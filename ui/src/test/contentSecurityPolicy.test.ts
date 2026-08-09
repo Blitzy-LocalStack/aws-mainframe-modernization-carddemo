@@ -1,5 +1,5 @@
 /**
- * Pins the container delivery path's content-security policy against a blanket `connect-src`.
+ * @file Pins the container delivery path's content-security policy against a blanket `connect-src`.
  *
  * WHY this file exists — Refactoring Rationale: all six `Content-Security-Policy` headers in
  * `ui/nginx.conf` carried `connect-src 'self' https:`. `https:` is a scheme-source, so it admits a

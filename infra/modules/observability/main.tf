@@ -784,6 +784,37 @@ data "aws_iam_policy_document" "access_logs" {
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
     }
+
+    # WHY : Refactoring Rationale: SourceAccount alone was the whole boundary here,
+    #       and it is not narrow enough. This bucket is SHARED -- it terminates the
+    #       access logs of every load balancer in the account -- so an account-scoped
+    #       condition let ANY load balancer in the same account write objects into
+    #       this environment's audit trail. That is a real defect rather than a
+    #       theoretical one: the two environment roots are designed to coexist in one
+    #       account, so dev's load balancer could inject records into prod's log
+    #       prefix, and an auditor reading the prefix could not tell which balancer
+    #       produced a record.
+    # WHY : Assumptions: an ARN PATTERN rather than the load balancer's own ARN, and
+    #       the sibling S3 statement below is narrowed the same way for the same
+    #       reason. Referencing the ARN would form a module cycle: infra/modules/alb
+    #       needs this bucket's NAME before it can be created, so this module cannot
+    #       in turn depend on the load balancer that writes to it. The pattern is
+    #       composed from the same two inputs infra/modules/alb composes its name
+    #       from -- "${var.name_prefix}-alb-${var.environment}" at that module's
+    #       local.alb_name -- so the two agree by construction rather than by
+    #       coincidence, and a renaming there is a renaming here.
+    # WHY : Assumptions: ArnLike with a trailing wildcard is required rather than
+    #       StringEquals, because an Application Load Balancer ARN ends in a
+    #       service-generated identifier -- loadbalancer/app/<name>/<id> -- that is
+    #       not known until the balancer exists. The wildcard covers only that
+    #       identifier segment; the account, region and name are all pinned.
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values = [
+        "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:loadbalancer/app/${var.name_prefix}-alb-${var.environment}/*"
+      ]
+    }
   }
 
   statement {
@@ -801,6 +832,20 @@ data "aws_iam_policy_document" "access_logs" {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    # WHY : Assumptions: narrowed by the same ARN pattern as the delivery statement
+    #       above, for the same reason and by the same construction. This grant is
+    #       read-only, so it cannot corrupt the audit trail, but it does disclose the
+    #       bucket's ACL to any load balancer in the account. Both statements are
+    #       written to the same boundary so that a future reader cannot conclude from
+    #       one narrow and one broad statement that the difference was intentional.
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values = [
+        "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:loadbalancer/app/${var.name_prefix}-alb-${var.environment}/*"
+      ]
     }
   }
 
@@ -945,12 +990,26 @@ locals {
       # WHY : Assumptions: CloudFront publishes this metric family in one fixed
       #       service region, and a dashboard metric widget carries its own
       #       region field, so the widget selects it independently and the module
-      #       keeps its single-provider calling contract. Creating an ALARM on
-      #       the same metric would instead need an aliased us-east-1 provider
-      #       declared through `configuration_aliases` in versions.tf, which
-      #       would make an extra provider a mandatory part of the contract for
-      #       every root -- including roots that never look at CloudFront -- so
-      #       no CloudFront alarm is created and versions.tf declares no alias.
+      #       keeps its single-provider calling contract. An ALARM cannot borrow
+      #       that trick -- an alarm is created in the provider's own region and
+      #       has no per-resource region field -- so watching this metric from a
+      #       deployment outside us-east-1 would need an aliased provider declared
+      #       through `configuration_aliases` in versions.tf, making an extra
+      #       provider a mandatory part of the contract for every root, including
+      #       roots that never look at CloudFront. versions.tf therefore declares
+      #       no alias.
+      #       Refactoring Rationale: this paragraph concluded "so no CloudFront
+      #       alarm is created", and that conclusion is now wrong: the
+      #       aws_cloudwatch_metric_alarm.cloudfront_5xx resource below IS created,
+      #       under a count gated on `var.cloudfront_distribution_id != null &&
+      #       data.aws_region.current.region == "us-east-1"`. The premise survives
+      #       and the conclusion does not, because the gate resolves the tension
+      #       rather than conceding to it: when the deployment region ALREADY is
+      #       us-east-1 the default provider is in the right region and no alias is
+      #       needed, so the alarm is created for free; when it is not, the alarm is
+      #       skipped rather than the contract widened. Leaving the old conclusion in
+      #       place invited a reader to add the alarm they believed was missing, and
+      #       to add the aliased provider along with it.
       #       Trade-offs: this is the one literal region in the file. It is
       #       admissible where a deployment region would not be, because it is a
       #       fixed property of where the service publishes rather than a choice

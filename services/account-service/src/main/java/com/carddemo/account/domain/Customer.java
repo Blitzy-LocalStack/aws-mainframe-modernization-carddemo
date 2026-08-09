@@ -5,8 +5,10 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import java.sql.Types;
 import java.time.LocalDate;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
 
 /**
  * The customer master row this context owns.
@@ -271,12 +273,19 @@ public class Customer {
     /**
      * The state code, {@code CUST-ADDR-STATE-CD PIC X(02)}.
      */
+    // WHY : Assumptions: CHAR(2) in V1__account.sql, and this value is compared against the seeded
+    //       reference state table rather than merely displayed, so the fixed-character binding is
+    //       what keeps the comparison agreeing with the stored form.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_state_cd", length = 2, nullable = false)
     private String addressStateCode;
 
     /**
      * The country code, {@code CUST-ADDR-COUNTRY-CD PIC X(03)}.
      */
+    // WHY : Assumptions: CHAR(3) in V1__account.sql; the override is repeated per member because
+    //       Hibernate infers the JDBC type independently for each one.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_country_cd", length = 3, nullable = false)
     private String addressCountryCode;
 
@@ -295,6 +304,11 @@ public class Customer {
     //   postal code is a fixed-width code rather than free text, and the padding is part of that contract;
     //   trimming belongs at the mapper edge, where the anti-corruption layer already sits, rather than in
     //   an entity whose job is to carry the row as stored.
+    // WHY : Assumptions: the column is CHAR(10) in V1__account.sql, so a five-digit postal code is
+    //       stored blank-padded to ten. Left as VARCHAR the padded stored value and an unpadded
+    //       parameter would be different strings under PostgreSQL's text comparison rules, so a
+    //       lookup would silently miss rather than fail loudly.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_zip", length = 10, nullable = false)
     private String addressZip;
 
@@ -390,6 +404,10 @@ public class Customer {
     //   leading digit is zero in all fifty records of app/data/ASCII/custdata.txt, so a numeric type would
     //   silently drop it and change the identifier; an external account number is an opaque token to be
     //   carried byte-for-byte rather than a quantity to be computed on.
+    // WHY : Assumptions: CHAR(10) in V1__account.sql. The reference declares this field as ten
+    //       characters and its seeded values are zero-filled to that width, so the padding is part
+    //       of the value rather than an artefact of storage.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "eft_account_id", length = 10, nullable = false)
     private String eftAccountId;
 
@@ -405,6 +423,9 @@ public class Customer {
     //   outright, in the message at lines 503 and 504. A boolean would also have to invent a mapping for
     //   any third character the reference would accept, and an enum would fail to construct on one rather
     //   than carrying it.
+    // WHY : Assumptions: CHAR(1) in V1__account.sql, constrained to Y or N. VARCHAR(1) would
+    //       validate against a different declared type and would compare under text rules.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "pri_card_holder_ind", length = 1, nullable = false)
     private String primaryCardHolderIndicator;
 

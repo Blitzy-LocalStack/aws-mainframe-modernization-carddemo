@@ -510,6 +510,18 @@ public class CardViewService {
     @Transactional(readOnly = true)
     public CardDetail viewByCardNumber(String cardNumber) {
         Objects.requireNonNull(cardNumber, "cardNumber must not be null");
+
+        // WHY : Assumptions: the submitted number is absent from this event deliberately, and so is any
+        //       indication of whether it resolved. A log that recorded the miss would accumulate the
+        //       numbers a caller guessed, which is the enumeration the masked rendering exists to
+        //       prevent, and one that recorded the hit would record the number itself.
+        // WHY : Refactoring Rationale: this line was carried here from a second implementation of this
+        //       read that lived on the list service and that the controller called instead of this
+        //       method. That duplicate is withdrawn; the event name is kept unchanged so an existing log
+        //       query still matches, and the line sits before the read rather than after it so a read
+        //       that raises still leaves the record that the lookup was attempted.
+        LOG.info("event=card.lookup.performed");
+
         return this.mapper.toDetail(requireCard(cardNumber));
     }
 

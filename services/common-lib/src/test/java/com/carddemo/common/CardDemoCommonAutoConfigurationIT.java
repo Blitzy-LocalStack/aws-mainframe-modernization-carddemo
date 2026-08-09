@@ -2,6 +2,8 @@ package com.carddemo.common;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.carddemo.common.control.OnlineWriteGate;
+import com.carddemo.common.control.OnlineWriteGateInterceptor;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
@@ -9,6 +11,8 @@ import com.carddemo.common.web.CursorToken;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,6 +25,14 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import software.amazon.awssdk.services.ssm.SsmClient;
+import software.amazon.awssdk.services.ssm.model.GetParameterRequest;
+import software.amazon.awssdk.services.ssm.model.GetParameterResponse;
+import software.amazon.awssdk.services.ssm.model.Parameter;
 import tools.jackson.databind.JacksonModule;
 
 /**
@@ -76,6 +88,16 @@ class CardDemoCommonAutoConfigurationIT {
      */
     private static final String TEST_SIGNING_KEY_BASE64 =
             "Y2FyZGRlbW8tY3Vyc29yLXRlc3Qta2V5LTMyYnl0ZXM=";
+
+    /**
+     * Parameter path standing in for the online-write flag.
+     *
+     * <p>Assumptions: shaped like the real one, which an environment root composes from its own
+     * prefix and environment name, so a reader recognises what the property carries. Nothing here
+     * reads the parameter's value; the stub answers whatever is asked for.
+     */
+    private static final String TEST_FLAG_PARAMETER =
+            "/carddemo/dev/batch/online-writes-enabled";
 
     /**
      * A servlet web context receives all four contributions.
@@ -271,6 +293,212 @@ class CardDemoCommonAutoConfigurationIT {
                         CardDemoCommonAutoConfiguration.CURSOR_SIGNING_KEY_PROPERTY
                                 + "=dG9vLXNob3J0LWZvci1obWFjLXNoYTI1Ng==")
                 .run(context -> assertThat(context).hasFailed());
+    }
+
+    /**
+     * No online-write gate is published until a deployment names the flag's parameter.
+     *
+     * <p>Assumptions: the withheld case is asserted first because it is the shape almost every context
+     * in this repository has. The batch task and the extract-transform-load package are deliberately
+     * not write-gated, and so is every test that does not set the property, so a gate published
+     * unconditionally would try to resolve an AWS region and credentials in all of them merely to hold
+     * a client nothing calls.
+     */
+    @Test
+    @DisplayName("no online-write gate is published until a deployment names the flag")
+    void withholdsTheOnlineWriteGateUntilTheFlagIsNamed() {
+        new WebApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(OnlineWriteGate.class);
+                    assertThat(context).doesNotHaveBean(SsmClient.class);
+                    assertThat(context).doesNotHaveBean("carddemoOnlineWriteGateMvcConfigurer");
+                });
+    }
+
+    /**
+     * Naming the flag publishes one gate and registers exactly one interceptor for it.
+     *
+     * <p>Assumptions: the registration is asserted by invoking the configurer and capturing what it
+     * adds, not merely by the configurer bean's presence. A configurer that registered nothing would
+     * be a bean of the right type in the right context and would leave every mutating request
+     * ungated -- which is precisely the "created but read by nothing" failure this whole control was
+     * added to correct, reproduced one layer higher.
+     *
+     * <p>Assumptions: a stub client is supplied so the context needs no region or credential. The gate
+     * is not exercised here; that is the unit tests' subject. What is under test is the wiring.
+     */
+    @Test
+    @DisplayName("naming the flag publishes one gate and registers one interceptor")
+    void publishesTheOnlineWriteGateAndItsInterceptor() {
+        new WebApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withUserConfiguration(StubSsmConfiguration.class)
+                .withPropertyValues(
+                        CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY
+                                + "=" + TEST_FLAG_PARAMETER,
+                        CardDemoCommonAutoConfiguration.ONLINE_WRITES_CACHE_PROPERTY + "=PT2S")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(OnlineWriteGate.class);
+                    assertThat(context).hasBean("carddemoOnlineWriteGateMvcConfigurer");
+
+                    CapturingInterceptorRegistry registry = new CapturingInterceptorRegistry();
+                    context.getBean("carddemoOnlineWriteGateMvcConfigurer", WebMvcConfigurer.class)
+                            .addInterceptors(registry);
+                    assertThat(registry.added)
+                            .hasSize(1)
+                            .allMatch(OnlineWriteGateInterceptor.class::isInstance);
+                });
+    }
+
+    /**
+     * A non-web context receives the gate but no interceptor.
+     *
+     * <p>Assumptions: the gate is declared on the outer configuration rather than inside the
+     * servlet-only nested class, so a context with no servlet API still assembles it. Asserting the
+     * absence of the configurer alongside the presence of the gate is what shows the nested condition
+     * is evaluated from class-file metadata rather than by resolving the MVC return type -- if it were
+     * the latter, this context would fail to start rather than start without one bean.
+     */
+    @Test
+    @DisplayName("a non-web context receives the gate and no interceptor registration")
+    void contributesTheGateWithoutAnInterceptorOutsideAWebContext() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withUserConfiguration(StubSsmConfiguration.class)
+                .withPropertyValues(
+                        CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY
+                                + "=" + TEST_FLAG_PARAMETER)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(OnlineWriteGate.class);
+                    assertThat(context).doesNotHaveBean("carddemoOnlineWriteGateMvcConfigurer");
+                });
+    }
+
+    /**
+     * The documented environment-variable spelling activates the gate through relaxed binding.
+     *
+     * <p>Assumptions: no {@code application.yml} declares this property, exactly as none declares the
+     * cursor signing key, so supplying the environment variable IS the whole wiring. It works only if
+     * the framework maps {@code CARDDEMO_ONLINE_WRITES_PARAMETER} onto the hyphenated property name,
+     * and that mapping is the single step between a correctly-provisioned environment and a service
+     * whose write gate silently does not exist.
+     *
+     * <p>Refactoring Rationale: the property name was chosen to satisfy this mapping rather than to
+     * mirror the Java package it lives in. A name carrying a {@code control} segment would have needed
+     * the variable to be {@code CARDDEMO_CONTROL_ONLINE_WRITES_PARAMETER}, so this case is what pins
+     * the two together -- renaming either without the other would leave the gate unpublished, and
+     * nothing else in the build would notice.
+     */
+    @Test
+    @DisplayName("the documented environment variable name activates the online-write gate")
+    void bindsTheOnlineWriteFlagFromItsDocumentedEnvironmentVariableName() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withUserConfiguration(StubSsmConfiguration.class)
+                .withInitializer(context -> {
+                    MutablePropertySources sources =
+                            context.getEnvironment().getPropertySources();
+                    sources.replace(
+                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            new SystemEnvironmentPropertySource(
+                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                                    Map.of("CARDDEMO_ONLINE_WRITES_PARAMETER",
+                                            TEST_FLAG_PARAMETER)));
+                })
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(OnlineWriteGate.class);
+                    assertThat(context.getEnvironment().getProperty(
+                                    CardDemoCommonAutoConfiguration
+                                            .ONLINE_WRITES_PARAMETER_PROPERTY))
+                            .isEqualTo(TEST_FLAG_PARAMETER);
+                });
+    }
+
+    /**
+     * A blank flag parameter fails the context rather than refusing every write at run time.
+     *
+     * <p>Assumptions: this is the misconfiguration worth failing loudly on. Because the gate fails
+     * closed, a blank name would refuse every mutating request in the service while presenting as a
+     * working control, so the only point at which an operator can learn of it is assembly.
+     */
+    @Test
+    @DisplayName("a blank flag parameter fails the context instead of refusing every write")
+    void aBlankFlagParameterFailsTheContext() {
+        new ApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withUserConfiguration(StubSsmConfiguration.class)
+                .withPropertyValues(
+                        CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY + "=   ")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    /**
+     * An interceptor registry that records what a configurer adds to it.
+     *
+     * <p>Assumptions: a subclass rather than reflection over the registry's protected accessor. The
+     * registration method is public, so overriding it observes exactly what a configurer does without
+     * this test depending on a framework internal that a version bump could rename.
+     */
+    static final class CapturingInterceptorRegistry extends InterceptorRegistry {
+
+        /** Interceptors added, in the order they were registered. */
+        private final List<Object> added = new ArrayList<>();
+
+        /**
+         * Records the interceptor and registers it as the framework would.
+         *
+         * @param interceptor the interceptor a configurer added
+         * @return the registration the superclass produced
+         */
+        @Override
+        public InterceptorRegistration addInterceptor(HandlerInterceptor interceptor) {
+            this.added.add(interceptor);
+            return super.addInterceptor(interceptor);
+        }
+    }
+
+    /**
+     * Supplies a Systems Manager client stub so a gated context needs no region or credential.
+     *
+     * <p>Assumptions: the stub answers rather than throws, because these cases test WIRING. A stub
+     * that threw would still satisfy every assertion here -- the gate is never asked for a decision --
+     * but it would mislead the next reader into thinking the failure path was covered, and it is
+     * covered in the gate's own unit tests instead.
+     */
+    @Configuration(proxyBeanMethods = false)
+    static class StubSsmConfiguration {
+
+        /**
+         * Supplies the stub client.
+         *
+         * @return a client reporting the window open, never {@code null}
+         */
+        @Bean
+        SsmClient ssmClient() {
+            return new SsmClient() {
+                @Override
+                public GetParameterResponse getParameter(GetParameterRequest request) {
+                    return GetParameterResponse.builder()
+                            .parameter(Parameter.builder().value("true").build())
+                            .build();
+                }
+
+                @Override
+                public String serviceName() {
+                    return SsmClient.SERVICE_NAME;
+                }
+
+                @Override
+                public void close() {
+                    // Assumptions: the stub holds nothing to release.
+                }
+            };
+        }
     }
 
     /**

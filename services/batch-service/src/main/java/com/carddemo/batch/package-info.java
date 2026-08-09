@@ -94,12 +94,21 @@
  *
  * <h2>Invariants every file in this subtree inherits</h2>
  *
- * <p>Assumptions: money is {@code BigDecimal} at scale 2 under one rounding contract,
- * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}; {@code double} and {@code float} are
- * forbidden in the money path and an architecture test asserts it. The reference accrual truncates
- * where this module rounds half up, which is registered as divergence C-ROUNDING in
- * {@code docs/architecture/cobol-to-service-traceability.md}. Arithmetic order is preserved under
- * transformation rule T4: a product is formed at full precision and only then divided.</p>
+ * <p>Assumptions: money is {@code BigDecimal} at scale 2 under two rounding contracts, each fixed to
+ * its operation and neither reachable from any signature.
+ * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING} is half up and governs the reduction of a
+ * supplied amount and general multiplication and division;
+ * {@code com.carddemo.common.money.Money#BASELINE_INTEREST_ROUNDING} is truncation toward zero and
+ * governs the accrual quotient alone, which is the one monetary computation the reference performs.
+ * {@code double} and {@code float} are forbidden in the money path and an architecture test asserts
+ * it. Arithmetic order is preserved under transformation rule T4: a product is formed at full
+ * precision and only then divided.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph named one contract and stated that the reference accrual
+ * truncates where this module rounds half up, registered as divergence C-ROUNDING. The accrual now
+ * truncates too and the divergence is withdrawn -- the identifier survives only as a withdrawal
+ * record in {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. This module is
+ * where the divergence would have shown up, because it is the module that accrues.</p>
  *
  * <p>Assumptions: a business date arrives as a job parameter and is never read from the clock. That
  * is what makes a rerun reproducible, and it is the property the golden comparison depends on --

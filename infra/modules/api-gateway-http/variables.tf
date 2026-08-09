@@ -315,11 +315,21 @@ variable "private_app_subnet_ids" {
 
   # WHY : (1) Assumptions: the PRIVATE APPLICATION tier -- not the public tier
   #       and not the isolated data tier. The VPC spans three availability
-  #       zones with the ECS tasks and the internal ALB in the private
-  #       application subnets and Aurora in isolated subnets that hold no
-  #       internet route at all. A VPC Link placed in the public subnets would
-  #       put the edge's interfaces in the one tier that does have a route out,
-  #       which removes the reason for having a VPC Link.
+  #       zones, with the ECS tasks in the private application subnets and
+  #       Aurora in isolated subnets that hold no internet route at all. A VPC
+  #       Link placed in the public subnets would put the edge's interfaces in
+  #       the one tier that does have a route out, which removes the reason for
+  #       having a VPC Link.
+  #       Refactoring Rationale: this comment also placed "the internal ALB in
+  #       the private application subnets". That was never the specified
+  #       topology and is not the delivered one: the design puts "only the load
+  #       balancer and NAT gateways" in the public tier, and both environment
+  #       roots now pass public_subnet_ids to the alb module. Nothing here
+  #       depends on the balancer's tier -- the link reaches it over private
+  #       addresses either way, because the balancer's scheme is internal -- so
+  #       the claim is corrected rather than acted on. Leaving it would have
+  #       made this file the fourth place a reader could find the ALB's tier
+  #       stated, and the only one stating it wrongly.
   #       (2) Trade-offs: at least two entries are required rather than one.
   #       With a single subnet the front door's interfaces sit in one
   #       availability zone, so losing that zone takes the whole API down even
@@ -333,23 +343,8 @@ variable "private_app_subnet_ids" {
   }
 }
 
-variable "vpc_id" {
-  description = "VPC in which this module creates the dedicated API Gateway VPC Link security group, supplied by the network module."
-  type        = string
-  nullable    = false
-
-  # WHY : Refactoring Rationale: the earlier interface accepted a list of
-  #       pre-created security groups, but no module owned the matching
-  #       VPC-Link-to-ALB 443 rule pair. Supplying the VPC lets main.tf own the
-  #       dedicated source group together with both exact rules.
-  validation {
-    condition     = can(regex("^vpc-", var.vpc_id))
-    error_message = "The vpc_id value must begin with \"vpc-\"; a subnet or security-group id from the network module is a crossed wire."
-  }
-}
-
 variable "alb_security_group_id" {
-  description = "Security group attached to the internal ALB. This module adds only the ingress rule from its dedicated VPC Link group on TCP 443."
+  description = "Security group attached to the internal ALB, supplied by the network module. This module attaches the VPC Link to this same group and adds only the self-referencing TCP 443 rule pair the private integration needs, so the topology keeps the three security groups the design freezes rather than adding a fourth for the link."
   type        = string
   nullable    = false
 

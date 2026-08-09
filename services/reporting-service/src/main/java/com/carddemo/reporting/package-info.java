@@ -82,12 +82,25 @@
  *
  * <p><strong>Delivered inventory.</strong> Assumptions: every class name and count in this
  * charter is now a measurement of the files present in this subtree, and no name below is a
- * forward assignment. The subtree holds <b>42</b> production classes and all <b>8</b> charter
+ * forward assignment. The subtree holds <b>53</b> production classes and all <b>10</b> charter
  * files, distributed as 3 in the root ({@code ReportingApplication}, {@code ReportingTask} and
- * {@code ReportingTaskRunner}), 2 in {@code .api}, 5 in {@code .config}, 7 in {@code .domain},
- * 10 in {@code .dto}, 7 in {@code .mapper}, 5 in {@code .repository} and 3 in
- * {@code .service}. This is the single place a reader has to look for that figure; no other
- * charter in the subtree restates it.
+ * {@code ReportingTaskRunner}), 2 in {@code .api}, 7 in {@code .config}, 7 in {@code .domain},
+ * 12 in {@code .dto}, 7 in {@code .mapper}, 5 in {@code .repository}, 3 in {@code .service},
+ * 3 in {@code .sink} and 4 in {@code .task}. This is the single place a reader has to look for
+ * that figure; no other charter in the subtree restates it. The same figure is reported in
+ * {@code docs/architecture/service-catalog.md}, which measures it the same way -- charters
+ * excluded, because a charter is documentation rather than delivery -- and a test compares that
+ * document's number against this subtree, so the two cannot drift apart silently.
+
+ * <p>Refactoring Rationale: the figure read 42 across 8 packages and now reads 53 across 10, and
+ * the eleven-class difference is entirely the context's BATCH half, which was missing. The
+ * orchestrator dispatches three {@code --job=} tokens at this task definition and this module's
+ * runner accepted and validated all three -- but no bean answered to any of the three names, so a
+ * dispatched run resolved nothing and an accepted report submission produced no artifact. What
+ * landed is 3 task components plus the artifact publisher they share ({@code .task}), 3
+ * object-store sinks ({@code .sink}), and 2 configuration classes: the storage client and the
+ * keyed tokeniser the artifact object key is derived through, so that no key carries an account
+ * identifier or any part of a card number.
  *
  * <p>Refactoring Rationale: an earlier revision of this section recorded 21 landed classes of a
  * target 32 and listed eleven behavioural types as planned and not yet authored. All eleven have
@@ -109,7 +122,7 @@
  * accepted because an inventory a reader cannot verify is worse than no inventory: the first
  * name that fails to resolve teaches the reader to distrust every other name in the list.
  *
- * <p><strong>Charter of the eight packages in this context.</strong>
+ * <p><strong>Charter of the ten packages in this context.</strong>
  * <ul>
  *   <li>{@code com.carddemo.reporting} - this charter, the entry point, and the decisions
  *       stated at the foot of this file. Owns no table: the {@code reporting} schema is
@@ -120,8 +133,10 @@
  *       COBOL: the byte-exact 133-column assembly, statement generation without a
  *       compile-time arity, and delegated report execution.</li>
  *   <li>{@code .repository} - read-only access to the {@code SELECT}-only cross-schema
- *       views: two streaming cursors and two keyed lookups. Keyset queries only, never
- *       offset paging.</li>
+ *       views: streaming cursors, keyed lookups, bounded chunk reads and keyset windows.
+ *       Keyset queries only, never offset paging. Every join, ordering and grouping key is the
+ *       per-card fingerprint the views publish rather than the card number, which no relation
+ *       here publishes unmasked -- registered as divergence D-REPORT-ORDER-FINGERPRINT.</li>
  *   <li>{@code .domain} - {@code @Immutable} read-only view projections reached through the
  *       anti-corruption boundary. No optimistic-locking version column, no cascade and no
  *       write path, because nothing in this context writes.</li>
@@ -133,8 +148,18 @@
  *       {@code FILLER}, truncation, zero-padding, masking and numeric edit masks may
  *       appear. Domain types downstream of it stay clean of layout concerns.</li>
  *   <li>{@code .config} - stateless JWT security, OpenAPI 3.1 metadata, the
- *       {@code SELECT}-only datasource with its search path, and the AWS Step Functions
- *       client used to start a report execution.</li>
+ *       {@code SELECT}-only datasource with its search path, the AWS Step Functions
+ *       client used to start a report execution, the object-storage client, and the keyed
+ *       tokeniser an artifact object key is derived through.</li>
+ *   <li>{@code .sink} - the object-store adapters that give the two generators' record seams a
+ *       destination. Bounded by a fixed part buffer and atomic by publishing nothing at the
+ *       destination key until a run completes, so a failed run leaves the previous artifact
+ *       readable rather than a truncated new one.</li>
+ *   <li>{@code .task} - the batch entry points, one per {@code --job=} name the orchestrator
+ *       dispatches, plus the artifact publisher two of them share. A task reads its parameters,
+ *       refuses an unusable one by the option an operator typed, opens a sink, drives one
+ *       generator and writes one journal line; it never parses a command line, never translates
+ *       its own failure into an exit code and never opens a transaction.</li>
  * </ul>
  *
  * <p><strong>Not owned here.</strong> This context owns no table, no index, no view, no

@@ -163,8 +163,19 @@ security:
 #   encoded or names only unrecognised groups, so such a token is fully
 #   authenticated while holding neither group. The chain therefore requires one of
 #   the two authorities explicitly on every route rather than requiring
-#   authentication. carddemo-user admits either group; carddemo-admin answers 403 to
-#   a token holding only carddemo-user.
+#   authentication. carddemo-user admits either group; carddemo-admin would answer
+#   403 to a token holding only carddemo-user.
+# Refactoring Rationale: every operation this context publishes now carries
+#   carddemo-user, so the second value of this vocabulary is currently unused here.
+#   The fraud operation carried carddemo-admin and does not any longer: the
+#   reference system reaches that write from the ORDINARY-USER menu -- cpy/
+#   COMEN02Y.cpy option 11, access byte 'U', dispatching to COPAUS0C, while the
+#   administrative table cpy/COADM02Y.cpy names the program nowhere -- so requiring
+#   the administrative group removed a capability from the group the reference
+#   grants it to. The vocabulary keeps both values because it states the FIELD's
+#   domain rather than a census of the values in use; narrowing it would make the
+#   field's meaning depend on which routes happen to exist. The rule is enforced at
+#   SecurityConfig.fraudAccess(), where the reversal is argued in full.
 x-authority-model:
   field: x-required-authority
   values:
@@ -178,10 +189,12 @@ tags:
     description: >-
       Every operation of the pending credit-card authorization context: listing
       an account's pending authorizations by key, reading one of them, and
-      setting the fraud state of one of them. The first two carry
-      x-required-authority carddemo-user; the third carries carddemo-admin, and
-      that difference is the reason the field exists rather than being implied
-      by this one tag.
+      setting the fraud state of one of them. All three carry
+      x-required-authority carddemo-user, which admits either group. The field is
+      published per operation regardless, because the fraud route is the only
+      state-changing one here and is therefore the one whose authority is most
+      likely to be narrowed by a deployment -- a marker implied by the tag could
+      not then say so per operation.
 
 paths:
 
@@ -308,8 +321,8 @@ paths:
       issued for it on a list row. It carries the read operation only, and
       deliberately no delete and no general update: the reference screens offer
       neither, the only state a user may change is the fraud flag, and that
-      change has its own path below because it is the only one requiring the
-      administrative authority.
+      change has its own path below because it is the only state-changing
+      operation this context publishes and is gated by its own rule.
 
     parameters:
       - $ref: '#/components/parameters/AuthorizationKeyPath'
@@ -355,15 +368,158 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /api/v1/authorizations/{key}/screen:
+
+    # WHY : Refactoring Rationale: this path is published because the operation behind it had no
+    #   caller at all. The service method existed, was tested, and was described by its package
+    #   documentation as published, while no controller and no contract reached it -- so the screen
+    #   shape this migration derived field by field from cpy-bms/COPAU01.cpy could not be fetched and
+    #   the single-page application's authorization-detail route had nothing to render its chrome
+    #   from.
+    # WHY : Assumptions: this is a SECOND REPRESENTATION of the resource above and not a replacement
+    #   for it. The member path returns the record; this one returns the record plus the terminal's
+    #   title band, transaction name, program name and rendered instant. A client that does not draw
+    #   a 3270 screen has no use for the second, which is why the two are separate paths.
+    # WHY : Alternatives Considered: content negotiation on the member path, selecting between the
+    #   two with a custom media type. Rejected because both representations are JSON, so the
+    #   distinction would be invisible in a browser's network panel and in an access log -- exactly
+    #   where an operator diagnosing a screen would look for it.
+
+    parameters:
+      - $ref: '#/components/parameters/AuthorizationKeyPath'
+
+    get:
+      operationId: getPendingAuthorizationScreen
+      tags:
+        - authorizations
+      summary: Read one pending authorization in the screen shape
+      description: >-
+        Returns the same authorization as the member path, projected onto the
+        27-component shape cbl/COPAUS1C.cbl renders, together with the six
+        components of screen chrome no segment holds -- the transaction name,
+        the two title lines, the program name, the rendered instant and the
+        message line. Every chrome value is derived by this service from
+        constants and its own clock and none is accepted from the caller: the
+        first four identify the reference screen the response reproduces, so a
+        caller able to set them could label a response as having come from a
+        screen that never produced it, and the instant is evidence of when the
+        response was produced.
+      x-required-authority: carddemo-user
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The screen-shaped projection of the authorization the selector
+            stands for, with the primary account number rendered to its last
+            four digits.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                type: object
+                description: >-
+                  The screen projection. Its properties are those of
+                  dto/PendingAuthDetailResponse, which is the record of what the
+                  terminal displayed rather than of what is stored.
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/authorizations/{key}/next:
+
+    # WHY : Refactoring Rationale: published for the same reason as the screen path above -- the
+    #   operation existed and was tested and nothing could reach it, so the forward paging move the
+    #   detail screen's function key performs had no server side.
+    # WHY : Assumptions: reaching the last authorization is a SUCCESSFUL answer and returns 200 with
+    #   an end-of-data indicator, not 404. "There is no next" is an answer to this question, and the
+    #   reference says so on the screen rather than refusing the request; a 404 would be
+    #   indistinguishable from a selector naming nothing at all, leaving the caller unable to tell a
+    #   boundary from a bad key.
+
+    parameters:
+      - $ref: '#/components/parameters/AuthorizationKeyPath'
+
+    get:
+      operationId: getNextPendingAuthorization
+      tags:
+        - authorizations
+      summary: Read the authorization following the one named
+      description: >-
+        Returns the authorization immediately older than the one the selector
+        names, which is the forward paging move of the detail screen. When the
+        one named is the oldest, the response carries the end-of-data indicator
+        and no authorization.
+      x-required-authority: carddemo-user
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The following authorization, or the end-of-data indicator when the
+            one named is the oldest beneath its account.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorization:
+                    allOf:
+                      - $ref: '#/components/schemas/PendingAuthDetail'
+                    description: >-
+                      The following authorization, absent when the one named is
+                      the oldest.
+                  endOfData:
+                    type: boolean
+                    description: >-
+                      True when the authorization named is the oldest beneath its
+                      account, so no forward move is available.
+                  message:
+                    type: string
+                    nullable: true
+                    description: >-
+                      The verbatim message the reference screen shows on
+                      exhaustion, present only when endOfData is true. It is
+                      declared because a client cannot otherwise know that the
+                      boundary carries display text of its own, and would either
+                      invent a message of its own wording or show none where the
+                      reference showed one.
+                required:
+                  - endOfData
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /api/v1/authorizations/{key}/fraud:
 
     description: >-
       The fraud state of one pending authorization. It is a subresource rather
       than a member of the detail body because it is the only state a caller may
-      change and the only one gated on the administrative authority, and
-      because config/SecurityConfig.java gates it by path prefix at
-      FRAUD_PATH_PATTERN: a mixed body would put a restricted change behind the
-      same path as an unrestricted read.
+      change and it is gated by its own rule, and because
+      config/SecurityConfig.java gates it by path prefix at FRAUD_PATH_PATTERN:
+      a mixed body would put a state change behind the same path as a read, so a
+      deployment narrowing the write could not do so without narrowing the read
+      with it.
 
     parameters:
       - $ref: '#/components/parameters/AuthorizationKeyPath'
@@ -418,7 +574,14 @@ paths:
         in one local transaction and there is no second resource manager left to
         coordinate. A failure therefore surfaces the reference system's own
         rollback sentence and never a partial success.
-      x-required-authority: carddemo-admin
+      # Refactoring Rationale: this read carddemo-admin. The reference reaches this
+      #   write from the ordinary-user menu, so the administrative requirement was a
+      #   behavioural change against the oracle that the specification does not
+      #   sanction; it is argued at SecurityConfig.fraudAccess(). A deployment that
+      #   wants the narrower rule must change that method AND restore this marker,
+      #   because a document promising a restriction the chain does not apply is the
+      #   more dangerous of the two possible disagreements.
+      x-required-authority: carddemo-user
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
@@ -477,6 +640,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 
 components:
@@ -559,7 +724,7 @@ components:
         with 400 before any handler runs.
       schema:
         $ref: '#/components/schemas/CursorToken'
-      example: v1.MDAwMDAwMDAwMTE6MjYyMTU6OTE2NDQ5MDI.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-0
+      example: v2.MDAwMDAwMDAwMTE6.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-0
 
     # Refactoring Rationale: the correlation identity is declared on the
     #   request side and not only on the response side. The shared filter in
@@ -684,7 +849,7 @@ components:
                 subsystem: APPLICATION
                 status: 400
                 correlationId: 4F1C0E423A554D219B7E6C0F
-                path: /api/v1/authorizations
+                path: /api/v1/authorizations/search
                 timestamp: '2026-08-06 09:15:02.117640'
                 fieldErrors:
                   - field: accountId
@@ -706,7 +871,7 @@ components:
                 subsystem: APPLICATION
                 status: 400
                 correlationId: 4F1C0E423A554D219B7E6C0F
-                path: /api/v1/authorizations
+                path: /api/v1/authorizations/search
                 timestamp: '2026-08-06 09:15:02.117640'
                 fieldErrors:
                   - field: accountId
@@ -738,20 +903,24 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
-    # Refactoring Rationale: this response exists because the fraud
-    #   operation requires the administrative authority, and that requirement
-    #   is an ADDITION rather than a parity break. csd/CRDDEMO2.csd carries
-    #   RESSEC(NO) CMDSEC(NO) on all three of this context's transactions --
-    #   at L46 for CPVD, L56 for CPVS and L66 for CP00 -- so the reference
-    #   system performed no resource-level or command-level security check at
-    #   all and any terminal user reaching the screen could tag an
-    #   authorization. The restriction is stated as an addition here so that
-    #   nobody reads a 403 as a behaviour the reference system had.
+    # Refactoring Rationale: this response no longer has a route that reserves
+    #   itself to the administrative group, and it is RETAINED rather than
+    #   removed. It was documented as raised by the fraud operation for a token
+    #   holding only carddemo-user; that requirement has been withdrawn, because
+    #   the reference reaches the fraud write from the ORDINARY-USER menu and
+    #   csd/CRDDEMO2.csd carries RESSEC(NO) CMDSEC(NO) on all three of this
+    #   context's transactions -- at L46 for CPVD, L56 for CPVS and L66 for CP00
+    #   -- so no resource-level or command-level check ran there at all. What
+    #   still reaches this response is a validly signed, in-date token holding
+    #   NEITHER group, which JwtRoleConverter grants an empty authority set and
+    #   the chain refuses on every route. Removing the response would leave that
+    #   outcome undocumented, and a deployment narrowing the fraud rule would
+    #   have to add it back.
     Forbidden:
       description: >-
         A valid token was presented that does not carry the authority this
-        operation requires. Raised by the fraud operation for a token holding
-        only carddemo-user. The authorization exists or does not exist
+        operation requires. Raised on any operation for a token that carries
+        neither carddemo-user nor carddemo-admin. The authorization exists or does not exist
         independently of this outcome, and this response deliberately does not
         say which, so that an unauthorised caller cannot use the choice between
         403 and 404 to discover whether a selector stands for a row. The body
@@ -767,13 +936,29 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
-    NotFound:
+    ServiceUnavailable:
       description: >-
-        No row exists for the identity supplied: no summary row for the account
-        scope on the list operation, or no detail row for the selector on the
-        other two. A well-formed selector standing for no row and a selector this
-        deployment never issued are reported alike, so that a caller cannot probe
-        for valid selectors by comparing the two.
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -782,12 +967,38 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
-    # Assumptions: the sentence this response carries is the house string
-    #   for a concurrent change and is reproduced character for character,
-    #   including the two-word spelling of "some one" and the absence of a
-    #   terminating full stop. It is published by the shared error type as
-    #   COACTUPC_RECORD_CHANGED, so this document references one wording
-    #   rather than retyping it into a second.
+    NotFound:
+      description: >-
+        No detail row exists for the selector supplied. A well-formed selector
+        standing for no row and a selector this deployment never issued are
+        reported alike, so that a caller cannot probe for valid selectors by
+        comparing the two.
+      # Refactoring Rationale: this said the response also covers "no summary row
+      #   for the account scope on the list operation". The list operation
+      #   declares no 404 at all -- an account with no pending authorizations is
+      #   an empty page and not a missing resource, which is what the reference
+      #   screen shows -- so the sentence described an outcome the contract does
+      #   not publish and a client could not receive. Only the two selector-keyed
+      #   operations reference this response, and both are about a detail row.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    # Assumptions: the sentence this response carries is the house string for a
+    #   lock that could not be obtained, reproduced character for character. It
+    #   is published by the shared advice as MESSAGE_LOCK_UNAVAILABLE, so this
+    #   document references one wording rather than retyping it into a second,
+    #   and AuthorizationApiContractTest compares the example below against that
+    #   constant so the two cannot drift.
+    # Refactoring Rationale: it was the data-changed sentence,
+    #   COACTUPC_RECORD_CHANGED, which the shared advice emits only for an
+    #   optimistic-lock failure. Neither table in this schema declares a version
+    #   column, so that failure was unreachable and this document published a
+    #   sentence the service could not produce.
     # Assumptions: the subsystem is RELATIONAL rather than APPLICATION. All three
     #   conflicts the shared advice recognises are raised by the datastore -- a
     #   version check, a lock acquisition and a foreign-key check -- so none of them
@@ -796,19 +1007,38 @@ components:
     # Assumptions: the sentence is one of three and the code is the same on all
     #   three, so a client discriminates on the sentence rather than on the code.
     #   A stale version carries the reference system's own data-changed sentence;
-    #   an unavailable lock and a still-referenced row carry their own. This
-    #   context reaches only the first of the three today, its one write being
-    #   version-checked, and the other two are documented because the shared
-    #   advice can emit them on any path and a client that ignored them would
-    #   treat a 409 it can receive as unparseable.
+    #   an unavailable lock and a still-referenced row carry their own.
+    # Refactoring Rationale: this said that the context reaches only the FIRST of
+    #   the three, "its one write being version-checked". That was not true and
+    #   could not become true by accident: neither pending_auth_detail nor
+    #   auth_fraud declares a version column, because neither is derived from a
+    #   copybook that has one, so an optimistic-lock failure was unreachable and
+    #   the 409 this response describes could never have been emitted. The write
+    #   is now serialised instead -- PendingAuthDetailRepository.findWithLockById
+    #   holds the authorization row for the transaction that rewrites it -- so the
+    #   conflict this context actually reaches is the SECOND of the three, a lock
+    #   that could not be obtained within carddemo.datasource.lock-timeout-ms.
+    #   The correction is recorded rather than made silently because a client
+    #   written against the earlier text would have been waiting for a sentence
+    #   this service cannot produce.
+    # Assumptions: the third conflict, a still-referenced row, remains
+    #   documented and remains unreachable here. It is described because the
+    #   shared advice can emit it on any path and a client that ignored it would
+    #   treat a 409 it can receive as unparseable; it is unreachable in this
+    #   context because no delete is published and the one cascade that exists
+    #   removes children with their parent.
     Conflict:
       description: >-
-        The authorization changed underneath the fraud write, so the write was
-        not applied. A caller re-reads the authorization and decides again. The
-        shared advice raises this from an optimistic-lock failure, which is why
-        no operation below catches anything in order to choose a status. The body
-        carries code CARDDEMO-0409 and subsystem RELATIONAL, the conflict being
-        decided by the datastore rather than by an application rule.
+        Another operator was marking the same authorization and this request
+        could not obtain the row within the configured wait, so nothing was
+        applied. A caller re-reads the authorization and decides again. The
+        shared advice raises this from a lock that could not be acquired, which
+        is why no operation below catches anything in order to choose a status.
+        The body carries code CARDDEMO-0409 and subsystem RELATIONAL, the
+        conflict being decided by the datastore rather than by an application
+        rule. A concurrent FIRST report of one authorization is deliberately not
+        a conflict: it is answered as an update, because the reference program
+        answers its own duplicate-key condition that way.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -819,12 +1049,12 @@ components:
           example:
             code: CARDDEMO-0409
             secondaryCode: ''
-            message: Record changed by some one else. Please review
+            message: Could not lock record for update
             severity: WARNING
             subsystem: RELATIONAL
             status: 409
             correlationId: 4F1C0E423A554D219B7E6C0F
-            path: /api/v1/authorizations/v1.MDAwMDAwMDAwMTE6MjYyMTU6OTE2NDQ5MDI.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-0/fraud
+            path: /api/v1/authorizations/v2.MDAwMDAwMDAwMTE6.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-0/fraud
             timestamp: '2026-08-06 09:15:02.117640'
             fieldErrors: []
             abend: null
@@ -890,8 +1120,19 @@ components:
       required: [accountId]
       description: >-
         The search criteria of the paged pending-authorization listing. The account
-        scope is required; the cursor and direction are optional and are sent
-        together or not at all.
+        scope is required. The cursor and the direction are both optional and their
+        rule is ASYMMETRIC: a cursor may be sent without a direction, and is then
+        read forward; a direction may not be sent without a cursor, and is refused
+        with 400. All four combinations are enumerated on the direction member.
+
+
+        Refactoring Rationale: this said the two were "sent together or not at all",
+        which is not what the service does and would have led a caller to send a
+        direction it does not need on every page after the first. The asymmetry is
+        deliberate rather than an oversight: a cursor names a position and forward is
+        the only direction a caller can be presumed to want from one, whereas a
+        direction with no position names no page at all -- so the permissive default
+        exists exactly where a default is unambiguous and nowhere else.
 
 
         Refactoring Rationale: these three were QUERY PARAMETERS named AccountIdScope,
@@ -932,21 +1173,31 @@ components:
           description: >-
             The paging position to continue from: copy the page envelope's lastKey
             member to advance past it, or its firstKey member to retreat from it,
-            and state the matching direction. Omit it, and the direction, to obtain
-            the opening page. The value is opaque and must be echoed exactly as
+            and state the matching direction when retreating. Omit both to obtain the
+            opening page; a cursor sent alone is read forward. The value is opaque and must be echoed exactly as
             received; it is not an account identifier, not a card number and not a
             row ordinal, and a client cannot construct one.
           $ref: '#/components/schemas/CursorToken'
         direction:
           description: >-
-            Which way to move from the supplied cursor. It is meaningful only
-            alongside a cursor, and the two are sent together or not at all. Reading
-            next seeks keys strictly after the cursor and is the default, which with
-            no cursor supplied returns the opening page; reading previous seeks keys
-            strictly before it. Supplying a direction with no cursor is a 400 keyed
-            direction, as is a value other than the two published here. A cursor is
-            not sealed per direction, so either direction may be stated with any
-            cursor this service issued; the CursorToken schema records why.
+            Which way to move from the supplied cursor. Reading next seeks keys
+            strictly after the cursor and is the DEFAULT when no direction is sent;
+            reading previous seeks keys strictly before it. All four combinations of
+            the two optional members are defined and none is left to inference:
+            neither member sent returns the opening page; a cursor with no direction
+            is read forward from that cursor; both sent are honoured as sent; and a
+            direction with no cursor is refused with 400 keyed direction, as is a
+            value other than the two published here. A cursor is not sealed per
+            direction, so either direction may be stated with any cursor this service
+            issued; the CursorToken schema records why.
+
+
+            Refactoring Rationale: this stated that the direction and the cursor "are
+            sent together or not at all", and the service has never required that --
+            it defaults an absent direction to next and refuses only the reverse
+            omission. A caller written to the withdrawn text would have sent a
+            direction on every page, and one written to it defensively might have
+            treated a cursor-only page as a client error of its own.
           $ref: '#/components/schemas/PageDirection'
 
 
@@ -1169,12 +1420,14 @@ components:
     CursorToken:
       type: string
       maxLength: 256
-      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
       description: >-
         An opaque position or selector minted by this service: a version marker,
-        a payload and an authentication code, joined by full stops and encoded
-        URL-safe. It stands for a key in the ordered set without disclosing it,
-        it is authenticated so it cannot be forged or altered, it is sealed for
+        a nonce and an ENCIPHERED payload carrying its own authentication tag,
+        joined by full stops and encoded URL-safe. It stands for a key in the
+        ordered set without disclosing it -- base64url-decoding it yields
+        ciphertext -- it is authenticated so it cannot be forged or altered, it is
+        sealed for
         the query and the caller it was issued for so it cannot be presented by
         another caller, and it expires, so a position in an ordered set is not
         held open indefinitely. It is not sealed per direction, and the account it
@@ -1182,7 +1435,7 @@ components:
         as a value to be echoed back unchanged and never parsed, constructed or
         compared: no part of it is a card number or a row ordinal. A token that
         cannot be opened is reported as 400.
-      example: v1.MDAwMDAwMDAwMTE6MjYyMTU6OTE2NDQ5MDI.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-0
+      example: v2.MDAwMDAwMDAwMTE6.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-0
 
     # Assumptions: the two member values are lower case and are next and
     #   previous, and they are not chosen here. They are the values the
@@ -1676,6 +1929,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         # Assumptions: a full page carries FIVE rows, and the figure is not
@@ -1737,6 +1991,18 @@ components:
             only forward availability statement this envelope makes; the row count
             is not one, because a full page and a final page can both carry five
             rows. When it is true, lastKey is present.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
 
     # Alternatives Considered: folding the summary members into the page envelope so
     #   that one flat object was returned. Rejected because PageResponse in common-lib
@@ -2979,7 +3245,7 @@ components:
             this migration publishes for this shared member, for the reason recorded
             on SharedErrorMessage; this context's wider screen line is a separate
             member and is not this one.
-          example: Record changed by some one else. Please review
+          example: Could not lock record for update
         severity:
           allOf:
             - $ref: '#/components/schemas/Severity'
@@ -3027,7 +3293,11 @@ components:
             The request path that failed, so that a client reporting a problem does
             not have to reconstruct which call produced it. The empty string when no
             path is available.
-          example: /api/v1/authorizations
+          # Refactoring Rationale: the example was /api/v1/authorizations, a route
+          #   this service retired when the listing became a POST on /search. An
+          #   example naming a path no operation serves reads as though the route
+          #   exists, which is the same mistake the two 400 examples above carried.
+          example: /api/v1/authorizations/search
         timestamp:
           type: string
           maxLength: 26

@@ -14,9 +14,16 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.yaml.snakeyaml.Yaml;
 
 /**
- * Asserts that this service's two profile overlays read their configuration the same way, from a parameter
- * path whose resolver and client are both on the classpath, and that neither overlay carries a deployment
- * value or relaxes what the base document closes.
+ * Asserts that this service's two profile overlays read their configuration the same way -- from environment
+ * variables the task definition sets, with no parameter path claimed by either -- and that neither overlay
+ * carries a deployment value or relaxes what the base document closes.
+ *
+ * <p>Refactoring Rationale: this summary previously said the overlays read "from a parameter path whose
+ * resolver and client are both on the classpath", which is the arrangement {@link
+ * #noDocumentClaimsAParameterStoreLocation()} exists to REFUSE. The resolver and client genuinely are both
+ * on the classpath, and {@link #theParameterStoreClientIsOnTheClasspath()} asserts it, but that pairing is why
+ * a claimed location fails legibly rather than a reason to claim one. Stating it as the way configuration
+ * arrives inverted the class's own conclusion in the first sentence a reader meets.</p>
  *
  * <h2>Purpose</h2>
  *
@@ -48,7 +55,13 @@ class ProfileConfigurationTopologyTest {
     /** The shared defaults document every profile overlay must name first. */
     private static final String SHARED_DEFAULTS = "classpath:/carddemo-common-defaults.yml";
 
-    /** The parameter path this context reads, with the environment segment left as a placeholder. */
+    /**
+     * The location prefix that must appear in NO document's import list.
+     *
+     * <p>Assumptions: this constant names something asserted ABSENT, not something read. It was documented
+     * as "the parameter path this context reads", which described the withdrawn arrangement rather than the
+     * one under test.</p>
+     */
     private static final String PARAMETER_STORE_PREFIX = "aws-parameterstore:";
 
 
@@ -318,7 +331,7 @@ class ProfileConfigurationTopologyTest {
                         "carddemo.messaging.pauth-request-queue",
                         "carddemo.messaging.pauth-reply-queue",
                         "carddemo.messaging.hmac-key",
-                        "carddemo.internal-identity.signing-key",
+                        "carddemo.internal-identity.authorization-signing-key",
                         "carddemo.account-context.base-url");
     }
 

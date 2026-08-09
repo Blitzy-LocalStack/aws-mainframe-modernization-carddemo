@@ -1054,6 +1054,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
 
   /api/v1/auth/users/{userId}:
@@ -1269,6 +1271,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
     delete:
       tags: [User Administration]
@@ -1286,6 +1290,15 @@ paths:
         (app/cbl/COUSR03C.cbl lines 318 to 321, the literal on line 320) -- is not
         returned, both for the reason given on the create operation and because a
         204 carries no body at all.
+
+
+        A 204 means the row is gone. Removal of the identity behind it is applied
+        to the provider after this operation's transaction commits and is recorded
+        durably until the provider agrees, so the deleted user may briefly still
+        exist in the provider -- where they authenticate but hold no membership this
+        service records and are refused at every route requiring one. That ordering
+        is deliberate: the reverse, removing the identity first, is the direction no
+        later operation repairs without provisioning the account again.
       security:
         - bearerAuth: []
       x-required-authority: carddemo-admin
@@ -1388,6 +1401,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
 
 components:
@@ -1478,9 +1493,9 @@ components:
         The paging position to continue from: copy the lastKey member of the
         page you hold to advance past it, or its firstKey member to retreat from
         it, and state the matching direction. Omit it, and the direction, for the
-        first page. It is opaque and sealed -- a version marker, a payload and an
-        authentication code separated by full stops -- and must be echoed exactly
-        as received; it is not a user identifier and cannot be constructed by a
+        first page. It is opaque and sealed -- a version marker, a nonce and an
+        enciphered payload carrying its own authentication tag, separated by full
+        stops -- and must be echoed exactly as received; it is not a user identifier and cannot be constructed by a
         caller. The two members it is copied from carry across the baseline's own
         stored page keys at app/cbl/COUSR00C.cbl lines 435 and 389.
       schema:
@@ -1578,6 +1593,37 @@ components:
         carddemo-admin, which every user-administration operation requires. This
         is distinct from the 401 above: the caller is known, and it is the
         authority that is missing rather than the credential.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       headers:
         X-Correlation-Id:
           $ref: "#/components/headers/XCorrelationId"
@@ -2277,6 +2323,19 @@ components:
             sign-on, so it is the one field here with an authorisation
             consequence.
 
+
+            The group move behind it is applied to the identity provider AFTER this
+            operation's transaction commits, so a 200 means the row is stored and
+            the move is owed rather than that the provider has already been
+            reached. The service records the owed move durably and retries it until
+            the provider agrees, so the two converge without a further request; a
+            reader of this row within that interval may see a role the provider has
+            not yet moved. This is stated because the alternative -- calling the
+            provider inside the transaction -- cannot be atomic: the provider does
+            not roll back, so a successful move followed by a failed commit would
+            leave the move applied and this row unchanged, with nothing recording
+            it.
+
     UserResponse:
       type: object
       description: >-
@@ -2326,15 +2385,17 @@ components:
     CursorToken:
       type: string
       maxLength: 256
-      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
       description: >-
-        An opaque, authenticated, expiring position in an ordered result set,
-        minted by this service and echoed back by the caller unchanged. Its three
-        period-separated parts are a version marker, a payload and an
-        authentication code; a caller must not parse, edit or construct one,
-        because the code covers both the payload and a binding naming the query
-        and the subject the token was issued to, so an altered or borrowed token
-        fails to open and is refused with 400. It is bound to the DIRECTION it was
+        An opaque, authenticated, ENCIPHERED, expiring position in an ordered
+        result set, minted by this service and echoed back by the caller unchanged.
+        Its three period-separated parts are a version marker, a nonce and an
+        enciphered payload carrying its own authentication tag; a caller must not
+        parse, edit, decode or construct one, because base64url-decoding it yields
+        ciphertext and because the tag covers both that ciphertext and a binding
+        naming the query, the subject, the narrowing filter and the direction the
+        token was issued for, so an altered or borrowed token fails to decipher and
+        is refused with 400. It is bound to the DIRECTION it was
         minted for as well, so replaying the previous-page position with direction
         next cannot silently answer with the wrong page. The shape is declared once
         here and referenced by the single cursor parameter and by both cursor
@@ -2408,7 +2469,7 @@ components:
         pages anywhere in this envelope, because supplying one would require
         counting the whole table on every request that only ever returns ten rows.
       additionalProperties: false
-      required: [items, firstKey, lastKey, hasNext]
+      required: [items, firstKey, lastKey, hasNext, hasPrevious]
       properties:
         # Assumptions: these four properties, in this order, are the four components
         #   of the shared page envelope services/common-lib publishes, so what a
@@ -2490,6 +2551,18 @@ components:
             binds the forward paging control to this value, which is what the
             baseline's own next-page indicator expressed, and it is never true
             without a lastKey to continue from.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
 
     # WHY : (1) Assumptions: these three describe the shared error record, its
     #       per-field entry and its abend aggregate exactly as

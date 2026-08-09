@@ -52,8 +52,10 @@ terraform {
     # 7.0.0, so a provider major cannot change the `aws_kms_key` argument schema this
     # module is written against between one `init` and the next; adopting one becomes
     # an explicit edit here. The lower bound is not arbitrary either: the sibling
-    # aurora-postgresql module requires a provider no older than 5.81.0 to express a
-    # zero minimum-capacity cluster, and 6.56 clears that, so one constraint string is
+    # aurora-postgresql module requires a provider no older than 5.80.0 to express a
+    # zero minimum-capacity cluster and no older than 5.81.0 for the auto-pause
+    # argument that then becomes mandatory -- so 5.81.0 floors the pair -- and 6.56
+    # clears that, so one constraint string is
     # repeated verbatim across every module and both environment roots.
     aws = {
       source  = "hashicorp/aws"

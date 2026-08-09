@@ -1,12 +1,5 @@
 package com.carddemo.authorization.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
@@ -15,6 +8,7 @@ import com.carddemo.authorization.mapper.PendingAuthDetailMapper;
 import com.carddemo.authorization.mapper.PendingAuthSummaryMapper;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
+import com.carddemo.common.codec.CopybookLayout;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -23,6 +17,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +30,19 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Limit;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Drives {@link LoadService} and {@link UnloadService} against the committed extract fixtures.
@@ -99,6 +107,12 @@ class AuthorizationExtractRoundTripTest {
     /** The number of children the detail fixtures hold. */
     private static final int CHILD_COUNT = 4;
 
+    /** The single-record fixture whose fraud position holds a character the column cannot store. */
+    private static final String FRAUD_POSITION_OUT_OF_DOMAIN = "pautdtl1-auth-fraud-invalid.bin";
+
+    /** The name of the one-byte field that fixture exists to put out of domain. */
+    private static final String FRAUD_FIELD = "PA-AUTH-FRAUD";
+
     /**
      * The width of the raw complement key IMS sequences the child twins on.
      *
@@ -126,15 +140,30 @@ class AuthorizationExtractRoundTripTest {
      * Makes the summary double remember what it is given and answer existence from that.
      */
     private void givenSummariesRemember() {
-        when(this.summaries.save(any())).thenAnswer(invocation -> {
-            PendingAuthSummary saved = invocation.getArgument(0);
-            this.storedRoots.add(saved);
-            return saved;
+        // WHY : Refactoring Rationale: the double answers the BATCHED presence query and the
+        //       conflict-tolerant insert, and the single-row save, the batched save and the identity probe
+        //       it answered at various points before are all gone. The loader settles presence for a whole
+        //       chunk in one statement and then writes each fresh row with a statement that tolerates a
+        //       conflict, so a double shaped around either mechanism alone would leave these cases unable
+        //       to observe the loader they now exercise.
+        // WHY : Assumptions: the insert double returns 1 for a row it stores and 0 for one whose key it
+        //       already holds, which is the row count the statement reports. Answering 1 unconditionally
+        //       would make every re-run look like a fresh insert and the re-run case would pass while
+        //       asserting nothing.
+        when(this.summaries.insertSummaryIfAbsent(any())).thenAnswer(invocation -> {
+            PendingAuthSummary row = invocation.getArgument(0);
+            boolean known = this.storedRoots.stream()
+                    .anyMatch(stored -> stored.getAccountId().equals(row.getAccountId()));
+            if (known) {
+                return Integer.valueOf(0);
+            }
+            this.storedRoots.add(row);
+            return Integer.valueOf(1);
         });
-        when(this.summaries.existsById(any())).thenAnswer(invocation -> {
-            Long accountId = invocation.getArgument(0);
-            return this.storedRoots.stream()
-                    .anyMatch(root -> accountId.equals(root.getAccountId()));
+        when(this.summaries.findExistingAccountIds(any())).thenAnswer(invocation -> {
+            Collection<Long> wanted = invocation.getArgument(0);
+            return this.storedRoots.stream().map(PendingAuthSummary::getAccountId)
+                    .filter(wanted::contains).toList();
         });
     }
 
@@ -142,15 +171,45 @@ class AuthorizationExtractRoundTripTest {
      * Makes the authorization double remember what it is given and answer existence from that.
      */
     private void givenDetailsRemember() {
-        when(this.details.save(any())).thenAnswer(invocation -> {
-            PendingAuthDetail saved = invocation.getArgument(0);
-            this.storedChildren.add(saved);
-            return saved;
+        when(this.details.insertDetailIfAbsent(any())).thenAnswer(invocation -> {
+            PendingAuthDetail row = invocation.getArgument(0);
+            boolean known = this.storedChildren.stream()
+                    .anyMatch(stored -> stored.getId().equals(row.getId()));
+            if (known) {
+                return Integer.valueOf(0);
+            }
+            this.storedChildren.add(row);
+            return Integer.valueOf(1);
         });
-        when(this.details.existsById(any())).thenAnswer(invocation -> {
-            PendingAuthDetailKey key = invocation.getArgument(0);
-            return this.storedChildren.stream().anyMatch(child -> key.equals(child.getId()));
+        when(this.details.findExistingIds(any())).thenAnswer(invocation -> {
+            Collection<PendingAuthDetailKey> wanted = invocation.getArgument(0);
+            return this.storedChildren.stream().map(PendingAuthDetail::getId)
+                    .filter(wanted::contains).toList();
         });
+    }
+
+    /**
+     * Builds a transaction template whose transactions begin and commit without a database.
+     *
+     * <p>Assumptions: a real template over a mock manager is used rather than a stub that simply runs the
+     * callback, because the loader now depends on the transaction ENDING per chunk -- that is what bounds
+     * its persistence context -- and a stub that never asked for a transaction would let a loader which
+     * stopped opening one still pass. The manager returns a mock status, so the template begins, runs the
+     * callback once and commits.</p>
+     *
+     * @return a transaction template that begins and commits without a database
+     */
+    private static TransactionTemplate chunkTransactions() {
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        // WHY : Assumptions: the stub is LENIENT because a malformed extract is refused before any
+        //       transaction is opened -- the record reader raises while reading the first chunk, which
+        //       happens outside the template -- so the cases about malformed input legitimately never ask
+        //       this manager for anything. That ordering is a property worth keeping: a truncated file
+        //       costs a message rather than a transaction and a connection.
+        lenient().when(manager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+        TransactionTemplate template = new TransactionTemplate(manager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        return template;
     }
 
     /**
@@ -159,7 +218,8 @@ class AuthorizationExtractRoundTripTest {
      * @return the loader's own counts
      */
     private LoadService.LoadOutcome loadBothFixtures() {
-        return new LoadService(this.summaries, this.details)
+        return new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS)
                 .load(open(PREFIXED_SUMMARY), open(PREFIXED_DETAIL));
     }
 
@@ -224,6 +284,102 @@ class AuthorizationExtractRoundTripTest {
         assertThat(this.storedChildren).hasSize(CHILD_COUNT);
     }
 
+
+    /**
+     * A row created by another writer between the read and the write is counted, never overwritten.
+     *
+     * <p>Purpose: this is the property the conflict-tolerant statement buys that no read can buy. The
+     * chunk-wide presence query reads correctly inside the load's own transaction, so a root repeated
+     * within one file is caught -- but it says nothing about a row another transaction committed since, and
+     * a save through the persistence context would replace such a row in every column. Here the insert
+     * refuses every record, which is what a concurrent creator leaves behind, and the loader must report
+     * the records as already present without a second attempt of any kind.
+     *
+     * <p>Assumptions: the presence query is deliberately left UNSTUBBED, so it answers empty and every
+     * record reaches the write looking absent. That is what puts the whole burden of this case on the
+     * statement: stubbing the query to report the rows present would satisfy the same three counts through
+     * the read path and prove nothing about the write.
+     *
+     * <p>Assumptions: the double refuses records the loader has NEVER seen, which is why this case is not
+     * the re-run case above in a different order. The re-run exercises a duplicate the loader itself
+     * created; this exercises one it cannot have known about, and only the second distinguishes an insert
+     * that tolerates a conflict from a probe that happens to have been correct.
+     *
+     * <p>Assumptions: the inherited save is asserted never to be called at all. That assertion is the guard
+     * against the failure returning, because the write path is one statement now and a later edit adding a
+     * fallback save on the zero-row arm would restore the overwrite exactly.
+     */
+    @Test
+    @DisplayName("a row created by another writer is counted as present and is never overwritten")
+    void aRacedInsertIsCountedRatherThanOverwriting() {
+        when(this.summaries.insertSummaryIfAbsent(any())).thenReturn(Integer.valueOf(0));
+
+        LoadService.LoadOutcome outcome =
+                new LoadService(this.summaries, this.details, chunkTransactions(),
+                        LoadService.DEFAULT_MAX_RECORDS)
+                        .loadSummaries(open(PREFIXED_SUMMARY));
+
+        assertThat(outcome.read()).isEqualTo(ROOT_COUNT);
+        assertThat(outcome.inserted()).isZero();
+        assertThat(outcome.alreadyPresent()).isEqualTo(ROOT_COUNT);
+        verify(this.summaries, never()).save(any());
+        verify(this.summaries, never()).existsById(any());
+    }
+
+    /**
+     * An extract holding more records than the configured ceiling is refused before any row is written.
+     *
+     * <p>Purpose: the read is bounded by a stated number rather than by the heap. This drives the ceiling
+     * down to one record against a two-record file, so the refusal is reached on the second record, and
+     * asserts both halves of the contract: the message names the property an operator would raise, and
+     * nothing was written for the record that was read before the ceiling was hit.
+     *
+     * <p>Assumptions: the ceiling is asserted through the CONSTRUCTOR rather than through a property
+     * source, because the binding is a constructor parameter and a test that went through a context would
+     * assert the container's binding rather than this class's behaviour. The property NAME is asserted in
+     * the message, which is what ties the two together -- the same constant is what the annotation binds.
+     *
+     * <p>Assumptions: the refusal is an {@link IllegalArgumentException} and not a bespoke type, matching
+     * the remainder refusal beside it. Both say the same thing about the file -- that it is not the file
+     * this reader was given -- and an operator's response to either is to correct the job definition.
+     */
+    @Test
+    @DisplayName("an extract beyond the record ceiling is refused, naming the property to raise")
+    void anExtractBeyondTheCeilingIsRefused() {
+        LoadService bounded = new LoadService(this.summaries, this.details, chunkTransactions(), 1);
+
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> bounded.loadSummaries(open(PREFIXED_SUMMARY)))
+                .withMessageContaining("at most 1 records")
+                .withMessageContaining(LoadService.MAX_RECORDS_PROPERTY);
+
+        verify(this.summaries, never()).insertSummaryIfAbsent(any());
+    }
+
+    /**
+     * A ceiling that admits nothing is refused when the loader is built, not when a load is attempted.
+     *
+     * <p>Purpose: a ceiling of zero or below would refuse every extract including an empty one, which is a
+     * configuration mistake rather than a policy. Refusing at construction means a container configured
+     * that way fails at startup, where the cause is obvious, instead of on the first load hours later.
+     *
+     * <p>Assumptions: both zero and a negative value are exercised, because the check is a single
+     * comparison and a later edit narrowing it to equality with zero would pass a test that tried only
+     * zero. The refusal names the property so that an operator reads the name to correct rather than the
+     * name of a constructor parameter they cannot see.
+     */
+    @Test
+    @DisplayName("a ceiling that admits no records is refused when the loader is built")
+    void aCeilingAdmittingNothingIsRefusedAtConstruction() {
+        for (int ceiling : new int[] {0, -1}) {
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .as("a ceiling of %d admits no extract at all", ceiling)
+                    .isThrownBy(() -> new LoadService(this.summaries, this.details, chunkTransactions(), ceiling))
+                    .withMessageContaining(LoadService.MAX_RECORDS_PROPERTY)
+                    .withMessageContaining(String.valueOf(ceiling));
+        }
+    }
+
     /**
      * A condition that is neither success nor a duplicate propagates rather than being counted.
      *
@@ -237,10 +393,12 @@ class AuthorizationExtractRoundTripTest {
     @Test
     @DisplayName("a store failure that is not a duplicate propagates instead of being counted as a skip")
     void aFailureThatIsNotADuplicatePropagates() {
-        when(this.summaries.existsById(any())).thenReturn(false);
-        when(this.summaries.save(any())).thenThrow(new IllegalStateException("store unavailable"));
+        when(this.summaries.findExistingAccountIds(any())).thenReturn(List.of());
+        when(this.summaries.insertSummaryIfAbsent(any()))
+                .thenThrow(new IllegalStateException("store unavailable"));
 
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(IllegalStateException.class)
                 .isThrownBy(() -> loader.loadSummaries(open(PREFIXED_SUMMARY)))
@@ -248,7 +406,8 @@ class AuthorizationExtractRoundTripTest {
     }
 
     /**
-     * Divergence D-C: a child whose parent summary is absent is refused, and the refusal names the account.
+     * Divergence D-C: a child whose parent summary is absent is refused, carrying the account in typed
+     * form and not in its message.
      *
      * <p>Assumptions: this asserts divergence D-C, recorded on {@link LoadService} and registered in
      * {@code docs/architecture/cobol-to-service-traceability.md}. The reference program passes such a child
@@ -261,7 +420,27 @@ class AuthorizationExtractRoundTripTest {
      * because carrying the key is the whole point of the divergence. A refusal that named no account would
      * leave an operator with exactly what the reference program leaves them -- the knowledge that something
      * was wrong and no way to find which record -- so a test that accepted any exception would pass for an
-     * implementation that had recovered none of the value.</p>
+     * implementation that had recovered none of the value. The key is read through the typed ACCESSOR,
+     * which is where it lives.</p>
+     *
+     * <p>Refactoring Rationale: this case additionally asserted that the account identifier appears IN the
+     * refusal's message, and that assertion has been inverted to assert it does not. It was pinning a
+     * violation of the binding observability contract, which names account identifiers among the values a
+     * durable diagnostic may not hold and requires them omitted rather than shortened -- and a throwable's
+     * message is such a diagnostic, because whatever catches it writes it and an orchestrator surfaces it
+     * with the failed task. The divergence this case defends is unaffected: what it exists to prove is
+     * that the refusal LOCATES the failure where the reference program loses it, and the two accessors
+     * asserted above carry that. Inverting rather than deleting the assertion is deliberate, because the
+     * property is now the opposite one and it is worth holding: an implementation that reinstated the
+     * interpolation would fail here rather than pass silently.</p>
+     *
+     * <p>Refactoring Rationale: this case ASSERTED that the account appeared in the exception message, and
+     * it now asserts the opposite while keeping the assertion on the typed accessor. The message reaches
+     * the log through a stack trace whether or not the raising site intended that, so the old assertion
+     * required the identifier to be logged for every unresolved child -- a test that held the disclosure
+     * in place. The value an operator needs is still carried, and it is carried where a caller has to ask
+     * for it. Both halves are asserted, because an implementation that dropped the accessor as well would
+     * satisfy a bare absence assertion.</p>
      *
      * <p>Assumptions: the case also asserts that NOTHING was written. The refusal is raised inside the same
      * transaction the load runs in, so on a real store the rollback discards the earlier records; the
@@ -270,9 +449,10 @@ class AuthorizationExtractRoundTripTest {
     @Test
     @DisplayName("D-C: a child whose parent summary is absent is refused, naming the account")
     void anUnresolvableParentIsRefusedAndNamesTheAccount() {
-        when(this.summaries.existsById(any())).thenReturn(false);
+        when(this.summaries.findExistingAccountIds(any())).thenReturn(List.of());
 
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
                 .isThrownBy(() -> loader.loadDetails(open(PREFIXED_DETAIL)))
@@ -283,10 +463,20 @@ class AuthorizationExtractRoundTripTest {
                     assertThat(refused.getRecordOrdinal())
                             .as("the refusal locates the record, one-based, so the file can be read at it")
                             .isEqualTo(1);
-                    assertThat(refused).hasMessageContaining(String.valueOf(ACCOUNT_ONE));
+                    // WHY : Assumptions: the message is asserted to name the ORDINAL and NOT the
+                    //   account. Both halves are needed: without the first the message could be left
+                    //   with nothing an operator can act on, and without the second an implementation
+                    //   could reinstate the prohibited value while still satisfying the first.
+                    assertThat(refused)
+                            .as("the message must locate the record it refused")
+                            .hasMessageContaining("record 1");
+                    assertThat(refused.getMessage())
+                            .as("an account identifier may not appear in a durable diagnostic, and a"
+                                    + " throwable message is one")
+                            .doesNotContain(String.valueOf(ACCOUNT_ONE));
                 });
 
-        verify(this.details, never()).save(any());
+        verify(this.details, never()).insertDetailIfAbsent(any());
     }
 
     /**
@@ -302,16 +492,24 @@ class AuthorizationExtractRoundTripTest {
     @Test
     @DisplayName("D-C: the refusal ends the pass at the first unresolvable record")
     void anUnresolvableParentEndsThePass() {
-        when(this.summaries.existsById(any())).thenReturn(false);
+        when(this.summaries.findExistingAccountIds(any())).thenReturn(List.of());
 
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
                 .isThrownBy(() -> loader.loadDetails(open(PREFIXED_DETAIL)));
 
-        verify(this.summaries, times(1)).existsById(any());
-        verify(this.details, never()).existsById(any());
-        verify(this.details, never()).save(any());
+        // WHY : Refactoring Rationale: the assertion counts the BATCHED presence query rather than the
+        //       per-record probe, and one call is now the whole first chunk rather than one record. That
+        //       is the property the change was made for: the number of statements a load issues is a
+        //       function of its chunk count, not of its record count.
+        verify(this.summaries, times(1)).findExistingAccountIds(any());
+        verify(this.details, never()).findExistingIds(any());
+        // WHY : Assumptions: the write named here is the conflict-tolerant insert the loader actually
+        //       issues. Naming the inherited save instead would forbid a call the loader never makes on
+        //       any path, and an absence assertion aimed at an unused method cannot fail.
+        verify(this.details, never()).insertDetailIfAbsent(any());
     }
 
     /**
@@ -339,7 +537,8 @@ class AuthorizationExtractRoundTripTest {
                 - PendingAuthDetailMapper.segmentLength() - 1;
         corrupted[signByte] = (byte) 0x05;
 
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(LoadService.MalformedParentKeyException.class)
                 .isThrownBy(() -> loader.loadDetails(new ByteArrayInputStream(corrupted)))
@@ -348,7 +547,102 @@ class AuthorizationExtractRoundTripTest {
                 .havingCause()
                 .isInstanceOf(IllegalArgumentException.class);
 
-        verify(this.details, never()).save(any());
+        verify(this.details, never()).insertDetailIfAbsent(any());
+    }
+
+    /**
+     * A record whose fraud position is outside the column's domain is refused, and nothing is written.
+     *
+     * <p>Purpose: this is the loader-side half of the fraud-domain contract. Its engine-side half,
+     * {@code fixtures.PendingAuthFraudDomainRepositoryIT}, proves the check constraint refuses the same
+     * image when it is written through plain JDBC; this case proves the LOADER never presents it, because
+     * the mapper it decodes through refuses the record first.
+     *
+     * <p>Refactoring Rationale: the mapper used to drop an out-of-domain position SILENTLY, leaving the
+     * entity unmarked. That made this the most dangerous shape a defect can take: the row loaded clean,
+     * the constraint never saw the offending byte because the entity presented null, and an authorization
+     * the source said had been marked arrived in the target unmarked. The extract is the second writer of
+     * that column, so an invariant asserted only in the marking flow bound nothing here.
+     *
+     * <p>Assumptions: the record is SYNTHESISED from a valid prefix and the out-of-domain segment rather
+     * than committed as a third fixture. The prefix of the committed detail extract is a well-formed
+     * packed account identifier, so pairing it with that segment isolates the fraud byte as the only
+     * thing wrong with the record -- which is what {@link #theSameRecordLoadsOnceItsFraudPositionIsInDomain()}
+     * then proves by changing that byte alone and watching the same record load.
+     *
+     * <p>Assumptions: the constrained byte's position is READ from the layout registry rather than written
+     * as a literal, so a registry that moved the field would relocate this case with it rather than
+     * leaving it asserting about a neighbour.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a record whose fraud position is out of domain is refused and nothing is written")
+    void anOutOfDomainFraudPositionIsRefusedByTheLoader() {
+        byte[] record = prefixedRecordCarrying(bytes(FRAUD_POSITION_OUT_OF_DOMAIN));
+        assertThat(record[prefixWidth() + fraudOffset()])
+                .as("the synthesised record carries the fixture's out-of-domain position")
+                .isEqualTo((byte) 'Y');
+
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
+
+        assertThatExceptionOfType(LoadService.MalformedSegmentException.class)
+                .isThrownBy(() -> loader.loadDetails(new ByteArrayInputStream(record)))
+                .satisfies(refused -> assertThat(refused.getRecordOrdinal()).isEqualTo(1))
+                .withMessageContaining("record 1")
+                .havingCause()
+                .withMessageContaining("'Y'")
+                .withMessageContaining("outside the domain");
+
+        verify(this.details, never()).insertDetailIfAbsent(any());
+        assertThat(this.storedChildren)
+                .as("the refusal precedes every write, so no authorization was stored")
+                .isEmpty();
+    }
+
+    /**
+     * The same record loads once its fraud position holds one of the two marking characters.
+     *
+     * <p>Purpose: this is what makes the refusal above discriminate. Without it, a case asserting that a
+     * record is refused proves only that SOMETHING about the record is unacceptable, and would stay green
+     * if the loader had begun refusing every record of this fixture for an unrelated reason.
+     *
+     * <p>Assumptions: the byte is changed to the reported marking and nothing else is touched, and the
+     * fixture's report date is already valid at its declared width, so the marking applies. The stored
+     * authorization is then read back to confirm the position SURVIVED the load rather than merely
+     * failing to refuse it -- which is the state the old behaviour produced.
+     *
+     * <p>Assumptions: the parent summary is loaded from the committed summary extract first, because the
+     * loader refuses a child naming an account with no summary row. That ordering is the load's own
+     * contract and not a fixture convenience.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the same record loads once its fraud position is one of the two marking characters")
+    void theSameRecordLoadsOnceItsFraudPositionIsInDomain() {
+        givenSummariesRemember();
+        givenDetailsRemember();
+        byte[] record = prefixedRecordCarrying(bytes(FRAUD_POSITION_OUT_OF_DOMAIN));
+        record[prefixWidth() + fraudOffset()] = (byte) PendingAuthDetail.FRAUD_REPORTED.charAt(0);
+
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
+        loader.loadSummaries(open(PREFIXED_SUMMARY));
+        LoadService.LoadOutcome outcome =
+                loader.loadDetails(new ByteArrayInputStream(record));
+
+        assertThat(outcome.inserted())
+                .as("the record differs from the refused one in one byte and that byte is now in domain")
+                .isEqualTo(1);
+        assertThat(this.storedChildren).hasSize(1);
+        assertThat(this.storedChildren.get(0).getAuthFraud())
+                .as("the marking survives the load rather than being normalised to unmarked")
+                .isEqualTo(PendingAuthDetail.FRAUD_REPORTED);
+        assertThat(this.storedChildren.get(0).getFraudReportDate())
+                .as("the report date accompanying the marking is carried with it")
+                .isNotNull();
     }
 
     /**
@@ -383,11 +677,18 @@ class AuthorizationExtractRoundTripTest {
 
         givenSummariesRemember();
         givenDetailsRemember();
-        this.summaries.save(PendingAuthSummaryMapper.fromExtractRecord(Arrays.copyOfRange(
-                bytes(PREFIXED_SUMMARY), PendingAuthSummaryMapper.unloadRecordLength(),
-                ROOT_COUNT * PendingAuthSummaryMapper.unloadRecordLength())));
+        // WHY : Assumptions: the parent is seeded through the conflict-tolerant insert, because that is
+        //       the only write the double answers -- the loader writes each fresh row with a statement
+        //       that tolerates a conflict rather than through the persistence context. Seeding through
+        //       either save would silently not be remembered, and this case would then fail for a missing
+        //       parent rather than for the packed reading it is actually about.
+        this.summaries.insertSummaryIfAbsent(PendingAuthSummaryMapper.fromExtractRecord(
+                Arrays.copyOfRange(bytes(PREFIXED_SUMMARY),
+                        PendingAuthSummaryMapper.unloadRecordLength(),
+                        ROOT_COUNT * PendingAuthSummaryMapper.unloadRecordLength())));
 
-        LoadService.LoadOutcome outcome = new LoadService(this.summaries, this.details)
+        LoadService.LoadOutcome outcome = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS)
                 .loadDetails(new ByteArrayInputStream(first));
 
         assertThat(outcome.inserted()).isEqualTo(1);
@@ -412,7 +713,8 @@ class AuthorizationExtractRoundTripTest {
     void theTwoPassesRunInTheReferenceOrder() {
         givenSummariesRemember();
         givenDetailsRemember();
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
                 .as("the child pass alone finds no parent, because the root pass writes them")
@@ -438,7 +740,8 @@ class AuthorizationExtractRoundTripTest {
     @Test
     @DisplayName("a stream that is not a whole number of records is refused, naming the stride")
     void aPartialRecordIsRefused() {
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(IllegalArgumentException.class)
                 .as("the 206-byte child file divided by the 100-byte root stride leaves a remainder")
@@ -449,8 +752,8 @@ class AuthorizationExtractRoundTripTest {
                 .isThrownBy(() -> loader.loadDetails(open(PREFIXED_SUMMARY)))
                 .withMessageContaining("must hold a whole number of 206-byte records");
 
-        verify(this.summaries, never()).save(any());
-        verify(this.details, never()).save(any());
+        verify(this.summaries, never()).insertSummaryIfAbsent(any());
+        verify(this.details, never()).insertDetailIfAbsent(any());
     }
 
     /**
@@ -474,13 +777,14 @@ class AuthorizationExtractRoundTripTest {
     void aTruncatedRecordTerminatesRatherThanLooping() {
         byte[] whole = bytes(PREFIXED_SUMMARY);
         byte[] truncated = Arrays.copyOfRange(whole, 0, whole.length - 1);
-        LoadService loader = new LoadService(this.summaries, this.details);
+        LoadService loader = new LoadService(this.summaries, this.details, chunkTransactions(),
+                LoadService.DEFAULT_MAX_RECORDS);
 
         assertThatExceptionOfType(IllegalArgumentException.class)
                 .isThrownBy(() -> loader.loadSummaries(new ByteArrayInputStream(truncated)))
                 .withMessageContaining("must hold a whole number of 100-byte records");
 
-        verify(this.summaries, never()).save(any());
+        verify(this.summaries, never()).insertSummaryIfAbsent(any());
     }
 
     /**
@@ -701,6 +1005,49 @@ class AuthorizationExtractRoundTripTest {
         int byDate = Integer.compare(rightKey.getAuthDate(), leftKey.getAuthDate());
         return byDate != 0 ? byDate
                 : Integer.compare(rightKey.getAuthTime(), leftKey.getAuthTime());
+    }
+
+    /**
+     * Builds one prefixed child record from a valid prefix and the segment handed in.
+     *
+     * <p>Assumptions: the prefix is taken from the committed detail extract rather than encoded here, so
+     * this helper cannot disagree with the loader about the packed representation of an account
+     * identifier. What it varies is the segment alone.
+     *
+     * @param segment one detail segment image of exactly the declared segment length
+     * @return a newly allocated record of exactly the declared unload stride
+     */
+    private static byte[] prefixedRecordCarrying(byte[] segment) {
+        byte[] record = Arrays.copyOf(bytes(PREFIXED_DETAIL),
+                PendingAuthDetailMapper.unloadRecordLength());
+        System.arraycopy(segment, 0, record, prefixWidth(), segment.length);
+        return record;
+    }
+
+    /**
+     * The width of the packed parent-key prefix each unload record carries.
+     *
+     * @return the stride less the segment length, which is the prefix
+     */
+    private static int prefixWidth() {
+        return PendingAuthDetailMapper.unloadRecordLength()
+                - PendingAuthDetailMapper.segmentLength();
+    }
+
+    /**
+     * The zero-based offset of the fraud position inside one segment, read from the layout registry.
+     *
+     * @return the declared start of the one-byte fraud field
+     * @throws AssertionError if the registry holds no field of that name, which would mean this case is
+     *     asserting about a layout that no longer declares the field it is named for
+     */
+    private static int fraudOffset() {
+        return CopybookLayout.layout("PAUTDTL").fields().stream()
+                .filter(field -> FRAUD_FIELD.equals(field.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "the PAUTDTL layout declares no field named " + FRAUD_FIELD))
+                .start();
     }
 
     /**

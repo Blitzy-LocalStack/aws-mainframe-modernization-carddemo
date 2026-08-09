@@ -1,5 +1,5 @@
 /**
- * The persistent, visible function-key legend: the on-screen half of the
+ * @file The persistent, visible function-key legend: the on-screen half of the
  * CardDemo PF-key contract.
  *
  * Purpose

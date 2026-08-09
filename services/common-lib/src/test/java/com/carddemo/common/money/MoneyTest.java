@@ -192,24 +192,34 @@ final class MoneyTest {
      * expects no exception because the source-derived balance and synthetic discriminating rate
      * are valid inputs.
      *
-     * <p>Assumptions: the quotient of this vector is {@code 2.2583...}, so half up gives
-     * {@code 2.26} while the reference program's truncating store gives {@code 2.25}. Both values are
-     * asserted -- the produced one against the API and the reference one against arithmetic computed
-     * here -- because divergence C-ROUNDING is only meaningful if the cent it costs is
-     * pinned rather than described.
+     * <p>Assumptions: the quotient of this vector is {@code 2.2583...}, so the reference program's
+     * truncating store gives {@code 2.25} while half up would give {@code 2.26}. Three things are
+     * asserted rather than one: that the API produces the reference value, that independently computed
+     * reference arithmetic produces the same value, and that the half-up counterfactual produces a
+     * DIFFERENT value. The third assertion is what makes this vector evidence -- without it the test
+     * would pass under either mode and prove nothing about which one ran.
+     *
+     * <p>Refactoring Rationale: this test required {@code 2.26} and named the difference divergence
+     * C-ROUNDING. It now requires the reference value, because the accrual truncates in production and
+     * the divergence is closed. The test was the load-bearing statement of the defect: as long as it
+     * demanded the half-up value, an implementation matching the reference would have failed it.
      */
     @Test
-    @DisplayName("1000.00 at 2.71 rounds half up to 2.26 where the reference truncates to 2.25")
-    void roundsFirstDivergentInterestVectorHalfUp() {
+    @DisplayName("1000.00 at 2.71 truncates to 2.25 as the reference does, where half up would give 2.26")
+    void truncatesFirstDivergentInterestVectorAsReferenceDoes() {
         Money balance = Money.of("1000.00");
         BigDecimal rate = new BigDecimal("2.71");
         Money production = balance.monthlyInterest(rate);
         BigDecimal referenceTruncation = balance.amount().multiply(rate)
                 .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
+        BigDecimal halfUpCounterfactual = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.HALF_UP);
 
-        assertThat(production).isEqualTo(Money.of("2.26"));
+        assertThat(production).isEqualTo(Money.of("2.25"));
         assertThat(referenceTruncation).isEqualByComparingTo("2.25");
-        assertThat(production.amount()).isNotEqualByComparingTo(referenceTruncation);
+        assertThat(production.amount()).isEqualByComparingTo(referenceTruncation);
+        assertThat(halfUpCounterfactual).isEqualByComparingTo("2.26");
+        assertThat(production.amount()).isNotEqualByComparingTo(halfUpCounterfactual);
     }
 
     /**
@@ -220,27 +230,44 @@ final class MoneyTest {
      * fixed-point domain.
      *
      * <p>Assumptions: this vector's quotient is {@code 2.0850} EXACTLY rather than a repeating
-     * expansion, which is the cleanest possible statement of the divergence -- there is no truncated
-     * tail to argue about, only a half cent resolved in one direction or the other. Two independent
-     * vectors are asserted because a single one could be satisfied by an implementation that happened
-     * to be right at one input.
+     * expansion, which is the cleanest possible statement of the contract -- there is no truncated
+     * tail to argue about, only a half cent resolved in one direction or the other. It is the one
+     * vector on which the two modes cannot both be right, so it is the vector this contract is pinned
+     * to. Two independent vectors are asserted because a single one could be satisfied by an
+     * implementation that happened to be right at one input.
+     *
+     * <p>Refactoring Rationale: this test required {@code 2.09} on the reading that the money path used
+     * one rounding mode everywhere. It now requires {@code 2.08}, which is the value the reference
+     * statement stores, because the accrual is one of the business rules the reference suite asserts
+     * verbatim and a cent of drift in it is a parity failure rather than a rounding preference.
      */
     @Test
-    @DisplayName("1000.80 at 2.50 rounds half up to 2.09 where the reference truncates to 2.08")
-    void roundsSecondDivergentInterestVectorHalfUp() {
+    @DisplayName("1000.80 at 2.50 truncates the exact half cent to 2.08 as the reference does")
+    void truncatesSecondDivergentInterestVectorAsReferenceDoes() {
         Money balance = Money.of("1000.80");
         BigDecimal rate = new BigDecimal("2.50");
         Money production = balance.monthlyInterest(rate);
+        BigDecimal exactQuotient = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, 4, RoundingMode.UNNECESSARY);
         BigDecimal referenceTruncation = balance.amount().multiply(rate)
                 .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
+        BigDecimal halfUpCounterfactual = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.HALF_UP);
 
-        assertThat(production).isEqualTo(Money.of("2.09"));
+        // Assumptions: UNNECESSARY is used deliberately and would THROW if the quotient were not
+        //   exact at four places. That makes the "2.0850 exactly" claim in this test's own
+        //   documentation an assertion rather than a comment, so a future edit to the balance or the
+        //   rate cannot quietly turn this into an ordinary repeating vector that proves less.
+        assertThat(exactQuotient).isEqualByComparingTo("2.0850");
+        assertThat(production).isEqualTo(Money.of("2.08"));
         assertThat(referenceTruncation).isEqualByComparingTo("2.08");
-        assertThat(production.amount()).isNotEqualByComparingTo(referenceTruncation);
+        assertThat(production.amount()).isEqualByComparingTo(referenceTruncation);
+        assertThat(halfUpCounterfactual).isEqualByComparingTo("2.09");
+        assertThat(production.amount()).isNotEqualByComparingTo(halfUpCounterfactual);
     }
 
     /**
-     * Verifies that a negative accrual rounds half up on magnitude, away from zero.
+     * Verifies that a negative accrual truncates toward zero rather than away from it.
      *
      * <p>The test accepts no parameters and returns normally after its void assertions. It
      * expects no exception because the synthetic signed balance is permitted by the source
@@ -248,22 +275,39 @@ final class MoneyTest {
      *
      * <p>Assumptions: a negative accrual is reachable rather than hypothetical, because both the
      * balance picture {@code PIC S9(10)V99} at line 7 of {@code app/cpy/CVACT01Y.cpy} and the rate
-     * picture {@code PIC S9(04)V99} at line 9 of {@code app/cpy/CVTRA02Y.cpy} are SIGNED. Half up
-     * rounds on magnitude, so the negative mirror of the {@code 2.26} vector is {@code -2.26} and not
-     * {@code -2.25}; asserting only the positive vector would leave that direction unproved.
+     * picture {@code PIC S9(04)V99} at line 9 of {@code app/cpy/CVTRA02Y.cpy} are SIGNED.
+     *
+     * <p>Assumptions: the direction of the two modes diverges on a negative value and this is the
+     * assertion that pins which one is in force. {@link java.math.RoundingMode#DOWN} truncates toward
+     * zero, so the negative mirror of the {@code 2.25} vector is {@code -2.25}, whereas half up rounds
+     * on magnitude and would give {@code -2.26}. Asserting only the positive vector would leave a
+     * mode that rounded away from zero on negatives indistinguishable from this one.
+     *
+     * <p>Refactoring Rationale: this test required {@code -2.26} while the accrual rounded half up. It
+     * now requires {@code -2.25}, and the sign case is the sharper of the two directions to state
+     * because "truncates toward zero" and "rounds toward negative infinity" agree on every positive
+     * input and part company here -- which is why the mode is {@code DOWN} and not {@code FLOOR}.
      */
     @Test
-    @DisplayName("a negative accrual rounds half up away from zero")
-    void roundsNegativeInterestHalfUpAwayFromZero() {
+    @DisplayName("a negative accrual truncates toward zero, not away from it")
+    void truncatesNegativeInterestTowardZero() {
         Money balance = Money.of("-1000.00");
         BigDecimal rate = new BigDecimal("2.71");
 
         Money production = balance.monthlyInterest(rate);
         BigDecimal referenceTruncation = balance.amount().multiply(rate)
                 .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
+        BigDecimal halfUpCounterfactual = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.HALF_UP);
+        BigDecimal floorCounterfactual = balance.amount().multiply(rate)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.FLOOR);
 
-        assertThat(production).isEqualTo(Money.of("-2.26"));
+        assertThat(production).isEqualTo(Money.of("-2.25"));
         assertThat(referenceTruncation).isEqualByComparingTo("-2.25");
+        assertThat(halfUpCounterfactual).isEqualByComparingTo("-2.26");
+        assertThat(floorCounterfactual).isEqualByComparingTo("-2.26");
+        assertThat(production.amount()).isNotEqualByComparingTo(halfUpCounterfactual);
+        assertThat(production.amount()).isNotEqualByComparingTo(floorCounterfactual);
     }
 
     /**
@@ -284,13 +328,19 @@ final class MoneyTest {
         //   CVTRA01Y/CVTRA02Y operands form a scale-four raw product before division. The
         //   counterfactual uses the SAME rounding mode as production, so the cent it differs by is
         //   attributable to the operation order alone and not to the mode.
+        // WHY : Refactoring Rationale: the mode named here is BASELINE_INTEREST_ROUNDING and was
+        //   GENERAL_ROUNDING. It had to change with the accrual's mode, and not merely for tidiness:
+        //   with production truncating and the counterfactual rounding half up, both orders reach 2.25
+        //   at this vector and the final assertion would have passed for the wrong reason -- the two
+        //   values agreeing while the test claimed they differed. Holding the mode equal on both sides
+        //   is the whole design of this test.
         BigDecimal divideFirstCounterfactual = balance.amount()
-                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.GENERAL_ROUNDING)
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.BASELINE_INTEREST_ROUNDING)
                 .multiply(rate)
-                .setScale(Money.SCALE, Money.GENERAL_ROUNDING);
+                .setScale(Money.SCALE, Money.BASELINE_INTEREST_ROUNDING);
 
-        assertThat(production).isEqualTo(Money.of("2.26"));
-        assertThat(divideFirstCounterfactual).isEqualByComparingTo("2.25");
+        assertThat(production).isEqualTo(Money.of("2.25"));
+        assertThat(divideFirstCounterfactual).isEqualByComparingTo("2.24");
         assertThat(production.amount()).isNotEqualByComparingTo(divideFirstCounterfactual);
     }
 
@@ -310,14 +360,23 @@ final class MoneyTest {
         Money reducedItem = balance.monthlyInterest(rate);
 
         // Trade-offs: CBACT04C.cbl:467 adds WS-MONTHLY-INT after its scale-two receive, so each
-        //   category's accrual is reduced BEFORE it joins the running total. The 1.00 rate is used
-        //   rather than the 2.71 of the vectors above because at 2.71 the two orders happen to agree
-        //   under half up, so that rate would assert nothing about the order.
+        //   category's accrual is reduced BEFORE it joins the running total. The 1.00 rate is kept
+        //   because its quotient, 0.8333..., loses a third of a cent per term, so three reduced terms
+        //   fall a cent short of the once-reduced product and the order is visible in the result.
+        // WHY : Refactoring Rationale: the note here previously justified 1.00 by saying that at 2.71
+        //   "the two orders happen to agree under half up". That reason expired with the mode change --
+        //   under truncation 2.71 gives 2.25 per term for 6.75, against 6.77 for the once-reduced
+        //   product, so 2.71 now discriminates too. The rate is unchanged and only the reason is
+        //   corrected, because an obsolete reason is what leads a later reader to swap the input.
+        // WHY : Assumptions: the counterfactual's mode is BASELINE_INTEREST_ROUNDING, matching
+        //   production, so the cent between the two is attributable to the reduction POINT alone. At
+        //   this vector the quotient 2.5 is exact and every mode agrees on it, so the choice changes
+        //   no value here; it is made explicit anyway so the test does not depend on that coincidence.
         Money perItemTotal = Money.total(reducedItem, reducedItem, reducedItem);
         BigDecimal reduceOnceCounterfactual = balance.amount()
                 .multiply(new BigDecimal("3"))
                 .multiply(rate)
-                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.GENERAL_ROUNDING);
+                .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, Money.BASELINE_INTEREST_ROUNDING);
 
         assertThat(reducedItem).isEqualTo(Money.of("0.83"));
         assertThat(perItemTotal).isEqualTo(Money.of("2.49"));
@@ -795,10 +854,17 @@ final class MoneyTest {
      * agree on the positive vector and differ on the negative one.
      *
      * <p>Alternatives Considered: asserting only that the operations return the arithmetically
-     * obvious product and quotient. Rejected because these two methods carry a rounding decision that
-     * the accrual path must not use -- {@link Money#monthlyInterest(BigDecimal)} exists
-     * because reducing the intermediate product changes the result -- so a test that never rounds
-     * would not distinguish the general contract from the accrual one at all.
+     * obvious product and quotient. Rejected because these two methods carry a rounding decision the
+     * accrual path must NOT use: they reduce with {@link Money#GENERAL_ROUNDING}, half up, while
+     * {@link Money#monthlyInterest(BigDecimal)} reduces with {@link Money#BASELINE_INTEREST_ROUNDING},
+     * truncation, because that is what the reference statement does. A test that never rounds would
+     * not distinguish the two contracts at all, and the half-cent vectors here are the only inputs at
+     * which they can be told apart.
+     *
+     * <p>Assumptions: the {@code 0.03} and {@code -0.05} vectors are the ones that make this test
+     * evidence for the general side of the split. Under truncation they would give {@code 0.01} and
+     * {@code -0.02}, so an edit that applied the accrual mode to these two methods would fail here
+     * rather than passing quietly.
      */
     @Test
     @DisplayName("multipliedBy and dividedBy reduce with HALF_UP away from zero")

@@ -2,10 +2,14 @@
 # infra/modules/s3-datasets/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The entire public return surface of the `s3-datasets` module -- SEVEN
+#   The entire public return surface of the `s3-datasets` module -- TEN
 #   outputs and nothing else. Between them they answer the only three questions
 #   a caller has about this bucket: what it is called, what it is called to IAM,
 #   and where inside it each baseline dataset lives.
+#   WHY (Refactoring Rationale): this said SEVEN, which was never the declared
+#   number in this file. A return-surface count is the one figure a caller reads
+#   before wiring a module, so an under-count reads as "there is nothing else to
+#   wire" and hides the outputs a root actually needs.
 #
 #   AAP section 0.5.3.5 states the contract these outputs exist to satisfy:
 #   "Terraform module outputs are the only source of runtime endpoints and
@@ -140,7 +144,7 @@ output "bucket_name" {
 # PutObject against the object ARN pattern, and IAM treats those as two
 # distinct resources. main.tf's TLS-only bucket policy depends on exactly that
 # fact and states it in full at the `resources` argument of
-# data.aws_iam_policy_document.tls_only, where it lists both forms; the
+# data.aws_iam_policy_document.dataset_access_boundary, where it lists both forms; the
 # reasoning is cross-referenced here rather than argued twice.
 # Alternatives Considered: publishing the object pattern instead of the bucket
 # ARN, or as well as it. Rejected -- a pre-suffixed string forces every

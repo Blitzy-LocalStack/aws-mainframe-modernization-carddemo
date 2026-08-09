@@ -1,13 +1,17 @@
 package com.carddemo.reporting.repository;
 
+import com.carddemo.common.money.Money;
 import com.carddemo.reporting.domain.CardXrefView;
 import jakarta.persistence.QueryHint;
+import org.springframework.data.domain.Limit;
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 import org.hibernate.jpa.AvailableHints;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.Repository;
+import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -253,15 +257,19 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * retrieval batch, and the divergence is registered in
      * {@code docs/architecture/cobol-to-service-traceability.md} as divergence D-2. </p>
      *
-     * <p>Assumptions: the key this traversal walks is the narrowed rendering rather than the stored
-     * number, because L525 of {@code data-migration/sql/V1__reporting_views.sql} narrows it to
-     * twelve asterisks and the last four digits before this module sees it. Two consequences follow
-     * and both are load-bearing. The sequence is still total and still deterministic, since the
-     * twelve leading asterisks are constant, so a rerun over the same data walks the same rows in
-     * the same sequence and a golden-master comparison stays meaningful. And the co-ordering with
-     * the transaction traversal survives the narrowing, because L509 through L511 of that same file
-     * record that this column is narrowed by the same expression the two transaction projections
-     * use, so both streams still lead on one common key. </p>
+     * <p>Refactoring Rationale: the ordering is the narrowed rendering and then the per-card
+     * fingerprint, where it was the narrowed rendering alone, and the claim that accompanied the
+     * single key was false. It read: "The sequence is still total and still deterministic, since the
+     * twelve leading asterisks are constant." The twelve asterisks being constant is exactly what
+     * makes the sequence NOT total -- it reduces the key to four digits, and two cards sharing those
+     * four occupy one position with no defined order between them, so two runs over identical data
+     * could emit two cardholders' statements in either sequence and a golden-master comparison would
+     * fail intermittently on data that had not changed. The fingerprint is unique per card, so
+     * appending it makes the ordering total, which is what the original sentence claimed and did not
+     * deliver. Ordering on the whole card number, which is what L53 of
+     * {@code app/jcl/CREASTMT.JCL} declares, is not available to this module at all -- no relation it
+     * may read publishes that value -- and that divergence is registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md} rather than papered over here. </p>
      *
      * <p>Assumptions: the cursor requires an enclosing transaction rather than starting one of its
      * own, so that it outlives the call that opened it; a cursor that closed with its own
@@ -282,9 +290,9 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * for a caller-driven browse and is simply not what this traversal is. </p>
      *
      * @return an open, forward-only cursor over every row of the projection, ordered by the narrowed
-     *     card number ascending, which is the leading key of the two
-     *     {@code app/jcl/CREASTMT.JCL} L53 declares; empty when the projection holds no row; never
-     *     {@code null}. The caller owns the cursor and must close it, for which try-with-resources
+     *     card number ascending and then by the per-card fingerprint ascending, which together make a
+     *     total order over the leading key of the two {@code app/jcl/CREASTMT.JCL} L53 declares; empty
+     *     when the projection holds no row; never {@code null}. The caller owns the cursor and must close it, for which try-with-resources
      *     is the intended form, and must consume it inside the read-only transaction it requires
      * @throws org.springframework.transaction.IllegalTransactionStateException if no transaction is
      *     in progress when this method is called, which the mandatory propagation below enforces so
@@ -296,7 +304,7 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
     @Query("""
             select x
             from CardXrefView x
-            order by x.cardNum asc
+            order by x.cardNum asc, x.cardFingerprint asc
             """)
     @QueryHints({
         @QueryHint(name = AvailableHints.HINT_FETCH_SIZE, value = XREF_FETCH_SIZE),
@@ -306,51 +314,329 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
     Stream<CardXrefView> streamAllInCardNumberOrder();
 
     /**
-     * Reads the cross-reference row carrying one narrowed card number.
+     * Resolves one WHOLE card number to its cross-reference row, exactly.
      *
-     * <p>Refactoring Rationale: the prose formerly attached to this method attributed it to the
-     * report path, stating that a report line's account identifier is resolved through it. That
-     * attribution is replaced rather than left standing, because it is not what the module does:
-     * {@code TransactionReportRepository} resolves the cross-reference inside its own join, at L215
-     * and L257 of that file, and reaches this method never. The one caller is the on-demand
-     * statement path, {@code StatementService#compose(StatementRequest)}, which names a single card
-     * instead of walking the relation. </p>
+     * <p>Refactoring Rationale: this method replaces {@code findByCardNum(String)}, which took the
+     * NARROWED rendering and is withdrawn. The narrowed rendering is twelve constant asterisks
+     * followed by four digits, so a predicate on it names a tail rather than a card, and the two
+     * outcomes that produced were both wrong and neither was visible. Where the requested card and a
+     * different cardholder's card shared a tail and both existed, the read matched two rows and raised
+     * -- refusing a legitimate request. Where the requested card did NOT exist but another card with
+     * the same tail did, the read matched exactly one row and returned it, so the caller received
+     * somebody else's customer, somebody else's account and, downstream, somebody else's statement,
+     * with nothing anywhere recording that a substitution had happened. That second case is the
+     * serious one: it is a broken-object-selection defect and not a collision-handling nicety. </p>
      *
-     * <p>Assumptions: a keyed single-row read is retained here even though the data definition this
-     * interface stands in for is sequential-only, and both readings are named rather than one being
-     * applied silently. The sequential-only reading is correct for the whole-relation run and is the
-     * whole reason the cursor above exists: L157 through L179 of {@code app/cbl/CBSTM03B.CBL} carry
-     * no keyed arm for this definition. The keyed shape has independent first-hand authority over
-     * the same relation from a different program, {@code app/cbl/CBTRN03C.cbl} looking the
-     * cross-reference up by key at {@code 1500-A-LOOKUP-XREF} L484 through L492, which register entry
-     * <b>R3</b> and the two-join analysis in {@code package-info.java} both record as the second of
-     * the two access shapes this one relation is reached through. </p>
+     * <p>Assumptions: the resolution is delegated to {@code reporting.resolve_card}, declared in
+     * {@code data-migration/sql/V1__reporting_views.sql}, rather than expressed as a predicate here.
+     * It has to be: no relation this module may read publishes the whole card number, so no query this
+     * interface can compose selects a single card. The function is definer-rights, owned by the
+     * barrier role, pinned to an explicit {@code search_path}, and has EXECUTE granted to this
+     * module's login role alone. It returns the same four columns the projection publishes, so the
+     * result maps onto the same entity. </p>
      *
-     * <p>Alternatives Considered: withdrawing this method so that the cursor above is the only
-     * surface. Declined because the on-demand caller would then walk every row ahead of the card it
-     * was asked for, and bounding that walk would report a statement with no activity that a reader
-     * cannot tell apart from a genuinely empty one -- which is the reasoning {@code StatementService}
-     * records at its L273 through L277, at the point it opens its own per-card cursor. A single-card
-     * request is a lookup, and expressing it as a traversal would make the answer depend on where the
-     * card happens to sit in the ordering. </p>
+     * <p>Assumptions: this is a native query because the function is a relation-valued call, which
+     * the persistence query language has no syntax for, and the cast on the argument is required
+     * rather than defensive: the parameter would otherwise be bound as an untyped placeholder that
+     * PostgreSQL cannot resolve against a single-signature function. </p>
      *
-     * <p>Trade-offs: the return is one optional even though the narrowed value is not guaranteed
-     * unique, since L525 of {@code data-migration/sql/V1__reporting_views.sql} keeps only the last
-     * four digits and two cards sharing those four collide under one rendering. A collision makes
-     * this lookup ambiguous and the underlying read raises rather than selecting one of them. That
-     * is the correct failure: selecting a row would attribute one cardholder's statement to another
-     * whenever the engine happened to return that row first, and the document would be wrong with
-     * nothing recording why. </p>
+     * <p>Alternatives Considered: adding a plain {@code card_fingerprint_for(text)} helper so that the
+     * service could compute the token for a card and then use the ordinary keyed read. Rejected in the
+     * migration itself and the reason is recorded there: the masked column is published beside the
+     * token, so a caller who knows an issuer prefix and reads a mask has about a million middle-digit
+     * candidates left, and a forward oracle turns that into a feasible search that recovers the whole
+     * number. This function answers nothing for a card that does not exist, so it discloses a
+     * fingerprint only to a caller that already held the number it belongs to. </p>
      *
-     * @param cardNum the card number as this projection exposes it, being the narrowed rendering of
-     *     sixteen characters; must not be {@code null}
-     * @return the cross-reference row carrying that rendering, or an empty optional when the
-     *     projection holds no such row; never {@code null}
-     * @throws org.springframework.dao.IncorrectResultSizeDataAccessException if two cards collide
-     *     under one narrowed rendering, so that the read matches more than a single row
-     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
-     *     includes the relation being absent -- a defect to report against the data-migration
-     *     package, as register entry <b>R11</b> records, and never one to work around from here
+     * <p>Alternatives Considered: withdrawing single-card resolution altogether so that the cursor
+     * above is the only surface. Declined for the reason it was declined before: the on-demand caller
+     * would walk every row ahead of the card it was asked for, and bounding that walk would report a
+     * statement with no activity that a reader cannot tell apart from a genuinely empty one. A
+     * single-card request is a lookup, and expressing it as a traversal would make the answer depend
+     * on where the card happens to sit in the ordering. The keyed shape also has independent
+     * first-hand authority: {@code app/cbl/CBTRN03C.cbl} looks the cross-reference up by key at
+     * {@code 1500-A-LOOKUP-XREF} L484 through L492, which register entry <b>R3</b> records as the
+     * second of the two access shapes this one relation is reached through. </p>
+     *
+     * <p>Trade-offs: the return is an optional over at most one row, and now that is a guarantee
+     * rather than a hope. The function's predicate is an equality on the whole trimmed number against
+     * a relation whose own primary key is that number, so two rows are unrepresentable and the
+     * previous method's documented {@code IncorrectResultSizeDataAccessException} can no longer
+     * arise. </p>
+     *
+     * @param cardNumber the WHOLE primary account number to resolve, trimmed or padded either way
+     *     because the function trims both sides of its comparison; must not be {@code null}
+     * @return the cross-reference row for exactly that card, or an empty optional when no card with
+     *     that number exists; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the function cannot be executed, which
+     *     includes it being absent or EXECUTE not being granted -- a defect to report against the
+     *     data-migration package, as register entry <b>R11</b> records, and never one to work around
+     *     from here
      */
-    Optional<CardXrefView> findByCardNum(String cardNum);
+    @Query(value = """
+            select r.card_num, r.card_fingerprint, r.customer_id, r.account_id
+            from reporting.resolve_card(cast(:cardNumber as varchar)) as r
+            """, nativeQuery = true)
+    @Transactional(readOnly = true)
+    Optional<CardXrefView> resolveByWholeCardNumber(@Param("cardNumber") String cardNumber);
+
+    /**
+     * Reads the cross-reference row carrying one per-card fingerprint.
+     *
+     * <p>Assumptions: the fingerprint is the declared identifier of {@link CardXrefView}, so this is the
+     * relation's keyed read and yields at most one row by construction. It exists beside
+     * {@link #resolveByWholeCardNumber(String)} because the two answer different questions: that method
+     * turns a whole card number into an identity, and this one reads a row for an identity already held.
+     * </p>
+     *
+     * @param cardFingerprint the keyed per-card fingerprint; must not be {@code null}
+     * @return the cross-reference row for that card, or an empty optional when none exists; never
+     *     {@code null}
+     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
+     *     includes the relation being absent -- a defect to report against the data-migration package,
+     *     as register entry <b>R11</b> records, and never one to work around from here
+     */
+    @Transactional(readOnly = true)
+    Optional<CardXrefView> findById(String cardFingerprint);
+
+    /**
+     * Reads the cards of one account, bounded by the caller.
+     *
+     * <p>Purpose: serves the request path's account selector, which the published contract offers as the
+     * alternative to a card number.</p>
+     *
+     * <p>Assumptions: the caller supplies the bound, and the request path supplies TWO where it wants
+     * one. Reading one row could not tell an account holding a single card from an account holding
+     * several, and a statement is a per-card document -- {@code app/cbl/CBSTM03A.CBL} produces one per
+     * cross-reference row -- so an account with several cards has several statements and must be refused
+     * rather than answered from whichever row came back first. This is the same look-ahead device the
+     * reference uses to discover a further page at {@code app/cbl/COCRDLIC.cbl} L1197.</p>
+     *
+     * <p>Assumptions: the ordering is by fingerprint, which is total and stable, so a refusal is
+     * reproducible and a single-card account always answers with the same row. Ordering by the masked
+     * rendering would leave two colliding cards of one account in an undefined order.</p>
+     *
+     * @param accountId the account whose cards are wanted; must not be {@code null}
+     * @param bound the greatest number of rows to return; must not be {@code null}
+     * @return the account's cards in fingerprint order, at most {@code bound} of them, empty when the
+     *     account holds none; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the projection cannot be read
+     */
+    @Query("""
+            select x
+            from CardXrefView x
+            where x.accountId = :accountId
+            order by x.cardFingerprint asc
+            """)
+    @Transactional(readOnly = true)
+    List<CardXrefView> findCardsOfAccount(@Param("accountId") Long accountId, Limit bound);
+
+    /**
+     * Reads one bounded chunk of statement heading rows, each card joined to its customer and account.
+     *
+     * <p>Purpose: supplies the whole-run statement generator with everything a statement heading needs
+     * in ONE query per chunk, instead of one query per card per dimension.</p>
+     *
+     * <p>Refactoring Rationale: the generator walked the ordered cursor above and, for every row it
+     * produced, issued a keyed read for the customer and another for the account -- so a run over
+     * {@code N} cards executed {@code 1 + 3N} statements and held the outer cursor open across every
+     * one of them, including across the object-store writes each statement performed. Two separate
+     * costs followed. The query count is the visible one. The open cursor is the serious one: a
+     * forward-only cursor pins a database transaction for the whole run, so the run's transaction
+     * lifetime became the run's wall-clock time including all of its network writes. Reading heading
+     * rows in bounded chunks removes both -- each chunk is one statement inside one short transaction
+     * that has ended before any artifact is written.</p>
+     *
+     * <p>Assumptions: both joins are OUTER joins and not inner ones, and the difference is
+     * behavioural rather than stylistic. {@code app/cbl/CBSTM03A.CBL} reads the customer at
+     * {@code 2000-CUSTFILE-GET} L368 and the account at {@code 3000-ACCTFILE-GET} L392 with no
+     * not-found arm, and reaches its abend paragraph at L921 when either read fails. An inner join
+     * would DROP such a card from the result, so a broken cross-reference would produce a run that
+     * silently emitted one statement fewer instead of stopping -- the opposite of the reference's
+     * behaviour. An outer join returns the row with null dimension components, which the caller
+     * detects and reports as the abend the reference performs.</p>
+     *
+     * <p>Assumptions: the chunk is positioned by a strict keyset continuation on the fingerprint,
+     * which is unique per card and is the second component of the ordering the cursor above declares.
+     * An offset would skip or repeat a card when a concurrent load inserts a cross-reference row into
+     * a chunk already read, and a statement run that skips a card produces no document for a
+     * cardholder with no record anywhere of the omission.</p>
+     *
+     * <p>Assumptions: the ordering is the masked rendering and then the fingerprint, matching the
+     * cursor above exactly, so the two access shapes over this relation walk cards in one order. The
+     * continuation compares the fingerprint alone, which is sound because the fingerprint is unique --
+     * it names the anchor card exactly, so no second component is needed to break a tie that cannot
+     * occur.</p>
+     *
+     * @param afterFingerprint the fingerprint of the last card already produced, or the empty string to
+     *     start from the beginning, which sorts below every hexadecimal digest; must not be
+     *     {@code null}
+     * @param limit the greatest number of cards to return in this chunk
+     * @return the heading rows for the next cards in order, at most {@code limit} of them, empty when
+     *     the relation holds no further card; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the relations cannot be read, which
+     *     includes any of them being absent -- a defect to report against the data-migration package,
+     *     as register entry <b>R11</b> records, and never one to work around from here
+     */
+    @Query("""
+            select x.cardNum as cardNum,
+                   x.cardFingerprint as cardFingerprint,
+                   x.customerId as customerId,
+                   x.accountId as accountId,
+                   cu.firstName as firstName,
+                   cu.middleName as middleName,
+                   cu.lastName as lastName,
+                   cu.addressLine1 as addressLine1,
+                   cu.addressLine2 as addressLine2,
+                   cu.addressLine3 as addressLine3,
+                   cu.stateCode as stateCode,
+                   cu.countryCode as countryCode,
+                   cu.postalCode as postalCode,
+                   cu.ficoCreditScore as ficoCreditScore,
+                   a.currentBalance as currentBalance
+            from CardXrefView x
+            left join CustomerView cu on cu.customerId = x.customerId
+            left join AccountView a on a.accountId = x.accountId
+            where x.cardFingerprint > :afterFingerprint
+            order by x.cardNum asc, x.cardFingerprint asc
+            limit :limit
+            """)
+    @QueryHints(@QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true"))
+    @Transactional(readOnly = true)
+    List<StatementHeadingRow> findHeadingChunk(
+            @Param("afterFingerprint") String afterFingerprint,
+            @Param("limit") int limit);
+
+    /**
+     * One card's statement heading: the card, its customer's printed attributes and its account balance.
+     *
+     * <p>Assumptions: this is a closed interface projection, so the provider builds an implementation
+     * from the aliases the query declares. A record was rejected for the reason the report projection
+     * records: a constructor expression binds by position, so reordering fifteen select items would
+     * compile and silently move one customer's postal code into another component.</p>
+     *
+     * <p>Assumptions: the customer and account components are nullable even though their base columns
+     * are not, because the joins are outer joins. A null means the cross-reference names a dimension row
+     * that does not exist, which the caller reports as the abend {@code app/cbl/CBSTM03A.CBL} performs
+     * at L921 rather than rendering a statement around the gap.</p>
+     */
+    interface StatementHeadingRow {
+
+        /**
+         * Returns the masked rendering of the card this statement is for.
+         *
+         * @return twelve asterisks and the last four digits, at the declared width of
+         *     {@value CardXrefView#CARD_NUMBER_WIDTH}; never {@code null}
+         */
+        String getCardNum();
+
+        /**
+         * Returns the keyed per-card fingerprint identifying this card exactly.
+         *
+         * @return the sixty-four-character digest, which is both the chunk continuation key and the
+         *     selector for this card's transactions; never {@code null}
+         */
+        String getCardFingerprint();
+
+        /**
+         * Returns the customer the card belongs to, as the cross-reference names them.
+         *
+         * @return the customer identifier declared {@code XREF-CUST-ID PIC 9(09)} at
+         *     {@code app/cpy/CVACT03Y.cpy} L6; never {@code null}
+         */
+        Long getCustomerId();
+
+        /**
+         * Returns the account the card is issued against, as the cross-reference names it.
+         *
+         * @return the account identifier declared {@code XREF-ACCT-ID PIC 9(11)} at
+         *     {@code app/cpy/CVACT03Y.cpy} L7; never {@code null}
+         */
+        Long getAccountId();
+
+        /**
+         * Returns the customer's first name.
+         *
+         * @return the first of the three name parts, or {@code null} when the joined customer row is
+         *     absent
+         */
+        String getFirstName();
+
+        /**
+         * Returns the customer's middle name.
+         *
+         * @return the second name part, which is {@code null} both when the customer carries none and
+         *     when the joined customer row is absent
+         */
+        String getMiddleName();
+
+        /**
+         * Returns the customer's last name.
+         *
+         * @return the third name part, or {@code null} when the joined customer row is absent
+         */
+        String getLastName();
+
+        /**
+         * Returns the first address line.
+         *
+         * @return the first address line, or {@code null} when the joined customer row is absent
+         */
+        String getAddressLine1();
+
+        /**
+         * Returns the second address line.
+         *
+         * @return the second address line, which is {@code null} both when the customer carries none
+         *     and when the joined customer row is absent
+         */
+        String getAddressLine2();
+
+        /**
+         * Returns the third address line.
+         *
+         * @return the third address line, or {@code null} when the joined customer row is absent
+         */
+        String getAddressLine3();
+
+        /**
+         * Returns the state code.
+         *
+         * @return the two-character state code as stored, or {@code null} when the joined customer row
+         *     is absent
+         */
+        String getStateCode();
+
+        /**
+         * Returns the country code.
+         *
+         * @return the three-character country code as stored, or {@code null} when the joined customer
+         *     row is absent
+         */
+        String getCountryCode();
+
+        /**
+         * Returns the postal code.
+         *
+         * @return the ten-character postal code as stored, or {@code null} when the joined customer row
+         *     is absent
+         */
+        String getPostalCode();
+
+        /**
+         * Returns the credit score the heading band prints.
+         *
+         * @return the three-digit score declared {@code CUST-FICO-CREDIT-SCORE PIC 9(03)} at L22 of
+         *     {@code app/cpy/CVCUS01Y.cpy}, or {@code null} when the joined customer row is absent
+         */
+        Short getFicoCreditScore();
+
+        /**
+         * Returns the account balance the heading band prints.
+         *
+         * @return the current balance as an exact decimal at scale two, or {@code null} when the joined
+         *     account row is absent
+         */
+        Money getCurrentBalance();
+    }
 }

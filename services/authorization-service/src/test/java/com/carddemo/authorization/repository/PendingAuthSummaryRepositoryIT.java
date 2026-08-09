@@ -25,6 +25,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -33,6 +37,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.postgresql.util.PSQLException;
 import org.springframework.core.ResolvableType;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.support.JpaRepositoryFactory;
 import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
@@ -316,6 +321,49 @@ class PendingAuthSummaryRepositoryIT {
     /** The offset owned by the unload-shape case, which inserts four rows. */
     private static final long OFFSET_UNLOAD = 1000L;
 
+    /** The offset owned by the approved-contribution case. */
+    private static final long OFFSET_CONTRIBUTION = 1100L;
+
+    /** The offset owned by the declined-contribution case. */
+    private static final long OFFSET_DECLINE = 1200L;
+
+    /** The offset owned by the absent-account contribution case, whose row is never inserted. */
+    private static final long OFFSET_ABSENT_CONTRIBUTION = 1300L;
+
+    /** The offset owned by the reversal case. */
+    private static final long OFFSET_REVERSAL = 1400L;
+
+    /** The offset owned by the presence-query case, which inserts the one account it finds. */
+    private static final long OFFSET_PRESENCE = 1500L;
+
+    /** The offset owned by the presence query's absent account, which is never inserted. */
+    private static final long OFFSET_PRESENCE_ABSENT = 1600L;
+
+    /** The offset owned by the insert-if-absent case, which offers three rows over two identifiers. */
+    private static final long OFFSET_INSERT_IF_ABSENT = 1700L;
+
+    /**
+     * The offset owned by the checkpoint-walk case, which inserts three consecutive accounts.
+     */
+    // WHY : Assumptions: this offset sits above every KEYED case and the three rows it produces are
+    //       consecutive from it. Every keyed case addresses one row, so a neighbouring row is invisible
+    //       to it; an ORDERED walk is the one shape here that would see another case's rows, which is
+    //       why the two walks take the top of the identifier space between them.
+    // WHY : Refactoring Rationale: this comment claimed the offset was the highest in the class, and a
+    //       second ordered case -- the key-projected walk -- has since been added above it. Both walks
+    //       therefore bound every read by a LIMIT that stops inside their own three rows, which is what
+    //       keeps each independent of the other whichever order the two run in.
+    private static final long OFFSET_WALK = 5000L;
+
+    /**
+     * The offset owned by the key-projected walk, which inserts three consecutive accounts.
+     */
+    // WHY : Assumptions: this offset is the HIGHEST in the class, because that case asserts its third
+    //       row is the greatest identifier the table holds -- which is how it shows the projection is
+    //       reading the top of the ordering rather than an arbitrary page of it. A case added later must
+    //       take an offset below this one, or move this one up.
+    private static final long OFFSET_KEY_WALK = 6000L;
+
     /** The reference hundred-byte record, whose five status slots are all distinct. */
     private static final String CANONICAL_FIXTURE = "fixtures/pautsum0-canonical.bin";
 
@@ -511,6 +559,18 @@ class PendingAuthSummaryRepositoryIT {
               FROM pending_auth_summary
              WHERE account_id BETWEEN ? AND ?
              ORDER BY account_id
+            """;
+
+    /**
+     * The highest stored account identifier, used to prove the walk case owns the top of the ordering.
+     *
+     * <p>Assumptions: the walk case asserts EXACT pages, so it can only do so from a position above which
+     * nothing else in this class stores a row. This statement is how that requirement is checked rather
+     * than assumed, because the cases share one table and JUnit does not order them.</p>
+     */
+    private static final String SELECT_MAX_ACCOUNT_ID = """
+            SELECT max(account_id)::text
+              FROM pending_auth_summary
             """;
 
     /**
@@ -1091,6 +1151,149 @@ class PendingAuthSummaryRepositoryIT {
                 .hasSize(4);
     }
 
+
+    /**
+     * The insert-if-absent statement writes a fresh account and leaves a taken one exactly as it stood.
+     *
+     * <p>Purpose: the extract loader tolerates a duplicate root -- the reference program counts it and reads
+     * the next record at {@code cbl/PAUDBLOD.CBL} L256 to L258 -- and it now does so with one statement
+     * rather than a probe followed by a save. Two properties of that statement need an engine: the row
+     * count it reports, which is how the loader tells the two outcomes apart, and that a conflict leaves the
+     * stored row UNTOUCHED rather than merging anything into it.
+     *
+     * <p>Assumptions: the untouched half is asserted on a column the second attempt carries a DIFFERENT
+     * value in, so the assertion can fail. Re-offering an identical row would satisfy an equality assertion
+     * whatever the statement did on conflict, which is the assertion a merge would slip past.
+     *
+     * <p>Assumptions: the conflict is asserted not to poison the transaction, by writing a further row
+     * through the same context afterwards. That is the property the loader depends on to keep its whole run
+     * in one unit of work: a refused insert that aborted the transaction would make the duplicate tolerance
+     * useless, because the records after the duplicate could not then be written.
+     */
+    @Test
+    @DisplayName("insert-if-absent writes a fresh account, reports zero for a taken one, and merges nothing")
+    void insertIfAbsentWritesOnceAndLeavesATakenAccountAlone() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        PendingAuthSummary first = rehydrate(fields, OFFSET_INSERT_IF_ABSENT);
+        long accountId = first.getAccountId();
+
+        // WHY : Assumptions: each row count is bound to an int local before it is asserted. The transaction
+        //       helper is generic, so asserting on its call directly leaves the assertion overload to be
+        //       chosen by inference and the compiler reports it as ambiguous rather than choosing.
+        int freshWrite = inTransaction(repository -> Integer.valueOf(repository.insertSummaryIfAbsent(first)));
+        assertThat(freshWrite)
+                .as("a fresh account is written and the statement says so")
+                .isEqualTo(1);
+
+        PendingAuthSummary second = rehydrate(fields, OFFSET_INSERT_IF_ABSENT, "Z",
+                new BigDecimal("7777.77"));
+        int takenWrite = inTransaction(
+                repository -> Integer.valueOf(repository.insertSummaryIfAbsent(second)));
+        assertThat(takenWrite)
+                .as("a taken account writes no row, which is what the loader counts as already present")
+                .isEqualTo(0);
+
+        PendingAuthSummary stored = read(accountId).orElseThrow();
+        assertThat(stored.getAuthStatus())
+                .as("the conflict must merge nothing, so the first row's status stands")
+                .isEqualTo(first.getAuthStatus())
+                .isNotEqualTo("Z");
+        assertThat(stored.getCreditLimit()).isEqualByComparingTo(first.getCreditLimit());
+
+        int afterConflict = inTransaction(repository -> Integer.valueOf(
+                repository.insertSummaryIfAbsent(rehydrate(fields, OFFSET_INSERT_IF_ABSENT + 1L))));
+        assertThat(afterConflict)
+                .as("the conflict left the connection usable, which one transaction per load depends on")
+                .isEqualTo(1);
+    }
+
+    /**
+     * The key-projected walk returns ascending identifiers, strictly above the position, capped by the
+     * limit.
+     *
+     * <p>Purpose: the purge walks this table with a query that returns identifiers rather than summaries,
+     * so that the summary it then modifies is loaded for the first time under its row lock. Three
+     * properties of that query can only be answered by an engine: that the comparison EXCLUDES the
+     * position handed in, that the ordering is ascending, and that the {@link Limit} is applied as a row
+     * cap rather than ignored. All three are asserted here on three adjacent identifiers.</p>
+     *
+     * <p>Assumptions: the limit is asserted with a page that is FULL and then with a page that is short,
+     * because the caller decides the walk is finished by receiving fewer rows than it asked for. A query
+     * that ignored the limit would answer the first call with all three, which the caller would read as
+     * a short page and treat as the end of the walk -- a defect that shows up as summaries silently never
+     * visited, not as an error.</p>
+     *
+     * <p>Alternatives Considered: asserting the projection through the entity walk instead, on the
+     * grounds that both are ordered the same way. Rejected because the projection is a hand-written
+     * query rather than a derived one, so nothing about the derived method's behaviour tells us anything
+     * about this one -- the ordering, the comparison and the parameter binding are all stated by hand
+     * here and each is a place a hand-written query can be wrong.</p>
+     *
+     * @throws SQLException if the container refuses a connection or the maximum-identifier query fails,
+     *     which is a setup fault rather than the property under test
+     */
+    @Test
+    @DisplayName("the key-projected walk is ascending, strictly above the position, and honours the limit")
+    void theKeyProjectedWalkIsAscendingStrictAndLimited() throws SQLException {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long first = inTransaction(repository ->
+                repository.save(rehydrate(fields, OFFSET_KEY_WALK))).getAccountId();
+        long second = inTransaction(repository ->
+                repository.save(rehydrate(fields, OFFSET_KEY_WALK + 1L))).getAccountId();
+        long third = inTransaction(repository ->
+                repository.save(rehydrate(fields, OFFSET_KEY_WALK + 2L))).getAccountId();
+        assertThat(List.of(first, second, third))
+                .as("the three fixtures must be adjacent and ordered for the comparison to be observable")
+                .containsExactly(first, first + 1L, first + 2L);
+        assertThat(queryText(SELECT_MAX_ACCOUNT_ID).getFirst())
+                .as("this case asserts exact pages, so its own offset must be the highest in the class;"
+                        + " a case added above OFFSET_KEY_WALK must move this one rather than leave it")
+                .isEqualTo(String.valueOf(third));
+
+        List<Long> fullPage = walk(first - 1L, 2);
+        assertThat(fullPage)
+                .as("ascending, capped at two, and beginning above the position rather than at it")
+                .containsExactly(first, second);
+
+        List<Long> shortPage = walk(second, 2);
+        assertThat(shortPage)
+                .as("the position is EXCLUDED, so the row it names is not returned a second time")
+                .containsExactly(third);
+
+        assertThat(walk(third, 2))
+                .as("a walk past the last identifier is empty, which is how the caller ends the run")
+                .isEmpty();
+    }
+
+    // WHY : Refactoring Rationale: a case named aHeldSummaryMakesASecondWriterWait stood here and has
+    //       been WITHDRAWN with the member it exercised. PendingAuthSummaryRepository published a
+    //       findWithLockByAccountId under a pessimistic write lock; that read was withdrawn because the
+    //       reference system holds nothing on this path -- cpy/IMSFUNCS.cpy declares all three get-hold
+    //       function codes and no reference program passes any of them -- so a row lock is concurrency
+    //       machinery the baseline does not have. The lost update it was added for is closed instead by
+    //       reversing the four counters in ONE statement computed in the database, which is asserted by
+    //       the reversal case above. A test that waited on a lock nothing takes would fail for the
+    //       right reason and mean the wrong thing.
+
+    /**
+     * Runs the key-projected walk once, above a position, capped at a row count.
+     *
+     * @param startAfterAccountId the identifier the walk seeks strictly above
+     * @param window the row cap the caller applies
+     * @return the identifiers returned, in the order the engine returned them
+     */
+    private static List<Long> walk(long startAfterAccountId, int window) {
+        EntityManager entityManager = entityManagerFactory.createEntityManager();
+        try {
+            return new JpaRepositoryFactory(entityManager)
+                    .getRepository(PendingAuthSummaryRepository.class)
+                    .findAccountIdsAboveOrderByAccountIdAsc(
+                            Long.valueOf(startAfterAccountId), Limit.of(window));
+        } finally {
+            entityManager.close();
+        }
+    }
+
     /**
      * Reads one recorded image as raw bytes.
      *
@@ -1252,6 +1455,252 @@ class PendingAuthSummaryRepositoryIT {
      */
     private static BigDecimal amount(Map<String, Object> fields, String name) {
         return (BigDecimal) fields.get(name);
+    }
+
+    /**
+     * An approved contribution advances exactly the three members the reference consumer adds to.
+     *
+     * <p>Purpose: this is {@code cbl/COPAUA0C.cbl} L814 to L817 -- one added to the approved count, the
+     * approved amount accumulated, and the SAME amount added to the credit balance. The statement under
+     * test performs that arithmetic in the database rather than reading, mutating and writing back, so
+     * what has to be asserted against a real engine is that the three columns move and that the other
+     * nine do not.
+     *
+     * <p>Refactoring Rationale: this and the five cases below are additions. Every custom declaration on
+     * this repository was previously unexercised against an engine: the class asserted schema shape and
+     * the inherited save and find, so an arithmetic statement could have named the wrong column, moved
+     * the wrong number of them, or matched no row at all, and nothing here would have noticed. A mocked
+     * repository cannot cover them either, because the arithmetic is the statement's and a mock has
+     * none.
+     *
+     * <p>Assumptions: the row is re-read through a context that never wrote it. A modifying query
+     * bypasses the persistence context, so an instance the writing context still holds would answer
+     * from its identity map with the PRE-update values -- the one reading that cannot see the update
+     * being the one taken beside it.
+     *
+     * <p>Assumptions: the return value is asserted as well as the columns, because it is how the caller
+     * learns the account existed. A statement that matched nothing returns zero and raises nothing, so a
+     * caller that ignored the count would treat a missing summary as a successful accumulation.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approved contribution advances the count, the amount and the credit balance")
+    void anApprovedContributionAdvancesExactlyThreeColumns() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long accountId = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_CONTRIBUTION))).getAccountId();
+
+        int updated = inTransaction(repository -> repository
+                .addApprovedAuthorization(accountId, new BigDecimal("25.50")));
+
+        assertThat(updated).as("the account had a summary, so exactly one row moved").isEqualTo(1);
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getApprovedAuthCount())
+                .as("L814 adds one")
+                .isEqualTo((short) 43);
+        assertThat(reread.getApprovedAuthAmount())
+                .as("L815 accumulates the approved amount")
+                .isEqualByComparingTo("4225.50");
+        assertThat(reread.getCreditBalance())
+                .as("L817 adds the SAME amount to the credit balance, which starts negative here")
+                .isEqualByComparingTo("-74.50");
+        assertThat(reread.getDeclinedAuthCount())
+                .as("an approval touches neither declined member")
+                .isEqualTo((short) 7);
+        assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo("700.00");
+        assertThat(reread.getCashBalance())
+                .as("the cash balance is not an authorization accumulator")
+                .isEqualByComparingTo("0.00");
+    }
+
+    /**
+     * A declined contribution advances two members and deliberately leaves the credit balance alone.
+     *
+     * <p>Purpose: this is the ELSE arm at {@code cbl/COPAUA0C.cbl} L820 to L821, which adds to the
+     * declined count and the declined amount and does NOT touch the credit balance. The asymmetry with
+     * the approved arm is the whole point of asserting it: a declined authorization reserves nothing, so
+     * a statement that moved the balance here would over-reserve an account on every refusal.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a declined contribution advances two columns and never the credit balance")
+    void aDeclinedContributionLeavesTheCreditBalanceAlone() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long accountId = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_DECLINE))).getAccountId();
+
+        int updated = inTransaction(repository -> repository
+                .addDeclinedAuthorization(accountId, new BigDecimal("30.00")));
+
+        assertThat(updated).isEqualTo(1);
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getDeclinedAuthCount()).isEqualTo((short) 8);
+        assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo("730.00");
+        assertThat(reread.getCreditBalance())
+                .as("no reference statement adds a declined amount to the balance")
+                .isEqualByComparingTo("-100.00");
+        assertThat(reread.getApprovedAuthCount()).isEqualTo((short) 42);
+        assertThat(reread.getApprovedAuthAmount()).isEqualByComparingTo("4200.00");
+    }
+
+    /**
+     * A contribution naming an account with no summary changes nothing and reports that it changed none.
+     *
+     * <p>Assumptions: this is asserted for BOTH arms in one case, because the two statements share the
+     * predicate that decides it and a case covering one would leave the other's predicate unproven.
+     *
+     * <p>Assumptions: the table is checked to be unchanged as well as the count being zero. A statement
+     * that inserted a row for an unknown account would also report one row affected, so the count alone
+     * cannot distinguish "no such account" from "created one".
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a contribution to an account with no summary moves no row and reports zero")
+    void aContributionToAnAbsentAccountReportsZero() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long absent = accountOf(fields, OFFSET_ABSENT_CONTRIBUTION);
+
+        int approved = inTransaction(repository -> repository
+                .addApprovedAuthorization(absent, new BigDecimal("10.00")));
+        int declined = inTransaction(repository -> repository
+                .addDeclinedAuthorization(absent, new BigDecimal("10.00")));
+
+        assertThat(approved).isZero();
+        assertThat(declined).isZero();
+        assertThat(read(absent))
+                .as("an accumulation is not an insert, so no summary may appear")
+                .isEmpty();
+    }
+
+    /**
+     * The reversal subtracts all four accumulators and leaves the credit balance where it stood.
+     *
+     * <p>Purpose: this is {@code cbl/CBPAUP0C.cbl} L287 to L292, which subtracts from the same four
+     * members the consumer adds to -- and from no fifth. That the credit balance is NOT restored is the
+     * reference's behaviour, not an omission here, and it is asserted so that a later reader who notices
+     * the asymmetry with the approved arm finds it pinned rather than plausible.
+     *
+     * <p>Assumptions: both pairs are supplied non-zero in one call, because the statement subtracts both
+     * pairs unconditionally and a caller supplies zero for the arm that does not apply; a case that
+     * exercised one pair would leave the other's expression unproven.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the reversal subtracts all four accumulators and not the credit balance")
+    void theReversalSubtractsAllFourAccumulators() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long accountId = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_REVERSAL))).getAccountId();
+
+        int updated = inTransaction(repository -> repository.reverseExpiredAuthorizations(accountId,
+                2, new BigDecimal("200.00"), 1, new BigDecimal("100.00")));
+
+        assertThat(updated).isEqualTo(1);
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getApprovedAuthCount()).isEqualTo((short) 40);
+        assertThat(reread.getApprovedAuthAmount()).isEqualByComparingTo("4000.00");
+        assertThat(reread.getDeclinedAuthCount()).isEqualTo((short) 6);
+        assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo("600.00");
+        assertThat(reread.getCreditBalance())
+                .as("L287 to L292 subtract from four members and the balance is not one of them")
+                .isEqualByComparingTo("-100.00");
+    }
+
+    /**
+     * The presence query answers only the accounts that have a summary, and never invents one.
+     *
+     * <p>Purpose: this is the query that replaced one probe per record in the extract load, so what it
+     * has to answer correctly is the SUBSET: a present account included, an absent one excluded, and no
+     * value returned that was not asked about. An implementation returning every identifier it was
+     * handed would make the load accept a child whose parent is missing, which is the refusal that query
+     * exists to drive.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the presence query returns exactly the accounts that have a summary")
+    void thePresenceQueryReturnsOnlyPresentAccounts() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long present = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_PRESENCE))).getAccountId();
+        long absent = accountOf(fields, OFFSET_PRESENCE_ABSENT);
+
+        List<Long> found = inTransaction(repository -> repository
+                .findExistingAccountIds(List.of(present, absent)));
+
+        assertThat(found).containsExactly(present);
+        // WHY : Assumptions: the second reading is assigned to a TYPED local before being asserted. The
+        //       unit-of-work helper is generic and the assertion entry point is overloaded, so handing
+        //       the call straight to it leaves the lambda with no target type and the overload
+        //       ambiguous; naming the type is what resolves both.
+        List<Long> nothingFound = inTransaction(
+                repository -> repository.findExistingAccountIds(List.of(absent)));
+        assertThat(nothingFound)
+                .as("asking only about an absent account answers nothing rather than raising")
+                .isEmpty();
+    }
+
+    /**
+     * The checkpoint walk is strictly past its anchor, ascending, and bounded by the limit it is given.
+     *
+     * <p>Purpose: this is the purge's resumption read, and all three properties are load-bearing. A
+     * non-strict bound would re-read the anchor account on every window and the purge would never
+     * advance past it; a descending or unordered walk would make the anchor meaningless, since the next
+     * window resumes from the highest identifier the last one saw; and an unbounded read would defeat
+     * the window cap the purge exists to respect.
+     *
+     * <p>Assumptions: the three accounts are given identifiers ABOVE every other case's offset, so the
+     * walk from an anchor just below the first can see only this case's rows. This class shares one
+     * table across its cases by design -- each owns an offset rather than cleaning up -- so an ordered
+     * read is the one shape that has to be given the top of that space.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the checkpoint walk is strict, ascending and bounded")
+    void theCheckpointWalkIsStrictAscendingAndBounded() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long first = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_WALK))).getAccountId();
+        long second = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_WALK + 1))).getAccountId();
+        long third = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_WALK + 2))).getAccountId();
+
+        List<Long> fromBelowTheFirst = walkFrom(first - 1, 3);
+        // WHY : Assumptions: this read is capped at TWO rather than three. Its own three rows can answer
+        //       at most two above the first, and asking for three would reach into the rows of the
+        //       key-projected walk above this offset -- making the case depend on whether that one has
+        //       run. The property asserted is unchanged: anchoring on a row excludes that row.
+        List<Long> fromTheFirst = walkFrom(first, 2);
+        List<Long> boundedToOne = walkFrom(first - 1, 1);
+
+        assertThat(fromBelowTheFirst)
+                .as("ascending, and the anchor being below the first admits all three")
+                .containsExactly(first, second, third);
+        assertThat(fromTheFirst)
+                .as("the bound is STRICT, so anchoring on a row excludes that row")
+                .containsExactly(second, third);
+        assertThat(boundedToOne)
+                .as("the limit bounds the read rather than being advisory")
+                .containsExactly(first);
+    }
+
+    /**
+     * Walks the summaries past one anchor account, ascending, taking at most the rows asked for.
+     *
+     * @param anchorExclusive the account the walk resumes past, which the walk must not return
+     * @param atMost how many rows the walk may take
+     * @return the accounts the walk returned, in the order it returned them
+     */
+    private static List<Long> walkFrom(long anchorExclusive, int atMost) {
+        return inTransaction(repository -> repository
+                .findByAccountIdGreaterThanOrderByAccountIdAsc(anchorExclusive, Limit.of(atMost))
+                .stream().map(PendingAuthSummary::getAccountId).toList());
     }
 
     /**

@@ -6,8 +6,10 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import java.sql.Types;
 import java.time.LocalDate;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
 
 /**
  * The one persistent card record of this bounded context.
@@ -136,6 +138,15 @@ public class Card {
     //       card number is a delete and an insert rather than an update; no baseline path offers
     //       that correction either, since both maintenance programs address the card by this key.
     @Id
+    // WHY : Assumptions: V1__card.sql declares this column CHAR(16), and length alone would leave the
+    //       provider to infer VARCHAR(16). The difference is not cosmetic here, because this member is
+    //       both the primary key and the keyset browse ordering key: PostgreSQL resolves a bpchar column
+    //       against a varchar parameter under text rules, where the blank padding a CHAR column adds is
+    //       significant, so a strict inequality over it would order and position against a value that is
+    //       not the stored one. Stating the fixed-character binding is what keeps the browse predicate
+    //       and the stored form the same. The alternative, columnDefinition, was rejected: it is a
+    //       DDL-implying attribute and this mapping is DDL-passive, the schema being owned by Flyway.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "card_num", length = 16, nullable = false, updatable = false)
     private String cardNum;
 
@@ -293,6 +304,10 @@ public class Card {
     //       because neither distinguishes a blank byte, which a one-character field in a
     //       fixed-width record can genuinely carry, from no value at all; a string preserves the
     //       difference and binds to the one-character column without a conversion.
+    // WHY : Assumptions: CHAR(1) in V1__card.sql, so the same fixed-character binding recorded on the key
+    //       above applies. The override is repeated rather than inherited because the provider infers the
+    //       JDBC type independently for every member.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "active_status", length = 1, nullable = false)
     private String activeStatus;
 

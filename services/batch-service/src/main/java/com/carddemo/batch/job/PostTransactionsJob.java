@@ -6,20 +6,19 @@ import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.Transaction;
-import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.PostingValidationResult;
 import com.carddemo.batch.mapper.DailyTransactionMapper;
 import com.carddemo.batch.mapper.TransactionRejectRecordMapper;
 import com.carddemo.batch.repository.AccountRepository;
-import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.CategoryBalanceService;
 import com.carddemo.batch.service.PostingValidationService;
+import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import com.carddemo.common.money.Money;
 import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
@@ -27,7 +26,6 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.ExitStatus;
@@ -116,9 +114,6 @@ public class PostTransactionsJob {
     /** The feed the day's transactions are read from. */
     private final DailyTransactionRepository feed;
 
-    /** The cross-reference a card number is resolved to an account through. */
-    private final CardXrefRepository crossReferences;
-
     /** The account master the posted amounts are accumulated into. */
     private final AccountRepository accounts;
 
@@ -147,8 +142,8 @@ public class PostTransactionsJob {
      * Builds the job over the rules and repositories it composes.
      *
      * @param feed the daily transaction feed; must not be {@code null}
-     * @param crossReferences the card cross-reference; must not be {@code null}
-     * @param accounts the account master; must not be {@code null}
+     * @param accounts the account master the posted amounts are accumulated into; must not be
+     *     {@code null}
      * @param ledger the posted-transaction ledger; must not be {@code null}
      * @param rejects the reject stream; must not be {@code null}
      * @param validation the posting validation rule; must not be {@code null}
@@ -158,16 +153,21 @@ public class PostTransactionsJob {
      * @param entityManager the persistence context; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
+    // WHY : Refactoring Rationale: a CardXrefRepository parameter stood between the feed and the
+    //       account master, and it is withdrawn. This job resolved the card itself, so it held the
+    //       cross-reference; the validation service now owns that read and hands the resolved row back
+    //       with its outcome, which leaves nothing here to read it for. Keeping an unread collaborator
+    //       would say that this job still reaches the cross-reference table, and a reader auditing
+    //       which components touch cardholder data would have to open the body to find that it does
+    //       not. The account master stays, because the accumulated balance is written through it.
     @SuppressWarnings("checkstyle:ParameterNumber")
-    public PostTransactionsJob(DailyTransactionRepository feed, CardXrefRepository crossReferences,
+    public PostTransactionsJob(DailyTransactionRepository feed,
             AccountRepository accounts, TransactionRepository ledger,
             TransactionRejectRepository rejects, PostingValidationService validation,
             CategoryBalanceService categoryBalances, BatchStepLedger ledgerOfSteps, Clock clock,
             EntityManager entityManager) {
 
         this.feed = Objects.requireNonNull(feed, "feed must not be null");
-        this.crossReferences =
-                Objects.requireNonNull(crossReferences, "crossReferences must not be null");
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.rejects = Objects.requireNonNull(rejects, "rejects must not be null");
@@ -292,19 +292,17 @@ public class PostTransactionsJob {
      * @return {@code true} when the record was rejected, {@code false} when it was posted
      */
     private boolean postOneRecord(DailyTransaction feedRecord) {
-        Optional<CardXref> crossReference =
-                this.crossReferences.findByCardNum(feedRecord.getCardNum());
-
-        // WHY : Assumptions: the account is looked up only when the cross-reference resolved, because
-        //       app/cbl/CBTRN02C.cbl:372 gates the account read on the not-invalid-key branch of the
-        //       cross-reference read. Reading the account regardless would work and would still reject
-        //       correctly, but it would issue a query the reference never issues and would make the
-        //       reject reason for an unresolvable card depend on whether some account happened to exist.
-        Optional<Account> account = crossReference
-                .flatMap(resolved -> this.accounts.findByAccountId(resolved.getAccountId()));
-
-        PostingValidationResult outcome =
-                this.validation.validate(feedRecord, crossReference, account);
+        // WHY : Refactoring Rationale: this method performed its own card read, its own account read
+        //       and its own copy of the app/cbl/CBTRN02C.cbl:372 guard between them, then handed both
+        //       records to a validation overload that only decided the outcome. The validation service
+        //       transcribes :370 including that guard and asserts it under test, so the guard existed
+        //       in two places -- one asserted, one executed -- and a rule the reference expresses only
+        //       as a MISSING statement is the last one that should be duplicated, because neither copy
+        //       fails when the other changes. The resolving entry point now returns what its reads
+        //       found, so this method consumes them instead of repeating them and each record is still
+        //       read exactly once per feed row.
+        PostingDecision decision = this.validation.validate(feedRecord);
+        PostingValidationResult outcome = decision.outcome();
 
         if (outcome.isRejected()) {
             this.rejects.save(TransactionRejectRecordMapper.toRejectRow(
@@ -317,33 +315,24 @@ public class PostTransactionsJob {
         //       do through a resolved cross-reference -- so unwrapping here is an assertion of that
         //       invariant rather than an unchecked assumption. If it were ever violated the failure would
         //       be immediate and named, which is what the step should do with a broken invariant.
-        CardXref resolved = crossReference.orElseThrow(() -> new IllegalStateException(
+        CardXref resolved = decision.crossReference().orElseThrow(() -> new IllegalStateException(
                 "validation accepted a record whose card resolved to no cross-reference"));
-        Account posting = account.orElseThrow(() -> new IllegalStateException(
+        Account posting = decision.account().orElseThrow(() -> new IllegalStateException(
                 "validation accepted a record whose cross-reference resolved to no account"));
 
-        applyToCategoryBalance(feedRecord, resolved);
+        // WHY : Refactoring Rationale: the key was composed here, from the cross-reference's account
+        //       identifier and the record's two codes, and handed to the category service's key-taking
+        //       method. The service publishes a method that composes exactly that key from exactly
+        //       those two objects and documents itself as the entry point this job calls, so the
+        //       composition existed twice and the service's own claim was false. Delegating removes the
+        //       duplicate and makes the claim true. What is bought is that the reason the account
+        //       component comes from the cross-reference rather than from the feed record -- :469 moves
+        //       XREF-ACCT-ID, and app/cpy/CVTRA06Y.cpy declares no account field for a positional
+        //       mistake to draw on -- is recorded once, beside the composition it governs.
+        this.categoryBalances.accumulatePostedTransaction(feedRecord, resolved);
         applyToAccount(feedRecord, posting);
         postToLedger(feedRecord);
         return false;
-    }
-
-    /**
-     * Accumulates the record's amount into its account, type and category balance.
-     *
-     * <p>Assumptions: the key is the account from the CROSS-REFERENCE rather than from the feed record,
-     * matching {@code app/cbl/CBTRN02C.cbl:503} which moves {@code XREF-ACCT-ID} into the balance key. The
-     * feed record carries no account at all, so there is no second candidate -- the note is here because a
-     * reader who assumes the feed carries one will look for it.</p>
-     *
-     * @param feedRecord the record being posted; must not be {@code null}
-     * @param resolved the cross-reference the record's card resolved to; must not be {@code null}
-     */
-    private void applyToCategoryBalance(DailyTransaction feedRecord, CardXref resolved) {
-        this.categoryBalances.accumulate(
-                new TransactionCategoryBalanceId(resolved.getAccountId(), feedRecord.getTypeCd(),
-                        feedRecord.getCategoryCd()),
-                Money.of(feedRecord.getAmount()));
     }
 
     /**

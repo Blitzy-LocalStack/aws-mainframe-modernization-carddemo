@@ -168,6 +168,19 @@ import org.springframework.transaction.annotation.Transactional;
  * registered in {@code docs/architecture/cobol-to-service-traceability.md} rather than absorbed
  * silently. Register entry <b>R6</b> holds the decision. </p>
  *
+ * <p>Assumptions: the leading ordering component is the per-card FINGERPRINT and not the card number,
+ * and the substitution is registered as divergence D-REPORT-ORDER-FINGERPRINT in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. No relation this interface may read
+ * publishes the unmasked number, so ordering on the card as such is not available here; the fingerprint
+ * is injective on the whole trimmed number, so one card's rows still sort together and the control break
+ * below still falls exactly where the reference's does. What the substitution does NOT preserve is the
+ * relative order between two different cards, because a digest orders differently from the number it
+ * digests -- and the register entry states that plainly rather than leaving it to be discovered from a
+ * diff of two artifacts. Alternatives Considered: ordering on the masked rendering, which an earlier
+ * revision did. Rejected because twelve of its sixteen positions are constant, so it groups by TAIL: two
+ * cardholders sharing four digits collapsed into one group and one transaction joined to both their
+ * cross-reference rows. </p>
+ *
  * <p>Assumptions: the card ordering is not cosmetic, because the reference's control break depends
  * on it. {@code app/cbl/CBTRN03C.cbl} L181 tests {@code IF WS-CURR-CARD-NUM NOT= TRAN-CARD-NUM}; on
  * a break it writes the account totals when this is not the first record, at L182-L183, latches the
@@ -391,33 +404,27 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     String REPORT_FETCH_SIZE = "500";
 
     /**
-     * Character joining the two ordering components inside one cursor key.
+     * Exact character width of one cursor key, being the transaction identifier alone.
      *
-     * <p>Assumptions: a vertical bar cannot occur inside either component, so the join is reversible
-     * without escaping. The leading component is the narrowed card rendering
-     * {@code data-migration/sql/V1__reporting_views.sql} L256 projects, which is twelve asterisks and
-     * four digits, and the trailing component is the 16-character transaction identifier declared at
-     * {@code app/cpy/CVTRA05Y.cpy} L5. Neither alphabet contains a bar. </p>
+     * <p>Refactoring Rationale: a cursor key was two components joined by a vertical bar -- the card
+     * rendering and then the transaction identifier -- and is now the identifier alone. Two separate
+     * pressures forced the change and they point the same way. The ordering this surface positions
+     * within is now led by the per-card fingerprint rather than by the masked rendering, for the
+     * reasons the queries below record, and a fingerprint is 64 characters: a two-component key
+     * carrying it would be 81, which is past the {@code MAX_KEY_LENGTH} of 64 the sealing utility
+     * admits at {@code services/common-lib/.../web/CursorToken.java}. And the second component is
+     * UNIQUE on its own -- {@code TRAN-ID PIC X(16)} at {@code app/cpy/CVTRA05Y.cpy} L5 is the whole
+     * key of the transaction cluster -- so it determines the anchor row, and from the anchor row both
+     * ordering components are recoverable. Carrying the leading component as well was therefore
+     * always redundant; it only stopped looking redundant once it stopped fitting.</p>
      *
-     * <p>Alternatives Considered: reusing the colon the sealing utility itself places between a
-     * token's issue instant and its cursor key. Rejected because reading a sealed token back splits
-     * on the FIRST colon only, at
-     * {@code services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java} L310, and
-     * returns everything after it as the key at its L323, so a colon inside the key survives that
-     * round trip but reads as though the key had structure the utility owns. A separator the utility
-     * does not use keeps the two levels of structure visibly separate. </p>
+     * <p>Assumptions: a single-component key needs no separator and no arity check, so both the
+     * separator character and the component count that guarded it are withdrawn. What replaces them is
+     * a width check: a key of any other width was not produced by this interface, and refusing it is
+     * what keeps a malformed position from selecting nothing and reading to a client as a range
+     * exhausted rather than as a request refused.</p>
      */
-    char CURSOR_KEY_SEPARATOR = '|';
-
-    /**
-     * Number of ordering components one cursor key carries, being the card rendering and then the
-     * transaction identifier.
-     *
-     * <p>Assumptions: the arity is two because the ordering is two keys deep, for the reason the
-     * type-level charter records against {@code app/jcl/TRANREPT.jcl} L46. A key presenting any other
-     * arity was not produced by this interface and is refused rather than partially read. </p>
-     */
-    int CURSOR_KEY_COMPONENTS = 2;
+    int CURSOR_KEY_LENGTH = 16;
 
     /**
      * One fully resolved report line: a transaction with its three joined dimensions.
@@ -460,6 +467,27 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
          *     and the last four digits; never {@code null}
          */
         String getCardNum();
+
+        /**
+         * Returns the keyed per-card fingerprint this line's card resolves to.
+         *
+         * <p>Assumptions: this is the value the report ORDERS by, JOINS on and BREAKS on, and it is
+         * declared on the projection for exactly those three reasons. It is not printed. The 133-column
+         * layout at {@code app/cpy/CVTRA07Y.cpy} carries the card rendering above, and this component
+         * never reaches an output band or a response body.</p>
+         *
+         * <p>Refactoring Rationale: the three uses above were all served by {@link #getCardNum()}
+         * before, and that column is the masked rendering -- twelve constant asterisks and four digits.
+         * Ordering on it interleaved two cards sharing a tail, so the card-change break fired inside
+         * one cardholder's run and the emitted group spanned two; joining on it matched one transaction
+         * to every colliding cross-reference row, so the joined result carried more lines than the
+         * driving relation admitted. This component is a function of the whole trimmed number, so all
+         * three become exact.</p>
+         *
+         * @return the sixty-four-character hexadecimal digest the relation projects as
+         *     {@code card_fingerprint}; never {@code null} for a joined row, because the join is on it
+         */
+        String getCardFingerprint();
 
         /**
          * Returns the account the transaction's card is issued against.
@@ -544,8 +572,10 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      * {@code services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java} L345-L348 --
      * and sealing needs two things a data-access type must not hold: the keyed authentication
      * material and the identity of the authenticated caller a token is bound to. So the algebra of
-     * positioning lives here and the sealing lives with the caller, which is what this one-method
-     * type carries across the boundary. </p>
+     * positioning lives here and the sealing lives with the caller, which is what this single-method
+     * type carries across the boundary. Its one method takes the key AND which boundary the key names,
+     * because the published contract seals the direction a position was issued for into the token and
+     * only the caller can compose the two bindings that expresses. </p>
      *
      * <p>Trade-offs: passing a function into a query method is unusual and is accepted for a specific
      * reason. The envelope cannot be built without tokens at all -- its constructor rejects a
@@ -567,8 +597,28 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         /**
          * Seals one cursor key produced by this interface into a client-facing token.
          *
+         * <p>Assumptions: the caller is told WHICH boundary it is sealing, and the reason is a
+         * property of the published contract rather than a convenience. {@code reporting-api.yaml}
+         * declares that the direction a position was issued for is sealed into it, so that replaying
+         * a trailing position with a backward direction is refused rather than answered with the
+         * wrong page. That requires the two boundaries of one page to be sealed under two different
+         * bindings -- the leading key under the binding a BACKWARD step opens with, the trailing key
+         * under the binding a FORWARD step opens with -- and only the holder of the sealing material
+         * can compose either. Passing the flag is what lets this interface keep deriving which row
+         * each boundary names while the binding stays with the caller.</p>
+         *
+         * <p>Alternatives Considered: taking two sealers instead of one sealer and a flag. Rejected
+         * because both methods below would then carry two callback parameters that must not be
+         * transposed, and a transposition compiles, runs, and produces tokens that open successfully
+         * in the wrong direction -- a failure mode no signature can rule out. A boolean naming the
+         * boundary cannot be transposed with anything.</p>
+         *
          * @param cursorKey the opened cursor key naming one row boundary, in the rendering this
-         *     interface produces, being at most 33 characters; must not be {@code null} or blank
+         *     interface produces, being exactly {@value #CURSOR_KEY_LENGTH} characters; must not be
+         *     {@code null} or blank
+         * @param leading {@code true} when the key names the FIRST row of the window, which is the
+         *     position a backward step is taken from; {@code false} when it names the LAST row, which
+         *     is the position a forward step is taken from
          * @return the sealed token carrying that key, which the envelope accepts as a boundary; never
          *     {@code null}
          * @throws NullPointerException if {@code cursorKey} is {@code null}, which the sealing
@@ -576,7 +626,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
          * @throws IllegalArgumentException if {@code cursorKey} is blank or longer than the sealing
          *     utility admits, both of which it refuses at its own boundary
          */
-        String seal(String cursorKey);
+        String seal(String cursorKey, boolean leading);
     }
 
     /**
@@ -623,6 +673,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     @Query("""
             select t.transactionId as transactionId,
                    t.cardNum as cardNum,
+                   t.cardFingerprint as cardFingerprint,
                    x.accountId as accountId,
                    t.typeCd as typeCd,
                    ty.typeDescription as typeDescription,
@@ -631,12 +682,12 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
                    t.source as source,
                    t.amount as amount
             from ReportTransactionView t
-            join CardXrefView x on x.cardNum = t.cardNum
+            join CardXrefView x on x.cardFingerprint = t.cardFingerprint
             join TransactionTypeView ty on ty.typeCd = t.typeCd
             join TransactionCategoryView c
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
-            order by t.cardNum asc, t.transactionId asc
+            order by t.cardFingerprint asc, t.transactionId asc
             """)
     @QueryHints({
         @QueryHint(name = AvailableHints.HINT_FETCH_SIZE, value = REPORT_FETCH_SIZE),
@@ -697,6 +748,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     @Query("""
             select t.transactionId as transactionId,
                    t.cardNum as cardNum,
+                   t.cardFingerprint as cardFingerprint,
                    x.accountId as accountId,
                    t.typeCd as typeCd,
                    ty.typeDescription as typeDescription,
@@ -705,12 +757,12 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
                    t.source as source,
                    t.amount as amount
             from ReportTransactionView t
-            join CardXrefView x on x.cardNum = t.cardNum
+            join CardXrefView x on x.cardFingerprint = t.cardFingerprint
             join TransactionTypeView ty on ty.typeCd = t.typeCd
             join TransactionCategoryView c
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
-            order by t.cardNum asc, t.transactionId asc
+            order by t.cardFingerprint asc, t.transactionId asc
             """)
     List<ReportLine> findReportLines(
             @Param("rangeStart") LocalDateTime rangeStart,
@@ -727,9 +779,9 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      * writes at {@code app/cbl/CBTRN03C.cbl} L182-L183 would then be short by exactly those rows.
      * This is the read-next half of the browse quartet register entry <b>R1</b> records. </p>
      *
-     * @param cardNum the card rendering of the last row already returned; must not be {@code null}
-     * @param transactionId the transaction identifier of the last row already returned; must not be
-     *     {@code null}
+     * @param transactionId the transaction identifier of the last row already returned, which names
+     *     the anchor row uniquely and from which the query recovers the leading ordering component;
+     *     must not be {@code null}
      * @param rangeStart the first instant admitted; must not be {@code null}
      * @param rangeEnd the first instant excluded; must not be {@code null}
      * @param rowBound the greatest number of rows to return, which the positioning path sizes one
@@ -741,6 +793,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     @Query("""
             select t.transactionId as transactionId,
                    t.cardNum as cardNum,
+                   t.cardFingerprint as cardFingerprint,
                    x.accountId as accountId,
                    t.typeCd as typeCd,
                    ty.typeDescription as typeDescription,
@@ -749,17 +802,21 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
                    t.source as source,
                    t.amount as amount
             from ReportTransactionView t
-            join CardXrefView x on x.cardNum = t.cardNum
+            join CardXrefView x on x.cardFingerprint = t.cardFingerprint
             join TransactionTypeView ty on ty.typeCd = t.typeCd
             join TransactionCategoryView c
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
-              and (t.cardNum > :cardNum
-                   or (t.cardNum = :cardNum and t.transactionId > :transactionId))
-            order by t.cardNum asc, t.transactionId asc
+              and (t.cardFingerprint > (select a.cardFingerprint
+                                        from ReportTransactionView a
+                                        where a.transactionId = :transactionId)
+                   or (t.cardFingerprint = (select a.cardFingerprint
+                                            from ReportTransactionView a
+                                            where a.transactionId = :transactionId)
+                       and t.transactionId > :transactionId))
+            order by t.cardFingerprint asc, t.transactionId asc
             """)
     List<ReportLine> findReportLinesAfter(
-            @Param("cardNum") String cardNum,
             @Param("transactionId") String transactionId,
             @Param("rangeStart") LocalDateTime rangeStart,
             @Param("rangeEnd") LocalDateTime rangeEnd,
@@ -782,9 +839,9 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      * from a backward browse at {@code app/cbl/COCRDLIC.cbl} L1273-L1376 and displaying it in
      * ascending order. </p>
      *
-     * @param cardNum the card rendering of the first row already returned; must not be {@code null}
-     * @param transactionId the transaction identifier of the first row already returned; must not be
-     *     {@code null}
+     * @param transactionId the transaction identifier of the first row already returned, which names
+     *     the anchor row uniquely and from which the query recovers the leading ordering component;
+     *     must not be {@code null}
      * @param rangeStart the first instant admitted; must not be {@code null}
      * @param rangeEnd the first instant excluded; must not be {@code null}
      * @param rowBound the greatest number of rows to return, sized one beyond the window that is
@@ -796,6 +853,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     @Query("""
             select t.transactionId as transactionId,
                    t.cardNum as cardNum,
+                   t.cardFingerprint as cardFingerprint,
                    x.accountId as accountId,
                    t.typeCd as typeCd,
                    ty.typeDescription as typeDescription,
@@ -804,17 +862,21 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
                    t.source as source,
                    t.amount as amount
             from ReportTransactionView t
-            join CardXrefView x on x.cardNum = t.cardNum
+            join CardXrefView x on x.cardFingerprint = t.cardFingerprint
             join TransactionTypeView ty on ty.typeCd = t.typeCd
             join TransactionCategoryView c
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
-              and (t.cardNum < :cardNum
-                   or (t.cardNum = :cardNum and t.transactionId < :transactionId))
-            order by t.cardNum desc, t.transactionId desc
+              and (t.cardFingerprint < (select a.cardFingerprint
+                                        from ReportTransactionView a
+                                        where a.transactionId = :transactionId)
+                   or (t.cardFingerprint = (select a.cardFingerprint
+                                            from ReportTransactionView a
+                                            where a.transactionId = :transactionId)
+                       and t.transactionId < :transactionId))
+            order by t.cardFingerprint desc, t.transactionId desc
             """)
     List<ReportLine> findReportLinesBefore(
-            @Param("cardNum") String cardNum,
             @Param("transactionId") String transactionId,
             @Param("rangeStart") LocalDateTime rangeStart,
             @Param("rangeEnd") LocalDateTime rangeEnd,
@@ -854,7 +916,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      *     than raising; never {@code null}
      * @throws NullPointerException if either date or the sealer is {@code null}
      * @throws IllegalArgumentException if {@code rowsWanted} is not greater than zero, or if
-     *     {@code openedLastKey} is present but does not carry the two components this interface
+     *     {@code openedLastKey} is present but is not the single key component this interface
      *     produces
      * @throws org.springframework.dao.DataAccessException if the relations cannot be read
      */
@@ -879,7 +941,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         Limit probe = Limit.of(rowsWanted + 1);
         List<ReportLine> probed = openedLastKey == null
                 ? findReportLines(rangeStart, rangeEnd, probe)
-                : findReportLinesAfter(cardRenderingOf(openedLastKey), transactionIdOf(openedLastKey),
+                : findReportLinesAfter(requireCursorKey(openedLastKey),
                         rangeStart, rangeEnd, probe);
 
         boolean furtherAhead = probed.size() > rowsWanted;
@@ -887,11 +949,17 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         if (rows.isEmpty()) {
             return PageResponse.empty();
         }
+        // WHY : Assumptions: backward availability on a forward read is whether the caller supplied a
+        //       position, because the predicate is strictly beyond that position and the position names a
+        //       row the caller was already shown. It is NOT inferred from the leading boundary token,
+        //       which every page carrying rows supplies -- so the opening window reports nothing behind
+        //       it rather than advertising a window that would come back empty.
         return PageResponse.ofRows(
                 rows,
-                sealer.seal(cursorKeyOf(rows.get(0))),
-                sealer.seal(cursorKeyOf(rows.get(rows.size() - 1))),
-                furtherAhead);
+                sealer.seal(cursorKeyOf(rows.get(0)), true),
+                sealer.seal(cursorKeyOf(rows.get(rows.size() - 1)), false),
+                furtherAhead,
+                openedLastKey != null);
     }
 
     /**
@@ -935,7 +1003,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      *     step was taken from; never {@code null}
      * @throws NullPointerException if either date, the key or the sealer is {@code null}
      * @throws IllegalArgumentException if {@code rowsWanted} is not greater than zero, or if
-     *     {@code openedFirstKey} does not carry the two components this interface produces
+     *     {@code openedFirstKey} is not the single key component this interface produces
      * @throws org.springframework.dao.DataAccessException if the relations cannot be read
      */
     default PageResponse<ReportLine> readPreviousReportLines(
@@ -954,7 +1022,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         LocalDateTime rangeEnd = firstInstantAfter(endDate);
 
         List<ReportLine> probed = findReportLinesBefore(
-                cardRenderingOf(openedFirstKey), transactionIdOf(openedFirstKey),
+                requireCursorKey(openedFirstKey),
                 rangeStart, rangeEnd, Limit.of(rowsWanted + 1));
 
         // Assumptions: the probe row on this path is the FURTHEST row back, because the query orders
@@ -966,16 +1034,25 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         boolean furtherBehind = probed.size() > rowsWanted;
         List<ReportLine> nearestFirst = furtherBehind ? probed.subList(0, rowsWanted) : probed;
         if (nearestFirst.isEmpty()) {
-            return PageResponse.ofFilteredEmpty(sealer.seal(openedFirstKey), null);
+            // WHY : Assumptions: the one position this envelope carries is sealed as the LEADING
+            //       boundary, because it is the position the caller is standing on and the only step
+            //       it can take from here is backward again -- there is nothing behind it to seal as a
+            //       trailing key. Sealing it as trailing would issue a token the caller could only
+            //       redeem forward, which would walk it away from the window it holds.
+            return PageResponse.ofFilteredEmpty(sealer.seal(openedFirstKey, true), null, false);
         }
 
         List<ReportLine> rows = new ArrayList<>(nearestFirst);
         Collections.reverse(rows);
+        // WHY : Assumptions: on a backward read the look-ahead row IS the answer to backward
+        //       availability -- it lies further back than the window -- so the read already performed
+        //       settles it and no second query is issued.
         return PageResponse.ofRows(
                 rows,
-                sealer.seal(cursorKeyOf(rows.get(0))),
-                sealer.seal(cursorKeyOf(rows.get(rows.size() - 1))),
-                true);
+                sealer.seal(cursorKeyOf(rows.get(0)), true),
+                sealer.seal(cursorKeyOf(rows.get(rows.size() - 1)), false),
+                true,
+                furtherBehind);
     }
 
     /**
@@ -1009,42 +1086,60 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
             @Param("rangeEnd") LocalDateTime rangeEnd);
 
     /**
-     * Counts the report lines the three inner joins yield inside the same range.
+     * Names the transactions in one range whose dimension joins do not resolve to exactly one row each.
      *
-     * <p>Assumptions: this is the second half of the reconciliation, and its predicate and its three
-     * joins are character for character those of
-     * {@link #findReportLines(LocalDateTime, LocalDateTime, Limit)}, which is the predicate
-     * {@code app/jcl/TRANREPT.jcl} L47-L48 declares. A count taken under any other predicate would
-     * reconcile against a different population, and would then report a divergence that did not exist
-     * or, worse, fail to report one that did. </p>
+     * <p>Purpose: establishes, per transaction rather than in aggregate, that every driving row resolves
+     * to exactly one card cross-reference row, exactly one transaction type and exactly one transaction
+     * category. This is the migrated form of the three lookup paragraphs of
+     * {@code app/cbl/CBTRN03C.cbl}, each of which treats a miss as fatal and displays the offending key
+     * before abending -- {@code 1500-A-LOOKUP-XREF} L484 to L492 and its counterparts at L497 and L507.
+     * </p>
      *
-     * <p>Assumptions: the comparison a caller makes is for equality and not for a shortfall, because
-     * divergence is possible in both directions. A shortfall means a dimension did not resolve, which
-     * the reference treats as fatal at {@code app/cbl/CBTRN03C.cbl} L484-L492, L494-L502 and
-     * L504-L512. A surplus means a join matched more than one dimension row, which the narrowed card
-     * rendering at {@code data-migration/sql/V1__reporting_views.sql} L256 and L525 makes possible for
-     * two cards sharing their last four digits. Either way the report's totals would not be the
-     * reference's totals. </p>
+     * <p>Refactoring Rationale: this replaces a pair of aggregate counts -- one over the driving rows and
+     * one over the joined rows -- whose difference was compared for equality. That comparison could be
+     * satisfied by a broken range: one transaction resolving to NO cross-reference row subtracts one from
+     * the joined count while a second transaction matching TWO adds one, and the two cancel exactly. The
+     * run then reported success over a report that was missing one line and carrying a duplicate. A
+     * per-transaction check cannot cancel, because each transaction is tested on its own.</p>
+     *
+     * <p>Assumptions: the joins here are OUTER joins where the report's own query uses inner ones, and
+     * that is the whole mechanism. An inner join makes an unresolved transaction disappear, which is the
+     * condition being detected; an outer join keeps the row with a null dimension, so {@code count} over
+     * the joined alias counts zero for a miss, one for the expected case and more for a multiple.</p>
+     *
+     * <p>Assumptions: the predicate tests all three dimensions with {@code or} rather than summing them.
+     * A sum could be satisfied by one dimension counting zero while another counted two -- the same
+     * cancellation at a smaller scale.</p>
+     *
+     * <p>Assumptions: the result is bounded by the caller and ordered by identifier, so the row a refusal
+     * names is deterministic. This path runs only when a range is being validated, and its purpose is to
+     * give a maintainer one place to start rather than to enumerate every defect.</p>
      *
      * @param rangeStart the first instant admitted; must not be {@code null}
      * @param rangeEnd the first instant excluded; must not be {@code null}
-     * @return the number of fully resolved report lines inside the range, which equals
-     *     {@link #countDrivingRows(LocalDateTime, LocalDateTime)} exactly when every dimension
-     *     resolved to exactly one row
+     * @param rowBound the greatest number of offending identifiers to return; must not be {@code null}
+     * @return the identifiers of transactions whose dimensions do not resolve to exactly one row each, in
+     *     ascending identifier order, at most {@code rowBound} of them; empty when every transaction in
+     *     the range resolves exactly, which is the expected outcome; never {@code null}
      * @throws org.springframework.dao.DataAccessException if the relations cannot be read
      */
     @Query("""
-            select count(t)
+            select t.transactionId
             from ReportTransactionView t
-            join CardXrefView x on x.cardNum = t.cardNum
-            join TransactionTypeView ty on ty.typeCd = t.typeCd
-            join TransactionCategoryView c
+            left join CardXrefView x on x.cardFingerprint = t.cardFingerprint
+            left join TransactionTypeView ty on ty.typeCd = t.typeCd
+            left join TransactionCategoryView c
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
+            group by t.transactionId
+            having count(x) <> 1 or count(ty) <> 1 or count(c) <> 1
+            order by t.transactionId asc
             """)
-    long countJoinedRows(
+    @Transactional(readOnly = true)
+    List<String> findTransactionsWithUnresolvedDimensions(
             @Param("rangeStart") LocalDateTime rangeStart,
-            @Param("rangeEnd") LocalDateTime rangeEnd);
+            @Param("rangeEnd") LocalDateTime rangeEnd,
+            Limit rowBound);
 
     /**
      * Reads the driving transactions the date predicate admits, without joining a dimension.
@@ -1069,7 +1164,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
             select t
             from ReportTransactionView t
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
-            order by t.cardNum asc, t.transactionId asc
+            order by t.cardFingerprint asc, t.transactionId asc
             """)
     List<ReportTransactionView> findDrivingRows(
             @Param("rangeStart") LocalDateTime rangeStart,
@@ -1138,73 +1233,58 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
     /**
      * Renders the ordering position of one returned row as a single cursor key.
      *
-     * <p>Assumptions: the key carries both ordering components because the ordering is two keys deep,
-     * for the reason the type-level charter records against {@code app/jcl/TRANREPT.jcl} L46. A key
-     * carrying the card rendering alone could not resume inside a card whose rows span a window
-     * boundary, and one carrying the transaction identifier alone could not resume at all, because the
-     * identifier is the secondary key and is not ordered across cards. </p>
+     * <p>Refactoring Rationale: the key carried both ordering components and now carries the
+     * transaction identifier alone. The prose that justified two said that "one carrying the
+     * transaction identifier alone could not resume at all, because the identifier is the secondary
+     * key and is not ordered across cards", and that reasoning conflates a POSITION with an ORDER. The
+     * identifier is not ordered across cards, which is true and is why the query still orders by the
+     * fingerprint first; but it is UNIQUE -- {@code TRAN-ID PIC X(16)} at
+     * {@code app/cpy/CVTRA05Y.cpy} L5 is the whole key of the transaction cluster -- so it names the
+     * anchor ROW exactly, and the query recovers the leading component from that row with a scalar
+     * subquery. Resuming inside a card whose rows span a window boundary therefore still works, which
+     * is the property the two-component key existed for. What forced the change was width: the leading
+     * component is now a 64-character fingerprint, and a two-component key would be 81 against a
+     * sealing limit of 64. </p>
      *
      * @param line the row whose position is to be named; must not be {@code null}
-     * @return the cursor key, being the card rendering, the separator and the transaction identifier,
-     *     33 characters for the declared widths and so inside the 64 the sealing utility admits at its
-     *     L102; never {@code null}
+     * @return the cursor key, being the transaction identifier alone at
+     *     {@value #CURSOR_KEY_LENGTH} characters and so well inside the 64 the sealing utility admits
+     *     at its L135; never {@code null}
      * @throws NullPointerException if {@code line} is {@code null}
      */
     private static String cursorKeyOf(ReportLine line) {
         Objects.requireNonNull(line, "line must not be null");
-        return line.getCardNum() + CURSOR_KEY_SEPARATOR + line.getTransactionId();
+        return line.getTransactionId();
     }
 
     /**
-     * Locates the separator inside a cursor key and refuses a key this interface did not produce.
+     * Checks a cursor key this interface is asked to position on, and refuses one it did not produce.
      *
-     * <p>Assumptions: a key is checked before it is split rather than after, because an unchecked
-     * split silently yields a position instead of an error. A well-formed key is 16 characters of
-     * card rendering, per {@code data-migration/sql/V1__reporting_views.sql} L256, then the separator,
-     * then the 16 declared at {@code app/cpy/CVTRA05Y.cpy} L5. A key with no separator would position
-     * on a card rendering of the whole key and an empty identifier, which selects nothing and reads to
-     * a client as a range exhausted rather than as a request refused. </p>
+     * <p>Assumptions: a key is checked before it is used rather than after, because an unchecked key
+     * silently yields a position instead of an error. A well-formed key is the
+     * {@value #CURSOR_KEY_LENGTH} characters {@code TRAN-ID PIC X(16)} declares at
+     * {@code app/cpy/CVTRA05Y.cpy} L5. A key of any other width names no row, so the subquery that
+     * recovers the anchor's leading ordering component returns nothing, the predicate admits nothing,
+     * and the answer reads to a client as a range exhausted rather than as a request refused.</p>
      *
-     * @param cursorKey the opened cursor key to examine; must not be {@code null}
-     * @return the index of the single separator, which is neither the first nor the last character
+     * <p>Refactoring Rationale: this replaces a separator search and two substring extractions that
+     * split a two-component key. The arity check they performed is gone because the arity is one; what
+     * remains is the property that check existed to establish, which is that the key came from here.
+     * </p>
+     *
+     * @param cursorKey the opened cursor key to check; must not be {@code null}
+     * @return the same key, so that a call site can check and pass in one expression
      * @throws NullPointerException if {@code cursorKey} is {@code null}
-     * @throws IllegalArgumentException if the key does not carry exactly two non-empty components
+     * @throws IllegalArgumentException if the key is not exactly {@value #CURSOR_KEY_LENGTH}
+     *     characters wide
      */
-    private static int separatorIndexOf(String cursorKey) {
+    private static String requireCursorKey(String cursorKey) {
         Objects.requireNonNull(cursorKey, "cursorKey must not be null");
-        int separator = cursorKey.indexOf(CURSOR_KEY_SEPARATOR);
-        boolean wellFormed = separator > 0
-                && separator < cursorKey.length() - 1
-                && cursorKey.indexOf(CURSOR_KEY_SEPARATOR, separator + 1) < 0;
-        if (!wellFormed) {
+        if (cursorKey.length() != CURSOR_KEY_LENGTH) {
             throw new IllegalArgumentException(
-                    "cursor key does not carry the " + CURSOR_KEY_COMPONENTS + " non-empty components"
-                            + " this query surface produces, joined by one separator");
+                    "cursor key is not the " + CURSOR_KEY_LENGTH + " characters wide this query"
+                            + " surface produces, so it names no row this surface ordered");
         }
-        return separator;
-    }
-
-    /**
-     * Extracts the leading ordering component, the card rendering, from a cursor key.
-     *
-     * @param cursorKey the opened cursor key; must not be {@code null}
-     * @return the card rendering the key positions on; never {@code null}
-     * @throws NullPointerException if {@code cursorKey} is {@code null}
-     * @throws IllegalArgumentException if the key is not well formed
-     */
-    private static String cardRenderingOf(String cursorKey) {
-        return cursorKey.substring(0, separatorIndexOf(cursorKey));
-    }
-
-    /**
-     * Extracts the trailing ordering component, the transaction identifier, from a cursor key.
-     *
-     * @param cursorKey the opened cursor key; must not be {@code null}
-     * @return the transaction identifier the key positions on; never {@code null}
-     * @throws NullPointerException if {@code cursorKey} is {@code null}
-     * @throws IllegalArgumentException if the key is not well formed
-     */
-    private static String transactionIdOf(String cursorKey) {
-        return cursorKey.substring(separatorIndexOf(cursorKey) + 1);
+        return cursorKey;
     }
 }

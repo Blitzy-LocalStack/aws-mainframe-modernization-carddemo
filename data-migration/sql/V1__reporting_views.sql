@@ -166,6 +166,39 @@ SET LOCAL ROLE carddemo_reporting_owner;
 --       statement, and with a twelve-digit filler that collision is a certainty
 --       rather than a risk. The digest is deterministic, so it groups without
 --       collision; it is used ONLY as a grouping key and no client ever sees it.
+-- WHY : Refactoring Rationale: the fingerprint is projected on THREE relations now --
+--       v_statement_transactions, v_report_transactions and v_card_xref -- where it
+--       previously appeared on the statement projection alone. The narrower placement
+--       rested on the reasoning that a fingerprint groups and that the other two
+--       relations had nothing to group, and that reasoning was answering the wrong
+--       question. A fingerprint is not only a grouping token here: it is the only
+--       column on these relations that is a function of the WHOLE card number, so it
+--       is also the only one that can serve as a row identity, as a join predicate and
+--       as an ordering key. Without it, the report's join of a transaction to its
+--       cross-reference row matched on the mask -- which is to say on four digits --
+--       so two cards sharing a tail joined to each other's cross-reference row and the
+--       join multiplied rows the driving relation admitted once. And v_card_xref's own
+--       reasoning, that it holds one row per card so has nothing to group, was true
+--       about grouping and false about SELECTION: a lookup by the mask names four
+--       digits, so it can resolve to a row belonging to a different cardholder
+--       entirely. Both are broken-object-selection defects rather than presentation
+--       ones, and both close by joining, identifying and ordering on the fingerprint
+--       while the mask stays what it always was, a value to display.
+-- WHY : Assumptions: the fingerprint on the two added relations is computed by the
+--       SAME expression as on the statement projection, over the same single-row
+--       secret, and that identity is load-bearing rather than tidy. The report joins
+--       v_report_transactions to v_card_xref on it, so a fingerprint computed with a
+--       different key, a different digest or a different concatenation order would
+--       join nothing at all -- and would do so silently, returning an empty report
+--       rather than an error.
+-- WHY : Alternatives Considered: exposing a forward oracle -- a function taking a card
+--       number and returning its fingerprint -- so that the service could compute the
+--       token for a card a caller supplied and select on it directly. Rejected: the
+--       masked column is published beside the token, so a caller who knows an issuer
+--       prefix and reads a mask has only the middle six digits left to guess, and a
+--       forward oracle turns that into a search of about a million calls. The exact
+--       lookup below returns nothing for a card that does not exist, so it discloses a
+--       fingerprint only to a caller that already held the whole number it belongs to.
 -- WHY : Refactoring Rationale: that token is KEYED, and an earlier revision's
 --       unkeyed md5(rtrim(card_num)) was not. The earlier form was accompanied by
 --       the claim that it was "not reversible to a card number by anyone who does
@@ -254,14 +287,25 @@ SELECT
     t.merchant_city,
     t.merchant_zip,
     ('************' || right(rtrim(t.card_num), 4))::character(16) AS card_num,
+    -- WHY : Assumptions: the same keyed digest the statement projection publishes, for
+    --       the reason recorded in the header block: the report joins this relation to
+    --       reporting.v_card_xref to obtain the account identifier its layout prints,
+    --       and the mask is four digits behind a constant filler so a join on it is a
+    --       join on four digits. The CROSS JOIN cannot multiply rows, because the key
+    --       table's primary key is fixed to a single value.
+    encode(sha256(convert_to(k.key_value || rtrim(t.card_num), 'UTF8')), 'hex')
+                                                                  AS card_fingerprint,
     t.orig_ts,
     t.proc_ts
-FROM ledger.transactions AS t;
+FROM ledger.transactions AS t
+CROSS JOIN reporting.card_grouping_key AS k;
 
 COMMENT ON VIEW reporting.v_report_transactions IS
     'Row source for the 133-column transaction report (app/cbl/CBTRN03C.cbl, app/jcl/TRANREPT.jcl). '
-    'Projects the thirteen columns of ledger.transactions the report consumes; the report date '
-    'window is applied per run as a predicate on proc_ts, never baked into this view.';
+    'Projects the columns of ledger.transactions the report consumes, the card number masked to its '
+    'last four digits for display and a keyed per-card fingerprint for joining, grouping and '
+    'ordering; the report date window is applied per run as a predicate on proc_ts, never baked '
+    'into this view.';
 
 -- WHY : Assumptions: ownership is ALSO assigned explicitly, view by view, even though
 --       every definition above ran under SET LOCAL ROLE and is therefore already owned
@@ -469,8 +513,24 @@ ALTER VIEW reporting.v_accounts OWNER TO carddemo_reporting_owner;
 --       projection later. Spelling them out to explain their absence would defeat
 --       the check that guarantees the absence, so the explanation is kept and the
 --       identifiers are not.
--- WHY : Assumptions: fico_credit_score is absent for the same reason -- it is a
---       credit assessment, not statement heading data, and no band prints it.
+-- WHY : Refactoring Rationale: fico_credit_score IS projected, and the reasoning that
+--       withheld it -- "it is a credit assessment, not statement heading data, and no
+--       band prints it" -- was factually wrong about the band. A band does print it.
+--       app/cbl/CBSTM03A.CBL moves CUST-FICO-CREDIT-SCORE, declared PIC 9(03) at L22 of
+--       app/cpy/CUSTREC.cpy, into ST-FICO-SCORE, declared PIC X(20) at L118 of
+--       app/cpy/COSTM01.CPY, and the migrated renderer emits that band from
+--       StatementBandLayouts.ST_LINE9. With the column absent the statement path had no
+--       source for a value it is required to print, and the gap had been papered over
+--       with a caller-supplied resolver function that no production caller passed --
+--       so the whole-run generator could not be invoked at all. Projecting the column
+--       is what lets the value come from the customer row it belongs to.
+-- WHY : Trade-offs: this is the one genuinely evaluative attribute in the projection and
+--       it widens the reporting role's reach by one column, which is a real cost. It is
+--       accepted because the alternative is worse in both available directions: omitting
+--       it leaves a required band unprintable, and supplying it from outside the database
+--       means some other component reads it and hands it over, which spreads the same
+--       disclosure across two roles instead of one. Least privilege here means the role
+--       that renders the band reads the column, and nothing else does.
 -- WHY : Assumptions: the three address lines are all projected, including
 --       addr_line_3, which app/cbl/COACTUPC.cbl treats as the city (:1615). A
 --       statement heading prints the whole address block, so dropping any line
@@ -488,14 +548,16 @@ SELECT
     c.addr_state_cd,
     c.addr_country_cd,
     c.addr_zip,
-    c.dob
+    c.dob,
+    c.fico_credit_score
 FROM account.customers AS c;
 
 COMMENT ON VIEW reporting.v_customers IS
     'Read-only projection of account.customers for statement heading data (app/cpy/COSTM01.CPY). '
-    'Deliberately omits the two enciphered national-identifier columns, the credit score, both '
-    'phone numbers and the transfer account reference: no reporting band prints any of them, so '
-    'the role reads none of them.';
+    'Deliberately omits the two enciphered national-identifier columns, both phone numbers and the '
+    'transfer account reference: no reporting band prints any of them, so the role reads none of '
+    'them. fico_credit_score IS projected, because the statement heading band ST-FICO-SCORE at L118 '
+    'of app/cpy/COSTM01.CPY prints it.';
 
 ALTER VIEW reporting.v_customers OWNER TO carddemo_reporting_owner;
 
@@ -514,25 +576,130 @@ ALTER VIEW reporting.v_customers OWNER TO carddemo_reporting_owner;
 --       reporting role every primary account number in the cross-reference --
 --       defeating the masking on the other views, since this relation joins to
 --       both of them.
--- WHY : Assumptions: NO fingerprint column here, unlike the statement view. A
---       fingerprint exists to GROUP rows that a masked number would merge, and
---       this relation is keyed one row per card rather than many rows per card, so
---       there is nothing to group. Adding one would create a second place the
---       grouping secret is read for no purpose.
+-- WHY : Refactoring Rationale: this projection now publishes card_fingerprint, and the
+--       reasoning that previously withheld it -- that a fingerprint exists to GROUP and
+--       that a relation holding one row per card has nothing to group -- is withdrawn
+--       rather than softened. It was true about grouping and irrelevant to the two uses
+--       this relation is actually put to. The report JOINS to it, and a join on the mask
+--       is a join on four digits, so one transaction matched every cross-reference row
+--       sharing a tail and the joined result carried more rows than the driving
+--       relation admitted. The statement path SELECTS from it by card, and a select on
+--       the mask is a select on four digits, so a request naming a card that does not
+--       exist resolved to a different cardholder's row whenever that cardholder's card
+--       shared the tail. The fingerprint is a function of the whole trimmed number, so
+--       it makes both exact. The secret is read once more per query than before, which
+--       is the cost, and it buys the difference between an identity and a display
+--       value.
+-- WHY : Assumptions: the fingerprint is the primary key of this projection as the
+--       reporting context sees it, and the masked number is not. Two rows of this
+--       relation can carry one identical mask and cannot carry one identical
+--       fingerprint, so only the fingerprint can be mapped as an entity identifier --
+--       which is what services/reporting-service/.../domain/CardXrefView.java now
+--       declares.
 CREATE VIEW reporting.v_card_xref
     WITH (security_barrier = true) AS
 SELECT
     ('************' || right(rtrim(x.card_num), 4))::character(16) AS card_num,
+    encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex')
+                                                                  AS card_fingerprint,
     x.customer_id,
     x.account_id
-FROM account.card_xref AS x;
+FROM account.card_xref AS x
+CROSS JOIN reporting.card_grouping_key AS k;
 
 COMMENT ON VIEW reporting.v_card_xref IS
     'Read-only projection of account.card_xref resolving a card to its customer and account for '
     'statement generation (app/cbl/CBSTM03A.CBL). The card number is masked to its last four '
-    'digits, as on every other card-bearing relation in this schema.';
+    'digits, as on every other card-bearing relation in this schema, and a keyed per-card '
+    'fingerprint carries the identity the mask cannot: it is unique per card, so it is what the '
+    'report joins on and what the reporting entity maps as its identifier.';
 
 ALTER VIEW reporting.v_card_xref OWNER TO carddemo_reporting_owner;
+
+
+-- -----------------------------------------------------------------------------
+-- 8. reporting.resolve_card -- exact resolution of one whole card number.
+--
+-- The statement request path receives a whole primary account number from an
+-- authenticated caller and has to resolve exactly that card. Every relation above
+-- publishes the number masked, so no predicate the reporting role can compose
+-- selects one card: a predicate on the mask selects a tail, and a tail is shared.
+--
+-- This function, together with the card_fingerprint column the three transaction and
+-- cross-reference projections publish, is registered as divergence
+-- D-REPORT-ORDER-FINGERPRINT in docs/architecture/cobol-to-service-traceability.md. That
+-- entry records what the substitution preserves -- one card's rows still sort together, so
+-- a group break still occurs where the reference's does -- and what it deliberately does
+-- not: the relative order BETWEEN two cards, because a digest orders differently from the
+-- number it digests.
+--
+-- WHY : Assumptions: this is a SECURITY DEFINER function rather than a further view,
+--       because what the caller needs is not a projection but a lookup whose ARGUMENT
+--       is the sensitive value. A view cannot take an argument, and a view that
+--       published the whole number so the service could filter on it would hand the
+--       reporting role every primary account number in the cross-reference -- exactly
+--       the access the masking above exists to withhold.
+-- WHY : Assumptions: the function discloses a fingerprint only for a card that exists,
+--       so it is not a forward oracle over the fingerprint space. A caller must already
+--       hold the whole number to obtain the token belonging to it, which is the property
+--       that keeps the masked column beside the token from being masked in appearance
+--       only. Alternatives Considered: a plain card_fingerprint_for(text) helper, which
+--       would answer for any string and turn a known issuer prefix plus a read mask into
+--       a search of about a million calls. Rejected on that ground.
+-- WHY : Assumptions: search_path is pinned on the function rather than inherited. A
+--       SECURITY DEFINER body resolves its names with the OWNER's privileges, so an
+--       unqualified name resolved through a caller-controlled search_path is the
+--       classic privilege-escalation route -- the caller creates account.card_xref in a
+--       schema of its own and the body reads that instead. Pinning it also makes the
+--       schemas the body may reach an explicit, reviewable list.
+-- WHY : Assumptions: STABLE and not IMMUTABLE. The answer depends on table contents,
+--       which change between statements, so declaring it immutable would let the planner
+--       fold one call's result into a plan cached across a load -- returning a card's
+--       former customer after a re-issue moved it.
+-- WHY : Trade-offs: EXECUTE is revoked from PUBLIC and granted to one role by name. A
+--       SECURITY DEFINER function is executable by PUBLIC on creation, so omitting the
+--       revoke would make this lookup reachable by every login in the database, which is
+--       a strictly wider reach than the seven views it sits beside.
+CREATE FUNCTION reporting.resolve_card(p_card_num character varying)
+RETURNS TABLE (
+    card_num          character(16),
+    card_fingerprint  text,
+    customer_id       bigint,
+    account_id        bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, reporting, account
+AS $$
+    SELECT
+        ('************' || right(rtrim(x.card_num), 4))::character(16),
+        encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex'),
+        x.customer_id,
+        x.account_id
+    FROM account.card_xref AS x
+    CROSS JOIN reporting.card_grouping_key AS k
+    -- WHY : Assumptions: the comparison trims both sides. The stored column is
+    --       CHAR(16) so it is blank-padded, and the argument arrives from a request
+    --       body where a caller may or may not have padded it; comparing untrimmed
+    --       would make the answer depend on the caller's padding. Trimming both sides
+    --       keeps the predicate an equality on the whole number rather than on a
+    --       prefix, so it stays index-eligible and cannot match two cards.
+    WHERE rtrim(x.card_num) = rtrim(p_card_num)
+$$;
+
+COMMENT ON FUNCTION reporting.resolve_card(character varying) IS
+    'Resolves one whole primary account number to its masked rendering, its keyed per-card '
+    'fingerprint, its customer and its account. Exists because every reporting relation publishes '
+    'the number masked, so no predicate the reporting role can compose selects a single card. '
+    'Returns no row for a card that does not exist, so it discloses a fingerprint only to a caller '
+    'that already holds the number it belongs to.';
+
+ALTER FUNCTION reporting.resolve_card(character varying) OWNER TO carddemo_reporting_owner;
+
+REVOKE ALL ON FUNCTION reporting.resolve_card(character varying) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION reporting.resolve_card(character varying) TO carddemo_reporting;
 
 
 -- -----------------------------------------------------------------------------
@@ -563,9 +730,15 @@ GRANT SELECT ON reporting.v_card_xref              TO carddemo_reporting;
 --       above, and the absence is stated as a REVOKE rather than left implicit. A
 --       simple view over one table is AUTOMATICALLY UPDATABLE in PostgreSQL, so a
 --       projection that reads as read-only would accept a write the moment the
---       privilege existed -- and six of the seven views here are simple enough to
---       qualify, every one except v_statement_transactions, whose join to the
---       grouping-key table disqualifies it. The reporting context writes nothing, so
+--       privilege existed -- and four of the seven views here are simple enough to
+--       qualify, every one except the three whose join to the grouping-key table
+--       disqualifies them: v_statement_transactions, v_report_transactions and
+--       v_card_xref. Refactoring Rationale: that count was six-of-seven while the
+--       fingerprint was projected on the statement view alone; the two relations that
+--       gained it also lost automatic updatability, and the number is restated rather
+--       than left stale because a reader checking this claim against the file would
+--       otherwise find it wrong and have no way to tell which half was out of date.
+--       The reporting context writes nothing, so
 --       this is
 --       a contract rather than an oversight, and revoking makes it one the catalogue
 --       records instead of one a reader has to infer from what is missing.

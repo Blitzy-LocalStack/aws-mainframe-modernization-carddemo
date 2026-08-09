@@ -11,7 +11,6 @@ import com.carddemo.reference.dto.TransactionCategoryListRequest;
 import com.carddemo.reference.dto.TransactionCategoryResponse;
 import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
 import com.carddemo.reference.mapper.TransactionCategoryMapper;
-import com.carddemo.reference.mapper.TransactionTypeMapper;
 import com.carddemo.reference.repository.TransactionCategoryRepository;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -92,28 +91,43 @@ public class TransactionCategoryService {
      * after reading it. A filter applied after the bound would publish a page shorter than the window
      * and would make the further-page flag describe the unfiltered set.</p>
      *
+     * <p>Refactoring Rationale: the position is sealed against the CALLER, the type filter and the
+     * DIRECTION as well as against this browse, and a direction stated without a position is refused. Both
+     * were defects the sibling type browse was reported for, and the same defect existed here because the
+     * two share the assembly; the reasoning is recorded once, on {@code ReferencePaging.binding} and
+     * {@code ReferencePaging.requireCursorForDirection}.</p>
+     *
      * @param request the validated paging and filter parameters; must not be {@code null}
      * @param cursorToken the sealer that mints and opens the opaque position; must not be {@code null}
+     * @param subject the authenticated caller's identity, sealed into every position this page mints so
+     *     that a position is not transferable between callers; must not be {@code null}
      * @return one page of categories
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if a supplied position is not
-     *     a position this browse minted
+     *     a position this browse minted, for this caller, under this filter and for this direction
+     * @throws com.carddemo.common.error.ClientInputException if a paging direction arrives without the
+     *     position it would move from
      */
     @Transactional(readOnly = true)
     public PageResponse<TransactionCategoryResponse> list(
-            TransactionCategoryListRequest request, CursorToken cursorToken) {
+            TransactionCategoryListRequest request, CursorToken cursorToken, String subject) {
 
-        String position = request.cursor() == null
-                ? null
-                : cursorToken.open(CURSOR_BINDING, request.cursor());
+        ReferencePaging.requireCursorForDirection(request.cursor(), request.direction());
+
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
         String typeFilter = request.typeCode();
 
+        String position = ReferencePaging.openPosition(cursorToken, CURSOR_BINDING, subject,
+                request.cursor(), request.direction(), typeFilter);
+
         List<TransactionCategory> rows =
                 walk(position, backward, limit, typeFilter);
 
-        return ReferencePaging.page(rows, PAGE_SIZE, backward, CURSOR_BINDING, cursorToken,
-                TransactionCategoryMapper::toResponse, TransactionCategoryService::positionOf);
+        return ReferencePaging.page(rows, PAGE_SIZE, backward, position != null,
+                ReferencePaging.binding(CURSOR_BINDING, subject, true, typeFilter),
+                ReferencePaging.binding(CURSOR_BINDING, subject, false, typeFilter),
+                cursorToken, TransactionCategoryMapper::toResponse,
+                TransactionCategoryService::positionOf);
     }
 
     /**
@@ -210,7 +224,19 @@ public class TransactionCategoryService {
             throw new RecordConflictException(
                     RecordConflictException.Kind.STALE_VERSION, stored.getVersion());
         }
-        stored.setDescription(TransactionTypeMapper.trimForStorage(request.description()));
+        // WHY : Refactoring Rationale: the write goes through the mapper rather than being performed
+        //       here, and this line previously duplicated the mapper's own body -- it called the same
+        //       normalisation on the same component and assigned it to the same member. Two
+        //       implementations of one storage rule are free to drift, and a VARCHAR column would
+        //       report nothing when they did: a description trimmed by one path and not by the other
+        //       stores as two different values for the same input. Routing through applyUpdate leaves
+        //       exactly one place that decides what a stored description looks like, which is the same
+        //       shape the sibling type service already uses at its own replace.
+        // WHY : Assumptions: the mapper writes the description and NOTHING else -- neither key half,
+        //       which travel in the request path and are mapped updatable false, nor the revision,
+        //       which the persistence provider maintains and which is compared above rather than
+        //       assigned. That is asserted by the mapper's own test rather than restated here.
+        TransactionCategoryMapper.applyUpdate(request, stored);
         return TransactionCategoryMapper.toResponse(this.categories.save(stored));
     }
 

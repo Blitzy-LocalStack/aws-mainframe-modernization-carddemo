@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -15,7 +16,6 @@ import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.Transaction;
-import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
 import com.carddemo.batch.domain.TransactionReject;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.PostingValidationResult;
@@ -28,6 +28,7 @@ import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.CategoryBalanceService;
 import com.carddemo.batch.service.PostingValidationService;
+import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import jakarta.persistence.EntityManager;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -133,6 +134,15 @@ class PostTransactionsJobTest {
     /** The job under test. */
     private Job job;
 
+    /**
+     * The cross-reference the staged accepted decision carries.
+     *
+     * <p>Assumptions: held on the instance so a case can assert that the job passed THAT row on to the
+     * category-balance service rather than one it composed itself, which is the property that keeps the
+     * balance key derived from {@code XREF-ACCT-ID} as {@code app/cbl/CBTRN02C.cbl:469} requires.</p>
+     */
+    private CardXref stagedCrossReference;
+
     /** The framework's in-memory job repository. */
     private JobRepository jobRepository;
 
@@ -165,7 +175,7 @@ class PostTransactionsJobTest {
         Clock clock = Clock.fixed(
                 LocalDateTime.of(2022, 7, 18, 1, 2, 3).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
 
-        PostTransactionsJob configuration = new PostTransactionsJob(this.feed, this.crossReferences,
+        PostTransactionsJob configuration = new PostTransactionsJob(this.feed,
                 this.accounts, this.ledger, this.rejects, this.validation, this.categoryBalances,
                 this.ledgerOfSteps, clock, entityManager);
 
@@ -187,10 +197,8 @@ class PostTransactionsJobTest {
     void anAcceptedRecordProducesThreeWrites() throws Exception {
         DailyTransaction feedRecord = resolvableRecord(new BigDecimal("100.00"));
         stageOneRecord(feedRecord);
-        stageResolvedCardAndAccount();
-        when(this.validation.validate(any(), any(), any()))
-                .thenReturn(PostingValidationResult.accepted(new BigDecimal("100.00")));
-        when(this.categoryBalances.accumulate(any(), any())).thenReturn(
+        stageAcceptedDecision(new BigDecimal("100.00"));
+        when(this.categoryBalances.accumulatePostedTransaction(any(), any())).thenReturn(
                 new CategoryBalanceService.Outcome(CategoryBalanceService.Arm.CREATED,
                         new BigDecimal("100.00")));
 
@@ -199,9 +207,13 @@ class PostTransactionsJobTest {
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         assertThat(execution.getExitStatus().getExitCode())
                 .isNotEqualTo(BatchApplication.EXIT_CODE_COMPLETED_WITH_WARNINGS);
-        verify(this.categoryBalances).accumulate(
-                new TransactionCategoryBalanceId(ACCOUNT_ID, "01", "0001"), com.carddemo.common.money
-                        .Money.of(new BigDecimal("100.00")));
+        // WHY : Assumptions: the assertion names the key-COMPOSING entry point and hands it the record
+        //       and the cross-reference, rather than a key this test composed. The service documents
+        //       itself as the entry point this job calls and derives the account component from
+        //       XREF-ACCT-ID per app/cbl/CBTRN02C.cbl:469; asserting a pre-composed key here would let
+        //       the job go back to composing its own without this case noticing.
+        verify(this.categoryBalances).accumulatePostedTransaction(
+                feedRecord, this.stagedCrossReference);
         verify(this.accounts).save(any(Account.class));
         verify(this.ledger).save(any(Transaction.class));
         verify(this.rejects, never()).save(any(TransactionReject.class));
@@ -220,10 +232,7 @@ class PostTransactionsJobTest {
     void aRejectedRecordProducesOneWriteAndWarns() throws Exception {
         DailyTransaction feedRecord = resolvableRecord(new BigDecimal("100.00"));
         stageOneRecord(feedRecord);
-        stageResolvedCardAndAccount();
-        when(this.validation.validate(any(), any(), any())).thenReturn(
-                PostingValidationResult.rejected(RejectReason.OVER_CREDIT_LIMIT,
-                        new BigDecimal("100.00")));
+        stageRejectedDecision(RejectReason.OVER_CREDIT_LIMIT, new BigDecimal("100.00"));
 
         JobExecution execution = run();
 
@@ -236,27 +245,32 @@ class PostTransactionsJobTest {
     }
 
     /**
-     * The account is not read at all when the card does not resolve.
+     * The job resolves nothing itself: one validation call per feed record, and no read of its own.
      *
-     * <p>Pins {@code app/cbl/CBTRN02C.cbl:372}, which gates the account read on the not-invalid-key branch
-     * of the cross-reference read. Reading it regardless would still reject correctly, so this is the one
-     * ruling the outcome cannot reveal -- only the absence of the call can.</p>
+     * <p>Refactoring Rationale: this case asserted that the job skipped the account read when the card
+     * did not resolve, pinning {@code app/cbl/CBTRN02C.cbl:372} at the JOB level. It could only assert
+     * that while the job performed the two reads and the guard between them itself -- which is exactly
+     * the duplication that made the validation service's own transcription of {@code :370} unreachable
+     * in production. The guard now lives in one place and is asserted there, by
+     * {@code PostingValidationServiceTest.unresolvedCardLeavesTheAccountPathUnread}, which can observe
+     * the skipped read because it drives the real service over stubbed repositories. What is left for
+     * this level is the property that keeps it that way: the job reads NEITHER repository, so a
+     * revision that reintroduced its own lookup and its own guard fails here.</p>
      * @throws Exception if the framework's own execution path raises, which no case here provokes
      */
     @Test
-    @DisplayName("skip the account read when the card does not resolve")
-    void anUnresolvableCardSkipsTheAccountRead() throws Exception {
+    @DisplayName("delegate every lookup, reading neither the cross-reference nor the account")
+    void theJobPerformsNoLookupOfItsOwn() throws Exception {
         DailyTransaction feedRecord = record(UNRESOLVABLE_CARD, new BigDecimal("10.00"));
         stageOneRecord(feedRecord);
-        when(this.crossReferences.findByCardNum(UNRESOLVABLE_CARD)).thenReturn(Optional.empty());
-        when(this.validation.validate(any(), any(), any())).thenReturn(
-                PostingValidationResult.rejected(
-                        RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE, null));
+        stageRejectedDecision(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE, null);
 
         run();
 
-        verify(this.crossReferences).findByCardNum(UNRESOLVABLE_CARD);
+        verify(this.validation, times(1)).validate(feedRecord);
+        verify(this.crossReferences, never()).findByCardNum(anyString());
         verify(this.accounts, never()).findByAccountId(anyLong());
+        verify(this.rejects).save(any(TransactionReject.class));
     }
 
     /**
@@ -273,10 +287,8 @@ class PostTransactionsJobTest {
     void aNegativeAmountAccumulatesNegativelyIntoDebit() throws Exception {
         DailyTransaction feedRecord = resolvableRecord(new BigDecimal("-25.00"));
         stageOneRecord(feedRecord);
-        Account account = stageResolvedCardAndAccount();
-        when(this.validation.validate(any(), any(), any()))
-                .thenReturn(PostingValidationResult.accepted(new BigDecimal("-25.00")));
-        when(this.categoryBalances.accumulate(any(), any())).thenReturn(
+        Account account = stageAcceptedDecision(new BigDecimal("-25.00"));
+        when(this.categoryBalances.accumulatePostedTransaction(any(), any())).thenReturn(
                 new CategoryBalanceService.Outcome(CategoryBalanceService.Arm.UPDATED,
                         new BigDecimal("-25.00")));
 
@@ -381,20 +393,48 @@ class PostTransactionsJobTest {
     }
 
     /**
-     * Stages the cross-reference and the account master so the resolvable card resolves.
+     * Stages an ACCEPTED decision carrying the two records the resolvable card resolves to.
      *
-     * @return the account the card resolves to, never {@code null}
+     * <p>Refactoring Rationale: this helper stubbed the two REPOSITORIES and left the job to read
+     * them, because the job performed its own card read, its own account read and its own copy of the
+     * {@code app/cbl/CBTRN02C.cbl:372} guard. Those reads and that guard now belong to the validation
+     * service alone, which hands both records back with its outcome, so what a case has to stage is
+     * the DECISION. Staging repositories instead would stub calls the job no longer makes, and every
+     * case would then pass while the job received an empty decision.</p>
+     *
+     * @param projection the projected cycle balance the accepted outcome reports; must not be
+     *     {@code null}
+     * @return the account the decision carries, never {@code null}
      */
-    private Account stageResolvedCardAndAccount() {
-        CardXref resolved = new CardXref(RESOLVABLE_CARD, 987654321L, ACCOUNT_ID);
+    private Account stageAcceptedDecision(BigDecimal projection) {
         Account account = new Account(ACCOUNT_ID, "Y", new BigDecimal("0.00"),
                 new BigDecimal("5000.00"), new BigDecimal("500.00"), LocalDate.of(2020, 1, 1),
                 LocalDate.of(2030, 1, 1), LocalDate.of(2024, 1, 1), new BigDecimal("0.00"),
                 new BigDecimal("0.00"), "98101", "DEFAULT");
+        this.stagedCrossReference = new CardXref(RESOLVABLE_CARD, 987654321L, ACCOUNT_ID);
 
-        when(this.crossReferences.findByCardNum(RESOLVABLE_CARD)).thenReturn(Optional.of(resolved));
-        when(this.accounts.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        when(this.validation.validate(any(DailyTransaction.class))).thenReturn(
+                new PostingDecision(PostingValidationResult.accepted(projection),
+                        Optional.of(this.stagedCrossReference), Optional.of(account)));
         return account;
+    }
+
+    /**
+     * Stages a REJECTED decision for whichever reason a case exercises.
+     *
+     * <p>Assumptions: the two records are carried back as ABSENT even for a reason that resolved one
+     * of them, because no case here asserts them on the reject path -- the job writes the reject row
+     * from the feed record and the outcome alone, and reaches neither optional. A case that did assert
+     * one would stage it explicitly rather than relying on this helper.</p>
+     *
+     * @param reason the reason the outcome reports; must not be {@code null}
+     * @param projection the projected cycle balance, or {@code null} for a reason assigned before the
+     *     account was read
+     */
+    private void stageRejectedDecision(RejectReason reason, BigDecimal projection) {
+        when(this.validation.validate(any(DailyTransaction.class))).thenReturn(
+                new PostingDecision(PostingValidationResult.rejected(reason, projection),
+                        Optional.empty(), Optional.empty()));
     }
 
     /**

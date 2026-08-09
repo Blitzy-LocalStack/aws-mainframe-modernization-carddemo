@@ -306,17 +306,25 @@ variable "tags" {
 # -----------------------------------------------------------------------------
 # Deliberate absences.
 #
-# Seven inputs is the whole surface. Two things a reader may go looking for are
+# NINE inputs is the whole surface. Two things a reader may go looking for are
 # not here, and their absence is a decision rather than an omission:
 #
 #   - No `environment` input, for the reason recorded in the header: this root
 #     is scoped to an AWS account, not to an environment. Both roots under
 #     infra/envs/ are environment-scoped and carry a terraform.tfvars; this one
 #     is neither and carries none.
-#   - No eighth input of any kind. infra/.tflint.hcl enables
+#   - No TENTH input of any kind. infra/.tflint.hcl enables
 #     terraform_unused_declarations, and the lint step in
 #     .github/workflows/infra-ci.yml is gating with no tolerated-finding tier,
 #     so an input that no expression in this root reads fails the build rather
 #     than merely reading as untidy. That is why the header names the consumer
-#     of each of the seven above.
+#     of each of the nine above.
+#
+# Refactoring Rationale: this block said "Seven inputs is the whole surface",
+# "No eighth input of any kind" and "each of the seven above", while the header
+# twenty lines up correctly said nine and enumerated all nine by name. The two
+# halves of one file disagreed, and the closing half was the one a reader would
+# quote when deciding whether an input already existed. Both counts are now
+# derived the same way and are checkable with
+# `grep -c '^variable "' variables.tf`.
 # -----------------------------------------------------------------------------

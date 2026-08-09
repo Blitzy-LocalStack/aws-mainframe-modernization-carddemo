@@ -57,15 +57,6 @@
 
 spring:
   config:
-    # WHY : Assumptions: the prefix is /carddemo/<environment>/authorization/, the
-    #       same three-part shape every context uses, so one Terraform module
-    #       writes them all and one policy can grant read on exactly one context's
-    #       subtree. The label defaults to `prod` here where the dev overlay
-    #       defaults to `dev`, so a task started on this profile with no label set
-    #       still reads the subtree belonging to it rather than another
-    #       environment's.
-    # WHY : Refactoring Rationale: the Parameter Store location this overlay declared has been
-    #       withdrawn. The reasoning, measured on this tree, is recorded in full below.
     # WHY : Refactoring Rationale: this overlay carried
     #       `optional:aws-parameterstore:/carddemo/<environment>/authorization/` and no
     #       longer does, and the withdrawal is a startup correction rather than a
@@ -88,8 +79,20 @@ spring:
     #       supply already arrives as an environment variable the task definition sets.
     #       Assumptions: what remains is the shape reference-service takes -- the other
     #       context whose only AWS artifact is the queue starter -- so both queue-only
-    #       contexts now read their environment the same way, and the dev overlay
-    #       declares no import either.
+    #       contexts now read their environment the same way. The dev overlay declares
+    #       the identical single-entry list: the shared defaults document and nothing
+    #       else. Refactoring Rationale: this sentence previously said the dev overlay
+    #       "declares no import either", which was false -- both overlays declare one
+    #       import each, and what neither declares is a Parameter Store LOCATION. The
+    #       distinction is withdrawn from ambiguity because an overlay that truly
+    #       declared no import would silently lose the shared console pattern that
+    #       carries the correlation identifier in this profile alone.
+    #       Assumptions: the shape is asserted rather than described.
+    #       config/ProfileConfigurationTopologyTest.eachOverlayImportsTheSharedDefaultsAlone
+    #       requires this overlay's import list to be exactly the shared defaults, and
+    #       noDocumentClaimsAParameterStoreLocation checks all three documents for the
+    #       prefix, so a re-added location fails the build rather than reaching a
+    #       deployment.
     import:
       - "classpath:/carddemo-common-defaults.yml"
 

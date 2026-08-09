@@ -179,11 +179,10 @@ class GlobalExceptionHandlerPathMaskingTest {
      */
     @ParameterizedTest
     @ValueSource(strings = {
-        "/api/v1/accounts/12345678901",
-        "/api/v1/customers/123456789",
-        "/api/v1/accounts/123456789012",
         "/api/v1/cards",
+        "/api/v1/cards/12345678/hold",
         "/actuator/health",
+        "/api/v1/reports?size=100",
     })
     @DisplayName("a digit run shorter than the threshold is left legible")
     void leavesShortDigitRunsLegible(String path) {
@@ -194,19 +193,58 @@ class GlobalExceptionHandlerPathMaskingTest {
     }
 
     /**
+     * The nine-digit customer identifier and the eleven-digit account identifier are withheld whole.
+     *
+     * <p>Refactoring Rationale: these two paths were previously asserted to be left LEGIBLE, on a
+     * threshold of thirteen digits chosen so that the identifiers the routes legitimately carry would
+     * survive. That was the defect: those identifiers are themselves protected, so the assertion
+     * pinned a disclosure in place. Both are now withheld in full rather than reduced to a tail,
+     * because the platform publishes no partial rendering of either one -- unlike a card number, whose
+     * last four digits appear in list rows and detail bodies by contract.
+     *
+     * @param path the request path carrying a protected identifier
+     * @param expected the withheld rendering, of identical length and retaining no digit
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "/api/v1/customers/123456789,            /api/v1/customers/*********",
+        "/api/v1/accounts/12345678901,           /api/v1/accounts/***********",
+        "/api/v1/accounts/123456789012,          /api/v1/accounts/************",
+        "/api/v1/accounts/12345678901/customer,  /api/v1/accounts/***********/customer",
+    })
+    @DisplayName("a customer or account identifier is withheld whole, retaining no digit")
+    void withholdsShorterProtectedIdentifiersWhole(String path, String expected) {
+        ResponseEntity<ApiError> response = whenMissingRecordAt(path);
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().path()).isEqualTo(expected);
+        assertThat(response.getBody().path()).hasSameSizeAs(path);
+        assertThat(response.getBody().path())
+                .as("no four-digit tail of a customer or account identifier survives")
+                .doesNotContain(lastFourDigitsOf(path));
+    }
+
+    /**
      * Runs at and above the threshold are narrowed, at any position and in any number.
      *
      * <p>Assumptions: the declared width is preserved in every case, so each expectation below is the
      * same length as its input. The interior-run and two-run cases are what prove the loop closes a
-     * run on a non-digit rather than only at the end of the text, and the thirteen-digit case is the
+     * run on a non-digit rather than only at the end of the text, and the nine-digit case is the
      * threshold itself.
+     *
+     * <p>Assumptions: only a run of sixteen digits or more keeps a four-digit tail, and the cases below
+     * are chosen to straddle that boundary. A thirteen- and a fifteen-digit run keep nothing, because a
+     * run that short cannot be a card number; a sixteen- and a seventeen-digit run keep the last four,
+     * which is the rendering the card contract already publishes.
      *
      * @param path the request path to narrow
      * @param expected the narrowed rendering, of identical length
      */
     @ParameterizedTest
     @CsvSource({
-        "/api/v1/cards/1234567890123,          /api/v1/cards/*********0123",
+        "/api/v1/cards/123456789,              /api/v1/cards/*********",
+        "/api/v1/cards/1234567890123,          /api/v1/cards/*************",
+        "/api/v1/cards/444433332222001,        /api/v1/cards/***************",
         "/api/v1/cards/4444333322220011/hold,  /api/v1/cards/************0011/hold",
         "/x/4444333322220011/y/5555444433332222, /x/************0011/y/************2222",
         "/api/v1/cards/44443333222200119,      /api/v1/cards/*************0119",
@@ -258,6 +296,27 @@ class GlobalExceptionHandlerPathMaskingTest {
         assertThat(this.logAppender.list).hasSize(1);
         assertThat(this.logAppender.list.get(0).getFormattedMessage())
                 .doesNotContain(ACCOUNT_NUMBER);
+    }
+
+    /**
+     * Extracts the last four digits of the longest digit run in a path.
+     *
+     * <p>Assumptions: the withheld identifier is the longest digit run, because the surrounding route
+     * text carries only the single digit of the version segment. Taking the longest run rather than the
+     * final segment is what lets the same helper serve a path whose identifier is followed by a
+     * sub-resource.</p>
+     *
+     * @param path the request path the assertion was driven with; must not be {@code null}
+     * @return the last four characters of its longest digit run
+     */
+    private static String lastFourDigitsOf(String path) {
+        String longest = "";
+        for (String run : path.split("[^0-9]+")) {
+            if (run.length() > longest.length()) {
+                longest = run;
+            }
+        }
+        return longest.substring(longest.length() - 4);
     }
 
     /**

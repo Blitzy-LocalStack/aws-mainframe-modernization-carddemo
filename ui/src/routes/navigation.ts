@@ -1,3 +1,23 @@
+/**
+ * @file Route constants and the one validated navigation helper every screen transitions through.
+ *
+ * Purpose
+ * -------
+ * Hold the destination constants that more than one screen needs -- the main and administrative menu
+ * routes the reference programs transfer to -- and wrap the router's navigate function so that a
+ * transition is checked before it is performed. This is where `EXEC CICS XCTL`'s destination naming
+ * ends up: the reference names a program, a screen here names a route, and both are looked up rather
+ * than composed at the call site.
+ *
+ * Why a helper rather than calling navigate directly
+ * -------------------------------------------------
+ * Assumptions: a destination is validated, so a route that does not exist becomes the router's
+ * bounded not-found result rather than an unhandled state. Two of the constants below name screens
+ * that are not authored yet, which is exactly the case that makes the check load-bearing: naming the
+ * reference's real destination keeps the transition truthful, and the helper is what stops that
+ * truthfulness from becoming a broken navigation.
+ */
+
 import type { NavigateFunction, To } from 'react-router';
 
 /**

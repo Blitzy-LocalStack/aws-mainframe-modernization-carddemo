@@ -169,6 +169,28 @@ Build each Dockerfile and tag it with `<commit-sha>`. Never publish only `latest
 prevents an ECS task definition from identifying the exact bytes required for rollback. The ECR
 module enables scan-on-push, so inspect each repository's scan result after push.
 
+### Step 2b - Mirror the telemetry collector image
+
+The registry holds an eleventh repository, `aws-otel-collector`, that this repository does not build.
+Copy the pinned upstream image into it before the apply.
+
+```bash
+# WHAT: copies the pinned OpenTelemetry collector image into this deployment's registry.
+# WHY : Assumptions: the environment roots point every task's telemetry sidecar at this PRIVATE
+#       repository, because the application security group's egress is enumerated rather than
+#       allow-all and the public registry has neither an interface endpoint nor a managed prefix
+#       list. Skipping this step registers task definitions naming an image that was never pushed,
+#       and because the sidecar is attached to every workload by default, NO task starts.
+# WHY : Assumptions: the tag is the upstream version and matches local.telemetry_collector_image_tag
+#       in infra/envs/<env>/main.tf, not the release commit SHA -- a third-party artifact tagged with
+#       a CardDemo commit would claim a provenance it does not have.
+collector_tag="v0.48.0"
+docker pull "public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}"
+docker tag "public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}" \
+  "<account-registry>/<name-prefix>-<environment>/aws-otel-collector:${collector_tag}"
+docker push "<account-registry>/<name-prefix>-<environment>/aws-otel-collector:${collector_tag}"
+```
+
 ---
 
 ## Step 3 - Provision the environment
@@ -209,9 +231,21 @@ export TF_VAR_github_oidc_provider_arn="<oidc-provider-arn>"
 #       lookups, and why they are absent from terraform.tfvars.
 export TF_VAR_permissions_boundary_arn="<iam-permissions-boundary-arn>"
 export TF_VAR_mask_hmac_secret_arn="<mask-hmac-secret-arn>"
+# WHY : Assumptions: at least one alarm recipient is REQUIRED, in both environments, and it is
+#       supplied here rather than in terraform.tfvars because an on-call or team address is
+#       personal data this repository does not carry. Both roots declare the input with no
+#       default and refuse an empty list, so omitting it stops `plan` -- which is deliberate:
+#       previously both tfvars files set it to `[]`, and the environment then provisioned a
+#       notification topic, thirteen alarms and every alarm action pointing at it with ZERO
+#       SUBSCRIBERS. Every alarm fired correctly into nothing, and because the dashboards,
+#       alarms and topic all existed the gap was invisible until an incident was missed.
+#       Trade-offs: an email subscription is not live until the recipient CONFIRMS it, so this
+#       export provisions the target but does not by itself complete delivery. The
+#       confirmation step follows the apply and is listed with the post-apply checks below.
+export TF_VAR_alarm_email_endpoints='["<oncall-address>"]'
 ```
 
-**The automated path takes the same ten values from protected GitHub environment variables.**
+**The automated path takes the same eleven values from protected GitHub environment variables.**
 `.github/workflows/deploy.yml` writes them into an untracked `deployment.auto.tfvars.json` that it
 deletes at the end, and `.github/workflows/infra-ci.yml` passes them as `TF_VAR_` for its review
 plan. Two of the ten are read from the run context instead of being set by an operator, so an
@@ -247,9 +281,21 @@ output size -- and refuses a passphrase, the URL-safe alphabet, a non-canonical 
 shorter, and material that is a single repeated byte. Create the value with:
 
 ```bash
-aws secretsmanager create-secret \
+# WHY : Trade-offs: the value travels on STDIN via --secret-string fileb:///dev/stdin rather than as
+#       an argv value. An argv value is readable from the process table by any local process for as
+#       long as the call runs, and it is retained by the shell's history file and echoed by `set -x`;
+#       a transcript of this runbook would then contain the live key. The pipeline keeps it in memory
+#       between two processes instead. `set +o xtrace` is issued explicitly because a traced shell
+#       would defeat the pipeline by echoing the command's expansion.
+# WHY : Assumptions: --query null keeps the new version identifier out of the transcript, for the
+#       same reason the value itself is kept out of it.
+set +o xtrace
+python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())' \
+  | tr -d '\n' \
+  | aws secretsmanager create-secret \
   --name "carddemo/<env>/mask-hmac" \
-  --secret-string "$(python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+  --secret-string fileb:///dev/stdin \
+  --query "null" --output text
 ```
 
 WHY : Assumptions: the refusal is stated here rather than only in the ETL's own README because the
@@ -446,14 +492,26 @@ Rotate one role at a time, and complete the whole sequence for that role before 
 
 ```bash
 # WHAT: replaces the stored value for one role's credential with a freshly generated one.
-# WHY : Assumptions: --generate-random-password has Secrets Manager produce the value so it never
-#       exists in argv, in shell history or in a file; --output text with a null query keeps the
-#       new version identifier out of the transcript as well. The role name IS the secret name,
-#       matching V0__schemas_and_roles.sql character for character.
-aws secretsmanager put-secret-value --region "<aws-region>" --secret-id "<role-name>" \
-  --secret-string "$(aws secretsmanager get-random-password --region "<aws-region>" \
+# WHY : Refactoring Rationale: this block claimed the generated value "never exists in argv, in
+#       shell history or in a file" while placing it in argv itself -- the composed JSON document,
+#       password included, was the expansion of --secret-string "$(...)". The claim was the right
+#       requirement and the command did not meet it. The document now reaches the call on STDIN via
+#       --secret-string fileb:///dev/stdin, so the requirement the comment states is the one the
+#       command implements.
+# WHY : Trade-offs: an argv value is readable from the process table by any local process for as
+#       long as the call runs, is retained by the shell's history file, and is echoed by `set -x`.
+#       `set +o xtrace` is issued explicitly because a traced shell would defeat the pipeline by
+#       echoing the expansion the pipeline exists to avoid.
+# WHY : Assumptions: get-random-password still has Secrets Manager produce the material, so the
+#       password is never generated locally; --query null keeps the new version identifier out of
+#       the transcript. The role name IS the secret name, matching V0__schemas_and_roles.sql
+#       character for character.
+set +o xtrace
+aws secretsmanager get-random-password --region "<aws-region>" \
   --exclude-punctuation --password-length 32 --query RandomPassword --output text \
-  | python3 -c 'import json,sys; print(json.dumps({"engine":"aurora-postgresql","username":"<role-name>","password":sys.stdin.read().strip(),"masteruser":"<master-username>"}))')" \
+  | python3 -c 'import json,sys; print(json.dumps({"engine":"aurora-postgresql","username":"<role-name>","password":sys.stdin.read().strip(),"masteruser":"<master-username>"}))' \
+  | aws secretsmanager put-secret-value --region "<aws-region>" --secret-id "<role-name>" \
+  --secret-string fileb:///dev/stdin \
   --query "null" --output text
 ```
 
@@ -500,64 +558,93 @@ rotation functions AWS publishes for PostgreSQL authenticate with the credential
 so they cannot perform a first application against a freshly created role, and a function used here
 must escalate through the master identity instead.
 
-### Replace the internal-identity signing key (operator-managed, and NOT a rolling change)
+### Replace an internal-identity signing key (operator-managed, and NOT a rolling change)
 
 The selected environment root — not `infra/modules/secrets`, which composes database credentials
-only — creates one further entry, `<name-prefix>/<env>/internal-identity/signing-key`, with
-`<name-prefix>` being that root's `name_prefix` variable. It holds the symmetric key of the
-machine-to-machine bearer token the pending-authorization consumer presents to the account context
-on the three internal lookups described in
+only — creates **two** further entries, `<name-prefix>/<env>/internal-identity/authorization-signing-key`
+and `<name-prefix>/<env>/internal-identity/transaction-signing-key`, with `<name-prefix>` being that
+root's `name_prefix` variable. Each holds the symmetric key of the machine-to-machine bearer token
+one calling context presents to the account context on the internal reads described in
 [security-and-identity.md](../architecture/security-and-identity.md): `authorization-service` signs
-with it and `account-service` verifies against it. It stores a **bare string** rather than a JSON
-document, it is written through the write-only argument so the value never reaches state, and it is
-injected as `CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY` into exactly **two** task definitions —
-`account` and `authorization`. No rotation function ships for it, so it is static until an operator
-replaces it; the resource carries a recorded `checkov` suppression stating that reason rather than
-leaving the omission unexplained.
+with the first, `transaction-service` signs with the second, and `account-service` verifies against
+both because it holds both. Each stores a **bare string** rather than a JSON document, each is
+written through the write-only argument so the value never reaches state, and each is injected into
+exactly **two** task definitions — the authorization key as
+`CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY` into `authorization` and `account`, the
+transaction key as `CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY` into `transaction` and
+`account`. No rotation function ships for either, so each is static until an operator replaces it;
+each resource carries a recorded `checkov` suppression stating that reason rather than leaving the
+omission unexplained.
 
-> **This replacement has a refusal window, and the window is unavoidable with one stored value.**
-> Each consuming task reads the value once at startup, and the verifier is built with exactly
-> **one** key — `NimbusJwtDecoder.withSecretKey` takes a single key and holds no predecessor the way
-> the Cognito app-client rotation above does. So from
-> the moment the first of the two tasks is rolled until the second finishes, the minter and the
-> verifier hold different keys and **every internal account-context lookup is refused 401**. The
-> practical consequence is that pending-authorization decisions stop for the duration; queue
+> Refactoring Rationale: this section described **one** entry injected into two task definitions and
+> a verifier built with a single key. Both were wrong, and in the same direction. The key was in fact
+> injected into three task definitions, which made the two calling contexts interchangeable — with
+> shared bytes, the subject a token asserts is a value its holder writes rather than a property the
+> verifier can check, so either caller could mint as the other. The keys are now per caller and the
+> verifier selects between them by the `kid` the token carries. The operational consequence for this
+> procedure is a narrower blast radius, described next.
+
+> **This replacement has a refusal window, and the window is unavoidable with one stored value per
+> caller — but it is now confined to ONE caller.** Each consuming task reads its value once at
+> startup, and the verifier holds exactly one key per subject, with no predecessor the way the
+> Cognito app-client rotation above does. So from the moment the first of that key's two tasks is
+> rolled until the second finishes, that caller's minter and the verifier disagree and **that
+> caller's internal account-context reads are refused 401**. The other caller is unaffected, because
+> its key is a different entry and neither task holding it is rolled.
+>
+> Replacing the **authorization** key stops pending-authorization decisions for the duration; queue
 > messages are not lost, because a refused decision leaves the message to be redelivered and the
 > request queue's dead-letter threshold is five receives, so a window shorter than five
-> redeliveries drains rather than discards.
+> redeliveries drains rather than discards. Replacing the **transaction** key refuses the internal
+> reads that back the transaction context's account lookups for the duration; those are
+> request-driven rather than queue-driven, so they surface to a caller instead of draining, which is
+> the reason to do this outside a traffic window rather than to rely on redelivery.
 >
-> Trade-offs: the alternative — teaching the verifier to accept a current and a previous key, as
-> the app-client rotation does — was not built, because it doubles the number of keys that can
-> mint an accepted token for the entire interval between replacements, and the seam has exactly
-> one caller whose interruption is recoverable by redelivery. Perform this inside the batch
-> quiesce bracket, or during a period with no authorization traffic, rather than adding a second
-> simultaneously-valid key.
+> Trade-offs: the alternative — teaching the verifier to accept a current and a previous key per
+> subject, as the app-client rotation does — was not built, because it doubles the number of keys
+> that can mint an accepted token for the entire interval between replacements, and each key's
+> interruption is confined to one caller. Perform this inside the batch quiesce bracket, or during a
+> period with no traffic for the affected caller, rather than adding a second simultaneously-valid
+> key.
 
-Advance `secret_string_wo_version` in a reviewed diff if the value should be regenerated by
-Terraform. To replace it without an apply, do all three steps as one sequence and do not stop
-between them:
+Advance that entry's `secret_string_wo_version` in a reviewed diff if the value should be regenerated
+by Terraform. To replace one without an apply, do all three steps as one sequence and do not stop
+between them. Substitute the one key you are replacing for `<secret-name>`, and its own two services
+below — `authorization` and `account`, or `transaction` and `account`.
 
 ```bash
-# WHAT: replaces the stored key with freshly generated bytes.
-# WHY : Assumptions: --exclude-punctuation matches the generator the module uses (special = false),
+# WHAT: replaces the stored key with freshly generated bytes, without the value ever appearing in a
+#       command line.
+# WHY : Trade-offs: the value travels on STDIN via --secret-string fileb:///dev/stdin rather than as
+#       an argv value. An argv value is readable by any process that can list the process table for
+#       as long as the call runs, and it is recorded by the shell's own history and by `set -x`; a
+#       transcript of this runbook would then contain the live key. The pipeline keeps it in memory
+#       between two processes instead.
+# WHY : Assumptions: --exclude-punctuation matches the generator the roots use (special = false),
 #       and the 32-character floor matches the 32-BYTE minimum both consuming services enforce at
 #       startup -- a shorter value makes both fail to start rather than fail to authenticate.
 #       --query null keeps the new version identifier out of the transcript.
-aws secretsmanager put-secret-value --region "<aws-region>" \
-  --secret-id "<name-prefix>/<env>/internal-identity/signing-key" \
-  --secret-string "$(aws secretsmanager get-random-password --region "<aws-region>" \
-  --exclude-punctuation --password-length 32 --query RandomPassword --output text)" \
+set +o xtrace   # a traced shell would echo the value this pipeline is written to hide
+aws secretsmanager get-random-password --region "<aws-region>" \
+  --exclude-punctuation --password-length 32 --query RandomPassword --output text \
+  | tr -d '\n' \
+  | aws secretsmanager put-secret-value --region "<aws-region>" \
+  --secret-id "<name-prefix>/<env>/internal-identity/<secret-name>" \
+  --secret-string fileb:///dev/stdin \
   --query "null" --output text
 ```
 
 ```bash
-# WHAT: rolls BOTH consuming services, together rather than one after the other.
+# WHAT: rolls that key's TWO consuming services, together rather than one after the other.
 # WHY : Trade-offs: issued as two calls in immediate succession because ECS has no primitive for
 #       replacing two services atomically. Ordering does not remove the window -- rolling the
 #       minter first produces new credentials the old verifier refuses, and rolling the verifier
 #       first produces a verifier that refuses the old credentials -- so the objective is to
 #       SHORTEN the window, not to sequence it away.
-aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<authorization-service-name>" --force-new-deployment
+# WHY : Assumptions: only the replaced key's minter is rolled. Rolling the OTHER caller too would
+#       widen the outage to a service whose key did not change, which is the property the per-caller
+#       split exists to provide.
+aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<minting-service-name>" --force-new-deployment
 aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --service "<account-service-name>" --force-new-deployment
 ```
 
@@ -567,15 +654,109 @@ aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" --serv
 #       treating the update-service calls above as the end would declare success while the old
 #       tasks are still draining and still refusing.
 aws ecs describe-services --region "<aws-region>" --cluster "<cluster-name>" \
-  --services "<authorization-service-name>" "<account-service-name>" \
+  --services "<minting-service-name>" "<account-service-name>" \
   --query "services[].deployments[?status=='PRIMARY'].[serviceName:@.id,rolloutState]" --output table
 ```
 
 The identity performing this needs `secretsmanager:PutSecretValue` on that one entry,
 `kms:GenerateDataKey` and `kms:Decrypt` through Secrets Manager on the secrets CMK, and
 `ecs:UpdateService` and `ecs:DescribeServices` on the two services. It needs no access to any
-database credential entry, and no task role should ever be granted it — a task reads this entry
-and never writes it.
+database credential entry, no access to the other caller's key entry, and no task role should ever
+be granted it — a task reads its own entry and never writes it.
+
+---
+
+### Rotate a sealed-token key: the pagination cursor and the card selector (operator-managed)
+
+Two secrets in each environment root hold keys that seal a token a **client** may still be
+holding: `<name-prefix>/<env>/pagination/cursor-signing-key`, read by
+`com.carddemo.common.web.CursorToken`, and `<name-prefix>/<env>/security/card-selector-signing-key`,
+read by the card context's selector sealer. Both carry a recorded `checkov` suppression for
+`CKV2_AWS_57` stating that rotation is an **attended** procedure documented here. This section is
+that procedure.
+
+> Refactoring Rationale: both suppressions cited "an attended procedure … documented in
+> `docs/runbooks/deploy.md`" while no such procedure existed in this file. A suppression whose
+> justification points at a missing document is indistinguishable from an unjustified one: the
+> reviewer who accepts it is accepting a promise, and the operator who needs it finds nothing. The
+> two are documented together because their justifications differ only in what a stale token costs,
+> and writing one and not the other would leave the same defect behind under a different name.
+
+**They differ in blast radius, and the difference decides when you may run each.**
+
+| Key | What a token names | Cost of invalidating every outstanding token |
+|---|---|---|
+| `pagination/cursor-signing-key` | a position in **one** browse, and it is *meant* to expire | an operator mid-browse gets a refused cursor and re-lists. Costs a re-listing, never data |
+| `security/card-selector-signing-key` | a card row's **stable address**, which a client may hold for as long as a list stays on screen | every single-card route reached from an already-rendered list stops resolving until the list is refreshed |
+
+So the cursor key may be rotated in any low-traffic window, while the selector key should be rotated
+inside the batch quiesce bracket or at a time with no interactive traffic — because the failure it
+produces looks to a user like a card that has disappeared rather than like a page that needs
+reloading.
+
+**Neither rotation is a rolling change, and neither has a dual-key grace period.** Each consuming
+task reads its value once at start-up and the sealer holds exactly one key, with no predecessor.
+Teaching either to accept a current and a previous key was considered and not built: it would double
+the number of keys that can open a token for the whole interval between rotations, and the failure it
+avoids is a refused token that costs a retry rather than data.
+
+Substitute the key you are rotating for `<secret-name>` below, and its own consuming services for
+`<service-name>` — the **five** services that bind the cursor key are `account`, `transaction`,
+`reference`, `reporting` and `authorization`; the selector key is bound by `card` alone.
+
+```bash
+# WHAT: replaces the stored key with freshly generated bytes, without the value ever appearing in a
+#       command line.
+# WHY : Trade-offs: the value travels on STDIN via --secret-string fileb:///dev/stdin. An argv value
+#       is readable from the process table by any local process for as long as the call runs, is
+#       retained by the shell's history file, and is echoed by `set -x`; a transcript of this runbook
+#       would then contain the live key. `set +o xtrace` is issued explicitly for that last reason.
+# WHY : Assumptions: --exclude-punctuation matches the generator both roots use (special = false),
+#       and 32 characters matches the 32-BYTE floor the sealers enforce at start-up -- a shorter
+#       value makes every consumer fail to start rather than fail to open a token, which is the
+#       safer of the two failures but is still a failure to avoid. --query null keeps the new
+#       version identifier out of the transcript.
+set +o xtrace
+aws secretsmanager get-random-password --region "<aws-region>" \
+  --exclude-punctuation --password-length 32 --query RandomPassword --output text \
+  | tr -d '\n' \
+  | aws secretsmanager put-secret-value --region "<aws-region>" \
+  --secret-id "<name-prefix>/<env>/<secret-name>" \
+  --secret-string fileb:///dev/stdin \
+  --query "null" --output text
+```
+
+```bash
+# WHAT: rolls every service that binds the rotated key.
+# WHY : Assumptions: ALL of that key's consumers are rolled, and rolling only some is the one
+#       mistake this step exists to prevent. Two tasks holding different cursor keys will refuse
+#       each other's tokens, so a partially rolled fleet produces a browse that works or fails
+#       depending on which task answers -- an intermittent fault, which is materially harder to
+#       diagnose than the clean refusal a complete roll produces.
+# WHY : Trade-offs: issued as separate calls because ECS has no primitive for replacing several
+#       services atomically. Ordering does not remove the window, so the objective is to shorten it.
+for service in "<service-name>" ; do
+  aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" \
+    --service "$service" --force-new-deployment
+done
+```
+
+```bash
+# WHAT: confirms every rolled deployment reached a steady state before the rotation is declared done.
+# WHY : Assumptions: PRIMARY reaching COMPLETED is the observable end of the mixed-key interval;
+#       treating the update-service calls as the end would declare success while old tasks are still
+#       draining and still sealing tokens under the previous key.
+aws ecs describe-services --region "<aws-region>" --cluster "<cluster-name>" \
+  --services "<service-name>" \
+  --query "services[].deployments[?status=='PRIMARY'].[serviceName:@.id,rolloutState]" --output table
+```
+
+Advance that secret's `secret_string_wo_version` in a reviewed diff instead if the value should be
+regenerated by Terraform. The identity performing the manual form needs
+`secretsmanager:PutSecretValue` on that one entry, `kms:GenerateDataKey` and `kms:Decrypt` through
+Secrets Manager on the secrets CMK, and `ecs:UpdateService` and `ecs:DescribeServices` on that key's
+consumers. No task role should ever hold `PutSecretValue`: a task reads these entries and never
+writes them.
 
 ---
 

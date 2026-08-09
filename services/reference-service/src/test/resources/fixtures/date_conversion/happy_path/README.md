@@ -269,15 +269,35 @@ the branch rather than assumed, which is the stance the charter's section 10 tak
 for the tree as a whole.
 
 **The decoding consumer** is
-[`DateConversionMessageListener`](../../../../../main/java/com/carddemo/reference/service/DateConversionMessageListener.java),
-and it is present. Its `@SqsListener`-annotated `onDateConversionRequest` receives
-the payload and decodes it through a `CopybookLayout.RecordSpec` that the class
-builds locally, at offsets 0, 4 and 15 with widths 4, 11 and 985 -- the same three
-intervals as the table in section 4.1.1, each of its field-name constants citing
-the physical line it came from. Its declared buffer length is 1000, and its key
-offset and key length are declared as 4 and 11. Its `convert` method is shared with
-the synchronous path, so the queue transport and the HTTP transport render the same
-reply from the same code.
+[`DateInquiryMessageListener`](../../../../../main/java/com/carddemo/reference/service/DateInquiryMessageListener.java),
+and it is present. Its `@SqsListener`-annotated `onRequest` receives the message,
+decodes the payload through `com.carddemo.common.codec.InquiryRequestCodec`, and
+answers with the fixed-width body
+[`DateInquiryReplyMapper`](../../../../../main/java/com/carddemo/reference/mapper/DateInquiryReplyMapper.java)
+renders. It is the **only** `@SqsListener` bound to the inquiry request queue, which
+`ReferenceQueueConsumerContractTest` asserts.
+
+Refactoring Rationale: this paragraph named `DateConversionMessageListener` and said
+its `convert` method was "shared with the synchronous path, so the queue transport and
+the HTTP transport render the same reply from the same code". Both halves were wrong,
+and in a way a reader would have acted on. That type carried a **second**
+`@SqsListener` on this same request queue, so the flow's wire behaviour depended on
+which listener container polled first; and its `convert` method has never been on the
+queue path at all -- it judges a date a caller submits, whereas this flow emits the
+current system date and time and reads no field of its request. The competing consumer
+has been removed, its evaluation now lives on
+[`DateConversionService`](../../../../../main/java/com/carddemo/reference/service/DateConversionService.java)
+and is reached only from
+[`DateConversionController`](../../../../../main/java/com/carddemo/reference/api/DateConversionController.java),
+and this section names the consumer that actually reads these bytes.
+
+**The two routes into this context's date surface are separate, and these bytes belong
+to one of them.** The queue route consumes this fixture's shape and answers with the
+forty-six-character `SYSTEM DATE : MM-DD-YYYY SYSTEM TIME : HH:MM:SS` body; the HTTP
+route at `GET /api/v1/reference/date-evaluations` takes a candidate date and a picture
+as query parameters and answers with the structured verdict `DateConversionResponse`
+declares. Neither renders the other's reply, and no code is shared between them beyond
+the shared kernel.
 
 **The asserting consumers** are both present, both under
 `com.carddemo.reference.fixtures`, and both run by Surefire:
@@ -290,9 +310,16 @@ reply from the same code.
 
 `DateInquiryMessageListenerTest` resolves this domain's fixtures from the test
 classpath by building the path from the scenario name, which is what makes the
-constant filename in section 7 load-bearing rather than cosmetic. There is no test
-class named for the decoding consumer itself; the listener-level coverage sits in
-that class.
+constant filename in section 7 load-bearing rather than cosmetic. It IS the test class
+named for the decoding consumer, so the listener-level coverage sits where a reader
+looking for it would look.
+
+Refactoring Rationale: this paragraph used to end "There is no test class named for the
+decoding consumer itself; the listener-level coverage sits in that class" — two sentences
+that contradicted each other, because the class it had just named was named for a
+DIFFERENT consumer than the one section 5 pointed at. With the duplicate consumer
+withdrawn there is one consumer and one test class named for it, so the caveat has nothing
+left to describe.
 
 Fixtures reach all of them from the **test classpath** rather than by filesystem
 path: Maven copies `src/test/resources/` into `target/test-classes/`, so this file

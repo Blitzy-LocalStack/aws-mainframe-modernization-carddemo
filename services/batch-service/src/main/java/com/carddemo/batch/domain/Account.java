@@ -689,7 +689,7 @@ public class Account {
      * {@code com.carddemo.common.money.Money}, which is why this takes a result rather than an
      * addend. It is the assignment half of {@code app/cbl/CBTRN02C.cbl} line 547, where the
      * baseline reads {@code ADD DALYTRAN-AMT TO ACCT-CURR-BAL}; splitting the arithmetic out keeps
-     * the single rounding contract in one place and leaves this type holding state only.</p>
+     * every rounding contract in one place and leaves this type holding state only.</p>
      *
      * @param newBalance the balance to store, signed and already reduced to scale 2; must not be
      *     {@code null}

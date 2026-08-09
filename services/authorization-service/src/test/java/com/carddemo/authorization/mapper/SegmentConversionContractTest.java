@@ -20,7 +20,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -362,7 +361,7 @@ class SegmentConversionContractTest {
                 PendingAuthSummaryMapper.toSegment(unsetAggregateFields(populatedSummary),
                         populatedSummary));
         PendingAuthSummaryResponse summaryResponse = PendingAuthSummaryMapper.toResponse(summary,
-                PageResponse.ofRows(List.<PendingAuthRowView>of(), null, null, false),
+                PageResponse.<PendingAuthRowView>empty(),
                 new PendingAuthSummaryMapper.ScreenChrome("CP00", "CardDemo", "07/15/24", "COPAUS0C",
                         "Pending Authorizations", "09:15:30"),
                 new PendingAuthSummaryMapper.CardholderContext("CARDHOLDER NAME", "ADDRESS ONE", null,

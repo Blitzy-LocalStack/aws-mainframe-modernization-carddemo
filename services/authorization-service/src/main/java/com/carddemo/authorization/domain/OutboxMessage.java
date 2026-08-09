@@ -99,20 +99,32 @@ import java.util.Objects;
  * A payload's item names belong to whoever consumes the payload. The reference files themselves are
  * read as the specification and are never modified.</p>
  *
- * <p>Assumptions: {@code orderGroupToken} and {@code deduplicationToken} hold purpose-scoped keyed
- * tokens and not the values they stand for -- the first a token over the card number, the second a
- * token over the card and transaction pair -- which is why each component is named for the token
- * rather than for the item behind it. Grouping by card is what preserves the per-card ordering the
- * reference system gets from a single-threaded consumer, and deduplicating by the pair is what makes
- * suppression independent of the payload bytes. A single group for every message was the alternative
- * and would serialise every card behind one ordering chain. The tokens are produced by
- * {@code com.carddemo.common.codec.CsvAuthCodec.AuthReply#orderGroup} and
- * {@code #deduplicationKey}, and the two purposes differ so that a holder of one token cannot join
- * it to the other; the derivation is specified in
- * {@code docs/architecture/messaging-contracts.md}. They are carried as tokens because the
- * publisher passes them as the transport's group and deduplication attributes, and an attribute is
- * metadata that the queue's server-side encryption of a message body does not cover -- so the raw
- * form would put a primary account number into queue telemetry and into the trace of every send.</p>
+ * <p>Assumptions: {@code orderGroupId} holds the CARD NUMBER and {@code deduplicationId} holds the
+ * acquirer's TRANSACTION IDENTIFIER, each exactly as the wire carries it. Grouping by card is what
+ * preserves the per-card ordering the reference system gets from a single-threaded consumer, and
+ * deduplicating by the transaction is what makes suppression independent of the payload bytes. A single
+ * group for every message was the alternative and would serialise every card behind one ordering
+ * chain.</p>
+ *
+ * <p>Refactoring Rationale: both components held purpose-scoped keyed TOKENS derived from those values,
+ * and both now hold the values themselves. Sections 0.4.1.8 and 0.7.6 of the technical specification
+ * freeze the reply queue's identities as {@code MessageGroupId = card_num} and
+ * {@code MessageDeduplicationId = transaction_id}, and that specification is the agreed source of truth
+ * rather than a starting point. The derivation preserved each semantic in isolation -- equal for equal
+ * cards, equal for one authorization -- but it changed the identity any OTHER party computes: a second
+ * publisher, a cross-account consumer or a replay tool built from the frozen contract would place one
+ * card's messages in a different group and would compute a different deduplication identity for one
+ * authorization, so grouping and suppression would both silently stop working across producers. The two
+ * components were renamed with the columns behind them, by
+ * {@code V3__authorization_outbox_fifo_identities.sql}.</p>
+ *
+ * <p>Trade-offs: these two components become message METADATA at publication, and a queue's server-side
+ * encryption covers a message body and not its metadata -- so the card number reaches queue telemetry
+ * and the trace of every send. The exposure is bounded by the deployment rather than by this type: the
+ * reply queues are encrypted with a customer-managed key, reachable only through an interface endpoint
+ * inside the private network, and readable only by the task roles the infrastructure grants. That
+ * judgement belongs to the specification that freezes the identities, and revisiting it means revisiting
+ * the specification.</p>
  *
  * <p>Assumptions: {@code correlationId} is echoed from the request unaltered, mirroring
  * {@code cbl/COPAUA0C.cbl} L745, which moves the saved inbound identifier onto the reply descriptor
@@ -179,7 +191,7 @@ import java.util.Objects;
  * <p>Trade-offs: the accepted cost of this design is one extra row written per authorization, one
  * extra hop to publish it, and at-least-once publication -- a publisher that succeeds in sending and
  * then fails before recording the send will send that reply twice. The duplicate is tolerable
- * precisely because the reply queue suppresses it on the deduplication token above, whereas the
+ * precisely because the reply queue suppresses it on the deduplication identity above, whereas the
  * opposite ordering, recording the send before making it, converts a duplicate into a missing reply,
  * which is the outcome the outbox was added to remove. The migration states the same ordering
  * argument on the {@code attempts} column it introduces for it, at L1082 to L1090 of
@@ -191,10 +203,10 @@ import java.util.Objects;
  *     configuration; must not be {@code null} or blank
  * @param correlationId the identity a requester matches an answer against, echoed unaltered; may be
  *     {@code null} when the request carried none
- * @param orderGroupToken the purpose-scoped keyed token over the card number that carries per-card
- *     ordering; must not be {@code null} or blank
- * @param deduplicationToken the purpose-scoped keyed token over the card and transaction pair that
- *     carries duplicate suppression; must not be {@code null} or blank
+ * @param orderGroupId the card number the reply answers for, which carries per-card ordering; must not
+ *     be {@code null} or blank
+ * @param deduplicationId the acquirer's transaction identifier, which carries duplicate suppression;
+ *     must not be {@code null} or blank
  * @param payload the already-encoded reply body, held exactly as the wire carries it; must not be
  *     {@code null} or blank
  * @param contentType the wire format the payload is expressed in; must not be {@code null} or blank
@@ -204,8 +216,8 @@ import java.util.Objects;
 public record OutboxMessage(
         String replyQueueUrl,
         String correlationId,
-        String orderGroupToken,
-        String deduplicationToken,
+        String orderGroupId,
+        String deduplicationId,
         String payload,
         String contentType,
         LocalDateTime expiresAt) {
@@ -233,16 +245,22 @@ public record OutboxMessage(
     public static final int CORRELATION_ID_MAX_LENGTH = 64;
 
     /**
-     * The widest ordering or deduplication token this message can be made durable as.
+     * The widest ordering or deduplication identity this message can be made durable as.
      *
-     * <p>Assumptions: mirrors {@code order_group_token} and {@code deduplication_token}, both
-     * {@code VARCHAR(128)} at L1031 and L1032 of the migration. Narrowing either to the exact width
-     * of the present derivation was rejected there, because a later purpose-scoped derivation of a
-     * different length would then need a schema change to store what is in every other respect the
-     * same thing; the same reasoning keeps one constant for both rather than two that could
-     * drift.</p>
+     * <p>Assumptions: mirrors the two identity columns, both {@code VARCHAR(128)} at L1031 and L1032 of
+     * {@code V1__authorization.sql} and renamed to {@code order_group_id} and {@code deduplication_id} by
+     * {@code V3__authorization_outbox_fifo_identities.sql}. 128 is also the queue's own ceiling for both
+     * {@code MessageGroupId} and {@code MessageDeduplicationId}, so a value this column accepts is a value
+     * the send accepts -- which is the property worth having, because the alternative is a row that
+     * commits and can then never be published.</p>
+     *
+     * <p>Alternatives Considered: narrowing to the exact widths the specification fixes -- 16 for the card
+     * number and 15 for the transaction identifier. Rejected because the column would then refuse a value
+     * the queue accepts, and the two identities are not this service's to redefine: a producer contract
+     * change that widened either would turn a storable reply into an unpublishable one. One constant is
+     * kept for both rather than two that could drift apart.</p>
      */
-    public static final int TOKEN_MAX_LENGTH = 128;
+    public static final int FIFO_IDENTITY_MAX_LENGTH = 128;
 
     /**
      * The widest wire-format label this message can be made durable as.
@@ -268,8 +286,8 @@ public record OutboxMessage(
      * unlike the four required components. The reference descriptor's identifier may legitimately
      * arrive as all blanks or as an absence, and rejecting an all-blank identity would refuse a
      * reply that the reference system would have sent. The four components that are blank-checked
-     * have no meaning when empty: a message with no destination, no ordering token, no
-     * deduplication token or no body cannot be published at all.</p>
+     * have no meaning when empty: a message with no destination, no ordering identity, no
+     * deduplication identity or no body cannot be published at all.</p>
      *
      * <p>Assumptions: {@code expiresAt} is not validated. Any instant is admissible, including one
      * already in the past, because the decision to withhold a stale reply belongs to the publisher
@@ -279,10 +297,10 @@ public record OutboxMessage(
      *     fit {@link #REPLY_QUEUE_URL_MAX_LENGTH}
      * @param correlationId the identity to echo; may be {@code null}, and must fit
      *     {@link #CORRELATION_ID_MAX_LENGTH} when present
-     * @param orderGroupToken the keyed ordering token; must not be {@code null} or blank and must
-     *     fit {@link #TOKEN_MAX_LENGTH}
-     * @param deduplicationToken the keyed deduplication token; must not be {@code null} or blank and
-     *     must fit {@link #TOKEN_MAX_LENGTH}
+     * @param orderGroupId the ordering identity, which is the card number; must not be {@code null} or
+     *     blank and must fit {@link #FIFO_IDENTITY_MAX_LENGTH}
+     * @param deduplicationId the deduplication identity, which is the transaction identifier; must not
+     *     be {@code null} or blank and must fit {@link #FIFO_IDENTITY_MAX_LENGTH}
      * @param payload the encoded reply body; must not be {@code null} or blank, and is not
      *     width-checked because the column that stores it is unbounded text
      * @param contentType the wire format of the payload; must not be {@code null} or blank and must
@@ -295,9 +313,8 @@ public record OutboxMessage(
     public OutboxMessage {
         replyQueueUrl = requiredWithin(replyQueueUrl, "replyQueueUrl", REPLY_QUEUE_URL_MAX_LENGTH);
         correlationId = boundedOrNull(correlationId, "correlationId", CORRELATION_ID_MAX_LENGTH);
-        orderGroupToken = requiredWithin(orderGroupToken, "orderGroupToken", TOKEN_MAX_LENGTH);
-        deduplicationToken =
-                requiredWithin(deduplicationToken, "deduplicationToken", TOKEN_MAX_LENGTH);
+        orderGroupId = requiredWithin(orderGroupId, "orderGroupId", FIFO_IDENTITY_MAX_LENGTH);
+        deduplicationId = requiredWithin(deduplicationId, "deduplicationId", FIFO_IDENTITY_MAX_LENGTH);
         payload = required(payload, "payload");
         contentType = requiredWithin(contentType, "contentType", CONTENT_TYPE_MAX_LENGTH);
     }
@@ -326,8 +343,10 @@ public record OutboxMessage(
      *
      * @param replyQueueUrl where the reply is to be sent; must not be {@code null} or blank
      * @param correlationId the identity to echo; may be {@code null}
-     * @param orderGroupToken the keyed ordering token; must not be {@code null} or blank
-     * @param deduplicationToken the keyed deduplication token; must not be {@code null} or blank
+     * @param orderGroupId the ordering identity, which is the card number; must not be {@code null}
+     *     or blank
+     * @param deduplicationId the deduplication identity, which is the transaction identifier; must not
+     *     be {@code null} or blank
      * @param payload the encoded reply body; must not be {@code null} or blank
      * @param expiresAt the staleness deadline in coordinated universal time; must not be {@code null}
      * @return a publication carrying the delimited-text format label, never {@code null}
@@ -337,10 +356,10 @@ public record OutboxMessage(
      *     character component is wider than the column that stores it
      */
     public static OutboxMessage csvReply(String replyQueueUrl, String correlationId,
-            String orderGroupToken, String deduplicationToken, String payload,
+            String orderGroupId, String deduplicationId, String payload,
             LocalDateTime expiresAt) {
         Objects.requireNonNull(expiresAt, "expiresAt must not be null for an authorization reply");
-        return new OutboxMessage(replyQueueUrl, correlationId, orderGroupToken, deduplicationToken,
+        return new OutboxMessage(replyQueueUrl, correlationId, orderGroupId, deduplicationId,
                 payload, AuthReplyOutbox.CONTENT_TYPE_CSV, expiresAt);
     }
 
@@ -370,7 +389,7 @@ public record OutboxMessage(
     public static OutboxMessage from(AuthReplyOutbox row) {
         Objects.requireNonNull(row, "row must not be null");
         return new OutboxMessage(row.getReplyQueueUrl(), row.getCorrelationId(),
-                row.getOrderGroupToken(), row.getDeduplicationToken(), row.getPayload(),
+                row.getOrderGroupId(), row.getDeduplicationId(), row.getPayload(),
                 row.getContentType(), row.getExpiresAt());
     }
 
@@ -415,8 +434,8 @@ public record OutboxMessage(
                     + AuthReplyOutbox.CONTENT_TYPE_CSV + " to be held on an outbox row, was "
                     + this.contentType);
         }
-        return new AuthReplyOutbox(this.replyQueueUrl, this.correlationId, this.orderGroupToken,
-                this.deduplicationToken, this.payload, this.expiresAt, createdAt);
+        return new AuthReplyOutbox(this.replyQueueUrl, this.correlationId, this.orderGroupId,
+                this.deduplicationId, this.payload, this.expiresAt, createdAt);
     }
 
     /**

@@ -123,7 +123,7 @@
  *   <li>No second exception handling advice, per Contract 1.</li>
  *   <li>The date edit rules are not restated here. They live in
  *       {@code com.carddemo.common.validation.DateEditValidator} and
- *       {@code DateConversionMessageListener} delegates to them.
+ *       {@code DateConversionService} delegates to them.
  *       Assumptions: that is faithful rather than a liberty, because
  *       {@code app/cbl/CSUTLDTC.cbl} was itself a shared callable
  *       subprogram: it declares

@@ -45,14 +45,15 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  *
  * <p>Alternatives Considered: applying a reduction mode in this class was evaluated and rejected. Two
  * reduction contracts exist in {@code com.carddemo.common.money.Money} and neither is this class's to
- * exercise. The general one admits a decimal at the money scale under the single mode
- * {@code Money.GENERAL_ROUNDING}, which is the only mode that type declares and which governs every
- * reduction it performs; the accrual one, {@code Money.monthlyInterest(java.math.BigDecimal)}, forms
- * the product at full precision and reduces exactly once at the division, against the combined
- * divisor {@code Money.MONTHLY_RATE_DIVISOR}. The second belongs to the batch job that computes
- * interest and is not called from here at all. Reducing an already-exact operand before either
- * contract sees it would be an adjustment nothing asked for, and its effect would be a cent rather
- * than an exception.</p>
+ * exercise. The general one admits a decimal at the money scale under
+ * {@code Money.GENERAL_ROUNDING}, half up, which governs every reduction that type performs except
+ * one; the accrual one, {@code Money.monthlyInterest(java.math.BigDecimal)}, forms the product at
+ * full precision and reduces exactly once at the division under
+ * {@code Money.BASELINE_INTEREST_ROUNDING}, truncation, against the combined divisor
+ * {@code Money.MONTHLY_RATE_DIVISOR}. The second belongs to the batch job that computes interest and
+ * is not called from here at all. Reducing an already-exact operand before either contract sees it
+ * would be an adjustment nothing asked for, and its effect would be a cent rather than an
+ * exception.</p>
  *
  * <p>Trade-offs: this class is deliberately incurious about the value it moves. It gains no defensive
  * normalisation, so a rate that somehow reached it out of contract would be published rather than
@@ -68,11 +69,17 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * reason the arithmetic sits in batch-service and the conversion sits here.</p>
  *
  * <p>Assumptions: the reference program carries no {@code ROUNDED} phrase on that statement, so it
- * truncates toward zero where the migrated accrual reduces under the one declared mode. That
- * difference is at most a cent and only on an exact half cent; it belongs to the accrual and not to
- * this conversion, and it is registered as divergence {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which is the one place a difference of
- * behaviour is recorded and which is referenced from here rather than authored here.</p>
+ * truncates toward zero, and the migrated accrual reduces the same way under
+ * {@code Money.BASELINE_INTEREST_ROUNDING} -- which is the accrual's own mode and is distinct from
+ * the {@code Money.GENERAL_ROUNDING} half up that governs every other reduction. That mode belongs to
+ * the accrual and not to this conversion, which applies neither.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph recorded a cent of difference registered as divergence
+ * {@code C-ROUNDING}. There is no difference now and the divergence is withdrawn; the identifier
+ * survives only as a withdrawal record in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. The sentence above it,
+ * which says two reduction contracts exist in {@code Money} and that neither is this class's to
+ * exercise, was already the accurate description and needed no change.</p>
  *
  * <p>Assumptions: no binary floating-point type appears anywhere on this path, and unlike the same
  * prohibition in some sibling contexts it is mechanised rather than left to review. Rule A3 of
@@ -248,10 +255,12 @@ public final class DisclosureGroupMapper {
     public static DisclosureGroupRateResponse toResponse(
             String requestedAcctGroupId, DisclosureGroup entity, boolean defaultGroupApplied) {
 
-        // WHAT: the six components of the reply, supplied positionally to the record's canonical
-        //       constructor. The order is declared by DisclosureGroupRateResponse and is load-bearing
-        //       here: the first two components are both ten-character group identifiers of the same
-        //       type, so transposing them would compile and would misreport every fallback.
+        // WHY : Assumptions: the component ORDER declared by DisclosureGroupRateResponse is
+        //       load-bearing at this call site, because the first two components are both
+        //       ten-character group identifiers of the same type. Transposing them would compile and
+        //       type-check, and every fallback would then report the applied group as the requested
+        //       one -- so the one observable difference a fallback exists to publish would be lost
+        //       with nothing to signal it.
         // WHY : Assumptions: app/cpy/CVTRA02Y.cpy L10 declares 05 FILLER PIC X(28) and it is not
         //       carried across. 10 + 2 + 4 + 6 + 28 = 50 accounts for every byte of the record length
         //       its L2 header declares, so nothing is overlooked by omitting it; those bytes pad the

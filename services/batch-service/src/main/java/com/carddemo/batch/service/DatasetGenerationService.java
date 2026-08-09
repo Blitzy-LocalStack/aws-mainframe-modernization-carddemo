@@ -405,8 +405,8 @@ public class DatasetGenerationService {
 
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore must not be null");
 
-        // WHAT: the bucket is rejected when blank, not merely when absent.
-        // WHY : Assumptions: the property is supplied as an environment variable, and an environment
+        // WHY : Assumptions: the bucket is rejected when blank and not merely when absent, because
+        //       the property is supplied as an environment variable, and an environment
         //       variable that is exported with an empty value resolves successfully to the empty string
         //       rather than failing to resolve. Without this check the task would start, compose
         //       locations of the form s3:///ledger/... and fail on the first listing with a message
@@ -444,7 +444,6 @@ public class DatasetGenerationService {
         Objects.requireNonNull(businessDate, "businessDate must not be null");
         requireNonBlank(runId, "runId");
 
-        // WHAT: an allocation already recorded for this run and family is returned without allocating.
         // WHY : Alternatives Considered: allocating on every call, which is the obvious reading of "(+1)
         //       means a new generation" and is wrong. Four jobs name one family twice through that same
         //       spelling and read back on the second reference -- COMBTRAN.jcl:37 then :44,
@@ -736,8 +735,8 @@ public class DatasetGenerationService {
                 .max()
                 .orElse(DatasetGeneration.MINIMUM_GENERATION_NUMBER - 1);
 
-        // WHAT: exhaustion of the generation range is reported here rather than left to the coordinate.
-        // WHY : Trade-offs: the sibling's constructor already refuses an out-of-range number, so this
+        // WHY : Trade-offs: exhaustion of the generation range is reported here rather than left to
+        //       the coordinate. The sibling's constructor already refuses an out-of-range number, so this
         //       check is not what makes the outcome safe -- it is what makes the outcome legible. A
         //       coordinate rejected there reports a number outside an accepted range, which reads like a
         //       caller passing nonsense; reported here it names the family and the date whose partition

@@ -87,10 +87,18 @@ mode unrepresentable.
 
 Subnet placement and ALB scheme are separate contracts. The module accepts
 `subnet_ids` without assigning a tier to them. The package architecture describes
-load-balancer-role public subnets, while the settled environment roots pass
-`module.network.private_app_subnet_ids`; either composition remains non-public
+load-balancer-role public subnets, and both environment roots pass
+`module.network.public_subnet_ids` accordingly; the composition remains non-public
 because `internal = true` withholds public addresses and an internet-routable DNS
 name regardless of the route table attached to the selected subnets.
+
+Refactoring Rationale: the roots previously passed
+`module.network.private_app_subnet_ids`, and this paragraph described that as one of
+two acceptable compositions. It is not: AAP §0.4.1.9 places the load balancer in the
+public tier, so the roots were aligned to the frozen topology. The module itself is
+unchanged and stays tier-agnostic — placement is the caller's decision — but the
+package now has one composition rather than two, and this paragraph no longer
+presents the other as settled.
 
 Trade-offs: keeping `subnet_ids` tier-agnostic leaves placement with the
 environment root, where network outputs are available, instead of coupling this
@@ -367,7 +375,7 @@ apply time and written directly to Secrets Manager.
 | <a name="output_alb_arn"></a> [alb\_arn](#output\_alb\_arn) | ARN of the internal Application Load Balancer, identifying it uniquely as an alarm target and in IAM policy conditions. |
 | <a name="output_alb_arn_suffix"></a> [alb\_arn\_suffix](#output\_alb\_arn\_suffix) | Trailing ARN segments that identify the load balancer to CloudWatch, supplied as the LoadBalancer metric dimension in the AWS/ApplicationELB namespace. |
 | <a name="output_alb_dns_name"></a> [alb\_dns\_name](#output\_alb\_dns\_name) | VPC-internal DNS name assigned to the load balancer; it resolves only from inside the VPC, because the load balancer is internal. |
-| <a name="output_alb_zone_id"></a> [alb\_zone\_id](#output\_alb\_zone\_id) | Canonical hosted-zone id of the load balancer, required as the alias-target zone of a Route 53 alias record; this module creates no such record. |
+| <a name="output_alb_zone_id"></a> [alb\_zone\_id](#output\_alb\_zone\_id) | Canonical hosted-zone id of the load balancer, required as the alias-target zone of a Route 53 alias record. This module creates no such record by design; each environment root uses this value as the alias-target zone of the VPC-private apex A record that service-to-service calls resolve. |
 | <a name="output_health_check_path"></a> [health\_check\_path](#output\_health\_check\_path) | Path the ecs-service target groups and the container health checks probe, republished from the input so that every load-balanced service is configured from one declaration. |
 | <a name="output_https_listener_arn"></a> [https\_listener\_arn](#output\_https\_listener\_arn) | ARN of the HTTPS listener, taken as the target of the API Gateway HTTP API private integration over its VPC Link; the only seam between the public edge and the services behind it. |
 | <a name="output_https_server_name"></a> [https\_server\_name](#output\_https\_server\_name) | Bare DNS name covered by the listener certificate and passed to API Gateway as the private integration's TLS server\_name\_to\_verify value. |

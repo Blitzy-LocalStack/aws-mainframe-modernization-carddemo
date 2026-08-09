@@ -13,22 +13,45 @@
  *
  * <p>What is present in the tree as this charter is written, enumerated so the
  * distinction above is checkable rather than merely declared: EIGHT
- * subpackages exist, each carrying its own charter, and SEVEN of the eight
+ * subpackages exist, each carrying its own charter, and ALL EIGHT
  * carry at least one test class. {@code api} holds
- * {@code ReferenceApiRoutingContractTest}. {@code config} holds
+ * {@code ReferenceApiRoutingContractTest},
+ * {@code DateEvaluationDispatcherTest} and
+ * {@code ReferenceParameterConstraintTest}. {@code config} holds
  * {@code ReferenceApiContractTest} and
  * {@code SecurityConfigTest}. {@code domain} holds
  * {@code ReferenceKeyCanonicalityTest}. {@code dto} holds
- * {@code ReferenceWireContractTest}. {@code fixtures} holds
+ * {@code ReferenceWireContractTest} and
+ * {@code DomainRefusalDisclosureTest}. {@code fixtures} holds
  * {@code ReferenceFixtureContractTest} and {@code ReferenceFixtureTest}.
  * {@code mapper} holds {@code DateInquiryReplyMapperTest}. {@code service}
- * holds {@code DateInquiryMessageListenerTest} and
- * {@code ReferenceWriteBehaviourTest}. The eighth, {@code repository}, holds
- * its charter and NO test class. That is ten test classes, every one of
- * them named {@code Test}, so this module contributes no class named
- * {@code IT}. This package root holds this charter and no test class, which
- * makes {@code ReferenceMoneyPathRulesTest}, reserved for it below, a name
- * this charter reserves rather than a file it describes.</p>
+ * holds {@code DateInquiryMessageListenerTest},
+ * {@code ReferenceWriteBehaviourTest}, {@code TransactionTypeBrowseTest} and
+ * {@code DateConversionServiceTest}. The eighth, {@code repository}, holds
+ * {@code TransactionTypeRepositoryIT},
+ * {@code TransactionCategoryRepositoryIT},
+ * {@code DisclosureGroupRepositoryIT},
+ * {@code UsPhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT} and
+ * {@code UsStateZipPrefixRepositoryIT}, together with the container base type
+ * the first of those hosts. That is FIFTEEN classes named {@code Test},
+ * collected by Surefire, and SIX named {@code IT}, collected by Failsafe --
+ * twenty-one in total. This package root holds this charter and no test class,
+ * which makes {@code ReferenceMoneyPathRulesTest}, reserved for it below, a
+ * name this charter reserves rather than a file it describes.</p>
+ *
+ * <p>Refactoring Rationale: the enumeration above previously read "SEVEN of the
+ * eight carry at least one test class", listed ten classes, and stated that
+ * "this module contributes no class named {@code IT}". Every one of those three
+ * claims was false against the tree, and the third was the one that could
+ * mislead a reader into a wrong conclusion rather than merely an incomplete
+ * one: {@code repository} holds six classes named {@code IT}, so a reader
+ * taking this charter at its word would have concluded that this module's
+ * Failsafe run collects nothing and that a green {@code mvn test} was therefore
+ * the whole of its verification. The recount is stated as two totals rather
+ * than one because the two suffixes are collected by DIFFERENT plugins in
+ * different lifecycle phases, and a single total conceals which command runs
+ * which half. This paragraph is the one to re-measure when a class is added to
+ * any subpackage.</p>
  *
  * <p>Refactoring Rationale: this enumeration read "seven subpackages exist,
  * each carrying its own charter, and each carries at least one test class",
@@ -39,11 +62,13 @@
  * one. A reader auditing this tree against the charter would have found a
  * directory the charter did not mention, and the only conclusions available
  * would have been that the charter was stale or that the directory was
- * unauthorised; neither is true. The ten-class total was correct throughout,
- * which is exactly why nothing else in the tree contradicted the wrong count
- * and why it had to be measured against the directory rather than derived from
- * the list. This paragraph is the one to re-measure when a subpackage is added
- * or when {@code repository} gains its first test class.</p>
+ * unauthorised; neither is true. That earlier correction left the ten-class
+ * total in place, and the total is the part the paragraph ABOVE has since had to
+ * recount: it was accurate when it was written and had gone stale by five
+ * classes, which is exactly why a count has to be measured against the
+ * directory rather than derived from a list a reader is not obliged to
+ * re-verify. The paragraph above supersedes this one on every number; this one
+ * is retained because it records how the omission arose.</p>
  *
  * <p>Refactoring Rationale: the paragraph above is written as an enumeration a
  * reader can check entry by entry instead of as a summary, and the reason is

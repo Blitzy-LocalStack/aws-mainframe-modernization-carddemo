@@ -21,8 +21,9 @@ import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.Message;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
@@ -50,7 +51,7 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  *   <li>{@code 4100-PUT-REPLY} at physical line 462 becomes
  *       {@link #publishReply(String, String, String, String)}.</li>
  *   <li>{@code 9000-ERROR} at physical line 501 becomes {@link #publishError(String)}, reached on the
- *       failure path through {@link #reportFailure(RuntimeException, String)}.</li>
+ *       failure path through {@link #reportFailure(RuntimeException, String, String)}.</li>
  * </ul>
  *
  * <p>The baseline's driver is not reproduced as code. Its {@code 1000-CONTROL} opens three queues -- input at
@@ -205,9 +206,6 @@ public class InquiryMessageListener {
      */
     public static final String ATTRIBUTE_REPLY_TO_QUEUE_URL = "replyToQueueUrl";
 
-    /**
-     * The attribute declaring the payload's media type on everything this class publishes.
-     */
     public static final String ATTRIBUTE_CONTENT_TYPE = "contentType";
 
     /**
@@ -215,13 +213,29 @@ public class InquiryMessageListener {
      *
      * <p>Assumptions: the baseline declares its payload format as a string on every put -- physical line 471
      * for the reply and physical line 508 for the error report -- and with a string format the FIELD ORDER
-     * and the delimiter positions ARE the contract, because a consumer locates each value by offset. The
-     * target declaration of that indicator is this media type, and it is the same one the authorization and
-     * date-inquiry replies carry, so one reader can recognise all of them. A structured envelope may be
-     * offered additively to new consumers, but never as a replacement: reshaping this payload would break an
-     * existing consumer silently rather than loudly.</p>
+     * and the OFFSETS are the contract, because a consumer locates each value by position. The target
+     * declaration of that indicator is this media type. A structured envelope may be offered additively to
+     * new consumers, but never as a replacement: reshaping this payload would break an existing consumer
+     * silently rather than loudly.</p>
+     *
+     * <p>Refactoring Rationale: the declared type is {@code text/plain} and NOT {@code text/csv}, and the
+     * correction matters because a media type is a parsing instruction. Nothing this class publishes is
+     * comma-separated: the reply is the labelled fixed-width block {@code WS-ACCT-RESPONSE} declared at
+     * physical lines 130 to 169, whose eleven label-and-value pairs are located by offset and framed to the
+     * declared message length, and the error report is the positional diagnostic prefix assembled below. A
+     * consumer that trusted a {@code text/csv} label would split on commas and find one field, or would
+     * split a free-text value containing a comma into two. {@code text/csv} is reserved in this migration
+     * for the one wire that genuinely is comma-separated, the authorization request and reply of
+     * {@code com.carddemo.common.codec.CsvAuthCodec}; the date-inquiry reply, which is positional for the
+     * same reason as this one, already declares {@code text/plain}.</p>
+     *
+     * <p>Trade-offs: {@code text/plain} states less than a registered fixed-width type would. No such type
+     * is registered, and inventing one under an {@code application/vnd.} name would give consumers a label
+     * no library recognises while still telling them nothing about the offsets -- which the published
+     * contract and this class's own width constants state instead. Naming the payload as text and letting
+     * the layout be documented is the honest of the two.</p>
      */
-    public static final String CONTENT_TYPE = "text/csv";
+    public static final String CONTENT_TYPE = "text/plain";
 
     /**
      * The logger for this consumer.
@@ -233,9 +247,9 @@ public class InquiryMessageListener {
      */
     private static final String MDC_CORRELATION_ID = "correlationId";
 
-    /**
-     * The paragraph name reported when an unexpected read failure is routed to the error sink.
-     */
+    // WHY : Assumptions: the reported paragraph name is the BASELINE's paragraph rather than a Java method
+    //   name, because an operator reading this sink is diagnosing against the reference program and a name
+    //   only the target uses would not locate anything in it.
     private static final String PARAGRAPH_PROCESS_REQUEST_REPLY = "4000-PROCESS-REQUEST-REPLY";
 
     /**
@@ -249,44 +263,29 @@ public class InquiryMessageListener {
      */
     private static final String DIAGNOSTIC_READ_FAILED = "ERROR WHILE READING ACCTFILE";
 
-    /**
-     * The width of the diagnostic's paragraph-name field.
-     */
+    // WHY : Assumptions: the six widths below are the declared widths of the diagnostic group at physical
+    //   lines 58 to 67, whose nine members are a 25-character paragraph name, a gap, a 25-character return
+    //   message, a gap, a 2-digit condition code, a gap, a 5-digit reason code, a gap and a 48-character
+    //   queue name. They matter because a consumer of that sink locates every value by OFFSET, so each
+    //   width is part of the wire contract and not a formatting preference: changing one shifts every
+    //   following field to a position no existing reader expects.
     private static final int DIAGNOSTIC_PARAGRAPH_WIDTH = 25;
 
-    /**
-     * The width of the diagnostic's return-message field.
-     */
     private static final int DIAGNOSTIC_MESSAGE_WIDTH = 25;
 
-    /**
-     * The width of each two-character gap between the diagnostic's fields.
-     */
     private static final int DIAGNOSTIC_GAP_WIDTH = 2;
 
-    /**
-     * The width of the diagnostic's condition-code field.
-     */
     private static final int DIAGNOSTIC_CONDITION_CODE_WIDTH = 2;
 
-    /**
-     * The width of the diagnostic's reason-code field.
-     */
     private static final int DIAGNOSTIC_REASON_CODE_WIDTH = 5;
 
-    /**
-     * The width of the diagnostic's queue-name field.
-     */
     private static final int DIAGNOSTIC_QUEUE_NAME_WIDTH = 48;
 
     /**
      * The combined width of the diagnostic's positional prefix.
      *
      * <p>Assumptions: this is SUMMED from the field widths above rather than written as a number, so the
-     * prefix length and the fields that make it up cannot drift apart. The widths themselves are those of the
-     * diagnostic group declared at physical lines 58 to 67, whose nine members are a 25-character paragraph
-     * name, a gap, a 25-character return message, a gap, a 2-digit condition code, a gap, a 5-digit reason
-     * code, a gap and a 48-character queue name.</p>
+     * prefix length and the fields that make it up cannot drift apart.</p>
      */
     private static final int DIAGNOSTIC_PREFIX_LENGTH =
             DIAGNOSTIC_PARAGRAPH_WIDTH + DIAGNOSTIC_GAP_WIDTH
@@ -342,6 +341,16 @@ public class InquiryMessageListener {
      * reply for a value that never changes. The map is concurrent because the container dispatches messages
      * on several threads at once.</p>
      */
+    /**
+     * The template the keyed read runs inside.
+     *
+     * <p>Assumptions: read-only and short -- one keyed lookup -- and it ends before the reply is published.
+     * Refactoring Rationale: a template rather than the annotation this listener used to carry, because the
+     * unit of work has to END at a visible point inside the method; an annotation can only end where the
+     * method does, which is after the publish.</p>
+     */
+    private final TransactionTemplate readTransaction;
+
     private final Map<String, String> queueUrls = new ConcurrentHashMap<>();
 
     /**
@@ -353,6 +362,8 @@ public class InquiryMessageListener {
      * @param replyQueue the configured reply queue name; must not be {@code null} or blank
      * @param errorQueue the configured error queue name; must not be {@code null} or blank
      * @param clock the clock the expiry check reads; must not be {@code null}
+     * @param transactionManager the manager the short read-only unit of work is opened against; must not
+     *     be {@code null}
      * @throws NullPointerException if any reference argument is {@code null}
      * @throws IllegalArgumentException if either queue name is blank, because a consumer that cannot address
      *     its reply queue would take requests off the request queue and answer none of them
@@ -362,7 +373,8 @@ public class InquiryMessageListener {
             SqsClient sqs,
             @Value("${carddemo.account.inquiry.reply-queue}") String replyQueue,
             @Value("${carddemo.account.inquiry.error-queue}") String errorQueue,
-            Clock clock) {
+            Clock clock,
+            PlatformTransactionManager transactionManager) {
 
         // WHY : Assumptions: every collaborator arrives through the CONSTRUCTOR rather than through field
         //   injection or a static lookup, which is how the baseline's linkage is replaced. COACCT01 reaches
@@ -376,6 +388,14 @@ public class InquiryMessageListener {
         this.replyQueue = requireQueueName(replyQueue, "carddemo.account.inquiry.reply-queue");
         this.errorQueue = requireQueueName(errorQueue, "carddemo.account.inquiry.error-queue");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        Objects.requireNonNull(transactionManager, "transactionManager must not be null");
+
+        // WHY : Assumptions: REQUIRES_NEW so the read is a unit of work of its own. A listener invocation
+        //   carries no ambient transaction in the ordinary case, and declaring the propagation explicitly is
+        //   what keeps that true if one is ever introduced around it.
+        this.readTransaction = new TransactionTemplate(transactionManager);
+        this.readTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.readTransaction.setReadOnly(true);
     }
 
     /**
@@ -411,17 +431,29 @@ public class InquiryMessageListener {
      * descriptor and hands the payload on at physical line 374, and it runs inside the unit of work
      * {@code 4000-MAIN-PROCESS} opens with its {@code EXEC CICS SYNCPOINT} verb at physical line 327.</p>
      *
-     * <p>Assumptions: the polling contract on the annotation is the baseline's own, not a chosen default. The
-     * wait is five seconds because physical line 337 moves 5000 into the get's wait interval, in
-     * milliseconds, under the program's own comment on physical line 336 recording that as five seconds. The
-     * loop is bounded by queue emptiness alone: physical lines 214 to 216 perform the get and then repeat
-     * until the no-more-messages condition, which physical lines 377 and 378 set when the get reports that no
-     * message is available, and the counter incremented at physical line 375 is never compared against a
-     * ceiling. A bounded long-poll of the same wait with a message-per-poll ceiling reproduces that shape
-     * without changing throughput. The five-hundred-message ceiling that DOES exist in this system belongs to
+     * <p>Assumptions: two of the three polling values on the annotation are the baseline's own rather than
+     * chosen defaults. The wait is five seconds because physical line 337 moves 5000 into the get's wait
+     * interval, in milliseconds, under the program's own comment on physical line 336 recording that as five
+     * seconds. The loop is bounded by queue emptiness alone: physical lines 214 to 216 perform the get and
+     * then repeat until the no-more-messages condition, which physical lines 377 and 378 set when the get
+     * reports that no message is available, and the counter incremented at physical line 375 is never
+     * compared against a ceiling. The five-hundred-message ceiling that DOES exist in this system belongs to
      * the authorization consumer, at
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} physical line 40, and is not this program's
      * discipline.</p>
+     *
+     * <p>Trade-offs: the third value, concurrency, has no counterpart in the reference and is ADDITIVE. The
+     * baseline's driver is one task performing one get at a time, whereas this container fetches a batch and
+     * runs handlers concurrently, so the target processes more requests per unit of time than the reference
+     * did and the ordering between two requests in one batch is no longer the ordering they were enqueued
+     * in. That is admissible for this flow specifically: the exchange is request/reply keyed on a correlation
+     * identifier the reply echoes, each request is answered from one keyed read of one account, and no
+     * request mutates anything -- so no outcome depends on which of two requests is answered first.
+     * Alternatives Considered: a single-threaded container with a one-message batch, which would reproduce
+     * the reference's serialisation exactly. Rejected because the property it would preserve is one nothing
+     * observes, and the cost is a queue depth that grows without bound behind a five-second poll. The
+     * authorization consumer does NOT get this treatment: its ordering is observable per card, which is why
+     * that flow is keyed onto an ordered queue instead.</p>
      *
      * <p>Assumptions: no container-factory name is named on the annotation because
      * {@code config/SqsConfig.java} declares none, so the framework's own default factory applies. Naming a
@@ -460,7 +492,6 @@ public class InquiryMessageListener {
             maxConcurrentMessages = "${carddemo.account.inquiry.max-concurrent-messages:10}",
             maxMessagesPerPoll = "${carddemo.account.inquiry.max-messages-per-poll:10}",
             pollTimeoutSeconds = "${carddemo.account.inquiry.poll-timeout-seconds:5}")
-    @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
     public void onRequest(Message<String> message) {
         Objects.requireNonNull(message, "message must not be null");
 
@@ -495,8 +526,24 @@ public class InquiryMessageListener {
             }
 
             InquiryRequest request = InquiryRequestCodec.decode(message.getPayload());
-            publishReply(replyFor(request), resolveReplyDestination(requestedReplyTo),
-                    messageId, correlationId);
+
+            // WHY : Refactoring Rationale: the reply is composed inside a short READ-ONLY transaction that
+            //   ends before it is sent, and the send happens with no transaction open. This method was
+            //   annotated transactional across the whole exchange, so a database connection was held for the
+            //   duration of a queue publish -- a network round trip to a service this one does not control.
+            //   With ten concurrent messages configured by default, a slow or unreachable queue endpoint
+            //   could therefore hold ten connections while doing no database work at all, and starve every
+            //   request-serving path in this process. The read itself is one keyed lookup, so the
+            //   transaction it needs is very short.
+            // WHY : Assumptions: nothing about the exchange's guarantees changes. The read is read-only, so
+            //   there is nothing to commit or roll back, and the request is still acknowledged only after
+            //   its answer has been sent, because a publish failure propagates out of this method exactly as
+            //   before -- the acknowledgement follows a clean return, not a commit.
+            String reply = Objects.requireNonNull(
+                    this.readTransaction.execute(status -> replyFor(request)),
+                    "the read transaction returned no reply, which its callback cannot do");
+
+            publishReply(reply, resolveReplyDestination(requestedReplyTo), messageId, correlationId);
         } catch (RuntimeException failure) {
             reportFailure(failure, messageId, correlationId);
             throw failure;
@@ -530,6 +577,9 @@ public class InquiryMessageListener {
      * @throws org.springframework.dao.DataAccessException if the keyed read fails unexpectedly, which is the
      *     target form of the baseline's {@code WHEN OTHER} branch at physical lines 437 to 445 and propagates
      *     rather than becoming a reply
+     * @throws NullPointerException if {@code request} is {@code null}; the precondition is not re-validated
+     *     here because the sole caller has already rejected a null message and the codec cannot return null,
+     *     so a null could only arrive from a direct call and is a defect rather than a wire condition
      */
     private String replyFor(InquiryRequest request) {
         if (!request.isFunction(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY) || !request.hasUsableKey()) {
@@ -625,6 +675,9 @@ public class InquiryMessageListener {
      *     supplied
      * @throws software.amazon.awssdk.core.exception.SdkException if the send fails, which propagates so the
      *     request becomes visible again rather than being acknowledged unanswered
+     * @throws NullPointerException if {@code body} or {@code destination} is {@code null}, raised by the send
+     *     below rather than validated here, for the reason recorded on {@link #replyFor(InquiryRequest)}: both
+     *     values are produced inside this class on the path to this call
      */
     private void publishReply(String body, String destination, String messageId, String correlationId) {
         send(destination, body, replyAttributes(messageId, correlationId));
@@ -637,11 +690,17 @@ public class InquiryMessageListener {
      * the buffer at physical lines 505 and 506, sets the buffer length at physical line 507, declares the
      * payload format at physical line 508 and puts to the error handle at physical line 517.</p>
      *
-     * <p>Assumptions: this is exposed rather than kept private because the error sink is an operator-facing
-     * channel in the baseline too -- the error queue is opened first, at physical line 289, before any other
-     * queue and before any message is read, so a diagnostic can be reported even when nothing else in the
-     * exchange has started. It is deliberately NOT reached from the reply path: a business outcome is a
-     * reply, not an error report.</p>
+     * <p>Assumptions: this is exposed rather than kept private because the error sink is reachable in the
+     * baseline before any request exists, and the target keeps that reachability. {@code 1000-CONTROL}
+     * performs {@code 2100-OPEN-ERROR-QUEUE} at physical line 187 -- ahead of its {@code EXEC CICS RETRIEVE}
+     * at physical line 191, ahead of {@code 2300-OPEN-INPUT-QUEUE} at physical line 212 and ahead of
+     * {@code 2400-OPEN-OUTPUT-QUEUE} at physical line 213 -- and then enters {@code 9000-ERROR} at physical
+     * line 208 when that retrieve fails, at a point where no queue has been read and there is nothing to
+     * reply to. Note that paragraph DECLARATION order is the reverse and is not the execution order: the
+     * error-queue paragraph is declared at physical line 289, below the input paragraph at 222 and the output
+     * paragraph at 255, so reading the declarations alone gives the opposite impression. Publishing this
+     * operation is what lets a caller in this context report a diagnostic with no exchange in progress. It is
+     * deliberately NOT reached from the reply path: a business outcome is a reply, not an error report.</p>
      *
      * <p>Assumptions: the diagnostic text is composed by the caller and must name no value that came off the
      * wire, for the same reason the reply path logs a length rather than a value. The failure path composes
@@ -694,6 +753,10 @@ public class InquiryMessageListener {
      * @param messageId the request's message identifier to echo, or {@code null} to attach none
      * @param correlationId the request's correlation identifier to echo, possibly empty when none was
      *     supplied
+     * @throws NullPointerException if {@code failure} is {@code null}, raised by the digest below. It is the
+     *     ONE precondition here whose violation is not swallowed: every other failure inside this method is
+     *     attached to {@code failure} and suppressed deliberately, so a null argument is the only way this
+     *     method can throw, and it means the caller had no failure to report
      */
     private void reportFailure(RuntimeException failure, String messageId, String correlationId) {
         String digest = ThrowableDigest.of(failure);
@@ -830,6 +893,10 @@ public class InquiryMessageListener {
      * @param body the framed payload; must not be {@code null}
      * @param attributes the message attributes; must not be {@code null}
      * @throws software.amazon.awssdk.core.exception.SdkException if the send fails
+     * @throws NullPointerException if {@code destination}, {@code body} or {@code attributes} is
+     *     {@code null}, raised by the request builder. The preconditions are not re-validated here because
+     *     every one of the three is produced inside this class on the path to this call, so a null is a defect
+     *     in this class rather than a condition a caller or the wire can present
      */
     private void send(String destination, String body, Map<String, MessageAttributeValue> attributes) {
         this.sqs.sendMessage(SendMessageRequest.builder()
@@ -888,6 +955,9 @@ public class InquiryMessageListener {
      * @throws software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException if the queue is absent,
      *     which propagates rather than being defaulted because a consumer that cannot address its reply
      *     queue must not acknowledge a request it cannot answer
+     * @throws NullPointerException if {@code name} is {@code null}, raised by the caching map, which refuses
+     *     a null key. The precondition holds by construction: every name reaching here is a constructor
+     *     argument already refused when blank, so a null names a defect in this class
      */
     private String queueUrl(String name) {
         return this.queueUrls.computeIfAbsent(name, queueName -> this.sqs

@@ -27,14 +27,27 @@
 > checked gate delivers is not an enforcement mechanism, so the gap remains a
 > review failure until the configuration or review process enforces it.
 >
-> **Current state.** Four documentation gates are present and build-failing: Java
-> Checkstyle, TypeScript/JavaScript ESLint, Python Ruff, and the Terraform
-> lint/documentation pair. There is **no** workflow-validation gate — nothing lints
-> `.github/**` — and the YAML row of the enforcement summary states that plainly;
-> workflow rationale, `permissions` scoping and SHA pinning are review obligations.
+> **Current state.** Five documentation gates are present and build-failing: Java
+> Checkstyle, TypeScript/JavaScript ESLint, Python Ruff, the Terraform
+> lint/documentation pair, and the embedded-Python gate that extracts every heredoc
+> Python block out of `infra-ci.yml` and applies Ruff plus a Rule 1 element check to
+> it. There is still **no** gate over the workflow YAML *itself* — no linter,
+> action-pin checker or policy scanner reads `.github/**` as YAML — and the YAML row
+> of the enforcement summary states that plainly; workflow rationale, `permissions`
+> scoping and SHA pinning remain review obligations.
 >
-> Those four gates run in **three** workflows: `services-ci.yml` carries the Java and
-> the Python gates, `ui-ci.yml` the TypeScript gate, and `infra-ci.yml` the HCL gate. A
+> Refactoring Rationale: this paragraph said four gates and that "nothing lints
+> `.github/**`", which was true when written and is now true only of the YAML. The
+> Python embedded in that file is source code Rule 1 binds, and it reached no gate:
+> Ruff walks files on disk and a heredoc body is a string inside a YAML value, so two
+> blocks had shipped with no module docstring and five of their functions documented
+> neither parameters nor return value. The distinction between the two claims is worth
+> stating precisely, because the broader form would now excuse exactly the gap that
+> was closed.
+>
+> Those five gates run in **three** workflows: `services-ci.yml` carries the Java and
+> the Python package gates, `ui-ci.yml` the TypeScript gate, and `infra-ci.yml` the HCL
+> pair and the embedded-Python gate. A
 > fourth workflow, `deploy.yml`, is not a documentation gate — it is what builds all ten
 > committed Dockerfiles and assumes the deployment role — and it is counted separately
 > here for that reason. All sixteen Terraform module READMEs and both environment-root
@@ -433,21 +446,21 @@ compilable as written.
  * multiplying second yields a different final cent on many balances, and the
  * golden-master comparison would flag it as a parity failure.
  *
- * <p>WHY the rounding mode is the general one here too. Assumptions: this path is
- * not an exception to the money contract. Every reduction to cents in this
- * migration is scale 2 with {@code RoundingMode.HALF_UP}, and accrual differs from
- * the others only in the ORDER of its operations. The baseline does behave
- * differently: the accrual paragraph in {@code app/cbl/CBACT04C.cbl} stores its
- * result into {@code PIC S9(09)V99} and carries no {@code ROUNDED} phrase — and no
- * statement anywhere in that program does — so the reference truncates toward zero.
- * That one-cent difference is a registered behavioural divergence rather than a
- * second rounding mode, and it is recorded as {@code C-ROUNDING} beside the other
- * intentional divergences; a package that contradicted the contract would not be
- * auditable, whereas a registered divergence is.
+ * <p>WHY this path takes the accrual rounding mode and not the general one.
+ * Assumptions: the mode is a property of the operation, not of the caller. The
+ * accrual paragraph in {@code app/cbl/CBACT04C.cbl} stores its result into
+ * {@code PIC S9(09)V99} and carries no {@code ROUNDED} phrase — and no statement
+ * anywhere in that program does — so the reference discards the surplus digits, which
+ * is truncation toward zero. This method reduces the same way, through
+ * {@code Money.BASELINE_INTEREST_ROUNDING}. Every other reduction to cents in this
+ * migration is scale 2 with {@code RoundingMode.HALF_UP}, through
+ * {@code Money.GENERAL_ROUNDING}, and those operations have no reference statement to
+ * be faithful to. Neither mode is reachable from a signature, so no call site selects
+ * between them.
  *
  * @param categoryBalance the category balance to accrue against; never {@code null}
  * @param annualRatePercent the annual disclosure-group rate as a percentage
- * @return the monthly interest, scaled to two decimal places, half-up
+ * @return the monthly interest, scaled to two decimal places, truncated toward zero
  * @throws IllegalArgumentException if either argument is negative
  */
 public Money monthlyInterest(Money categoryBalance, BigDecimal annualRatePercent) {
@@ -555,7 +568,15 @@ rule this document relies on is set to `error`, and even a warning would fail
 the run. Exactly ONE `jsdoc/*` entry is deliberately set to `off` —
 `jsdoc/no-types`, and only so that the `{Type}` tags the three `require-*-type`
 rules oblige are admitted at all, as the section above records. It relaxes no
-element of Rule 1. Two `linterOptions` complete the gate: `noInlineConfig` is
+element of Rule 1. The third of the three subjects Rule 1 names — the module entry
+point — is decided by `jsdoc/require-file-overview`, which requires exactly one
+whole-file `@file` overview, preceded by nothing but comments, in every `.ts`, `.tsx`
+and `.js` file the configuration governs. Refactoring Rationale: that rule was for a
+time deliberately left `off` and this paragraph, along with the enforcement summary,
+described the clause as a review obligation; it was switched on once every module in
+the package carried the tag, so the rule now reports nothing on the landed tree and
+binds every module authored after it. Two `linterOptions` complete the gate:
+`noInlineConfig` is
 `true`, so an `/* eslint-disable */` comment in a source file is ignored rather
 than honoured, and `reportUnusedDisableDirectives` is `error`, so such a comment
 cannot survive a run looking load-bearing. Every prohibited shape this paragraph
@@ -1084,12 +1105,12 @@ decides whether prose is true.
 | Language | Required form | Machine-checkable subset | Human-review obligation | Status |
 |---|---|---|---|---|
 | Java | Javadoc on every class, every method at every visibility, every module entry point; `@param`, `@return`, `@throws` | presence at **every** visibility including private, with the default `Override` exemption cleared; at-clause coverage and non-empty bodies at all visibilities — `config/checkstyle/checkstyle.xml` + `config/checkstyle/suppressions.xml`, bound to the Maven `validate` phase in `services/pom.xml` and covering test sources | accuracy of the prose; `WHY` comments present, specific and on the non-obvious line | **live** locally and in `.github/workflows/services-ci.yml` |
-| TypeScript | JSDoc/TSDoc on every function, class and module entry point, exported or not; `@param`, `@returns`, `@throws` | docstring presence and tag coverage on the selected declaration contexts, including function and arrow **expressions** in every position — `eslint-plugin-jsdoc` rules in `ui/eslint.config.js`, run at `--max-warnings=0` | accuracy and `WHY` quality; keeping the rule contexts un-narrowed and free of suppression comments | **live** through `npm run lint` and `.github/workflows/ui-ci.yml` |
-| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only, in two halves: formatting everywhere plus presence on **public** declarations — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml`; presence at **every** visibility and **every** nesting depth — `data-migration/tests/test_docstring_gate.py` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature, and a presence walker cannot judge content), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
+| TypeScript | JSDoc/TSDoc on every function, class and module entry point, exported or not; `@param`, `@returns`, `@throws` | docstring presence and tag coverage on the selected declaration contexts, including function and arrow **expressions** in every position, **and the module entry point itself** — a whole-file `@file` overview that heads the file and appears once, decided by `jsdoc/require-file-overview`; all in `ui/eslint.config.js`, run at `--max-warnings=0`, with each clause pinned by a probe in `ui/documentationGate.test.ts` | accuracy and `WHY` quality; keeping the rule contexts un-narrowed and free of suppression comments | **live** through `npm run lint` and `.github/workflows/ui-ci.yml` |
+| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting, plus **one** completeness clause, in three halves: formatting everywhere plus presence on **public** declarations — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml`; presence at **every** visibility and **every** nesting depth — `data-migration/tests/test_docstring_gate.py`; and, in that same gate, that every function under `data-migration/src/**` states its return contract as a `Returns` or a `Yields` section | **Args and Raises completeness**, and `Returns` completeness for the suite's own test functions, which the return-contract clause deliberately does not reach (no `D` rule checks a docstring against a signature); accuracy; `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
 | HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the prose in all sixteen module READMEs, both environment READMEs, and the bootstrap README | **live** through TFLint and terraform-docs checks in `.github/workflows/infra-ci.yml` |
 | SQL | header block, why-comment per non-obvious constraint or index | **none** | the whole obligation | review only |
 | Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job of `services-ci.yml` under a count assertion, and all **ten** committed Dockerfiles, the eight service images plus `ui/Dockerfile` and `data-migration/Dockerfile`, are built by `.github/workflows/deploy.yml`, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for all ten Dockerfiles — the eight service images on every pull request through `services-ci.yml`, and all ten at deploy time through `deploy.yml` |
-| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none for the documentation semantics.** GitHub itself rejects a syntactically invalid workflow at dispatch, and a mistyped `uses:` reference fails the step that runs it — but neither is a gate this repository configures, and NO linter, action-pin checker or policy scanner runs over `.github/**` (measured: no `actionlint`, `zizmor`, `ratchet` or equivalent appears anywhere under `.github/`) | the header and every rationale; least-privilege review of each `permissions` block; and confirming by inspection that every `uses:` carries a 40-character commit SHA rather than a moving tag | review only — the four migration workflows exist and each carries the required header, `permissions` block and SHA pins, but nothing mechanically enforces that they keep doing so |
+| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none for the YAML's own documentation semantics.** GitHub rejects a syntactically invalid workflow at dispatch and a mistyped `uses:` fails the step that runs it, but neither is a gate this repository configures, and no linter, action-pin checker or policy scanner reads `.github/**` as YAML (measured: no `actionlint`, `zizmor`, `ratchet` or equivalent appears anywhere under `.github/`). What **is** gated is the Python embedded in `infra-ci.yml`: its own "Verify the workflow's embedded Python" step extracts every heredoc block and applies Ruff's `D` family plus a check that each module and function docstring names the elements Rule 1 enumerates, asserting the block count so a new block cannot be skipped silently | the header and every rationale; least-privilege review of each `permissions` block; and confirming by inspection that every `uses:` carries a 40-character commit SHA rather than a moving tag | **mixed** — the embedded Python in `infra-ci.yml` is gated on every run of that workflow; the four workflows' own headers, `permissions` blocks and SHA pins are review only |
 
 **What the gates in that table do NOT check.** Assumptions: every gate above is a
 presence-and-shape check, and none of them reads prose. Specifically:

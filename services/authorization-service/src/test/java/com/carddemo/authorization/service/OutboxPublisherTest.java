@@ -1,5 +1,30 @@
 package com.carddemo.authorization.service;
 
+import com.carddemo.authorization.domain.AuthReplyOutbox;
+import com.carddemo.authorization.repository.OutboxRepository;
+import com.carddemo.common.codec.CsvAuthCodec;
+import com.carddemo.common.money.Money;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -15,29 +40,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-
-import com.carddemo.authorization.domain.AuthReplyOutbox;
-import com.carddemo.authorization.repository.OutboxRepository;
-import com.carddemo.common.codec.CsvAuthCodec;
-import com.carddemo.common.money.Money;
-import com.carddemo.common.security.OpaqueIdentifier;
-import java.lang.reflect.Field;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.List;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import software.amazon.awssdk.awscore.exception.AwsServiceException;
-import software.amazon.awssdk.core.exception.SdkClientException;
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
-import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
 /**
  * Pins what the outbox publisher refuses to be CONSTRUCTED with, and the two ordering and retention
@@ -91,6 +93,12 @@ class OutboxPublisherTest {
      */
     private static final int VALID_RETENTION_DAYS = 7;
 
+    /** The per-pass row budget the cases configure, matching the deployment default. */
+    private static final int VALID_MAX_ROWS_PER_DRAIN = 500;
+
+    /** The attempt ceiling the cases configure, matching the deployment default. */
+    private static final int VALID_MAX_ATTEMPTS = 10;
+
     /** The instant the publisher's clock is fixed at. */
     private static final Instant FIXED_INSTANT = Instant.parse("2026-08-05T10:45:30.123Z");
 
@@ -117,17 +125,6 @@ class OutboxPublisherTest {
     /** The acquirer's transaction identifier of the second reply for the same card. */
     private static final String SECOND_TRANSACTION_ID = "TX0000000000002";
 
-    /**
-     * The tokeniser the queue identities on the rows under test are derived with.
-     *
-     * <p>Assumptions: test-only key material at the tokeniser's minimum length, and a fixed pattern
-     * rather than a random one so that a token asserted here is reproducible from the source alone. The
-     * production key arrives from the secret store through {@code config/MessagingIdentityConfig.java}.
-     * </p>
-     */
-    private static final OpaqueIdentifier TOKENISER = new OpaqueIdentifier(
-            "carddemo-authorization-test-key!".repeat(2).getBytes(StandardCharsets.UTF_8));
-
     /** The outbox repository mock. */
     private OutboxRepository outbox;
 
@@ -141,6 +138,11 @@ class OutboxPublisherTest {
     private OutboxPublisher publisher;
 
     /**
+     * Every row a case has built, so the publisher's outcome re-read can be answered by identity.
+     */
+    private List<AuthReplyOutbox> claimed;
+
+    /**
      * Builds fresh collaborators for each case.
      */
     @BeforeEach
@@ -148,6 +150,20 @@ class OutboxPublisherTest {
         this.outbox = mock(OutboxRepository.class);
         this.sqs = mock(SqsClient.class);
         this.clock = Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
+        this.claimed = new ArrayList<>();
+        // WHY : Assumptions: the re-read the publisher performs before it writes an outcome is answered
+        //       from the rows this case itself built, keyed by identity. That is what makes the split
+        //       between the claim, the send and the OUTCOME observable in a unit test: the publisher no
+        //       longer mutates the instance it was handed, it re-reads the row inside a second short
+        //       transaction and writes there, so a case asserting on publication has to see the same
+        //       object come back. Alternatives Considered: stubbing findById to return the argument
+        //       wrapped in an Optional regardless of identity; rejected because it would answer a
+        //       lookup for a row this case never created, hiding a publisher that transitioned the
+        //       wrong identity.
+        when(this.outbox.findById(anyLong())).thenAnswer(invocation -> {
+            Long wanted = invocation.getArgument(0);
+            return this.claimed.stream().filter(row -> wanted.equals(row.getOutboxId())).findFirst();
+        });
         // WHY : Assumptions: the shared publisher is CONSTRUCTED here but no collaborator is stubbed here.
         //       Construction touches neither mock -- it only validates its numbers -- so the cases that
         //       assert no interaction remain able to do so, and each behavioural case states its own
@@ -258,14 +274,17 @@ class OutboxPublisherTest {
     @DisplayName("an absent repository, queue client or clock is refused by name")
     void anAbsentCollaboratorIsRefusedByName() {
         NullPointerException noOutbox = assertThrows(NullPointerException.class,
-                () -> new OutboxPublisher(null, this.sqs, this.clock, VALID_BATCH_SIZE,
-                        VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS));
+                () -> new OutboxPublisher(null, this.sqs, this.clock, txManager(),
+                        VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS,
+                        VALID_MAX_ROWS_PER_DRAIN, VALID_MAX_ATTEMPTS));
         NullPointerException noSqs = assertThrows(NullPointerException.class,
-                () -> new OutboxPublisher(this.outbox, null, this.clock, VALID_BATCH_SIZE,
-                        VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS));
+                () -> new OutboxPublisher(this.outbox, null, this.clock, txManager(),
+                        VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS,
+                        VALID_MAX_ROWS_PER_DRAIN, VALID_MAX_ATTEMPTS));
         NullPointerException noClock = assertThrows(NullPointerException.class,
-                () -> new OutboxPublisher(this.outbox, this.sqs, null, VALID_BATCH_SIZE,
-                        VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS));
+                () -> new OutboxPublisher(this.outbox, this.sqs, null, txManager(),
+                        VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS,
+                        VALID_MAX_ROWS_PER_DRAIN, VALID_MAX_ATTEMPTS));
 
         assertTrue(noOutbox.getMessage().contains("outbox"), "the refusal names the outbox repository");
         assertTrue(noSqs.getMessage().contains("sqs"), "the refusal names the queue client");
@@ -287,16 +306,28 @@ class OutboxPublisherTest {
     @DisplayName("a failed head blocks its own group and never sends the reply behind it")
     void aFailedHeadBlocksItsGroup() {
         AuthReplyOutbox head = rowFor(1L, FIRST_TRANSACTION_ID, null);
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(head));
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(head));
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenThrow(new IllegalStateException("queue unreachable"));
 
         assertThat(this.publisher.drain()).isZero();
 
-        verify(this.outbox, never()).claimGroupFollowers(anyString(), anyLong(), anyInt());
+        verify(this.outbox, never()).claimGroupFollowers(anyString(), anyLong(), anyInt(), any(), any(), anyInt());
         verify(this.sqs).sendMessage(any(SendMessageRequest.class));
         assertThat(head.getPublishedAt()).isNull();
-        assertThat(head.getAttempts()).isEqualTo((short) 1);
+        // WHY : Refactoring Rationale: the failure is asserted through the DIAGNOSTIC AND THE BACKOFF
+        //       rather than through the attempt counter, and the change is the visible face of the
+        //       single-increment correction. The counter is advanced by the claiming STATEMENT and by
+        //       nothing else, so over a mocked repository there is no increment for this case to
+        //       observe -- and that is the point: the version this replaces asserted one here only
+        //       because recording a failure incremented in Java as well, which meant a real failed
+        //       publication counted two and a sixteen-bit column reached its signed limit in half the
+        //       expected time before wrapping negative. The claim's own increment is asserted against a
+        //       real database in OutboxRepositoryIT, which is the only place it can be.
+        assertThat(head.getLastError()).isEqualTo(IllegalStateException.class.getName());
+        assertThat(head.getNextAttemptAt())
+                .as("a failed reply is deferred to a backoff rather than left immediately eligible")
+                .isAfter(LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
     }
 
     /**
@@ -316,10 +347,10 @@ class OutboxPublisherTest {
         AuthReplyOutbox follower = rowFor(2L, SECOND_TRANSACTION_ID, null);
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("m1").build());
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(head));
-        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(1L), anyInt()))
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(head));
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupId()), eq(1L), anyInt(), any(), any(), anyInt()))
                 .thenReturn(List.of(follower));
-        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(2L), anyInt()))
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupId()), eq(2L), anyInt(), any(), any(), anyInt()))
                 .thenReturn(List.of());
 
         assertThat(this.publisher.drain()).isEqualTo(2);
@@ -353,10 +384,10 @@ class OutboxPublisherTest {
         AuthReplyOutbox follower = rowRoutedTo(2L, SECOND_TRANSACTION_ID, OTHER_REPLY_QUEUE);
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("m1").build());
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(head));
-        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(1L), anyInt()))
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(head));
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupId()), eq(1L), anyInt(), any(), any(), anyInt()))
                 .thenReturn(List.of(follower));
-        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(2L), anyInt()))
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupId()), eq(2L), anyInt(), any(), any(), anyInt()))
                 .thenReturn(List.of());
 
         assertThat(this.publisher.drain()).isEqualTo(2);
@@ -389,8 +420,8 @@ class OutboxPublisherTest {
         AuthReplyOutbox row = rowFor(1L, FIRST_TRANSACTION_ID, null);
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("m1").build());
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(row));
-        when(this.outbox.claimGroupFollowers(anyString(), anyLong(), anyInt()))
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(row));
+        when(this.outbox.claimGroupFollowers(anyString(), anyLong(), anyInt(), any(), any(), anyInt()))
                 .thenReturn(List.of());
 
         assertThat(this.publisher.drain()).isEqualTo(1);
@@ -414,12 +445,12 @@ class OutboxPublisherTest {
     @Test
     @DisplayName("retention sweeps published replies older than the configured window")
     void retentionSweepsPublishedRepliesOnly() {
-        when(this.outbox.deletePublishedBefore(any(LocalDateTime.class))).thenReturn(3);
+        when(this.outbox.deletePublishedBefore(any(LocalDateTime.class), anyInt())).thenReturn(3);
 
         assertThat(this.publisher.purgePublished()).isEqualTo(3);
 
         ArgumentCaptor<LocalDateTime> cutoff = ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(this.outbox).deletePublishedBefore(cutoff.capture());
+        verify(this.outbox).deletePublishedBefore(cutoff.capture(), anyInt());
         assertThat(cutoff.getValue()).isEqualTo(LocalDateTime
                 .ofInstant(FIXED_INSTANT, ZoneOffset.UTC).minusDays(VALID_RETENTION_DAYS));
     }
@@ -447,7 +478,7 @@ class OutboxPublisherTest {
         LocalDateTime alreadyPast =
                 LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC).minusSeconds(1L);
         AuthReplyOutbox stale = rowFor(1L, FIRST_TRANSACTION_ID, alreadyPast);
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(stale));
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(stale));
 
         assertThat(this.publisher.drain()).isZero();
 
@@ -477,7 +508,7 @@ class OutboxPublisherTest {
     @DisplayName("a transient transport fault is reattempted once and a 4xx refusal is not")
     void onlyATransientTransportFaultIsReattempted() {
         AuthReplyOutbox recovering = rowFor(1L, FIRST_TRANSACTION_ID, null);
-        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(recovering));
+        when(this.outbox.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(recovering));
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenThrow(SdkClientException.create("connection reset"))
                 .thenReturn(SendMessageResponse.builder().build());
@@ -493,9 +524,10 @@ class OutboxPublisherTest {
                 AwsServiceException.builder().message("not authorized").statusCode(403).build());
         OutboxRepository singleRow = mock(OutboxRepository.class);
         AuthReplyOutbox refused = rowFor(2L, SECOND_TRANSACTION_ID, null);
-        when(singleRow.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(refused));
-        OutboxPublisher strict = new OutboxPublisher(singleRow, refusing, this.clock,
-                VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS);
+        when(singleRow.claimGroupHeads(eq(VALID_BATCH_SIZE), any(), any(), anyInt())).thenReturn(List.of(refused));
+        OutboxPublisher strict = new OutboxPublisher(singleRow, refusing, this.clock, txManager(),
+                VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS,
+                VALID_MAX_ROWS_PER_DRAIN, VALID_MAX_ATTEMPTS);
 
         assertThat(strict.drain()).isZero();
 
@@ -517,12 +549,32 @@ class OutboxPublisherTest {
     @DisplayName("a non-positive retention window is refused at construction")
     void aNonPositiveRetentionWindowIsRefused() {
         IllegalArgumentException zero = assertThrows(IllegalArgumentException.class,
-                () -> new OutboxPublisher(this.outbox, this.sqs, this.clock, VALID_BATCH_SIZE,
-                        VALID_POLL_INTERVAL_MILLIS, 0));
+                () -> new OutboxPublisher(this.outbox, this.sqs, this.clock, txManager(),
+                        VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, 0,
+                        VALID_MAX_ROWS_PER_DRAIN, VALID_MAX_ATTEMPTS));
 
         assertTrue(zero.getMessage().contains("carddemo.messaging.outbox-retention-days"),
                 "the refusal names the property an operator has to correct");
         verifyNoInteractions(this.outbox, this.sqs);
+    }
+
+    /**
+     * Builds a transaction manager whose transactions begin and commit without a database.
+     *
+     * <p>Assumptions: a plain mock is sufficient and is deliberately not a callback-running stub. The
+     * publisher opens its units of work through a template built over this manager, and a template asks
+     * the manager for a transaction, runs the callback, then commits -- so a mock returning a mock status
+     * executes every callback exactly once and records that a transaction was demanded. Alternatives
+     * Considered: a stub that runs callbacks without asking for a transaction at all; rejected because it
+     * would let a publisher that stopped opening a transaction around its writes still pass, and where
+     * those boundaries fall is the substance of this class's restructuring.</p>
+     *
+     * @return a transaction manager that begins and commits without a database
+     */
+    private static PlatformTransactionManager txManager() {
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        when(manager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+        return manager;
     }
 
     /**
@@ -534,12 +586,18 @@ class OutboxPublisherTest {
      * @return the publisher, when every number was acceptable
      */
     private OutboxPublisher publisherWith(int batchSize, long pollIntervalMillis) {
-        return new OutboxPublisher(this.outbox, this.sqs, this.clock, batchSize, pollIntervalMillis,
-                VALID_RETENTION_DAYS);
+        return new OutboxPublisher(this.outbox, this.sqs, this.clock, txManager(), batchSize,
+                pollIntervalMillis, VALID_RETENTION_DAYS, VALID_MAX_ROWS_PER_DRAIN,
+                VALID_MAX_ATTEMPTS);
     }
 
     /**
-     * Builds one persistent-shaped outbox row carrying tokenised queue identities.
+     * Builds one persistent-shaped outbox row carrying the specified queue identities.
+     *
+     * <p>Assumptions: the two identities are the card number and the transaction identifier verbatim,
+     * which is what specification &sect;0.4.1.8 freezes, so two rows built by this helper for one card
+     * share an ordering group and differ in deduplication identity -- the exact shape the publisher's
+     * group-then-follower claim walks.</p>
      *
      * <p>Assumptions: the identity column is assigned reflectively because it is generated by the
      * database and the entity exposes no setter for it -- which is correct for production and leaves a
@@ -555,19 +613,20 @@ class OutboxPublisherTest {
         CsvAuthCodec.AuthReply reply = new CsvAuthCodec.AuthReply(CARD_NUM, transactionId, "104530",
                 "00", "0000", Money.of("100.99"));
         AuthReplyOutbox row = new AuthReplyOutbox(REPLY_QUEUE, "corr-1",
-                reply.orderGroup(TOKENISER), reply.deduplicationKey(TOKENISER),
+                reply.cardNum(), reply.transactionId(),
                 CsvAuthCodec.encodeReply(reply), expiresAt,
                 LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
         assignIdentity(row, outboxId);
+        this.claimed.add(row);
         return row;
     }
 
     /**
      * Builds a row of the SAME order group as {@link #rowFor} but naming a different destination.
      *
-     * <p>Assumptions: the order-group token is derived from the card number, which this helper keeps
-     * identical to {@link #rowFor}'s, so the row it returns is claimed as a follower of that group. Only
-     * the destination differs, which is what isolates routing as the single variable under test.</p>
+     * <p>Assumptions: the ordering group IS the card number, which this helper keeps identical to
+     * {@link #rowFor}'s, so the row it returns is claimed as a follower of that group. Only the
+     * destination differs, which is what isolates routing as the single variable under test.</p>
      *
      * @param outboxId the identity to assign
      * @param transactionId the acquirer's transaction identifier this reply answers
@@ -578,10 +637,11 @@ class OutboxPublisherTest {
         CsvAuthCodec.AuthReply reply = new CsvAuthCodec.AuthReply(CARD_NUM, transactionId, "104530",
                 "00", "0000", Money.of("100.99"));
         AuthReplyOutbox row = new AuthReplyOutbox(replyQueueUrl, "corr-1",
-                reply.orderGroup(TOKENISER), reply.deduplicationKey(TOKENISER),
+                reply.cardNum(), reply.transactionId(),
                 CsvAuthCodec.encodeReply(reply), null,
                 LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
         assignIdentity(row, outboxId);
+        this.claimed.add(row);
         return row;
     }
 

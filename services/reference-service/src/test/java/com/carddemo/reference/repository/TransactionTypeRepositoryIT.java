@@ -1,6 +1,8 @@
 package com.carddemo.reference.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.carddemo.reference.domain.TransactionType;
 import java.util.List;
@@ -12,10 +14,12 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
@@ -39,6 +43,30 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
     /** The repository under test. */
     @Autowired
     private TransactionTypeRepository types;
+
+    /** Supplies the transaction the insert statement requires, one per write. */
+    // WHY : Refactoring Rationale: the insert cases below run through this template rather than calling
+    //       the repository directly, and the reason was measured rather than anticipated. A derived or
+    //       declared modifying statement carries no transaction of its own -- only the inherited save,
+    //       delete and flush members are annotated by the framework's base implementation -- so calling
+    //       insertType outside a transaction raised InvalidDataAccessApiUsageException reporting "No
+    //       active transaction for update or delete query" and never reached the constraint at all. The
+    //       template supplies the boundary that TransactionTypeService.create supplies in production,
+    //       so what is exercised here is the statement AS THE SERVICE ISSUES IT.
+    // WHY : Alternatives Considered: annotating this class @Transactional and letting the framework roll
+    //       each case back. Rejected for the same reason the auth context's identity suite records: a
+    //       UNIQUE constraint is evaluated when its statement executes, and one ambient transaction
+    //       spanning a whole case makes the point at which a refusal arrives depend on when the context
+    //       happens to flush. Committing each write on its own makes each refusal attributable to the
+    //       statement that caused it.
+    // WHY : Alternatives Considered: declaring insertType @Transactional on the repository interface so
+    //       no caller has to supply a boundary. Rejected because it would let the insert commit on its
+    //       own when a service method that already owns a transaction calls it -- exactly the case the
+    //       create path is, where the row and the identity-provider compensation must share one unit of
+    //       work -- and because the sibling auth repository's insert is declared the same way, so the
+    //       two contexts would then disagree about who owns the boundary.
+    @Autowired
+    private TransactionTemplate commit;
 
     /**
      * Confirms the seed migration loads exactly the seven types the window is sized for.
@@ -153,6 +181,127 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
                 .as("a filter matching nothing is a field refusal upstream, not an empty page")
                 .isZero();
     }
+
+    /**
+     * Confirms the unique constraint refuses a duplicate code at the statement rather than at commit.
+     *
+     * <p>Purpose: this is the timing the service's duplicate classification depends on. The service
+     * catches {@code DataIntegrityViolationException} around its insert so it can read the SQLSTATE and
+     * answer the referential conflict the contract publishes. That catch can only run if the INSERT is
+     * issued inside it -- a plain {@code save} registers the row with the persistence context and the
+     * statement goes out when the context is flushed, which for a transactional method is at commit,
+     * after the catch has returned.</p>
+     *
+     * <p>Assumptions: {@code insertType} is what the service now calls, so that is what is exercised
+     * here. A double could not establish this: whether the violation arrives from this call or from a
+     * later commit is the engine's and the persistence provider's behaviour, and a mock would raise
+     * whenever it was told to. The sibling case below records WHY a save is not what is called, which is
+     * a measured property of this entity rather than a preference.</p>
+     *
+     * <p>Assumptions: a SEEDED code is reused rather than one inserted by this case, so the row the
+     * constraint collides with is committed and outside this test's own unit of work.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a duplicate code is refused by the flush and not deferred to commit")
+    void aDuplicateCodeIsRefusedByTheFlush() {
+        Optional<TransactionType> seeded =
+                this.types.findAllByOrderByTypeCdAsc(Limit.of(1)).stream().findFirst();
+        assertThat(seeded).as("the seed migration must have loaded a row to collide with").isPresent();
+
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(status ->
+                this.types.insertType(seeded.get().getTypeCd(), "Duplicate of a seeded code")))
+                .as("the constraint must refuse the insert the service issues")
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    /**
+     * Confirms that a save CANNOT insert this entity, which is why the explicit insert exists.
+     *
+     * <p>Purpose: this is the measurement that produced {@code insertType}, kept as a case so the
+     * reasoning cannot be undone by someone "simplifying" the service back to a save. The entity carries
+     * an assigned {@code String} identifier and a primitive {@code long} version, so the framework's
+     * newness test can find neither a null version nor a null identifier and routes the save through
+     * {@code merge} -- which loads the row that identifier names and writes an UPDATE against it.</p>
+     *
+     * <p>Assumptions: what is asserted is that the save does NOT raise the integrity violation the
+     * service classifies. Whether it raises an optimistic-locking failure or silently updates depends on
+     * whether the stored version equals the zero on the new instance, and both outcomes are wrong in the
+     * same way -- neither reaches the duplicate classification. Asserting the absence of the integrity
+     * violation states exactly the property that matters and does not depend on which of the two the
+     * seeded row's version happens to produce.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a save cannot insert this entity, so the duplicate never reaches the integrity branch")
+    void aSaveCannotInsertThisEntity() {
+        Optional<TransactionType> seeded =
+                this.types.findAllByOrderByTypeCdAsc(Limit.of(1)).stream().findFirst();
+        assertThat(seeded).isPresent();
+
+        TransactionType duplicate =
+                new TransactionType(seeded.get().getTypeCd(), "Merged rather than inserted");
+
+        assertThat(catchThrowableOfType(DataIntegrityViolationException.class,
+                () -> this.types.saveAndFlush(duplicate)))
+                .as("a save reaches merge, so the duplicate does not arrive as an integrity violation")
+                .isNull();
+    }
+
+    /**
+     * Confirms the state the service classifies on is the state the engine actually reports.
+     *
+     * <p>Purpose: the service reads the SQLSTATE out of the violation's cause chain and branches on
+     * {@code 23505} to answer the duplicate as a referential conflict. The literal it compares against is
+     * only correct if this engine reports that state for this constraint, and nothing in the codebase
+     * establishes that except a real violation.</p>
+     *
+     * <p>Assumptions: the state is read by walking the cause chain for a {@link java.sql.SQLException},
+     * which is how the service reads it, rather than by matching a provider-specific exception subclass.
+     * Asserting it the same way the production code reads it is what makes this case evidence for that
+     * code and not for a different mechanism.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the engine reports SQLSTATE 23505 for the duplicate the service classifies")
+    void theEngineReportsTheClassifiedSqlState() {
+        Optional<TransactionType> seeded =
+                this.types.findAllByOrderByTypeCdAsc(Limit.of(1)).stream().findFirst();
+        assertThat(seeded).isPresent();
+
+        DataIntegrityViolationException refusal = catchThrowableOfType(
+                DataIntegrityViolationException.class,
+                () -> this.commit.executeWithoutResult(status ->
+                        this.types.insertType(seeded.get().getTypeCd(), "Second insert")));
+
+        assertThat(refusal).isNotNull();
+        assertThat(sqlStateOf(refusal))
+                .as("the state the service branches on when it answers a duplicate create")
+                .isEqualTo("23505");
+    }
+
+    /**
+     * Reads the SQLSTATE out of a violation the way the service under test reads it.
+     *
+     * @param failure the violation the provider raised; must not be {@code null}
+     * @return the first non-blank SQLSTATE found by walking the cause chain, or {@code null} when the
+     *     chain reports none
+     */
+    private static String sqlStateOf(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof java.sql.SQLException reported
+                    && reported.getSQLState() != null
+                    && !reported.getSQLState().isBlank()) {
+                return reported.getSQLState();
+            }
+            current = current.getCause();
+        }
+        return null;
+    }
 }
 
 /**
@@ -160,15 +309,15 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
  *
  * <p>Assumptions: this is declared as a second, package-private, top-level type in this file rather than
  * as a file of its own, exactly as {@code package-info.java} in this package rules. A separate file would
- * take the package's closed set from seven compilation units to eight and break the property the sibling
+ * take the package's closed set from eight compilation units to nine and break the property the sibling
  * test packages of this module rely on when they state their own inventories. A second top-level type in
  * one file is legal Java -- the restriction is one PUBLIC top-level type per file -- and it passes the
  * audit because {@code config/checkstyle/checkstyle.xml} configures neither the one-top-level-type module
  * nor the outer-type-filename module.
  *
  * <p>Assumptions: the container field is {@code static} on this base, so ONE engine is started for the
- * whole package rather than one per test class. Six containers would multiply the slowest part of the
- * build by six and would additionally run Flyway six times over identical migrations.
+ * whole package rather than one per test class. Seven containers would multiply the slowest part of the
+ * build by seven and would additionally run Flyway seven times over identical migrations.
  *
  * <p>Trade-offs: the base type is findable only by opening the class that hosts it, which is the cost
  * accepted for the closed-set property above, and it is why the hosting file is named in the package

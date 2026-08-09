@@ -5,9 +5,16 @@
 # Purpose:
 #   The hash-locked transitive closure of everything `carddemo_migration` imports
 #   WHEN IT RUNS, and nothing else. This is the set installed into the container
-#   image the batch orchestrator invokes: nine distributions, each pinned to one
+#   image the batch orchestrator invokes: twelve distributions, each pinned to one
 #   version and verified against the sha256 of every artifact PyPI publishes for
 #   that version.
+#
+#   Refactoring Rationale: this figure read nine while the file listed twelve. The
+#   three that arrived after it was written -- `cryptography` and its two required
+#   dependencies -- are the ones that let the loader seal the three ciphertext
+#   columns, so a count stated here and contradicted below would understate exactly
+#   the addition a reviewer would most want to find. Re-measure with
+#   `grep -cE '^[a-zA-Z][a-zA-Z0-9._-]*==' requirements.txt` before editing it.
 #
 #   The ETL decodes the eleven fixed-width record layouts declared by the COBOL
 #   copybooks (USRSEC 80, ACCTDATA 300, CARDDATA 150, CUSTDATA 500, CARDXREF 50,
@@ -199,6 +206,32 @@ botocore==1.43.50 \
     --hash=sha256:4a57a1e0dd4a8be855c29183fc0e029c18e9ec84cd4ac172869f3e800f972528 \
     --hash=sha256:7b07c423c44b1ab3815af103f11fa28ea317e28dda1335718a02ecde371a25e9
 
+# Alternatives Considered: this is the one distribution here that is NOT pure
+# Python, and three alternatives to adding it were evaluated before it was. The ETL
+# has to write the ciphertext envelopes `account.customers.ssn_encrypted`,
+# `account.customers.govt_issued_id_encrypted` and `card.cards.cvv_encrypted` hold,
+# in exactly the byte framing the owning Java service parses -- otherwise those
+# three columns cannot be populated by a migration at all, which is the state the
+# loader was in before. (1) Calling `kms:Encrypt` directly, which needs no local
+# cipher: rejected because it produces a KMS ciphertext blob, and both Java classes
+# parse a framing whose data key is WRAPPED INSIDE the value, so every column would
+# store well-formed bytes that are permanently unreadable. (2) Having the account
+# and card services encipher their own values through an internal endpoint:
+# rejected because it makes a bulk data load depend on two running services and
+# would require a write endpoint taking a cleartext national identifier. (3)
+# Implementing AES-GCM in this package: not a trade a financial migration is
+# entitled to make.
+# Trade-offs: the accepted cost is that this closure is no longer complete for
+# every platform. The hash below is the cp311-abi3 manylinux_2_34_x86_64 wheel --
+# the artifact CPython 3.13 on the pinned python:3.13.14-slim-trixie base installs
+# -- so an install on a different platform fails with a hash mismatch rather than
+# silently resolving a different artifact. That is the correct failure: it says the
+# platform is not the reference platform, which is exactly what has changed.
+# Version-matched to tests/requirements-test.txt line 101, so the ETL and the
+# harness that validates it run identical cipher code.
+cryptography==49.0.0 \
+    --hash=sha256:cbc77da8c523d5abd028635ba850a6966fcee2c82e2bf65a41d1d8afe0f98be9
+
 # Assumptions: this distribution is imported PURELY for its codec-registration
 # side effect. It exposes nothing the ETL calls, so no symbol from it appears
 # anywhere in src/carddemo_migration, and both a linter and a person tidying
@@ -268,6 +301,28 @@ psycopg==3.3.4 \
 #       desired behaviour: it turns a dependency-graph change into a reviewed edit
 #       of this file.
 # -----------------------------------------------------------------------------
+
+# Assumptions: required by cryptography on CPython -- its own metadata declares
+# `cffi>=2.0.0 ; platform_python_implementation != "PyPy"` -- and named explicitly
+# for the same reason botocore is: left unnamed, the resolver stays free to pair a
+# reviewed cryptography with an unreviewed cffi. This is the SECOND platform-tagged
+# member of the closure; the hash below is the cp313 manylinux2014_x86_64 wheel, so
+# it is correct for the reference platform and for no other. Version-matched to
+# tests/requirements-test.txt line 90.
+# Assumptions: `typing-extensions`, cryptography's other conditional dependency, is
+# NOT here and must not be added. Its marker is `python_full_version < "3.11"` and
+# this manifest requires 3.13, so pinning it would install a distribution nothing
+# imports -- the same attack-surface objection this file already makes about
+# development tooling reaching the shipped image.
+cffi==2.1.0 \
+    --hash=sha256:799416bae98336e400981ff6e532d67d5c709cfb30afb79865a1315f94b0e224
+
+# Assumptions: required by cffi, which uses it to parse the C declarations it builds
+# its bindings from. Pure Python and platform-independent, unlike the two entries
+# above it -- so its single hash is complete for every platform. Version-matched to
+# tests/requirements-test.txt line 138.
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
 
 # Assumptions: required by botocore, which uses it to evaluate the query
 # expressions embedded in its own service models.

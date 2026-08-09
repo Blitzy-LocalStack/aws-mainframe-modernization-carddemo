@@ -47,11 +47,12 @@
 > rather than buried: **no Figma or other design source was supplied**, so the
 > Figma-to-token mapping a reader might look for here is **not applicable** — see
 > [§1](#1-there-is-no-figma-source--gap-g6). A second boundary is equally plain:
-> **this mapping is not verified by any test that renders it.** Individual claims
-> have been checked by hand in a browser against a throwaway harness, but there is
-> **no visual regression test, no accessibility audit and no conformance claim** of
-> any kind; see [§11](#11-caveats-and-boundaries) for exactly what was and was not
-> established that way.
+> **this mapping is not verified by any test that renders it.** **No screen has been
+> rendered in a browser**, no visual regression test has run, no accessibility audit
+> has been performed and no conformance level of any kind is claimed; what the
+> document *is* grounded in — measured baseline attributes and the pinned package's
+> own declarations — and what that does not establish are stated in full in
+> [§11](#11-caveats-and-boundaries).
 >
 > **Convention.** This document follows
 > [`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md),
@@ -936,22 +937,37 @@ because they are the contract the user-interface work is written against.
 
 ## 11. Caveats and boundaries
 
-- **What has and has not been rendered in a browser.** The mapping itself is
-  authored and statically reviewable. Separately, the four shell modules under
-  `ui/src/layout` have been mounted in a temporary throwaway harness and inspected
-  in a real headless browser, which is how three specific claims in this document
-  were checked rather than asserted: that the scope class carries the CSS custom
-  properties, that a consumer taking the reference form resolves to a real computed
-  value, and that the informational and primary roles now render as different
-  colours after the seed separation in [§4.2](#42-colour-and-attribute-mapping).
-  That is the whole of the claim. **No visual regression test exists, no
-  accessibility audit has been performed, and no conformance level of any kind is
-  claimed** — a harness rendered once and read by hand establishes that specific
-  values resolve, and nothing about whether a screen looks right, stays right
-  between revisions, or meets any standard. Assumptions: the distinction is drawn
-  narrowly on purpose, because "it was rendered in a browser" is the sentence most
-  easily mistaken for "it was tested in a browser", and the two would license very
-  different conclusions about how much of this document is verified.
+- **What has not been rendered.** **No screen has been rendered in a browser. The
+  mapping is authored and statically reviewable only. No visual regression test has
+  run, no accessibility audit has been performed, and no conformance level is
+  claimed.** Assumptions: every value in this document is derived from an artifact a
+  reader can open — the attribute frequencies from the seventeen mapsets under
+  `app/bms`, re-derivable by the commands in
+  [§4.4](#44-re-deriving-the-counts), and the token names from the pinned package's
+  own type declarations. That is real evidence about *derivation* and no evidence at
+  all about *appearance*, and the two are not interchangeable: a mapping can be
+  correct in every name and still look wrong on a screen nobody has looked at.
+- Refactoring Rationale: this boundary formerly claimed more than it could support,
+  and the withdrawn wording is quoted below rather than paraphrased so the record is
+  auditable and cannot itself be read as a claim. **WITHDRAWN:** an earlier revision
+  of this section said the four shell modules under `ui/src/layout` *"have been
+  mounted in a temporary throwaway harness and inspected in a real headless
+  browser"*, and rested three claims on that inspection — that the scope class
+  carries the CSS custom properties, that a consumer taking the reference form
+  resolves to a real computed value, and that the informational and primary roles
+  render as different colours after the seed separation in
+  [§4.2](#42-colour-and-attribute-mapping). **That sentence is withdrawn and nothing
+  in this document rests on it.** No such harness is part of this repository —
+  nothing under `ui/` reproduces it — so a reader could neither re-run it nor tell it
+  apart from a claim that had been verified, which is the whole property a boundary
+  statement is worth anything for. The three properties are design intentions of the
+  bridge described in [§10](#10-where-the-tokens-are-applied), asserted from the
+  token derivation and not from an observation.
+- Assumptions: the distinction is drawn narrowly on purpose, because "it was
+  rendered in a browser" is the sentence most easily mistaken for "it was tested in
+  a browser", and the two license very different conclusions about how much of this
+  document is verified. Stating the boundary as an absolute is what makes it
+  impossible to soften by degrees.
 - **Accessibility is treated as a fidelity requirement, not an addition.** The
   3270 original was operated entirely from the keyboard, so full keyboard
   operation in the target is a parity obligation inherited from the source rather

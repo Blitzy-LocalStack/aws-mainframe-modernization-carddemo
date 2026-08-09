@@ -50,7 +50,7 @@ class InternalServiceTokenTest {
     /**
      * The subject a minted token carries.
      */
-    private static final String SUBJECT = "carddemo-authorization-service";
+    private static final String SUBJECT = InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE;
 
     /**
      * Builds a minter over the fixed key and clock.
@@ -84,14 +84,14 @@ class InternalServiceTokenTest {
     void aMintedTokenCarriesEveryVerifiedClaim() throws Exception {
         SignedJWT token = parse(minter(Duration.ofMinutes(1)).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                InternalServiceToken.SCOPE_CARD_XREF_READ));
 
         assertThat(token.getJWTClaimsSet().getIssuer()).isEqualTo(InternalServiceToken.ISSUER);
         assertThat(token.getJWTClaimsSet().getSubject()).isEqualTo(SUBJECT);
         assertThat(token.getJWTClaimsSet().getAudience())
                 .containsExactly(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT);
         assertThat(token.getJWTClaimsSet().getStringClaim(InternalServiceToken.SCOPE_CLAIM))
-                .isEqualTo(InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                .isEqualTo(InternalServiceToken.SCOPE_CARD_XREF_READ);
         assertThat(token.getJWTClaimsSet().getIssueTime().toInstant()).isEqualTo(NOW);
         assertThat(token.getJWTClaimsSet().getExpirationTime().toInstant())
                 .isEqualTo(NOW.plus(Duration.ofMinutes(1)));
@@ -111,7 +111,7 @@ class InternalServiceTokenTest {
     void theSignatureIsOverTheSharedKey() throws Exception {
         JWSObject token = parse(minter(Duration.ofMinutes(1)).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                InternalServiceToken.SCOPE_CARD_XREF_READ));
 
         assertThat(token.verify(new MACVerifier(KEY))).isTrue();
         assertThat(token.verify(new MACVerifier(
@@ -132,7 +132,7 @@ class InternalServiceTokenTest {
     void theHeaderNamesThePinnedAlgorithm() throws Exception {
         SignedJWT token = parse(minter(Duration.ofMinutes(1)).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                InternalServiceToken.SCOPE_CARD_XREF_READ));
 
         assertThat(token.getHeader().getAlgorithm())
                 .isEqualTo(InternalServiceToken.SIGNING_ALGORITHM);
@@ -174,15 +174,99 @@ class InternalServiceTokenTest {
     }
 
     /**
-     * Verifies a blank subject is refused, because a callee identifies its caller by it.
+     * Verifies a subject outside the closed set is refused, blank included.
+     *
+     * <p>Refactoring Rationale: this case asserted only that a BLANK subject was refused, which was the whole
+     * of the old rule. The subject is now load-bearing in two further ways -- it identifies the signing key in
+     * the token header and it keys the table of scopes the caller may carry -- so any unrecognised value names
+     * a caller the verifying context holds no key for, and every token minted under it would be refused there.
+     * Both the blank form and a plausible-looking unknown form are asserted, because the second is the one a
+     * misconfiguration actually produces.</p>
      */
     @Test
-    @DisplayName("a blank subject is refused")
-    void aBlankSubjectIsRefused() {
+    @DisplayName("a subject outside the closed set is refused, blank or otherwise")
+    void aSubjectOutsideTheClosedSetIsRefused() {
         assertThatThrownBy(() -> new InternalServiceToken(KEY, "   ",
                 Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(1)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("subject");
+        assertThatThrownBy(() -> new InternalServiceToken(KEY, "carddemo-reporting-service",
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("carddemo-reporting-service");
+    }
+
+    /**
+     * Verifies the header names the signing key by the subject it belongs to.
+     *
+     * <p>Assumptions: this is the claim that makes per-caller keys work. Without a key identifier the verifier
+     * would have to try every key it holds, which admits a token signed by one caller under another caller's
+     * name -- so the header value is asserted to EQUAL the subject rather than merely to be present.</p>
+     *
+     * @throws Exception if the minted token cannot be parsed, which would itself be the defect
+     */
+    @Test
+    @DisplayName("the header identifies the signing key by the caller's own subject")
+    void theHeaderIdentifiesTheKeyBySubject() throws Exception {
+        SignedJWT token = parse(minter(Duration.ofMinutes(1)).mint(
+                InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_CARD_XREF_READ));
+
+        assertThat(token.getHeader().getKeyID()).isEqualTo(SUBJECT);
+        assertThat(token.getJWTClaimsSet().getSubject()).isEqualTo(token.getHeader().getKeyID());
+    }
+
+    /**
+     * Verifies a caller may not mint a scope its own subject is not permitted to carry.
+     *
+     * <p>Assumptions: the transaction context is the subject asserted against, because it is the one with a
+     * genuinely narrower entitlement: it reads no customer record, so the customer scope is withheld from it
+     * while the cross-reference and account scopes are not. Asserting the permitted scopes as well as the
+     * refused one is what stops the case passing on a table that permitted nothing at all.</p>
+     */
+    @Test
+    @DisplayName("a caller cannot mint a scope outside its own permitted set")
+    void aCallerCannotMintAScopeItIsNotPermittedToCarry() {
+        InternalServiceToken transactionMinter = new InternalServiceToken(KEY,
+                InternalServiceToken.SUBJECT_TRANSACTION_SERVICE,
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(1));
+
+        assertThat(InternalServiceToken.permittedScopes(
+                InternalServiceToken.SUBJECT_TRANSACTION_SERVICE))
+                .containsExactly(InternalServiceToken.SCOPE_ACCOUNT_READ,
+                        InternalServiceToken.SCOPE_CARD_XREF_READ);
+        assertThatThrownBy(() -> transactionMinter.mint(
+                InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_CUSTOMER_READ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(InternalServiceToken.SCOPE_CUSTOMER_READ);
+        assertThat(transactionMinter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_ACCOUNT_READ)).isNotBlank();
+    }
+
+    /**
+     * Verifies the shared table answers both questions a verifier asks and answers them consistently.
+     *
+     * <p>Assumptions: the unknown-subject case is asserted to permit NOTHING rather than to be absent from the
+     * table, because a verifier calls the predicate rather than inspecting the table -- so a predicate that
+     * defaulted an unknown subject to a permissive answer would admit a caller nobody declared.</p>
+     */
+    @Test
+    @DisplayName("the shared table names exactly two callers and permits nothing to any other")
+    void theSharedTableNamesExactlyTheKnownCallers() {
+        assertThat(InternalServiceToken.knownSubjects())
+                .containsExactly(InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE,
+                        InternalServiceToken.SUBJECT_TRANSACTION_SERVICE);
+        assertThat(InternalServiceToken.isKnownSubject("carddemo-reporting-service")).isFalse();
+        assertThat(InternalServiceToken.isKnownSubject(null)).isFalse();
+        assertThat(InternalServiceToken.permittedScopes("carddemo-reporting-service")).isEmpty();
+        assertThat(InternalServiceToken.permits("carddemo-reporting-service",
+                InternalServiceToken.SCOPE_CARD_XREF_READ)).isFalse();
+        assertThat(InternalServiceToken.permits(
+                InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE, null)).isFalse();
+        assertThat(InternalServiceToken.permits(
+                InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE,
+                InternalServiceToken.SCOPE_CUSTOMER_READ)).isTrue();
     }
 
     /**
@@ -204,7 +288,7 @@ class InternalServiceTokenTest {
         java.util.Arrays.fill(caller, (byte) 0);
 
         JWSObject token = parse(minter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                InternalServiceToken.SCOPE_CARD_XREF_READ));
         assertThat(token.verify(new MACVerifier(KEY)))
                 .as("clearing the caller's array must not have emptied the minter's key")
                 .isTrue();
@@ -244,8 +328,8 @@ class InternalServiceTokenTest {
         InternalServiceToken minter = minter(Duration.ofMinutes(1));
 
         assertThat(minter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ))
+                InternalServiceToken.SCOPE_CARD_XREF_READ))
                 .isEqualTo(minter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                        InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                        InternalServiceToken.SCOPE_CARD_XREF_READ));
     }
 }

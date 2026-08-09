@@ -251,6 +251,18 @@ class DateInquiryMessageListenerTest {
 
     /**
      * Verifies the reply declares its media type, replacing the reference program's string-format indicator.
+     *
+     * <p>Refactoring Rationale: the expected value was {@code text/plain} and is now {@code text/csv}. The
+     * migration maps {@code MQFMT-STRING} to exactly one content type across all three message flows --
+     * {@code docs/architecture/messaging-contracts.md} states it as a row of the descriptor table -- and the
+     * attribute's documented job is to discriminate a POSITIONAL payload from the additive JSON envelope that
+     * document reserves. A third value on one of three flows discriminates the flow instead of the encoding,
+     * so a consumer written to the documented rule would read this reply as neither form.</p>
+     *
+     * <p>Assumptions: the literal is asserted rather than read from the listener's own constant, and that is
+     * deliberate for this one value. Reading the constant would make the assertion tautological -- it would
+     * pass for any value the listener happened to hold, including the one that diverged from the contract --
+     * whereas the literal here is the contract's value and a change to the constant must fail against it.</p>
      */
     @Test
     @DisplayName("the reply declares its media type")
@@ -258,7 +270,37 @@ class DateInquiryMessageListenerTest {
         this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of()));
 
         assertThat(captureSend().messageAttributes().get("contentType").stringValue())
-                .isEqualTo("text/plain");
+                .isEqualTo("text/csv");
+    }
+
+    /**
+     * Verifies a sender-supplied reply destination is ignored entirely.
+     *
+     * <p>Purpose: this is the confused-deputy property, and it is the reason this consumer is the retained one.
+     * A withdrawn sibling consumer read a {@code replyToQueueUrl} attribute off the message and, if it began
+     * with a scheme it recognised, passed it straight to the queue client -- so any sender could have directed
+     * this service's output to a queue of the sender's choosing, using this service's own credentials. The
+     * baseline never did that: the reference program SAVES the request's reply-to at physical line 320 and then
+     * does not use it, putting instead to the handle opened from its statically assigned reply queue at
+     * physical line 210.</p>
+     *
+     * <p>Assumptions: the destination is asserted to be the CONFIGURED address rather than merely "not the
+     * attacker's". Asserting inequality would pass against a consumer that had sent the reply somewhere else
+     * again, and the property under test is that exactly one destination is possible.</p>
+     *
+     * <p>Assumptions: the attribute is spelled as the withdrawn consumer read it and the value is a well-formed
+     * {@code https} URL of the shape that consumer would have accepted, so a regression that reinstated the
+     * behaviour would be caught by this case rather than slipping past a value it would have rejected anyway.</p>
+     */
+    @Test
+    @DisplayName("a sender-supplied reply destination is ignored and the configured queue is used")
+    void aSenderSuppliedReplyDestinationIsIgnored() {
+        this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"),
+                Map.of("replyToQueueUrl", "https://sqs.test.invalid/queue/attacker-controlled")));
+
+        assertThat(captureSend().queueUrl())
+                .as("the reply must go to the configured queue and nowhere a sender can name")
+                .isEqualTo(REPLY_URL);
     }
 
     /**

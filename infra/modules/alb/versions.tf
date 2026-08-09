@@ -54,7 +54,8 @@ terraform {
     #   fixes and newly exposed attributes while refusing a major whose breaking
     #   changes would have to be absorbed everywhere at once, and it clears the
     #   `>= 5.81` floor another module needs (Aurora accepts a zero minimum
-    #   capacity only from that provider release onward). A single uniform
+    #   capacity from 5.80.0 onward and the auto-pause argument it then requires
+    #   from 5.81.0, so the pair floors at 5.81.0). A single uniform
     #   constraint keeps every module resolvable to one provider build rather
     #   than scattering per-module ranges that could disagree.
     aws = {

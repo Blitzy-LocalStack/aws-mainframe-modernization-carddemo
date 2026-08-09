@@ -89,23 +89,33 @@ import org.hibernate.annotations.Immutable;
  * transformation rule that makes the copybook normative also makes it a field with nothing to
  * project.
  *
- * <h2>Eleven members are projected; the relation withholds seven</h2>
+ * <h2>Twelve members are projected; the relation withholds six</h2>
  *
- * <p>Assumptions: the eighteen named fields of the record reach this type as eleven mapped members,
- * because the relation this type maps selects eleven columns. {@code reporting.v_customers}, declared
+ * <p>Assumptions: the eighteen named fields of the record reach this type as twelve mapped members,
+ * because the relation this type maps selects twelve columns. {@code reporting.v_customers}, declared
  * in {@code data-migration/sql/V1__reporting_views.sql}, selects the identifier, the three name parts,
- * the three address lines, the state code, the country code, the postal code and the date of birth,
- * and nothing else. The seven it does not select are the two identifier fields at L17 and L18, both
- * telephone numbers at L15 and L16, the transfer-account reference at L20, the cardholder indicator at
- * L21 and the credit score at L22.
+ * the three address lines, the state code, the country code, the postal code, the date of birth and
+ * the credit score, and nothing else. The six it does not select are the two identifier fields at L17
+ * and L18, both telephone numbers at L15 and L16, the transfer-account reference at L20 and the
+ * cardholder indicator at L21.
  *
- * <p>Assumptions: withholding those seven at the relation, namely L15, L16, L17, L18, L20, L21 and
- * L22, is stronger than declining to expose them here, and that is why this type does not carry
+ * <p>Refactoring Rationale: the credit score at L22 moved from the withheld set into the projected
+ * set, and the reason it was withheld -- that no reporting band prints it -- was simply not true.
+ * {@code app/cbl/CBSTM03A.CBL} moves {@code CUST-FICO-CREDIT-SCORE} into {@code ST-FICO-SCORE},
+ * declared {@code PIC X(20)} at L118 of {@code app/cpy/COSTM01.CPY}, and the migrated renderer emits
+ * that band. With the column withheld the statement generator had no source for a value it must
+ * print, so it accepted a caller-supplied resolver function instead -- a parameter no production
+ * caller ever passed, which is a large part of why the whole-run generator could not be invoked at
+ * all. The paragraph below still describes why withholding at the relation is the stronger control;
+ * it is the CLASSIFICATION of this one column that was wrong, not the technique.</p>
+ *
+ * <p>Assumptions: withholding the remaining six at the relation, namely L15, L16, L17, L18, L20 and
+ * L21, is stronger than declining to expose them here, and that is why this type does not carry
  * them. A projection that mapped the record's whole
  * width and then kept part of it private would leave every withheld value one accessor away; a
  * relation that never selects them leaves them one privilege away, and the login role this module
  * connects as holds no privilege on the schema the base table lives in. Widening this type to the
- * record's full width is therefore not an improvement available to it: the four columns it would have
+ * record's full width is therefore not an improvement available to it: the columns it would have
  * to name do not exist in the relation, so each one would fail the first read rather than return a
  * value. A reporting band that genuinely needs one of the seven is a change to the relation, in the
  * migration that declares it, and is reported against that artifact rather than worked around here.
@@ -345,15 +355,34 @@ public class CustomerView {
     @Column(name = "dob", nullable = false, updatable = false)
     private LocalDate dateOfBirth;
 
+    // Assumptions: the credit score is mapped as a Short and not as an int or a String. The base
+    // column is declared SMALLINT NOT NULL at L610 of
+    // services/account-service/src/main/resources/db/migration/V1__account.sql, which is the mapping
+    // its own module chose for CUST-FICO-CREDIT-SCORE PIC 9(03) at L22 of app/cpy/CVCUS01Y.cpy -- an
+    // unsigned three-digit picture, so the value is bounded well inside a signed 16-bit range and a
+    // wider type would only invite a value the source cannot express.
+    // WHY : Refactoring Rationale: this member exists because the statement heading prints it and had
+    //       no source for it. app/cbl/CBSTM03A.CBL moves the field into ST-FICO-SCORE, declared
+    //       PIC X(20) at L118 of app/cpy/COSTM01.CPY, and the migrated renderer emits that band from
+    //       StatementBandLayouts.ST_LINE9. The projection did not select the column, so the generator
+    //       took the value from a caller-supplied resolver function instead -- and no production
+    //       caller existed to supply one, which is why the whole-run generator could not be invoked.
+    //       Reading the value from the row it belongs to removes the parameter and the gap together.
+    // Assumptions: the column is not null, matching the base declaration, so this member is never
+    // null on a projected row. A row arriving without a score would be a defect to report against the
+    // migration rather than a state the statement path is expected to render around.
+    @Column(name = "fico_credit_score", nullable = false, updatable = false)
+    private Short ficoCreditScore;
+
     /**
      * Creates an empty instance for the persistence provider to populate.
      *
      * <p>Assumptions: the persistence specification requires an entity to declare a constructor
-     * taking no arguments, which the provider uses before assigning the 11 mapped columns. Visibility is protected rather than public because no caller outside this
+     * taking no arguments, which the provider uses before assigning the 12 mapped columns. Visibility is protected rather than public because no caller outside this
      * type's hierarchy has a use for a half-built row.</p>
      */
     protected CustomerView() {
-        // Assumptions: the body is empty by design rather than unfinished. The provider assigns all 11
+        // Assumptions: the body is empty by design rather than unfinished. The provider assigns all 12
         // mapped fields directly after construction, so an assignment here would be overwritten and
         // would only obscure that.
     }
@@ -361,13 +390,13 @@ public class CustomerView {
     /**
      * Creates an instance from values already projected by the relation.
      *
-     * <p>Alternatives Considered: validating the arguments here was evaluated and rejected. All 11
+     * <p>Alternatives Considered: validating the arguments here was evaluated and rejected. All 12
      * values originate in {@code account.customers}, a relation another context owns, so a guard here would make this context an
      * arbiter of data it does not own and would fail a read on a row the owning context considers
      * valid. Reporting what is stored is this type's contract.</p>
      *
-     * <p>Assumptions: eleven arguments are declared because the relation selects eleven columns. The
-     * seven record fields it withholds, enumerated in the type documentation above, have no parameter
+     * <p>Assumptions: twelve arguments are declared because the relation selects twelve columns. The
+     * six record fields it withholds, enumerated in the type documentation above, have no parameter
      * here and no member on this type.</p>
      *
      * @param customerId the customer identifier declared {@code CUST-ID PIC 9(09)} at L5 of
@@ -387,10 +416,14 @@ public class CustomerView {
      * @param postalCode the postal code declared {@code PIC X(10)} at L14
      * @param dateOfBirth the date of birth declared {@code PIC X(10)} at L19, which is L19 and not
      *     L17, L17 being the national identifier this relation never selects
+     * @param ficoCreditScore the credit score declared {@code CUST-FICO-CREDIT-SCORE PIC 9(03)} at
+     *     L22, which the statement heading band {@code ST-FICO-SCORE} at L118 of
+     *     {@code app/cpy/COSTM01.CPY} prints
      */
     public CustomerView(Long customerId, String firstName, String middleName, String lastName,
             String addressLine1, String addressLine2, String addressLine3, String stateCode,
-            String countryCode, String postalCode, LocalDate dateOfBirth) {
+            String countryCode, String postalCode, LocalDate dateOfBirth,
+            Short ficoCreditScore) {
         this.customerId = customerId;
         this.firstName = firstName;
         this.middleName = middleName;
@@ -402,6 +435,7 @@ public class CustomerView {
         this.countryCode = countryCode;
         this.postalCode = postalCode;
         this.dateOfBirth = dateOfBirth;
+        this.ficoCreditScore = ficoCreditScore;
     }
 
     /**
@@ -504,6 +538,23 @@ public class CustomerView {
     }
 
     /**
+     * Returns the credit score the statement heading prints.
+     *
+     * <p>Assumptions: the value is returned as stored and is not bounded, clamped or defaulted here.
+     * {@code app/cbl/CBSTM03A.CBL} prints whatever the customer record holds, and the renderer that
+     * consumes this value applies the only constraint that exists -- the unsigned three-digit picture
+     * {@code CUST-FICO-CREDIT-SCORE PIC 9(03)} at L22 of {@code app/cpy/CVCUS01Y.cpy}, which is why a
+     * negative value is refused at the band rather than silently corrected. Reporting what is stored
+     * is this type's contract.</p>
+     *
+     * @return the value of the {@code fico_credit_score} column, being the three-digit score declared
+     *     at L22, or {@code null} where no row has been projected into this instance yet
+     */
+    public Short getFicoCreditScore() {
+        return ficoCreditScore;
+    }
+
+    /**
      * Reports whether another object denotes the same customer row as this one.
      *
      * <p>Assumptions: equality rests on the identifier alone, the key declared {@code PIC 9(09)} at L5.
@@ -540,19 +591,35 @@ public class CustomerView {
     }
 
     /**
-     * Returns a diagnostic rendering naming the type and the customer identifier, and nothing else.
+     * Returns a diagnostic rendering naming the type and no projected member at all.
      *
-     * <p>Trade-offs: all 10 name, address, code and date members are omitted and only the identifier
-     * declared at L5 is kept. The identifier locates the row exactly and is what a reader of a failure needs, whereas a
-     * name, an address line or a date of birth is personal data and a log line is the wrong place for
-     * it even when the failure is genuine. What is accepted is that a reader cannot tell whose row
-     * failed without querying for it; what is bought is that no log line written from this type can
-     * carry personal data at all.</p>
+     * <p>Assumptions: every one of the eleven projected members is withheld, and this rendering
+     * therefore names only its own type. That is the outcome
+     * {@code docs/architecture/observability.md} prescribes for a type left with nothing it may
+     * disclose: "A rendering left with none of those omits the member rather than substituting
+     * something." The ten name, address, code and date members are personal data; the customer
+     * identifier declared at {@code app/cpy/CVCUS01Y.cpy} L5 is named in the same rule's prohibition
+     * alongside account identifiers; and this projection carries no status code, version counter or
+     * bounded response code that the rule would let a rendering keep.</p>
      *
-     * @return a single-line rendering naming the type and the customer identifier
+     * <p>Refactoring Rationale: this rendering kept the customer identifier, justified on the ground
+     * that it "locates the row exactly and is what a reader of a failure needs". The need is real and
+     * the conclusion did not follow: the omission rule names customer identifiers explicitly, so
+     * "what a reader needs" cannot be the test, and a rendering that satisfied the rule for ten
+     * members by omission while exempting the eleventh by usefulness was applying two rules at once.
+     * The reasoning is kept on record because it is the argument a future reader is most likely to
+     * reach independently.</p>
+     *
+     * <p>Trade-offs: a log line written from this type now says only that a customer projection was
+     * involved. That is a genuine loss of diagnostic power, and it is paid for the same way the
+     * observability authority pays for it everywhere else -- by the request correlation identifier on
+     * every request-scoped line and by the {@code batch.batch_run} step ledger for batch work, both of
+     * which locate an event without naming a protected value.</p>
+     *
+     * @return a single-line rendering naming the type alone, never {@code null}
      */
     @Override
     public String toString() {
-        return "CustomerView[customerId=" + customerId + ']';
+        return "CustomerView[]";
     }
 }

@@ -15,19 +15,29 @@
 #   identical in topology and differ only in sizing and retention.
 #
 # Parameters:
-#   Thirty-five inputs, nine of them required, in eight groups -- the two values
+#   Thirty-four inputs, ELEVEN of them required, in eight groups -- the two values
 #   the provider reads; naming and environment identity; the VPC address space;
 #   the serverless database's version, capacity, backup and durability settings;
 #   container task sizing; log retention, edge footprint and the batch schedule;
 #   the TLS identities and imported service key material the load balancer,
 #   distribution and tasks each need; and the deployment artifact and the OIDC
-#   identity permitted to publish it. The nine with no default are
+#   identity permitted to publish it. The eleven with no default are
 #   `alb_certificate_arn`, `internal_service_domain_name`,
 #   `cloudfront_acm_certificate_arn`, `cloudfront_aliases`,
-#   `image_tag`,
-#   `github_repository` and `github_oidc_provider_arn`: a certificate, a key or a
-#   deployable artifact has no defensible default, and defaulting one would make a
-#   root that cannot serve TLS look complete.
+#   `cloudfront_api_connect_src_origins`, `image_tag`, `github_repository`,
+#   `github_oidc_provider_arn`, `mask_hmac_secret_arn`,
+#   `permissions_boundary_arn` and `alarm_email_endpoints`: a certificate, a key,
+#   a deployable artifact, a privilege ceiling or an alarm destination has no
+#   defensible default, and defaulting one would make a root that cannot serve
+#   TLS -- or cannot tell anyone it has failed -- look complete.
+#   WHY (Refactoring Rationale): this paragraph claimed thirty-five inputs and
+#   nine required, then enumerated only SEVEN names. All three figures were
+#   wrong in different directions: the total was never thirty-five, four
+#   required inputs were missing from the list, and `alarm_email_endpoints`
+#   became required when the alarm topic stopped defaulting to a repository
+#   value. A summary that under-counts required inputs is the worst kind to
+#   leave standing, because a reader trusts it to be the checklist for a first
+#   apply and then discovers the remainder one failed plan at a time.
 #
 #   Each `variable` block below carries its own authoritative `type` and
 #   `description`. The contract for an input lives on the input rather than in a
@@ -269,6 +279,31 @@ variable "vpc_cidr" {
     condition     = can(cidrhost(var.vpc_cidr, 0))
     error_message = "vpc_cidr must be a valid IPv4 CIDR block such as 10.0.0.0/16; the network module additionally requires a prefix length between /16 and /20 so that nine subnets can be derived from it."
   }
+
+  # WHY : Refactoring Rationale: this validation is NEW and it narrows THIS ROOT's
+  #       contract without touching the module's. The network module accepts /16 to
+  #       /20, and that remains true for any other caller. This root additionally
+  #       requires exactly /16, because one value derived here depends on it for
+  #       correctness rather than for convenience: the reporting service's trusted
+  #       proxy pattern in main.tf is composed from the FIRST TWO OCTETS of this block,
+  #       which describes exactly a /16. Given a /20 the same expression would produce
+  #       a pattern matching the whole containing /16 -- sixteen times the address
+  #       space actually allocated -- so Tomcat would honour an X-Forwarded-For header
+  #       from any address in that range, not merely from this VPC's own load balancer.
+  #       Since a client-supplied header is what that setting decides whether to
+  #       trust, over-matching there is a trust widening rather than an untidiness.
+  #       Alternatives Considered: deriving an exact regex from an arbitrary prefix
+  #       length. Rejected because it reimplements CIDR arithmetic as string
+  #       manipulation -- the third octet of a /20 is a bounded range, not a free
+  #       wildcard -- and a subtle error there fails OPEN, silently trusting more
+  #       than intended, which is the same failure mode by a longer route.
+  #       Assumptions: both environments already use a /16 (dev 10.0.0.0/16, prod
+  #       10.1.0.0/16), so this refuses nothing either root does today and refuses
+  #       only the configurations under which the derived pattern would over-match.
+  validation {
+    condition     = can(regex("/16$", var.vpc_cidr))
+    error_message = "vpc_cidr must use a /16 prefix in this environment root. The reporting service's trusted-proxy pattern is derived from the first two octets of this block, which is exact only for a /16; with any longer prefix that pattern would trust the whole containing /16 rather than this VPC alone."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -348,7 +383,9 @@ variable "aurora_min_capacity" {
   # instead.
   #
   # Assumptions: a zero floor is what sets the AWS provider floor in versions.tf.
-  # The provider accepts a zero minimum only from 5.81.0 onward and the `~> 6.56`
+  # The provider accepts a zero minimum only from 5.80.0 onward and the auto-pause
+  # argument it makes mandatory only from 5.81.0, so the pair floors at 5.81.0; the
+  # `~> 6.56`
   # constraint clears that comfortably; a reader tempted to relax that constraint
   # downward should know this input is what it protects. It is also what makes
   # aurora_seconds_until_auto_pause mandatory and forces the ceiling to at least
@@ -791,7 +828,7 @@ variable "skip_final_snapshot" {
 # -----------------------------------------------------------------------------
 
 variable "image_tag" {
-  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  description = "Immutable image tag applied to all eleven ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
   type        = string
   nullable    = false
 
@@ -859,10 +896,50 @@ variable "secret_recovery_window_in_days" {
 #       deployment that brings its own rotation function reintroduces this input
 #       alongside a `rotation_lambda_arn`, which the module accepts as a pair.
 
+# WHY : Refactoring Rationale: this input was `default = []` and terraform.tfvars set
+#       it to `[]` as well, so the environment provisioned a notification topic,
+#       thirteen alarms and every alarm action pointing at it -- with ZERO
+#       SUBSCRIBERS. Every alarm would have fired correctly into nothing. That is the
+#       worst shape of monitoring failure, because the dashboards, the alarms and the
+#       topic all exist and look complete, so the gap is invisible until an incident
+#       is missed. The old description called the empty list a way to leave
+#       notifications "available for a later subscription without inventing an
+#       address", which is a fair reading of the trade-off and still leaves the
+#       environment unmonitored in the meantime. The default is REMOVED, making the
+#       input required.
+# WHY : Assumptions: the value is supplied OUT OF BAND and never committed. It is not
+#       a secret, but a team or on-call address is personal data and the project's
+#       constraint is that the repository carries no environment-specific identity of
+#       that kind, so terraform.tfvars no longer names it at all. Being a required
+#       variable is what makes that safe rather than fragile: because it has no
+#       default, .github/workflows/infra-ci.yml's input-closure guard obliges
+#       deploy.yml, infra-ci.yml and docs/runbooks/deploy.md to supply and document it
+#       together, so an operator following the runbook exactly reaches a plan that
+#       works, and one who forgets is stopped at plan rather than at the first missed
+#       alarm.
+# WHY : Alternatives Considered: (1) keeping the default and adding a non-empty
+#       validation. Rejected as dishonest bookkeeping -- it produces the same
+#       operational requirement while leaving the variable looking optional to the
+#       closure guard, so the three sources that must name it would never be checked
+#       against each other. (2) Requiring it in prod only and leaving dev defaulted.
+#       Rejected because the two roots must be identical in SHAPE and differ only in
+#       sizing and retention; the closure guard asserts their required sets are equal,
+#       so the asymmetry fails the build. A development environment whose alarms
+#       notify nobody is the same defect at lower stakes. (3) Provisioning a chat or
+#       pager integration instead. Rejected because every such target needs an
+#       endpoint URL bearing a workspace or service token, which is precisely the
+#       material that may not enter this tree.
+# WHY : Trade-offs: a subscription created this way requires the recipient to confirm
+#       it before delivery begins, so provisioning the target is necessary but not by
+#       itself sufficient; the runbook step that follows the apply is what closes it.
 variable "alarm_email_endpoints" {
-  description = "Email addresses subscribed to the environment observability topic; empty leaves notifications available for a later subscription without inventing an address."
+  description = "Email addresses subscribed to the environment observability topic. REQUIRED and deliberately absent from terraform.tfvars: supply it out of band, because the repository carries no operator identity. At least one address must be given, so no environment creates alarms that notify nobody."
   type        = list(string)
-  default     = []
+
+  validation {
+    condition     = length(var.alarm_email_endpoints) > 0
+    error_message = "alarm_email_endpoints must name at least one recipient. A notification topic with no subscriber means every alarm fires into nothing, which is indistinguishable from working monitoring until an incident is missed. Supply the address out of band, for example TF_VAR_alarm_email_endpoints='[\"team@example.com\"]'."
+  }
 
   validation {
     condition     = alltrue([for address in var.alarm_email_endpoints : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", address))])

@@ -1,5 +1,7 @@
 package com.carddemo.common;
 
+import com.carddemo.common.control.OnlineWriteGate;
+import com.carddemo.common.control.OnlineWriteGateInterceptor;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.observability.MetricsConfig;
@@ -19,6 +21,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.Ordered;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import software.amazon.awssdk.services.ssm.SsmClient;
 import tools.jackson.databind.JacksonModule;
 
 /**
@@ -123,6 +128,68 @@ public class CardDemoCommonAutoConfiguration {
      * redeemable -- rather than silently accepting tokens a stranger minted.</p>
      */
     public static final String DEFAULT_CURSOR_LIFETIME = "PT15M";
+
+    /**
+     * The property naming the Parameter Store entry that says whether the environment is currently
+     * accepting mutating work.
+     *
+     * <p>Assumptions: this property is what makes a service write-gated, and it is defaulted nowhere.
+     * A default would either name a parameter that does not exist -- which, because
+     * {@link OnlineWriteGate} fails closed, would refuse every write in every deployment and every
+     * test -- or name one that does, which would put an environment's topology into a shared library.
+     * Leaving it unset is what lets the batch task and the extract-transform-load package run with no
+     * gate at all, which is correct: the quiesce exists to protect the batch chain, so gating the
+     * chain itself against its own window would deadlock it.</p>
+     *
+     * <p>Assumptions: the name is chosen so that the framework's own environment-variable resolution
+     * maps {@code CARDDEMO_ONLINE_WRITES_PARAMETER} onto it with NO declaration in any
+     * {@code application.yml}. The resolver uppercases the requested name and replaces both dots and
+     * hyphens with underscores, so {@code carddemo.online-writes.parameter} is looked up as
+     * {@code CARDDEMO_ONLINE_WRITES_PARAMETER} -- which is exactly the variable
+     * {@code infra/envs/dev} and {@code infra/envs/prod} inject into the seven online workloads, and
+     * exactly the one whose parameter ARN the same module grants the task role
+     * {@code ssm:GetParameter} on. A {@code control} segment matching this class's package was the
+     * first choice and was rejected on that arithmetic alone: it would have required the variable to
+     * be {@code CARDDEMO_CONTROL_ONLINE_WRITES_PARAMETER}, so either the infrastructure would have had
+     * to be renamed to suit a Java package name or the property would silently never resolve and the
+     * gate would silently never exist -- which is the failure this whole control was added to fix.</p>
+     *
+     * <p>Assumptions: no service declares this property in its {@code application.yml}, and that
+     * absence is deliberate rather than an omission. It follows the same discipline as
+     * {@value #CURSOR_SIGNING_KEY_PROPERTY}, which likewise appears in no configuration file: a
+     * placeholder with an empty default would make the property PRESENT with an empty value, which
+     * satisfies the condition below and then fails the gate's own blank check at startup, and a
+     * placeholder with no default would make every service that is not write-gated fail to start.
+     * Binding straight from the environment means the gate exists exactly where the variable is
+     * injected and nowhere else, with no second list to keep in step.</p>
+     */
+    public static final String ONLINE_WRITES_PARAMETER_PROPERTY =
+            "carddemo.online-writes.parameter";
+
+    /**
+     * The property naming how long an online-write decision may be reused before the flag is read
+     * again, as an ISO-8601 duration.
+     *
+     * <p>Assumptions: separate from the parameter name so that an environment can trade promptness
+     * against request volume without restating its topology, which are two independent decisions.
+     * Named in the same family as the parameter above so that it too resolves from
+     * {@code CARDDEMO_ONLINE_WRITES_CACHE_PERIOD} if an environment ever needs to set it; nothing
+     * injects it today, which is why it has the default below.</p>
+     */
+    public static final String ONLINE_WRITES_CACHE_PROPERTY =
+            "carddemo.online-writes.cache-period";
+
+    /**
+     * The cache period applied when a deployment names the flag but no period.
+     *
+     * <p>Assumptions: five seconds. A default is safe here in the way a default parameter name is not,
+     * because the value is not a secret and neither direction of error is silent: too short shows up
+     * as request volume against Parameter Store, and too long shows up as a write accepted shortly
+     * after a quiesce. Five seconds is deliberately the same order as the reference's own five-second
+     * message wait, and it is short enough that a quiesce takes effect well inside the state
+     * transition that follows it in the batch state machine.</p>
+     */
+    public static final String DEFAULT_ONLINE_WRITES_CACHE_PERIOD = "PT5S";
 
     /**
      * Supplies the clock the error advice timestamps problem shapes from.
@@ -231,6 +298,129 @@ public class CardDemoCommonAutoConfiguration {
             throw new IllegalArgumentException(
                     CURSOR_SIGNING_KEY_PROPERTY + " must carry base64-encoded key material of at"
                             + " least " + CursorToken.MIN_KEY_LENGTH + " bytes", notBase64);
+        }
+    }
+
+    /**
+     * Supplies the Systems Manager client the online-write gate reads its flag with.
+     *
+     * <p>Assumptions: the client is built from the SDK's default chains, so the region and the
+     * credentials come from the task's own environment rather than from configuration this module
+     * holds. On Fargate that is the task role and the injected region; nothing else has to be stated.
+     * </p>
+     *
+     * <p>Assumptions: conditional on the same property as the gate itself, so that a context which is
+     * not write-gated never constructs a client and therefore never needs a region, a credential or a
+     * network path to reach one. Without that condition every service and every test would resolve
+     * AWS credentials at startup merely to hold a client nothing calls.</p>
+     *
+     * @return the client, never {@code null}; closed by the context on shutdown, because the SDK's
+     *     client implements {@link AutoCloseable} and the framework infers the destroy method from it
+     */
+    @Bean
+    @ConditionalOnMissingBean(SsmClient.class)
+    @ConditionalOnProperty(name = ONLINE_WRITES_PARAMETER_PROPERTY)
+    public SsmClient carddemoSsmClient() {
+        return SsmClient.create();
+    }
+
+    /**
+     * Publishes the one online-write gate every mutating path of a service shares.
+     *
+     * <p>Purpose. This bean is what turns the quiesce flag from a value the infrastructure sets into a
+     * control a running service obeys. Before it existed the flag was created, toggled and injected
+     * into every online task definition, and read by nothing.</p>
+     *
+     * <p>Assumptions: declared on the outer configuration rather than inside the servlet-only nested
+     * class below, so that the decision is a property of the application context and not of its web
+     * layer. The interceptor is the only component that applies it today; keeping the gate outside the
+     * servlet boundary means a future enforcement point that is not a request -- a scheduled task, say
+     * -- injects the same instance and inherits the same fail-closed behaviour rather than
+     * constructing a second gate with its own cache.</p>
+     *
+     * <p>Assumptions: one instance per application context, so the short-lived cache in front of the
+     * parameter read is shared by every caller. A gate constructed per consumer would multiply the
+     * reads by the number of consumers and let two of them hold different answers at the same instant.
+     * </p>
+     *
+     * @param ssm the client the flag is read with, resolved from the context so a test can substitute
+     *     a stub that returns a chosen value or throws
+     * @param clock the context's shared clock, which the gate measures its cache period against;
+     *     resolved from the context so that a test substituting a fixed reading for the error advice
+     *     gets the same reading here rather than leaving one request measured by two clocks
+     * @param parameterName the Parameter Store entry named by
+     *     {@value #ONLINE_WRITES_PARAMETER_PROPERTY}
+     * @param cachePeriod how long a decision may be reused, named by
+     *     {@value #ONLINE_WRITES_CACHE_PROPERTY} as an ISO-8601 duration and defaulting to
+     *     {@value #DEFAULT_ONLINE_WRITES_CACHE_PERIOD}
+     * @return the gate, never {@code null}
+     * @throws IllegalArgumentException if the parameter name is blank or the cache period is not
+     *     positive, each of which fails the context at assembly rather than at the first write
+     * @throws java.time.format.DateTimeParseException if the cache period is not an ISO-8601 duration
+     */
+    @Bean
+    @ConditionalOnMissingBean(OnlineWriteGate.class)
+    @ConditionalOnProperty(name = ONLINE_WRITES_PARAMETER_PROPERTY)
+    public OnlineWriteGate carddemoOnlineWriteGate(
+            SsmClient ssm,
+            Clock clock,
+            @Value("${" + ONLINE_WRITES_PARAMETER_PROPERTY + "}") String parameterName,
+            @Value("${" + ONLINE_WRITES_CACHE_PROPERTY + ":" + DEFAULT_ONLINE_WRITES_CACHE_PERIOD
+                    + "}") String cachePeriod) {
+        // Trade-offs: the period is taken as text and parsed here for the same reason the cursor
+        //   lifetime above is -- binding a Duration through a value expression depends on a conversion
+        //   service that a plain context test does not install, so parsing explicitly keeps this bean
+        //   method behaving identically in a Boot application and in a test.
+        return new OnlineWriteGate(
+                ssm, parameterName.trim(), Duration.parse(cachePeriod.trim()), clock);
+    }
+
+    /**
+     * Contains the online-write gate's request-side registration only when a servlet runtime and an
+     * MVC dispatcher are actually present.
+     *
+     * <p>Assumptions: isolated in a nested configuration for the same reason the correlation and error
+     * configurations below are. The registration's own types -- the MVC configurer and the interceptor
+     * registry -- come from the web starter, so keeping them on the outer class would make the batch
+     * context resolve MVC types merely to discover that the beans should be skipped, and that context
+     * deliberately has no servlet API at all.</p>
+     *
+     * <p>Assumptions: conditional on the gate's property as well as on the runtime, so that the
+     * interceptor is registered exactly where the gate exists. Registering it without a gate is not
+     * possible -- the bean below could not be constructed -- and this condition makes that a skipped
+     * configuration rather than an unsatisfied dependency.</p>
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = {
+        "jakarta.servlet.Filter",
+        "org.springframework.web.servlet.config.annotation.WebMvcConfigurer"
+    })
+    @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
+    @ConditionalOnProperty(name = ONLINE_WRITES_PARAMETER_PROPERTY)
+    static final class ServletOnlineWriteGateConfiguration {
+
+        /**
+         * Registers the gate ahead of every mapped handler.
+         *
+         * <p>Assumptions: added for all paths with no explicit exclusions, because the exemptions this
+         * control needs are declared at the handlers that own them through
+         * {@link com.carddemo.common.control.OnlineWriteGateExempt}. Excluding path patterns here as
+         * well would put the same decision in two places and let them disagree.</p>
+         *
+         * @param gate the decision the interceptor applies, resolved from the context
+         * @return the configurer that adds one shared interceptor instance to the MVC chain, never
+         *     {@code null}
+         */
+        @Bean
+        @ConditionalOnMissingBean(name = "carddemoOnlineWriteGateMvcConfigurer")
+        public WebMvcConfigurer carddemoOnlineWriteGateMvcConfigurer(OnlineWriteGate gate) {
+            OnlineWriteGateInterceptor interceptor = new OnlineWriteGateInterceptor(gate);
+            return new WebMvcConfigurer() {
+                @Override
+                public void addInterceptors(InterceptorRegistry registry) {
+                    registry.addInterceptor(interceptor);
+                }
+            };
         }
     }
 

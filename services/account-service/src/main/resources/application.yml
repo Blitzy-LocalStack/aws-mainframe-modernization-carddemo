@@ -1328,21 +1328,27 @@ carddemo:
       error-queue: ${CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE}
 
   internal-identity:
-    # WHY : (1) Assumptions: this is KEY MATERIAL, not a name or an identifier. It
-    #       is the symmetric secret this service verifies the pending-authorization
-    #       context's machine-to-machine bearer token against, and the same value is
-    #       held by that service, which signs with it. It carries NO default: a
-    #       default would be a shared secret published in source, and anything able
-    #       to read this repository could then mint a token this service accepts on
-    #       EVERY address config/InternalApiSecurityConfig.java's internalPaths()
-    #       claims: /api/v1/card-xrefs/lookup, /api/v1/accounts/{accountId},
-    #       /api/v1/customers, /api/v1/customers/{customerId} and
-    #       /api/v1/customers/{customerId}/record.
-    #       Refactoring Rationale: this list named the first three alone, and it went
-    #       stale when the customer scan and the customer record read were matched on
-    #       that chain. The stale form understated what a leaked key unlocks, which is
-    #       the one direction a disclosure statement must never err in, so the list is
-    #       re-stated in full and anchored to the method that enumerates it.
+    # WHY : (1) Assumptions: these are KEY MATERIAL, not names or identifiers. Each is
+    #       the symmetric secret one CALLING service signs its machine-to-machine
+    #       bearer token with and this service verifies that caller's tokens against.
+    #       Neither carries a default: a default would be a shared secret published in
+    #       source, and anything able to read this repository could then mint a token
+    #       this service accepts.
+    #       Refactoring Rationale: there is one key PER CALLER where there used to be
+    #       one shared by both, and this service selects between them by the subject a
+    #       presented token names. While the key was shared, either caller could mint a
+    #       token carrying the other's subject and this service could not tell, so its
+    #       refusal and audit records named a caller they had no way to verify. The
+    #       list of addresses a leaked key unlocks is also no longer one list: a key
+    #       unlocks only the families its own caller is permitted to scope, which for
+    #       the transaction context excludes the customer addresses entirely. The
+    #       authoritative enumeration is config/InternalApiSecurityConfig.java --
+    #       internalPaths() for the addresses and the closed table in common-lib
+    #       InternalServiceToken for which caller may reach which family -- and it is
+    #       anchored rather than copied here, because the copy is what went stale
+    #       before: this comment once named three addresses while five were claimed,
+    #       understating what a leak unlocks, which is the one direction a disclosure
+    #       statement must never err in.
     #       (2) Assumptions: config/InternalApiSecurityConfig.java reads this key
     #       through @Value with no default, refuses a blank value naming this
     #       property, and refuses one shorter than the digest width. The length check
@@ -1360,11 +1366,15 @@ carddemo:
     #       identifier of the human app client and is not secret; this is a signing
     #       key. They are consumed by two different filter chains, and only the chain
     #       at config/InternalApiSecurityConfig.java consults this one.
-    #       (5) Assumptions: unlike the three inquiry queue names below, this
-    #       placeholder IS bound by a bean and DOES abort startup when unset, because
-    #       it is read through @Value. A deployment missing it fails fast rather than
-    #       serving the internal paths with a chain that can verify nothing.
-    signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+    #       (5) Assumptions: unlike the three inquiry queue names below, these
+    #       placeholders ARE bound by a bean and DO abort startup when unset, because
+    #       they are read through @Value. A deployment missing either fails fast rather
+    #       than serving the internal paths with a chain that can verify only one
+    #       caller -- which would be worse than failing, because one caller's traffic
+    #       would keep working and the other's would be refused with a 401 naming no
+    #       property.
+    authorization-signing-key: ${CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY}
+    transaction-signing-key: ${CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY}
 
   # Two properties are deliberately NOT declared in this file and are documented here instead,
   # because service/AccountViewService.java takes CursorToken as a constructor argument -- it seals
@@ -1426,6 +1436,40 @@ carddemo:
     base-url: ${CARDDEMO_REFERENCE_CONTEXT_BASE_URL}
     connect-timeout-ms: 2000
     read-timeout-ms: 3000
+
+  messaging:
+    # WHY : (1) Assumptions: these three are read TOGETHER by config/SqsConfig.java and
+    #       are meaningless apart. The first two bound the queue client's own calls --
+    #       the whole call including retries, and one network attempt within it -- and
+    #       the third is the period the queue keeps a received message invisible to
+    #       other consumers. common-lib's QueueClientBudget requires the whole-call
+    #       bound to be STRICTLY shorter than that period, and refuses to start
+    #       otherwise; the property names are published by that type so this file and
+    #       the binding cannot drift apart.
+    #       (2) Assumptions: the software development kit's default for both client
+    #       bounds is NO bound, which is why they are declared at all. The inquiry
+    #       reply is published from inside the message handler, before the listener
+    #       returns, so a stalled publish is a stalled handler -- and a handler that
+    #       outlives visibility does not merely run late: the queue makes the request
+    #       visible again, a second consumer takes it, and two handlers answer one
+    #       inquiry. Nothing in a log distinguishes that from ordinary redelivery.
+    #       (3) Assumptions: visibility-timeout-seconds is a PROPERTY here rather than
+    #       a value read from the queue, and sixty is what infra/modules/sqs provisions
+    #       through its own visibility_timeout_seconds default. Reading it from the
+    #       queue at startup was the alternative and is rejected twice over: context
+    #       refresh would then require a reachable queue, and the check would silently
+    #       pass in every test and local run where no queue exists. The consequence is
+    #       that lowering the queue's period in Terraform without lowering it here
+    #       leaves the comparison made against a number the queue no longer uses,
+    #       which is why both defaults are the same value and why this names the
+    #       module.
+    #       (4) Assumptions: this property does NOT set the queue's visibility period.
+    #       Nothing in this service can -- the period is a queue attribute owned by the
+    #       infrastructure module. Stating that plainly is the point: a reader who took
+    #       it for the setting would tune it expecting the queue to follow.
+    api-call-timeout-ms: 10000
+    api-call-attempt-timeout-ms: 5000
+    visibility-timeout-seconds: 60
 
 # =============================================================================
 # Closing notes

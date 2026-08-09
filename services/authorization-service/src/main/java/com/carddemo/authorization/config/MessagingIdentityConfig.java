@@ -10,19 +10,38 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Wires the keyed tokeniser that derives every opaque identity this context puts into queue metadata.
+ * Wires the single keyed tokeniser this context holds for identities it derives rather than echoes.
  *
  * <h2>Why this configuration exists</h2>
  *
- * <p>Refactoring Rationale: {@link OpaqueIdentifier} and the two accessors that use it -- the group
- * identity and the correlation identity on the shared authorization codec -- were authored and then never
- * reached by any running code, because no bean supplied a key. The consequence was concrete rather than
- * cosmetic: the reply path fell back to the CARD NUMBER as its first-in-first-out group identity, so a
- * primary account number was written into the outbox row and then into SQS message metadata on every
- * single reply. Queue metadata sits outside the message body, appears in queue telemetry and in the trace
- * of every send, and is carried into logs and metrics -- which is exactly where
- * {@code docs/adr/ADR-008-security-and-identity.md} requires an account number to be masked. This class
- * is the missing wiring, and it is deliberately a configuration of its own rather than a method on
+ * <p>Refactoring Rationale: this class was authored to key {@link OpaqueIdentifier} for the two
+ * first-in-first-out identities on the reply path, so that a primary account number stopped reaching SQS
+ * message metadata. That purpose is withdrawn. Sections 0.4.1.8 and 0.7.6 of the technical specification
+ * freeze those identities as literal values -- {@code MessageGroupId = card_num} and
+ * {@code MessageDeduplicationId = transaction_id} -- and the specification is the agreed source of truth.
+ * The derivation was not a free improvement either: a group identity is an ordering guarantee only while
+ * it is EQUAL for equal cards across every producer on the queue, and a deduplication identity suppresses
+ * a duplicate only while the REQUESTER that may resend can predict it, so keying both from this service's
+ * own secret removed both guarantees for anybody else on the same queue. The reply path therefore emits
+ * the frozen values, and the metadata exposure that follows is registered as divergence
+ * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, bounded by the queue's
+ * customer-managed-key encryption, its private-network-only reachability and task-role-scoped read
+ * access.</p>
+ *
+ * <p>Assumptions: what this class supplies is still a real primitive rather than a leftover -- the keyed
+ * tokeniser the derived-identity surfaces of {@code .mapper} take as a parameter, namely
+ * {@code AuthorizationMessageMapper.businessCorrelationToken} and
+ * {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}, both of which stand for values this
+ * context computes for itself rather than values a producer contract fixes. No component injects the bean
+ * at present. It is retained rather than retired for one stated reason and not from inertia: the
+ * deployment contract that delivers its key is asserted by {@code infra/modules/ecs-service}, which
+ * requires the authorization task and no other to receive {@code CARDDEMO_MESSAGING_HMAC_KEY}, and
+ * provisioned by both environment roots -- withdrawing the bean means withdrawing a provisioned secret
+ * and a module validation condition together, which is a change of a different scope from correcting an
+ * identity.</p>
+ *
+ * <p>Assumptions: it is deliberately a configuration of its own rather than a method on
  * {@link SqsConfig}: the tokeniser is a SECURITY primitive keyed from the deployment's secret store,
  * while {@code SqsConfig} wires a transport client, and keeping the key handling in a file whose only
  * subject is the key makes it possible to read every use of that key at once.</p>
@@ -35,16 +54,16 @@ import org.springframework.context.annotation.Configuration;
  *
  * <p>Assumptions: this key is a DIFFERENT secret from the extract-transform-load masking key. The two
  * have different trust purposes and different holders: the masking key is held by a one-off migration
- * workload that reads cardholder extracts, while this key is held by a long-running request consumer and
- * is shared with every other producer on the same queue so that one card's messages land in one group.
+ * workload that reads cardholder extracts, while this key is held by a long-running request consumer.
  * Sharing one key would mean rotating it required a coordinated stop of both, and it would give the
- * migration workload the ability to compute production queue group identities.</p>
+ * migration workload the ability to compute values a production consumer derives.</p>
  *
- * <p>Alternatives Considered: deriving the two identities from a random per-instance key. Rejected
- * outright, because a group identity has to be equal for equal cards ACROSS producers and across
- * restarts -- that equality is the entire ordering guarantee -- and a per-instance key would put one
- * card's messages into as many groups as there are instances, silently removing the per-card ordering
- * the reference consumer gets from being single-threaded.</p>
+ * <p>Alternatives Considered: a random per-instance key. Rejected because every identity worth deriving
+ * from this key has to be STABLE across restarts and across instances to be worth anything -- a
+ * correlation token that changed per instance would not join two log lines about one authorization, and a
+ * diagnostic digest that changed per instance would not group two reports of one recurring fault. This
+ * reasoning is what previously ruled a per-instance key out for the queue group identity as well; that
+ * identity is now literal, and the stability requirement survives for the identities that remain.</p>
  *
  * <p>Alternatives Considered: an unkeyed digest, or a keyed digest with a public salt. Both rejected for
  * the same reason: the protected value is a sixteen-digit number with a checksum, so the candidate space
@@ -96,9 +115,10 @@ public class MessagingIdentityConfig {
             @Value("${carddemo.messaging.hmac-key}") String key) {
         if (key == null || key.isBlank()) {
             throw new IllegalStateException(
-                    "carddemo.messaging.hmac-key must be supplied: without a secret key the queue group"
-                            + " identity would be an unkeyed digest of a card number, which an adversary"
-                            + " holding the token confirms by enumeration");
+                    "carddemo.messaging.hmac-key must be supplied: without a secret key every identity"
+                            + " derived through this tokeniser would be an unkeyed digest of a small"
+                            + " candidate space, which an adversary holding the token confirms by"
+                            + " enumeration");
         }
         byte[] material = decode(key);
         try {

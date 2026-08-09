@@ -4,9 +4,18 @@
 #
 # Purpose:
 #   The hash-locked closure needed to LINT and TEST the `carddemo_migration`
-#   package: everything the runtime needs, plus the four distributions that only
-#   a developer or a continuous-integration job runs. This file is installed by
-#   CI and by a contributor. It is never installed into the container image.
+#   package: everything the runtime needs, plus the seven distributions that only
+#   a developer or a continuous-integration job runs -- three a gate invokes
+#   directly (`ruff`, `pytest`, `coverage`) and four that pytest requires. This
+#   file is installed by CI and by a contributor. It is never installed into the
+#   container image.
+#
+#   Refactoring Rationale: this read "four", which was the count of the four TOOLS
+#   named in the rationale below rather than the count of distributions this file
+#   pins. Both numbers are true of something, which is why the sentence read
+#   plausibly; only one of them is true of this file, and a reader checking the
+#   closure against `grep -cE '^[a-zA-Z][a-zA-Z0-9._-]*==' requirements-dev.txt`
+#   is checking that one.
 #
 # Relationship to the other two manifests:
 #   requirements-build.txt .. the PEP 517 build backend alone.
@@ -44,7 +53,7 @@
 #     never uses it.
 #
 #   The runtime closure is INCLUDED, not restated
-#     Alternatives Considered: repeating the nine runtime pins here, so this file
+#     Alternatives Considered: repeating the twelve runtime pins here, so this file
 #     stands alone. Rejected because two exact-pin sites for one version is how a
 #     version drifts unnoticed -- the same reasoning pyproject.toml applies when it
 #     declares floors rather than duplicating the pins, and the same reasoning the

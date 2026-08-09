@@ -324,6 +324,29 @@ public record ApiError(
     public static final int CONFLICT_STATUS = 409;
 
     /**
+     * The shared machine code for a request refused because the environment is not currently accepting
+     * mutating work.
+     *
+     * <p>Assumptions: the 0503 suffix identifies the HTTP 503 surface, following the same convention as
+     * the four codes above. It is a distinct code rather than a reuse of {@link #CODE_INTERNAL} because
+     * the two conditions call for opposite client behaviour: an internal failure should not be retried
+     * blindly, whereas this one succeeds on retry once the window reopens, and a client cannot tell the
+     * difference from the status alone once its own error handling has collapsed every 5xx into one
+     * case.</p>
+     */
+    public static final String CODE_WRITES_QUIESCED = "CARDDEMO-0503";
+
+    /**
+     * The HTTP status a refusal during the online-write window carries, 503.
+     *
+     * <p>Assumptions: declared here for the same reason {@link #CONFLICT_STATUS} is -- the web
+     * dependency is optional for this module, so the number has to be stated rather than read from a
+     * framework enumeration -- and as a constant so that a test can assert the code and the status as a
+     * pair.</p>
+     */
+    public static final int SERVICE_UNAVAILABLE_STATUS = 503;
+
+    /**
      * The CardDemo thank-you source literal from {@code CSMSG01Y}.
      *
      * <p>Assumptions: AE-12 preserves the 49-character literal at line 19 of
@@ -1074,6 +1097,59 @@ public record ApiError(
                 path,
                 TimestampFormatter.formatNow(clock),
                 fieldErrors,
+                null);
+    }
+
+    /**
+     * Builds the 503 shape reporting that the environment is not currently accepting mutating work.
+     *
+     * <p>Purpose. The refusal a service returns while the nightly batch chain owns the data -- the
+     * target equivalent of a write attempted against the VSAM files {@code app/jcl/CLOSEFIL.jcl} had
+     * closed. The window it reports is a planned bracket around the batch chain, not an outage.</p>
+     *
+     * <p>Assumptions: the severity is stated as {@link Severity#WARNING} rather than derived from the
+     * status, and that is the whole reason this factory exists instead of a call to {@link #of}. The
+     * derivation in this type maps every status at or above 500 to {@link Severity#CRITICAL}, which is
+     * right for a failure and wrong for this: a write refused inside a scheduled window is expected
+     * behaviour, and reporting each one as critical would fill an operator's record with critical
+     * entries every night for a control working exactly as designed. That is how a severity field stops
+     * being read.</p>
+     *
+     * <p>Assumptions: the code and the status are NOT arguments, for the same reason
+     * {@link #ofConflict} fixes its own -- both are properties of this single condition, so accepting
+     * them would let one caller emit the same refusal under a different code.</p>
+     *
+     * <p>Trade-offs: no field-error array is accepted, unlike the contention factory. There is no field
+     * to report: nothing about the request is wrong, so an empty array is the only honest value and
+     * taking it as an argument would invite a caller to populate it with something else.</p>
+     *
+     * @param message the user-visible sentence naming the closed window; must name the condition rather
+     *     than the parameter or the environment, because neither is something a client can act on
+     * @param subsystem the part of the platform the refusal arose in; must not be {@code null}
+     * @param correlationId the inherited correlation identity, or {@code null} when absent
+     * @param path the refused request path, or {@code null} when absent
+     * @param clock the explicit clock from which the timestamp is read; must not be {@code null}
+     * @return a 503 problem shape carrying {@link #CODE_WRITES_QUIESCED} and no field entries, never
+     *     {@code null}
+     * @throws NullPointerException if {@code subsystem} or {@code clock} is {@code null}
+     * @throws IllegalArgumentException if the clock yields a year outside the formatter's supported
+     *     four-digit range
+     */
+    public static ApiError ofWritesQuiesced(String message, Subsystem subsystem,
+            String correlationId, String path, Clock clock) {
+        Objects.requireNonNull(subsystem, "subsystem must not be null");
+        Objects.requireNonNull(clock, "clock must not be null");
+        return new ApiError(
+                CODE_WRITES_QUIESCED,
+                "",
+                message,
+                Severity.WARNING,
+                subsystem,
+                SERVICE_UNAVAILABLE_STATUS,
+                correlationId,
+                path,
+                TimestampFormatter.formatNow(clock),
+                List.of(),
                 null);
     }
 

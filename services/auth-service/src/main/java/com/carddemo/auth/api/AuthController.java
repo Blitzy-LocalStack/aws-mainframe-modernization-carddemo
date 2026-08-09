@@ -6,6 +6,7 @@ import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
 import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.service.CognitoIdentityService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.web.CorrelationIdFilter;
@@ -117,6 +118,15 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping(path = AuthController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
+@OnlineWriteGateExempt(reason =
+        "All three operations here are authentication exchanges with the identity provider, not"
+        + " writes to migrated record data, and sign-on in particular has to keep working while the"
+        + " batch window is open: reads stay available during a quiesce, and nobody can read without"
+        + " first signing on. Assumptions: this is a deliberate NARROWING of the reference bracket."
+        + " app/jcl/CLOSEFIL.jcl line 30 closed USRSEC to the region outright, so the reference"
+        + " denied sign-on itself for the duration of the chain; the target closes writes only, and"
+        + " user maintenance -- which does write auth.users -- is gated on UserController. The"
+        + " divergence is recorded rather than silently taken.")
 public class AuthController {
 
     /** The context prefix every operation of this adapter sits beneath. */

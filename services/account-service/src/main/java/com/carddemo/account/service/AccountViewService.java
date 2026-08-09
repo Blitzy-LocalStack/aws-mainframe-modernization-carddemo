@@ -13,6 +13,7 @@ import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CardXrefMapper;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
+import com.carddemo.account.repository.AccountScreenRow;
 import com.carddemo.account.repository.CardXrefRepository;
 import com.carddemo.account.repository.CustomerRepository;
 import com.carddemo.common.error.AbendDetail;
@@ -23,6 +24,7 @@ import com.carddemo.common.web.PageResponse;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
@@ -459,6 +461,15 @@ public class AccountViewService {
     private static final String CARD_XREF_CURSOR_SCOPE_BACKWARD = "direction:previous";
 
     /**
+     * The prefix naming the account a cross-reference cursor was issued while walking.
+     *
+     * <p>Assumptions: the account is part of the seal because the cursor names a CARD NUMBER, and a card
+     * number is a valid position within some other account's rows too. Without the account in the seal a
+     * token from one account repositioned another account's walk silently.</p>
+     */
+    private static final String CARD_XREF_CURSOR_SCOPE_ACCOUNT_PREFIX = "account:";
+
+    /**
      * The request word that asks a cross-reference walk to step backward.
      *
      * <p>Assumptions: any other word, the empty string included, reads forward. That is the reference's
@@ -566,14 +577,24 @@ public class AccountViewService {
     public AccountContextView readAccountContext(long accountId) {
         return this.accounts.findById(accountId)
                 .map(this.contextMapper::toAccountContextView)
-                // WHY : Assumptions: the identifier IS named in this message, unlike the card number
-                //       above. The sensitive-data logging contract in docs/architecture/observability.md
-                //       prohibits a primary account number outright, and an eleven-digit internal
-                //       account key of the shape ACCT-ID declares at L5 of app/cpy/CVACT01Y.cpy already
-                //       appears in the request path and in the access log of every hop, so withholding
-                //       it here would remove a diagnostic without protecting anything.
+                // WHY : Refactoring Rationale: the identifier used to be named in this message, on the
+                //       argument that an eleven-digit ACCT-ID already travelled in the request path and
+                //       in the access log of every hop, so withholding it here protected nothing. Both
+                //       halves of that argument were wrong. The sensitive-data logging contract in
+                //       docs/architecture/observability.md names ACCOUNT AND CUSTOMER IDENTIFIERS
+                //       alongside the primary account number as values a durable diagnostic may not
+                //       carry, and it states that a prohibited value is OMITTED and not abbreviated --
+                //       so the contract never granted the exemption the old comment claimed. And the
+                //       premise has since been removed outright: this operation is now reached by a
+                //       POST carrying its key in a body, so the identifier appears in no request line
+                //       and in no access log, and repeating it here would be the ONLY place it landed.
+                // WHY : Trade-offs: the message loses the one value an operator would want when reading
+                //       it in isolation. It is not lost to the operator, because the correlation
+                //       identifier the shared filter stamps on the request joins this record to the
+                //       caller's own -- which is where the identifier legitimately lives, in the
+                //       calling context's own bounded diagnostics.
                 .orElseThrow(() -> new NoSuchElementException(
-                        "no account master row exists for account " + accountId));
+                        "no account master row exists for the requested account"));
     }
 
     /**
@@ -621,8 +642,11 @@ public class AccountViewService {
      *     {@code CUST-ID} declares at L5 of {@code app/cpy/CVCUS01Y.cpy}
      * @return the customer with both stored identifiers masked, a {@link CustomerResponse}, never
      *     {@code null}
-     * @throws NoSuchElementException if the customer master holds no such row, which the shared advice
-     *     renders as HTTP 404 carrying the reference sentence
+     * @throws NoSuchElementException if the customer master holds no such row, carrying the reference
+     *     sentence, which the shared advice renders as HTTP 404; the advice substitutes its own fixed
+     *     absence sentence in the body, because it passes a carried sentence through only when it ends in
+     *     an ellipsis and this one does not, so the reference wording is observable in this exception and
+     *     in the advice's log line rather than in the response
      */
     @Transactional(readOnly = true)
     public CustomerResponse readCustomer(long customerId) {
@@ -714,7 +738,7 @@ public class AccountViewService {
                 : this.customers.findByCustomerIdGreaterThanOrderByCustomerIdAsc(
                         Long.parseLong(this.cursorToken.open(CUSTOMER_SCAN_BINDING, cursor)), window);
 
-        return pageOfCustomers(rows, size);
+        return pageOfCustomers(rows, size, cursor != null);
     }
 
     /**
@@ -735,12 +759,16 @@ public class AccountViewService {
      * @param rows the window the store returned, at most the page size plus one, in ascending
      *     identifier order; must not be {@code null}
      * @param size the number of rows the page may carry
+     * @param resumed whether the request that produced this window carried a cursor, which settles
+     *     backward availability: the cursor names a row the caller was already shown and the predicate
+     *     is strictly greater than it, so a page lies behind this one exactly when one was supplied
      * @return the page with both boundaries sealed, or the exhausted page when the window holds no row;
      *     never {@code null}
      * @throws IllegalArgumentException if a sealed boundary is refused by the envelope's own cursor
      *     check, which no value produced here can provoke
      */
-    private PageResponse<CustomerResponse> pageOfCustomers(List<Customer> rows, int size) {
+    private PageResponse<CustomerResponse> pageOfCustomers(
+            List<Customer> rows, int size, boolean resumed) {
         boolean hasSurplus = rows.size() > size;
         List<Customer> shown = hasSurplus ? rows.subList(0, size) : rows;
 
@@ -762,12 +790,17 @@ public class AccountViewService {
         //       published projection, because the projection renders the identifier as text for the
         //       reason recorded on the response record while the resuming query binds a numeric key.
         //       Sealing the rendered form would make the next page's bound depend on a display decision.
+        // WHY : Refactoring Rationale: backward availability is REPORTED rather than implied by the
+        //       leading boundary. This scan travels one way only, so the answer is not a surplus row but
+        //       whether the caller arrived by cursor: the opening page has nothing behind it, and every
+        //       resumed page has at least the page whose trailing key it was given.
         return PageResponse.ofRows(items,
                 this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
                         String.valueOf(shown.getFirst().getCustomerId())),
                 this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
                         String.valueOf(shown.getLast().getCustomerId())),
-                hasSurplus);
+                hasSurplus,
+                resumed);
     }
 
     /**
@@ -778,12 +811,21 @@ public class AccountViewService {
      * reaches at L369 after its input edit has passed. It is the route the view screen and the update
      * screen's pre-read both take once an account identifier is in the request path.</p>
      *
-     * <p>Assumptions: BOTH masters and the cross-reference are read inside ONE read-only transaction,
-     * so the account and the customer on one screen are consistent with each other. That mirrors the
-     * reference, where all three reads are driven from the single paragraph at L687 through L720 of
-     * {@code app/cbl/COACTVWC.cbl} inside one task. Three separate transactions could return an account
-     * and a customer from either side of a concurrent update, and the screen would then show a pairing
-     * that never existed.</p>
+     * <p>Assumptions: BOTH masters and the cross-reference are read by ONE STATEMENT, so the account and
+     * the customer on one screen are consistent with each other. That mirrors the reference, where all
+     * three reads are driven from the single paragraph at L687 through L720 of
+     * {@code app/cbl/COACTVWC.cbl} inside one task.</p>
+     *
+     * <p>Refactoring Rationale: this paragraph previously credited the surrounding read-only TRANSACTION
+     * with that consistency while the composition issued three separate statements, and the credit was
+     * misplaced. This datasource runs at read-committed isolation, where a transaction takes no snapshot of
+     * its own and each statement takes one, so a concurrent update committing between two of the three
+     * statements produced an account from before it beside a customer from after it -- a pairing that never
+     * existed in the database, published as though it had. Alternatives Considered: raising this
+     * transaction to repeatable read, which is the other available remedy; rejected because it makes every
+     * read in the transaction snapshot-stable whether it needs to be or not and adds a
+     * serialisation-failure outcome this operation would then have to answer for, where one statement needs
+     * no isolation change at all.</p>
      *
      * <p>Trade-offs: a miss on any of the three reads is raised here rather than returned as a
      * message-bearing response, which is the opposite of what the screen entry point beside this one
@@ -823,35 +865,6 @@ public class AccountViewService {
     }
 
     /**
-     * Lists an account's card cross-reference rows through the migrated by-account index.
-     *
-     * <p>Purpose: this is the access path the reference surfaces to the online region under the
-     * alternate-index name held at L192 and L193 of {@code app/cbl/COACTVWC.cbl}. The target declares
-     * the secondary index {@code idx_card_xref_account_id} and reaches it with an ordered query.</p>
-     *
-     * <p>Assumptions: the order is by card number ascending and is part of the CONTRACT rather than an
-     * artefact of the query, because an alternate-index read returns its rows in index order and a
-     * caller diffing two responses depends on that order being stable. Ascending card number is the
-     * base cluster's own order, which {@code app/cbl/CBACT03C.cbl} states by declaring
-     * {@code ACCESS MODE IS SEQUENTIAL} at L31 beside {@code RECORD KEY IS FD-XREF-CARD-NUM} at
-     * L32.</p>
-     *
-     * <p>Assumptions: an account with no cards yields an EMPTY list rather than a not-found outcome. An
-     * account legitimately has no card, and a browse of an alternate index likewise ends immediately
-     * rather than failing.</p>
-     *
-     * @param accountId the account whose cross-reference rows are required, the eleven-digit
-     *     identifier {@code XREF-ACCT-ID} declares at L7 of {@code app/cpy/CVACT03Y.cpy}
-     * @return the rows in ascending card-number order as a {@code List} of {@link CardXrefResponse},
-     *     empty when the account has none, never {@code null}
-     */
-    @Transactional(readOnly = true)
-    public List<CardXrefResponse> listCardCrossReferences(long accountId) {
-        return this.crossReferenceMapper.toCardXrefResponses(
-                this.crossReferences.findByAccountIdOrderByCardNumAsc(accountId));
-    }
-
-    /**
      * Resolves an account to the account and customer its lowest-ordering cross-referenced card names.
      *
      * <p>Purpose: this is the migrated form of {@code 9200-GETCARDXREF-BYACCT.} at L723 of
@@ -882,13 +895,22 @@ public class AccountViewService {
     public CardXrefView resolveCardCrossReferenceByAccount(long accountId) {
         return this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId)
                 .map(this.contextMapper::toCardXrefView)
-                // WHY : Assumptions: the raised message names the account and no card number. The
-                //       account identifier already travelled in the request and appears in this
-                //       service's own account-master refusal, whereas a card number is the one value
-                //       the migration's logging contract withholds from a durable diagnostic -- and
-                //       naming a card here would disclose one the caller never asked for.
+                // WHY : Refactoring Rationale: the raised message names NO identifier at all, where it
+                //       previously named the account and argued that an account identifier was
+                //       admissible because it "already travelled in the request". That argument is
+                //       refuted by the migration's own logging contract, which covers account and
+                //       customer identifiers by name alongside the primary account number and requires
+                //       a prohibited value to be OMITTED rather than abbreviated. A message travels
+                //       further than the request that provoked it: it reaches the operational record
+                //       through whatever advice or handler catches it, and a record holding the
+                //       identifier plus a timestamp locates the customer, the cards and the
+                //       transactions without holding any of them.
+                // WHY : Assumptions: what remains identifies the CONDITION rather than the row, and
+                //       that is sufficient here because the caller supplied the key and the correlation
+                //       identifier on the response ties the refusal to the request in the operational
+                //       record. A message left with nothing safe to say says only what happened.
                 .orElseThrow(() -> new NoSuchElementException(
-                        "no cross-reference row exists for account " + accountId));
+                        "the account has no cross-referenced card"));
     }
 
     /**
@@ -943,7 +965,8 @@ public class AccountViewService {
         boolean backward = CARD_XREF_DIRECTION_PREVIOUS.equals(direction);
         String position = cursor == null || cursor.isBlank()
                 ? null
-                : this.cursorToken.open(cardXrefCursorBinding(subject, backward), cursor);
+                : this.cursorToken.open(
+                        cardXrefCursorBinding(accountId, subject, backward), cursor);
 
         // WHY : Assumptions: a backward step needs a position and the repository's backward statement
         //       declares its cursor mandatory, so an absent one cannot be passed to it. Reading forward
@@ -954,7 +977,8 @@ public class AccountViewService {
                         null, accountId, Limit.of(CARD_XREF_PAGE_SIZE + 1))
                 : cardXrefWindow(accountId, position, backward);
 
-        return cardXrefPage(window, backward && position != null, subject);
+        return cardXrefPage(window, backward && position != null, position != null, accountId,
+                subject);
     }
 
     /**
@@ -991,12 +1015,18 @@ public class AccountViewService {
      * @param window the rows the statement returned, at most one more than a page holds
      * @param backward {@code true} when the window was read in descending order and must be reversed
      *     into presentation order
+     * @param resumed {@code true} when the request carried a cursor, which settles backward availability
+     *     on a forward walk: the cursor names a row the caller was already shown and the forward
+     *     predicate is strictly greater than it
+     * @param accountId the account being walked, sealed into both boundary tokens so neither can
+     *     reposition a walk of a different account
      * @param subject the validated caller the boundary tokens are sealed for
-     * @return the page envelope carrying the rows, both sealed boundaries and the further-page
-     *     indicator, never {@code null}
+     * @return the page envelope carrying the rows, both sealed boundaries and both availability
+     *     indicators, never {@code null}
      */
     private PageResponse<CardXrefResponse> cardXrefPage(
-            List<CardXref> window, boolean backward, String subject) {
+            List<CardXref> window, boolean backward, boolean resumed, long accountId,
+            String subject) {
 
         List<CardXref> rows = new ArrayList<>(window);
         boolean more = rows.size() > CARD_XREF_PAGE_SIZE;
@@ -1022,28 +1052,56 @@ public class AccountViewService {
         // WHY : Assumptions: a backward page always reports a further page forward, because the set the
         //       caller stepped back from is itself ahead of this one. The reference makes the same
         //       unconditional claim on its backward path rather than probing for it.
+        // WHY : Refactoring Rationale: the mirror-image claim is NOT made unconditionally, and that
+        //       asymmetry is the fix. On a backward walk the surplus row is itself a row lying further
+        //       back, so it answers backward availability directly; on a forward walk the answer is
+        //       whether a cursor was supplied, so the OPENING page reports nothing behind it instead of
+        //       advertising an earlier page that would come back empty.
         return PageResponse.ofRows(items,
-                this.cursorToken.seal(cardXrefCursorBinding(subject, true), leading),
-                this.cursorToken.seal(cardXrefCursorBinding(subject, false), trailing),
-                backward || more);
+                this.cursorToken.seal(cardXrefCursorBinding(accountId, subject, true), leading),
+                this.cursorToken.seal(cardXrefCursorBinding(accountId, subject, false), trailing),
+                backward || more,
+                backward ? more : resumed);
     }
 
     /**
      * Composes the binding a cross-reference cursor is sealed against.
      *
-     * <p>Assumptions: the binding names the query, the subject and the direction together, so a token is
-     * usable only for the walk, the caller and the step it was issued for. Sealing on the subject alone
-     * would let one caller present the leading boundary of a page as a trailing one and step over rows.</p>
+     * <p>Assumptions: the binding names the query, the subject, the ACCOUNT being walked and the
+     * direction together, so a token is usable only for the walk, the caller, the parent and the step it
+     * was issued for. Sealing on the subject alone would let one caller present the leading boundary of a
+     * page as a trailing one and step over rows.</p>
      *
+     * <p>Refactoring Rationale: the account was ABSENT from this binding and is added here, because
+     * without it a cursor issued while walking account A opened cleanly while walking account B. The
+     * consequence was not a leak -- the row filter is the account in the path, so no other account's rows
+     * were returned -- but a silent misposition: the cursor names a card number, the predicate is keyed on
+     * it, and the same card number under a different account is a valid position that the caller never
+     * saw. A page could therefore begin part way through account B's rows, or be empty, with nothing in
+     * the response saying so.</p>
+     *
+     * <p>Assumptions: the account is rendered zero-padded to its declared eleven digits, because the value
+     * is a {@code long} in Java and {@code XREF-ACCT-ID PIC 9(11)} in the record at L7 of
+     * {@code app/cpy/CVACT03Y.cpy}. Padding keeps one account's rendering stable whatever formats it, so a
+     * token cannot fail to open merely because two code paths rendered the same account differently.</p>
+     *
+     * <p>Alternatives Considered: concatenating the account and the direction into one string here.
+     * Rejected because a hand-joined scope is not injective unless it also escapes, and the shared
+     * composer already length-prefixes each predicate for exactly that reason -- see
+     * {@link CursorToken#scope}.</p>
+     *
+     * @param accountId the account whose rows the token positions within
      * @param subject the validated caller the token is issued for
      * @param backward {@code true} for the backward scope, {@code false} for the forward scope
      * @return the binding string the seal and the matching open are performed with, never {@code null}
      */
-    private static String cardXrefCursorBinding(String subject, boolean backward) {
+    private static String cardXrefCursorBinding(long accountId, String subject, boolean backward) {
         return CursorToken.binding(CARD_XREF_CURSOR_QUERY, subject,
-                backward ? CARD_XREF_CURSOR_SCOPE_BACKWARD : CARD_XREF_CURSOR_SCOPE_FORWARD);
+                CursorToken.scope(
+                        backward ? CARD_XREF_CURSOR_SCOPE_BACKWARD : CARD_XREF_CURSOR_SCOPE_FORWARD,
+                        CARD_XREF_CURSOR_SCOPE_ACCOUNT_PREFIX
+                                + String.format(Locale.ROOT, "%011d", accountId)));
     }
-
 
     /**
      * Edits a screen-supplied account filter and reports its tri-state validation outcome.
@@ -1131,6 +1189,19 @@ public class AccountViewService {
      *
      * @param screenAccountFilter the account filter as supplied, a {@code String} that may be
      *     {@code null} or blank
+     * <p>Refactoring Rationale: this method and {@link #readAccountView} are TOGETHER the surviving form
+     * of the reference's re-entry dispatch arm, {@code WHEN CDEMO-PGM-REENTER} at L361 of
+     * {@code app/cbl/COACTVWC.cbl}, which edits the filter at L362 and then either re-renders with the
+     * message at L364 through L367 or performs the three-hop read at L369. A single method that did both
+     * also existed here and has been withdrawn: it was reached by nothing, and it answered a rejected
+     * filter with a 200 carrying an unpopulated view, where the published operation answers 400 with the
+     * refusal keyed to the field. Two implementations of one dispatch arm disagreeing about the status
+     * code is worse than one, and the adapter owns the status.</p>
+     *
+     * <p>Assumptions: the other two reference dispatch arms have no server call at all -- the
+     * function-key arm at L324 is client-side navigation and the first-entry arm at L353 renders an empty
+     * form -- so this pair is the whole of the surviving dispatch.</p>
+     *
      * @return the entries for this one field as a {@code List} of {@link ApiError.FieldError}, empty
      *     when the filter is acceptable and never larger than one entry; never {@code null}
      */
@@ -1147,62 +1218,6 @@ public class AccountViewService {
                 .map(ApiError.FieldError::from)
                 .map(List::of)
                 .orElseGet(List::of);
-    }
-
-    /**
-     * Reads the human account view from a screen-supplied account filter, editing it first.
-     *
-     * <p>Purpose: this is the re-entry branch of the reference's dispatch, {@code WHEN
-     * CDEMO-PGM-REENTER} at L361 of {@code app/cbl/COACTVWC.cbl}. It performs the input edit at L362,
-     * and then either re-renders the screen with the message at L364 through L367 or performs the
-     * three-hop read at L369. It is the only one of the reference's three dispatch arms that survives
-     * as a server call: the function-key arm at L324 is client-side navigation and the first-entry arm
-     * at L353 renders an empty form with no server round trip at all.</p>
-     *
-     * <p>Assumptions: a rejected filter is answered with a RESPONSE and not with a raised exception,
-     * because that is what the reference does -- L365 and L366 send the same map back carrying the
-     * message, and the account and customer regions stay unpopulated because their guards at L471,
-     * L472 and L493 are false. The response therefore has both message channels set, no account half
-     * and no customer half, which is precisely the shape the response record documents for that
-     * state.</p>
-     *
-     * <p>Assumptions: the published identifier on a rejected filter is the ZEROED key, eleven zero
-     * digits, because L660 and L675 both move zero into the selection identifier before leaving the
-     * edit. Echoing the caller's rejected text instead would put a value that failed validation back
-     * into a field the contract declares as an eleven-digit identifier.</p>
-     *
-     * <p>Assumptions: a read MISS is likewise answered with a response rather than raised, because this
-     * route is the screen and L365 with L366 sends the same map back. The composition already returns
-     * that shape, so nothing here has to translate it.</p>
-     *
-     * @param screenAccountFilter the account filter as supplied, a {@code String} that may be
-     *     {@code null}, may be blank, and may carry the blank-case screen marker
-     * @return the composed view when the filter is acceptable and every read resolves, otherwise the
-     *     re-rendered view carrying the message and whichever halves the reference would have
-     *     populated; an {@link AccountViewResponse}, never {@code null}
-     * @throws IllegalStateException if the composition reaches a data condition none of the three reads
-     *     classifies, which is the first abend surface of L375 through L380, or if a read fails for a
-     *     reason the program-wide handler of L916 would have caught
-     */
-    @Transactional(readOnly = true)
-    public AccountViewResponse readAccountViewForFilter(String screenAccountFilter) {
-        AccountFilterEdit edit = editMapInputs(screenAccountFilter);
-
-        if (edit.state().isError()) {
-            // WHY : Assumptions: the echoed identifier is the ZEROED key rather than the rejected text
-            //       because both rejection arms of the field edit move zero into the selection
-            //       identifier before leaving, at L660 and at L675, and the screen setup then echoes
-            //       that identifier at L468. Echoing the caller's rejected text instead would put a
-            //       value that failed validation into a component the contract declares as an
-            //       eleven-digit identifier.
-            return unpopulatedView(0L, edit.returnMessage());
-        }
-
-        // WHY : Assumptions: parsing is safe rather than optimistic. The edit above has already proved
-        //       the trimmed value is digits only and no wider than the declared eleven, so it fits the
-        //       signed sixty-four-bit range with nine decimal digits to spare, and the acceptable arm
-        //       is the only path that reaches this statement.
-        return readAccountUnderAbendHandler(Long.parseLong(screenAccountFilter.trim()));
     }
 
     /**
@@ -1270,7 +1285,6 @@ public class AccountViewService {
      */
     private record AccountFilterEdit(FieldValidationFlag state, String returnMessage) {
     }
-
 
     /**
      * Runs the three-hop composition under the program-wide abend handler.
@@ -1362,7 +1376,21 @@ public class AccountViewService {
         String returnMessage = null;
         FieldValidationFlag accountFilterState = FieldValidationFlag.VALID;
 
-        Optional<CardXref> crossReference = readCardXrefByAccount(accountKey);
+        // WHY : Refactoring Rationale: all three sides are read by ONE statement, so the account and the
+        //       customer this screen publishes are observed under one snapshot. Three statements inside one
+        //       read-only transaction did NOT give that, because this datasource runs at read-committed
+        //       isolation where each statement takes its own snapshot -- so a concurrent update committing
+        //       between the second and third statement produced an account from before it beside a customer
+        //       from after it, a pairing that never existed, published as though it had. The rationale on
+        //       the public entry point asserted the guarantee; this statement is what makes the assertion
+        //       true.
+        // WHY : Trade-offs: the three gates below no longer PREVENT a read the way the reference's GO TO
+        //       statements at L698, L705 and L714 did -- the sides are evaluated together. Nothing
+        //       observable changes, because a read has no side effect and the outcome is still decided in
+        //       the reference's own order from which sides came back empty.
+        Optional<AccountScreenRow> composed = readAccountScreenRow(accountKey);
+
+        Optional<CardXref> crossReference = composed.map(AccountScreenRow::crossReference);
         if (crossReference.isEmpty()) {
             accountFilterState = FieldValidationFlag.NOT_OK;
             returnMessage = latchedReturnMessage(returnMessage, RETURN_NOT_FOUND_IN_CARD_XREF);
@@ -1379,7 +1407,13 @@ public class AccountViewService {
         //       still be absent, which the guard further down answers for.
         Long customerKey = crossReference.get().getCustomerId();
 
-        Optional<Account> account = readAccountDataByAccount(accountKey);
+        // WHY : Assumptions: the account side is absent exactly when the outer join found no master row,
+        //       which is the migrated form of the second read missing. The join is OUTER for this reason:
+        //       an inner one would have collapsed this miss and the customer miss into one empty result,
+        //       and each arm carries its own verbatim sentence and its own rule about which half of the
+        //       screen is published.
+        Optional<Account> account = composed.map(AccountScreenRow::account)
+                .filter(Objects::nonNull);
         if (account.isEmpty()) {
             returnMessage = latchedReturnMessage(returnMessage, RETURN_NOT_FOUND_IN_ACCOUNT_MASTER);
         }
@@ -1403,7 +1437,13 @@ public class AccountViewService {
                     unexpectedDataScenarioDetail(), RETURN_UNEXPECTED_DATA_SCENARIO));
         }
 
-        Optional<Customer> customer = readCustomerDataByCustomer(customerKey);
+        // WHY : Assumptions: the customer side is joined on the identifier the CROSS-REFERENCE carries and
+        //       never on one taken from the account row, because the account record declares no customer
+        //       identifier at all -- the twelve named fields at L5 through L16 of app/cpy/CVACT01Y.cpy
+        //       contain no such field. The reference obtains it at L739 and moves it into the third read's
+        //       key at L708, which is the same derivation the join predicate expresses.
+        Optional<Customer> customer = composed.map(AccountScreenRow::customer)
+                .filter(Objects::nonNull);
         if (customer.isEmpty()) {
             returnMessage = latchedReturnMessage(returnMessage, RETURN_NOT_FOUND_IN_CUSTOMER_MASTER);
         }
@@ -1425,79 +1465,43 @@ public class AccountViewService {
     }
 
     /**
-     * Reads the cross-reference row for one account through the migrated by-account index.
+     * Reads one account's whole screen composition in a single statement.
      *
-     * <p>Purpose: this is {@code 9200-GETCARDXREF-BYACCT} at L723 of {@code app/cbl/COACTVWC.cbl}, exit
-     * at L771, whose body is the {@code EXEC CICS READ} at L727 through L735.</p>
+     * <p>Purpose: this is the whole of {@code 9000-READ-ACCT} at L687 of {@code app/cbl/COACTVWC.cbl},
+     * whose three keyed reads are {@code 9200-GETCARDXREF-BYACCT} at L723, {@code 9300-GETACCTDATA-BYACCT}
+     * at L774 and {@code 9400-GETCUSTDATA-BYCUST} at L825.</p>
      *
-     * <p>Refactoring Rationale: the reference reaches this record BY ACCOUNT, which the base cluster
-     * cannot answer, so it reads through the alternate index named by the literal at L192 and L193 and
-     * supplies the account identifier as the record identification field at L729 with its key length at
-     * L730. The target replaces that separately named file with the secondary index
-     * {@code idx_card_xref_account_id} and reaches it through a derived repository finder, so the access
-     * path survives while the file name does not.</p>
+     * <p>Assumptions: each of the three reference reads survives as one side of the statement, and the
+     * access path of each is preserved rather than merely its result. The cross-reference is reached BY
+     * ACCOUNT, which the base cluster cannot answer -- the reference reads through the alternate index
+     * named at L192 and L193, supplying the account as the record identification field at L729 -- and the
+     * target reaches the same path through the secondary index {@code idx_card_xref_account_id}. The
+     * account master is reached by its PRIMARY key, which {@code app/cbl/CBACT01C.cbl} states with
+     * {@code RECORD KEY IS FD-ACCT-ID} at L32 for the same file, which is why that side is an equality on
+     * the identifier and the first is not. The customer master is likewise reached by its primary key,
+     * with the key coming from the cross-reference.</p>
      *
-     * <p>Assumptions: ONE row is requested rather than the whole set, because the reference issues one
-     * keyed read carrying no browse start and consumes exactly one row on its normal arm at L739 and
-     * L740. The index behind the read is non-unique, since one account holds many cards, so the finder
-     * states an ordering and takes the lowest card number; without a stated ordering the row returned
-     * would be whichever the plan reached first and could differ between two executions over identical
-     * rows.</p>
+     * <p>Assumptions: ONE row is asked for, because the reference issues a keyed read carrying no browse
+     * start and consumes exactly one row on its normal arm at L739 and L740. The by-account index is
+     * non-unique, since one account holds many cards, so the statement states an ordering and this bound
+     * takes the lowest card number; without the ordering the row returned would be whichever the plan
+     * reached first and two identical requests could differ.</p>
      *
-     * @param accountKey the account whose cross-reference row is wanted, the eleven-digit identifier
-     * @return the row for that account with the lowest card number, or an empty result when the
-     *     cross-reference holds none; an {@code Optional} of {@link CardXref}, never {@code null}
+     * <p>Assumptions: the account master row is returned AS STORED. The batch reader substitutes a literal
+     * amount for a zero current-cycle debit at L236 through L238 of {@code app/cbl/CBACT01C.cbl}, but it
+     * does so while filling its OUTPUT record rather than while reading the master, which it reads
+     * unchanged at L166. That substitution is an artefact of the extract file and is not reproduced on a
+     * read path, so a zero current-cycle debit is published as zero.</p>
+     *
+     * @param accountKey the account whose composition is wanted, the eleven-digit identifier the reference
+     *     moves into the read key at L691
+     * @return the composition row, or an empty result when the cross-reference holds no row for the
+     *     account; an {@code Optional} of {@link AccountScreenRow}, never {@code null}
      */
-    private Optional<CardXref> readCardXrefByAccount(long accountKey) {
-        return this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountKey);
-    }
-
-    /**
-     * Reads the account master row for one account by its primary key.
-     *
-     * <p>Purpose: this is {@code 9300-GETACCTDATA-BYACCT} at L774 of {@code app/cbl/COACTVWC.cbl}, exit
-     * at L821, whose body is the {@code EXEC CICS READ} at L776 through L784 against the file name held
-     * at L184 and L185.</p>
-     *
-     * <p>Assumptions: the key is the primary key and no index is involved, which the batch reader
-     * states independently by declaring {@code RECORD KEY IS FD-ACCT-ID} at L32 of
-     * {@code app/cbl/CBACT01C.cbl} for the same file. That is why this hop is a find-by-identifier and
-     * the hop before it is not.</p>
-     *
-     * <p>Assumptions: the row is returned as stored. The batch reader substitutes a literal amount for
-     * a zero current-cycle debit at L236 through L238 of that same program, but it does so while
-     * filling its OUTPUT record and not while reading the master, which it reads unchanged at L166.
-     * That substitution is therefore an artifact of the extract file and is not reproduced on a read
-     * path; a zero current-cycle debit is published as zero.</p>
-     *
-     * @param accountKey the account to read, the eleven-digit identifier
-     * @return the account master row, or an empty result when the master holds none; an
-     *     {@code Optional} of {@link Account}, never {@code null}
-     */
-    private Optional<Account> readAccountDataByAccount(long accountKey) {
-        return this.accounts.findById(accountKey);
-    }
-
-    /**
-     * Reads the customer master row for the customer the cross-reference named.
-     *
-     * <p>Purpose: this is {@code 9400-GETCUSTDATA-BYCUST} at L825 of {@code app/cbl/COACTVWC.cbl}, exit
-     * at L870, whose body is the {@code EXEC CICS READ} at L826 through L834 against the file name held
-     * at L188 and L189.</p>
-     *
-     * <p>Assumptions: the key of this read is the customer identifier and it comes from the FIRST hop
-     * rather than from the account row, because the account record declares no customer identifier --
-     * the copybook's twelve named fields at L5 through L16 of {@code app/cpy/CVACT01Y.cpy} contain no
-     * such field. The reference obtains it at L739 and moves it into this read's key at L708, and the
-     * key it supplies is the character redefinition at L76 and L77, which is why the identifier travels
-     * as digits rather than as a formatted value.</p>
-     *
-     * @param customerKey the customer to read, the nine-digit identifier the cross-reference row named
-     * @return the customer master row, or an empty result when the master holds none; an
-     *     {@code Optional} of {@link Customer}, never {@code null}
-     */
-    private Optional<Customer> readCustomerDataByCustomer(long customerKey) {
-        return this.customers.findById(customerKey);
+    private Optional<AccountScreenRow> readAccountScreenRow(long accountKey) {
+        return this.crossReferences.findAccountScreenRows(accountKey, Limit.of(1))
+                .stream()
+                .findFirst();
     }
 
     /**
@@ -1725,4 +1729,3 @@ public class AccountViewService {
         return true;
     }
 }
-

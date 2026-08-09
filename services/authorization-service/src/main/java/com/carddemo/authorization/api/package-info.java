@@ -144,7 +144,8 @@
  *       through and renders the envelope it receives; it does not compute whether a further page
  *       exists.</li>
  *   <li>{@code com.carddemo.authorization.config.SecurityConfig} owns the route authorization
- *       matrix, including the {@code carddemo-admin} authority required on the fraud route, and
+ *       matrix, including the fraud route's own rule -- which admits either business group, the
+ *       authority the baseline grants, having briefly required {@code carddemo-admin} -- and
  *       registers {@code com.carddemo.common.web.CorrelationIdFilter} into this module's filter
  *       chain. Authorization is declared once, in one readable place, rather than annotated route
  *       by route across this package.</li>
@@ -201,8 +202,10 @@
  * ground that the baseline reaches the fraud program from inside transaction {@code CPVD} and so
  * treats detail and fraud as one screen's work. Rejected, and the deciding factor is the
  * authority rather than the grouping. The fraud route is the only route in this package that
- * changes state and the only one gated on the {@code carddemo-admin} authority, so giving it its
- * own type lets the route authorization matrix in {@code SecurityConfig} name one class-level
+ * changes state and the only one carrying a rule of its own -- that rule admits either business
+ * group today, the {@code carddemo-admin} requirement having been withdrawn as a parity break, and
+ * the separation is what would let a deployment narrow the write without narrowing the read. Giving
+ * it its own type lets the route authorization matrix in {@code SecurityConfig} name one class-level
  * path prefix instead of singling out a single method inside a mixed controller, where a later
  * edit could add a second method under the same prefix and inherit an authority nobody intended
  * for it. The cost accepted is one more small type than the baseline's screen count suggests,

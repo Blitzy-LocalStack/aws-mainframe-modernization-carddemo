@@ -1,7 +1,10 @@
 package com.carddemo.batch.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +15,7 @@ import com.carddemo.batch.dto.PostingValidationResult;
 import com.carddemo.batch.dto.RejectReason;
 import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
+import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -99,7 +103,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("post a transaction that fails no condition")
     void passingTransactionMayPost() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("0.00", "1000.00", LocalDate.of(2030, 1, 1))));
 
@@ -111,7 +115,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("report reason 100 and suppress the later conditions when the card does not resolve")
     void unresolvedCardReportsOneHundredAndSuppressesTheRest() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100000.00", LocalDate.of(2030, 1, 1)), Optional.empty(),
                 Optional.empty());
 
@@ -123,7 +127,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("report reason 101 rather than a boundary reason when the account is absent")
     void absentAccountReportsOneHundredAndOneRatherThanABoundaryReason() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100000.00", LocalDate.of(2030, 1, 1)), resolved(), Optional.empty());
 
         assertThat(outcome.rejectReason()).contains(RejectReason.ACCOUNT_NOT_FOUND_ON_READ);
@@ -133,7 +137,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("post a projected balance landing exactly on the credit limit")
     void exactLimitPosts() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("900.00", "1000.00", LocalDate.of(2030, 1, 1))));
 
@@ -144,7 +148,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("report reason 102 one cent beyond the credit limit")
     void oneCentBeyondTheLimitReportsOneHundredAndTwo() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.01", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("900.00", "1000.00", LocalDate.of(2030, 1, 1))));
 
@@ -155,7 +159,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("post a transaction dated equal to the account expiration date")
     void expirationDateEqualPosts() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(account("0.00", "1000.00", LocalDate.of(2022, 7, 18))));
 
@@ -166,7 +170,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("report reason 103 one day past the account expiration date")
     void oneDayPastExpirationReportsOneHundredAndThree() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.00", LocalDate.of(2022, 7, 19)), resolved(),
                 Optional.of(account("0.00", "1000.00", LocalDate.of(2022, 7, 18))));
 
@@ -185,7 +189,7 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("report reason 103 when both boundary guards fail")
     void bothBoundaryFailuresReportOneHundredAndThree() {
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.01", LocalDate.of(2022, 7, 19)), resolved(),
                 Optional.of(account("900.00", "1000.00", LocalDate.of(2022, 7, 18))));
 
@@ -218,7 +222,7 @@ class PostingValidationServiceTest {
     /**
      * An unresolved card ends validation without the account path being read at all.
      *
-     * <p>Assumptions: this drives the resolving entry point rather than the pre-resolved overload,
+     * <p>Assumptions: this drives the resolving entry point rather than the internal decision half,
      * because the guard at {@code app/cbl/CBTRN02C.cbl:372} is about a read NOT HAPPENING and only
      * the entry point that owns both reads can be observed to skip one. Reason 100 therefore
      * excludes reason 101 by control flow rather than by precedence.</p>
@@ -228,12 +232,86 @@ class PostingValidationServiceTest {
     void unresolvedCardLeavesTheAccountPathUnread() {
         when(this.crossReferences.findByCardNum(CARD_NUMBER)).thenReturn(Optional.empty());
 
-        PostingValidationResult outcome =
+        PostingDecision decision =
                 this.service.validate(transaction("100.00", LocalDate.of(2022, 7, 18)));
 
-        assertThat(outcome.rejectReason())
+        assertThat(decision.outcome().rejectReason())
                 .contains(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE);
         verifyNoInteractions(this.accounts);
+    }
+
+    /**
+     * The resolving entry point hands back both records it read, so its caller needs no second read.
+     *
+     * <p>Assumptions: this is the property that lets the posting job stop performing its own card
+     * read, its own account read and its own copy of the {@code :372} guard. Both records are asserted
+     * to be the SAME instances the repositories answered with, because a decision carrying equal-but-
+     * different objects would leave the job free to be handed a row read at a different moment -- and
+     * the reference resolves each record once per feed row.</p>
+     */
+    @Test
+    @DisplayName("hand back both records the two reads resolved")
+    void theDecisionCarriesTheRecordsItRead() {
+        CardXref crossReference = new CardXref(CARD_NUMBER, 1L, ACCOUNT_ID);
+        Account resolved = account("0.00", "1000.00", LocalDate.of(2030, 1, 1));
+        when(this.crossReferences.findByCardNum(CARD_NUMBER))
+                .thenReturn(Optional.of(crossReference));
+        when(this.accounts.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(resolved));
+
+        PostingDecision decision =
+                this.service.validate(transaction("100.00", LocalDate.of(2022, 7, 18)));
+
+        assertThat(decision.outcome().isAccepted()).isTrue();
+        assertThat(decision.crossReference()).containsSame(crossReference);
+        assertThat(decision.account()).containsSame(resolved);
+        verify(this.crossReferences, times(1)).findByCardNum(CARD_NUMBER);
+        verify(this.accounts, times(1)).findByAccountId(ACCOUNT_ID);
+    }
+
+    /**
+     * An absent account is reported with the cross-reference still carried back.
+     *
+     * <p>Assumptions: a reject decision has to remain expressible with one record present and the
+     * other absent, because that is precisely reason 101 -- the card resolved and the account it named
+     * did not. A decision type that required both records would be unable to describe the outcome the
+     * reject stream is written from.</p>
+     */
+    @Test
+    @DisplayName("carry the resolved cross-reference back on a reason 101 decision")
+    void anAbsentAccountStillCarriesTheCrossReference() {
+        CardXref crossReference = new CardXref(CARD_NUMBER, 1L, ACCOUNT_ID);
+        when(this.crossReferences.findByCardNum(CARD_NUMBER))
+                .thenReturn(Optional.of(crossReference));
+        when(this.accounts.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        PostingDecision decision =
+                this.service.validate(transaction("100.00", LocalDate.of(2022, 7, 18)));
+
+        assertThat(decision.outcome().rejectReason())
+                .contains(RejectReason.ACCOUNT_NOT_FOUND_ON_READ);
+        assertThat(decision.crossReference()).containsSame(crossReference);
+        assertThat(decision.account()).isEmpty();
+    }
+
+    /**
+     * A decision refuses to be assembled with any component absent.
+     *
+     * <p>Assumptions: an absent optional is how this type says "not resolved", so a {@code null}
+     * component says nothing at all and is a wiring defect in the producer rather than a state a
+     * consumer should have to test for.</p>
+     */
+    @Test
+    @DisplayName("refuse a decision assembled with a null component")
+    void aDecisionRefusesANullComponent() {
+        PostingValidationResult accepted =
+                PostingValidationResult.accepted(new BigDecimal("100.00"));
+
+        assertThatNullPointerException()
+                .isThrownBy(() -> new PostingDecision(null, Optional.empty(), Optional.empty()));
+        assertThatNullPointerException()
+                .isThrownBy(() -> new PostingDecision(accepted, null, Optional.empty()));
+        assertThatNullPointerException()
+                .isThrownBy(() -> new PostingDecision(accepted, Optional.empty(), null));
     }
 
     /**
@@ -246,13 +324,13 @@ class PostingValidationServiceTest {
     @Test
     @DisplayName("never report the rewrite reason for any input")
     void noInputEverReportsTheRewriteReason() {
-        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+        assertThat(this.service.decide(transaction("100.01", LocalDate.of(2022, 7, 19)),
                         Optional.empty(), Optional.empty()).rejectReason())
                 .isNotEqualTo(Optional.of(RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE));
-        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+        assertThat(this.service.decide(transaction("100.01", LocalDate.of(2022, 7, 19)),
                         resolved(), Optional.empty()).rejectReason())
                 .isNotEqualTo(Optional.of(RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE));
-        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+        assertThat(this.service.decide(transaction("100.01", LocalDate.of(2022, 7, 19)),
                         resolved(),
                         Optional.of(account("900.00", "1000.00", LocalDate.of(2022, 7, 18))))
                         .rejectReason())
@@ -276,7 +354,7 @@ class PostingValidationServiceTest {
                 LocalDate.of(2030, 1, 1), LocalDate.of(2024, 1, 1), new BigDecimal("400.00"),
                 new BigDecimal("25.00"), "98101", "DEFAULT");
 
-        PostingValidationResult outcome = this.service.validate(
+        PostingValidationResult outcome = this.service.decide(
                 transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
                 Optional.of(distinguishing));
 

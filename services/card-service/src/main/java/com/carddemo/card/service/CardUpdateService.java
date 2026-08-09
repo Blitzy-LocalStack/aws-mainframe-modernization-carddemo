@@ -707,11 +707,31 @@ public class CardUpdateService {
 
         Card stored = requireCard(resolveCardNumber(cardKey));
 
-        // WHY : Assumptions: the no-change test runs BEFORE the four edits, and the order is the
-        //       reference's own rather than a convenience. Line 680 makes the comparison and line 682
-        //       sets the sentence; lines 685 to 693 then force all four attribute flags valid and leave
-        //       the paragraph, so the edits at lines 698 to 708 are never reached for an unchanged
-        //       submission. Evaluating the edits first would refuse a submission the reference accepts.
+        // WHY : Refactoring Rationale: the revision gate now runs FIRST, ahead of the no-change test, and
+        //       the previous order was a parity defect rather than a stylistic choice. hasNoChanges
+        //       compares the submission against the row as it stands NOW, not against the before-image
+        //       the caller was shown, so those two comparisons part company in exactly the case
+        //       concurrency control exists for: if another writer has already moved the row to the values
+        //       this caller is submitting, the submission equals the current row, the old order returned
+        //       200 without consulting the caller's revision, and the caller was told its edit had been
+        //       accepted when what it saw was somebody else's. The reference does not behave that way. Its
+        //       no-change test at app/cbl/COCRDUPC.cbl:680-682 compares the new screen values against
+        //       CCUP-OLD-*, the BEFORE-IMAGE the screen carried, so a row changed underneath the caller
+        //       fails that test, reaches 9200-WRITE-PROCESSING, and is refused by
+        //       9300-CHECK-CHANGE-IN-REC at :1498-1511 with DATA-WAS-CHANGED-BEFORE-UPDATE. Checking the
+        //       revision first reproduces that outcome with the version column standing in for the
+        //       before-image comparison.
+        // WHY : Assumptions: the no-change test still runs BEFORE the four edits, and THAT order is the
+        //       reference's own. Line 680 makes the comparison and line 682 sets the sentence; lines 685
+        //       to 693 then force all four attribute flags valid and leave the paragraph, so the edits at
+        //       lines 698 to 708 are never reached for an unchanged submission. Evaluating the edits first
+        //       would refuse a submission the reference accepts. Only the revision gate moved above the
+        //       no-change test; the edits did not move.
+        // WHY : Trade-offs: a caller holding the current revision and submitting values equal to the
+        //       stored row still receives 200 and no write, which is the accepted-and-not-written outcome
+        //       the reference reaches. What changed is only the stale caller, which now receives the 409
+        //       the contract already declared for it.
+        checkChangeInRecord(stored, request.version());
         // WHY : Assumptions: over HTTP the declarative constraints on CardUpdateRequest fire ahead of
         //       this method, so a submission that is both unchanged and outside a declared domain would
         //       be refused rather than short-circuited. That combination cannot arise, because an
@@ -741,8 +761,6 @@ public class CardUpdateService {
         if (states.hasError()) {
             throw refuseAttributes(states);
         }
-
-        checkChangeInRecord(stored, request.version());
 
         return writeProcessing(request, stored);
     }

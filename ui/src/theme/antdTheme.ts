@@ -1,5 +1,5 @@
 /**
- * The application's single Ant Design theme object.
+ * @file The application's single Ant Design theme object.
  *
  * Purpose
  * -------

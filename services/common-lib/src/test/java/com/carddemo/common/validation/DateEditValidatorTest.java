@@ -479,6 +479,61 @@ class DateEditValidatorTest {
     class LanguageEnvironmentPath {
 
         /**
+         * Confirms a date whose width disagrees with its mask is refused by the validator's OWN width
+         * condition and not by the bare supertype.
+         *
+         * <p>Refactoring Rationale: the type is asserted, not merely the supertype, because the type IS
+         * the fix. The only consumer of this entry point had to catch {@code IllegalArgumentException} to
+         * answer a width disagreement as a client failure, and this class raises that same supertype for
+         * four internal invariants -- a feedback record whose severity contradicts its own code, an
+         * unknown date-component identity, a year outside the four-digit domain, a value too wide for a
+         * four-digit field. Each of those was therefore reported to a caller as a four-hundred naming the
+         * date it had sent correctly, while a genuine defect here never reached the internal-failure
+         * channel. Asserting the narrow type is what keeps that separation from silently reverting.</p>
+         *
+         * <p>Assumptions: both recognised masks are exercised, because each has its own width check and a
+         * revert could narrow one and leave the other. The message is asserted to name the two widths and
+         * the mask and to name NO part of the date, which is the disclosure property one of this class's
+         * entry points needs -- it gates a date of birth.</p>
+         *
+         * @param mask a recognised mask
+         * @param date a date whose width is not the one that mask declares
+         */
+        @ParameterizedTest
+        @CsvSource({"YYYY-MM-DD,2022-07-1", "YYYYMMDD,2022071"})
+        @DisplayName("a width disagreement raises the validator's own width condition")
+        void aWidthDisagreementRaisesTheNarrowCondition(String mask, String date) {
+            assertThatThrownBy(() -> DateEditValidator.evaluateWithLanguageEnvironment(date, mask))
+                .isInstanceOf(DateEditValidator.DateWidthException.class)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(mask)
+                .hasMessageContaining(String.valueOf(date.length()))
+                .hasMessageNotContaining(date);
+        }
+
+        /**
+         * Confirms an internal invariant failure is NOT reported as the width condition.
+         *
+         * <p>Assumptions: the four-digit domain check on the leap-year entry point is used as the
+         * representative invariant, because it is reachable without reflection and is one of the four
+         * this class raises through the shared supertype. It must remain an ordinary argument failure, so
+         * that a boundary catching only the width condition lets it through to the internal-failure
+         * channel rather than answering it as the caller's fault.</p>
+         *
+         * <p>Assumptions: the value used is one ABOVE the published ceiling rather than a small number,
+         * because the published floor of that domain is zero -- a three-digit year is inside it and does
+         * not raise. Naming the constant rather than a literal is what keeps the case exercising the
+         * boundary if the domain is ever widened.</p>
+         */
+        @Test
+        @DisplayName("an internal invariant failure is not the width condition")
+        void anInvariantFailureIsNotTheWidthCondition() {
+            assertThatThrownBy(() -> DateEditValidator.isLeapYear(DateEditValidator.MAX_YEAR + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .isNotInstanceOf(DateEditValidator.DateWidthException.class);
+        }
+
+        /**
          * Confirms a valid date against the declared mask reports the valid severity and verdict.
          */
         @Test

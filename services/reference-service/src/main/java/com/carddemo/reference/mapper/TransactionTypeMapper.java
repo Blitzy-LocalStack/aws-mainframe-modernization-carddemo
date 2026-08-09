@@ -4,7 +4,6 @@ import com.carddemo.reference.domain.TransactionType;
 import com.carddemo.reference.dto.TransactionTypeCreateRequest;
 import com.carddemo.reference.dto.TransactionTypeResponse;
 import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
-import java.util.List;
 
 /**
  * Converts between the transaction-type entity and its wire shapes.
@@ -26,7 +25,7 @@ import java.util.List;
  *
  * <p>Assumptions: this class is {@code final} with a private constructor and static members rather
  * than a Spring {@code @Component}, which is the shape the charter fixes for the four entity
- * conversions at its own L139 to L156. Each of the four is a total function of its argument, with no
+ * conversions at its own L170 to L192. Each of the four is a total function of its argument, with no
  * collaborator, no configuration and no state between calls. {@code DateInquiryReplyMapper} alone in
  * this package is a component and alone is not {@code final}, so that it stays proxyable; that
  * exception is recorded there and does not reach this class.</p>
@@ -118,37 +117,27 @@ public final class TransactionTypeMapper {
     }
 
     /**
-     * Renders a page of stored types, preserving the order they arrive in.
+     * {@code toResponseList} is deliberately absent.
      *
-     * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
-     * indicator of {@code com.carddemo.common.web.PageResponse} are assembled by
-     * {@code com.carddemo.reference.service}, the only layer that holds the keyset cursor and so the
-     * only one able to say whether a further page exists; a mapper is handed rows and knows nothing
-     * about the query that produced them. Two members a caller might reach for are absent from that
-     * envelope altogether -- it carries no previous-page flag and no page-size member -- so neither can
-     * be obtained from this method by any route.</p>
+     * <p>Refactoring Rationale: a {@code toResponseList(List<TransactionType>)} member was declared here and
+     * nothing ever called it. It was not merely unused: it could not be used, because the browse it was
+     * written for renders row by row. {@code ReferencePaging.page} takes a {@code Function<E, R>} and
+     * applies it per row so that it can drop the surplus probe row and seal the two boundary keys in one
+     * place, and every one of its call sites passes {@code TransactionTypeMapper::toResponse} as that function. A
+     * batch renderer therefore had no position in the call chain at all, and its own Javadoc described
+     * an envelope -- first key, last key, more-pages -- that it explicitly did not assemble.</p>
      *
-     * <p>Trade-offs: an empty input yields an empty list, while a {@code null} input propagates a
-     * {@code NullPointerException} instead of being folded into one. Folding it would make a genuinely
-     * empty page and a defect that returned nothing at all report identically, and the second would
-     * then reach a caller as a page with no rows rather than as a fault anyone could act on. The
-     * returned list is unmodifiable, so a caller needing to sort or extend it copies it first; that
-     * costs a copy at the one call site that would need it and removes the possibility of a shared
-     * response list being mutated after it is built.</p>
+     * <p>Alternatives Considered: widening {@code ReferencePaging.page} to accept a batch renderer so the
+     * member became the used path. Rejected: five browses share that helper, so the change would touch
+     * every one of them to move where a {@code map} happens, and it would move the surplus-row drop
+     * further from the query that produced it -- which is the one place the drop has to stay, because
+     * only that layer knows a probe row was requested. Removing two lines that nothing can reach is the
+     * smaller change and leaves one convention rather than two.</p>
      *
-     * @param entities the rows to render, in the order they are to be published; must not be
-     *     {@code null}, and every element must be a loaded row
-     * @return an unmodifiable list of response shapes in the same order, empty when the input was
-     *     empty, never {@code null}
-     * @throws NullPointerException if {@code entities} is {@code null} or holds a {@code null} element
+     * <p>Assumptions: this note is recorded rather than the member simply deleted, because the sibling
+     * mapper's own comments cited this one by name and line. A reader who follows such a citation and
+     * finds nothing cannot tell an intentional removal from a bad merge.</p>
      */
-    public static List<TransactionTypeResponse> toResponseList(List<TransactionType> entities) {
-        // WHY : Assumptions: the caller's order is preserved and nothing is sorted here. A backward
-        //       page is read in descending key order and reversed by the service before it is
-        //       rendered, at TransactionTypeService L177, so a sort applied at this point would undo
-        //       that silently and hand a backward page back in the wrong direction.
-        return entities.stream().map(TransactionTypeMapper::toResponse).toList();
-    }
 
     /**
      * Builds a new entity from a create request.
@@ -205,11 +194,25 @@ public final class TransactionTypeMapper {
         //       removes trailing blanks only and treats a leading blank as content the source record
         //       is entitled to hold. Two consequences carry the decision. Re-deciding it at this one
         //       mapping site would change behaviour for every other caller of the same member --
-        //       TransactionCategoryMapper, TransactionCategoryService and ReferenceBatchUpdateService
-        //       all normalise through it -- which is precisely the divergence between records that a
+        //       TransactionCategoryMapper, TransactionTypeService and ReferenceBatchUpdateService all
+        //       call it directly, and TransactionCategoryService reaches it through
+        //       TransactionCategoryMapper.applyUpdate -- which is precisely the divergence between
+        //       records that a
         //       package-scope ruling exists to prevent. And the resulting difference from the baseline
         //       is already registered, on the trailing-only terms, in
         //       docs/architecture/cobol-to-service-traceability.md.
+        // WHY : Refactoring Rationale: that citation used to read "is already registered, on the
+        //       trailing-only terms" and named no entry, and at the time it was written NO entry
+        //       existed -- the register held only the integrity-sentence, action-domain and
+        //       upsert-not-exposed entries. A reader following the citation found nothing and a
+        //       reviewer checking it found it false, which is why the entry is now named: a citation
+        //       that names its target can be checked by literal search, and one that does not cannot.
+        // WHY : Assumptions: this ruling governs STORAGE and not EQUALITY, and the two are decided
+        //       separately here because the baseline decides them separately too. Every description
+        //       comparison the baseline makes goes through a trim -- COTRTLIC.cbl L1065 and L1069,
+        //       COTRTUPC.cbl L791 and L795 -- so the target's no-change comparison in
+        //       TransactionTypeService trims BOTH ends before comparing, while this member keeps a
+        //       leading blank in what it stores.
         // WHY : Assumptions: a non-blank description is guaranteed by bean validation on the request
         //       shape and not by this method. The component is constrained non-blank, bounded to fifty
         //       characters and required to contain at least one alphanumeric, so this method neither

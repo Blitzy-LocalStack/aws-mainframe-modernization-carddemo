@@ -6,6 +6,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.common.control.OnlineWritesDisabledException;
 import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.web.CorrelationIdFilter;
 import java.time.Clock;
@@ -169,20 +170,23 @@ class GlobalExceptionHandlerTest {
     }
 
     /**
-     * Confirms the shorter identifiers a migrated path actually carries are left intact, so the
-     * masking does not cost the diagnostic value of the field where there is no exposure to remove.
+     * Confirms the shorter identifiers a migrated path carries are withheld whole, retaining no digit.
      *
-     * <p>Assumptions: eleven digits is {@code ACCT-ID PIC 9(11)} and nine is a customer identifier, so
-     * both are below the threshold by declaration rather than by coincidence.</p>
+     * <p>Refactoring Rationale: this test previously asserted that these identifiers were "carried
+     * through unmasked", on the ground that masking them would cost diagnostic value "where there is no
+     * exposure to remove". The premise was wrong -- eleven digits is {@code ACCT-ID PIC 9(11)} and nine
+     * is {@code CUST-ID PIC 9(09)}, both protected identifiers -- so the assertion held a disclosure in
+     * place on every failure those routes can return. The single-digit trailing segment is retained in
+     * the expectation to show the rule still fires on runs and not on segments.</p>
      */
     @Test
-    @DisplayName("account and customer identifiers are carried through unmasked")
-    void shorterIdentifiersAreNotMasked() {
+    @DisplayName("account and customer identifiers are withheld whole")
+    void shorterIdentifiersAreWithheldWhole() {
         ResponseEntity<ApiError> response = this.handler.onMissingRecord(
                 new NoSuchElementException(), requestFor("/api/v1/accounts/00000000011/customer/9"));
 
         assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().path()).isEqualTo("/api/v1/accounts/00000000011/customer/9");
+        assertThat(response.getBody().path()).isEqualTo("/api/v1/accounts/***********/customer/9");
     }
 
     /**
@@ -389,6 +393,91 @@ class GlobalExceptionHandlerTest {
                 .contains("reason=AUTH_WIRE_MALFORMED")
                 .contains(diagnostic)
                 .doesNotContain(CARD_NUMBER);
+    }
+
+    /**
+     * Confirms a catalogue sentence that does NOT end with the reference terminator still reaches the
+     * caller verbatim, in the aggregate and in every field entry the refusal names.
+     *
+     * <p>Refactoring Rationale: the provenance gate recognised only sentences ending in the terminator,
+     * and thirty-four of the sixty-seven migrated message constants do not end that way. The card
+     * maintenance sentences asserted here are declared without one at {@code app/cbl/COCRDUPC.cbl} lines
+     * 195 and 196, while the card contract publishes a worked four-hundred example quoting that exact
+     * wording in both {@code message} and {@code fieldErrors[].message} -- so before the second admitted
+     * shape existed, a published contract described a body no response could produce.</p>
+     *
+     * <p>Assumptions: both destinations of the sentence are asserted, because they are populated from the
+     * same decision but by different statements, and a client renders the aggregate in the message band
+     * and the entry against the control. Asserting only one would leave the other free to regress.</p>
+     */
+    @Test
+    @DisplayName("an unterminated catalogue sentence is rendered verbatim in the aggregate and the entry")
+    void proseShapedCatalogueSentenceIsRenderedVerbatim() {
+        String sentence = "Card Active Status must be Y or N";
+
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                new ClientInputException("CARD_ATTRIBUTES_REFUSED", "activeStatus",
+                        com.carddemo.common.validation.FieldValidationFlag.BLANK, sentence),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message()).isEqualTo(sentence);
+        assertThat(response.getBody().fieldErrors()).hasSize(1);
+        assertThat(response.getBody().fieldErrors().get(0).message()).isEqualTo(sentence);
+        assertThat(response.getBody().fieldErrors().get(0).state())
+                .isEqualTo(com.carddemo.common.validation.FieldValidationFlag.BLANK);
+    }
+
+    /**
+     * Confirms a sentence of foreign provenance is still replaced by the fixed aggregate, whichever of
+     * the two admitted shapes it fails.
+     *
+     * <p>Assumptions: the cases are the ways a library, parser, converter or driver actually writes what
+     * it could not handle, plus the two identifier widths this system carries. A parser quotes the token
+     * it read; a driver labels its report with a colon and brackets its own diagnostic; a converter names
+     * the type it wanted with a dotted class name; a copybook field name arrives hyphenated; and a value
+     * a caller supplied is echoed as an unbroken digit run. Every one of those fails the reference-prose
+     * alphabet, its dotted-identifier rule or its digit bound, and none ends with the terminator, so each
+     * must arrive as the fixed sentence.</p>
+     *
+     * <p>Trade-offs: this does NOT assert that every conceivable library sentence is refused, because the
+     * shape test does not claim that. A sentence such as {@code 'Index 5 out of bounds for length 3'}
+     * quotes nothing, names no dotted type and holds no long number, so the prose shape admits it; the
+     * rationale on the gate records why that residual is accepted and why no path in this repository
+     * reaches it. Asserting an absolute here would be asserting a property the implementation does not
+     * have, which is worse than leaving the boundary stated where it actually falls.</p>
+     *
+     * <p>Assumptions: the two identifier cases are the point of the digit bound and are asserted
+     * separately from the punctuation cases. The prose shape refuses a run longer than four, so an
+     * eleven-digit account identifier and a sixteen-digit card number are both refused even though every
+     * other character in those sentences is admitted -- which is what makes the second shape stricter
+     * than the first on the one axis this gate exists to protect.</p>
+     */
+    @Test
+    @DisplayName("a library, driver, parser or identifier-bearing sentence is replaced by the fixed one")
+    void foreignSentencesAreNotRendered() {
+        String[] foreign = {
+            "For input string: \"12\"",
+            "could not execute statement [ERROR: duplicate key]",
+            "Failed to convert value of type java.lang.String",
+            "No enum constant com.carddemo.card.CardStatus.MAYBE",
+            "PA-RQ-TRANSACTION-ID arrived as 14 characters",
+            "Account 00000000011 was refused",
+            "Card " + CARD_NUMBER + " was refused",
+        };
+
+        for (String message : foreign) {
+            ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                    new ClientInputException("REFUSED", "payload", message), requestFor(CARD_PATH));
+
+            assertThat(response.getBody()).isNotNull();
+            assertThat(response.getBody().message())
+                    .as("sentence of foreign provenance: %s", message)
+                    .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
+            assertThat(response.getBody().fieldErrors().get(0).message())
+                    .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
+        }
     }
 
     /**
@@ -743,6 +832,54 @@ class GlobalExceptionHandlerTest {
                 .isNotNull()
                 .satisfies(body -> assertThat(body.status())
                         .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value()));
+        assertThat(this.handler
+                        .onWritesQuiesced(new OnlineWritesDisabledException("closed"), request)
+                        .getBody())
+                .isNotNull()
+                .satisfies(body -> assertThat(body.status())
+                        .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value()));
+    }
+
+    /**
+     * Confirms a write refused during the batch window is rendered as 503 and not as a failure.
+     *
+     * <p>Assumptions: the STATUS and the SEVERITY are asserted together, because the two carry
+     * different halves of one statement and only one of them is obvious. A 503 alone would be derived
+     * by this type's own status rule into a critical severity, and every write attempted during a
+     * scheduled nightly window would then be recorded as a critical entry for a control working exactly
+     * as designed -- which is how a severity field stops being read at all.</p>
+     *
+     * <p>Assumptions: the refusal's own message is asserted NOT to reach the body. The gate raises a
+     * message naming the condition, but the body must carry the migration's own sentence so that one
+     * wording answers a closed window everywhere, and so that a cause carried for an operator -- an
+     * access denial or a timeout on the flag read -- cannot reach a caller through it.</p>
+     */
+    @Test
+    @DisplayName("a write refused during the batch window is a 503 carrying a warning severity")
+    void quiescedWriteIsRenderedAsServiceUnavailable() {
+        OnlineWritesDisabledException refusal = new OnlineWritesDisabledException(
+                "flag /carddemo/dev/batch/online-writes-enabled could not be read",
+                new IllegalStateException("access denied"));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onWritesQuiesced(refusal, requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_WRITES_QUIESCED);
+        assertThat(response.getBody().status()).isEqualTo(ApiError.SERVICE_UNAVAILABLE_STATUS);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_WRITES_QUIESCED);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+
+        assertThat(response.getBody().message())
+                .as("neither the parameter nor the underlying failure may reach a caller")
+                .doesNotContain("online-writes-enabled")
+                .doesNotContain("access denied");
+        assertThat(response.getBody().path())
+                .as("the shared path narrowing applies to this body as it does to every other")
+                .isEqualTo(MASKED_CARD_PATH);
     }
 
     /**

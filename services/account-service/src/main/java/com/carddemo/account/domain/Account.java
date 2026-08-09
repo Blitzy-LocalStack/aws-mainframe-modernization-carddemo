@@ -6,8 +6,10 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.math.BigDecimal;
+import java.sql.Types;
 import java.time.LocalDate;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
 
 /**
  * The account master row this bounded context owns.
@@ -259,6 +261,11 @@ public class Account {
      * at {@code COACTUPC.cbl} L1067 to mean not supplied on the screen, which is a screen-validation
      * state and not a stored one, so it is not modelled here.</p>
      */
+    // WHY : Assumptions: length alone would make Hibernate infer VARCHAR(1) while V1__account.sql
+    //       declares CHAR(1), and the two disagree about trailing blanks. The provider-level JDBC
+    //       type code states the fixed-character binding without a columnDefinition, which is a
+    //       DDL-implying attribute this DDL-passive mapping may not declare.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "active_status", length = 1, nullable = false)
     private String activeStatus;
 
@@ -348,6 +355,11 @@ public class Account {
      * picture of the three dates above. The seeded value is {@code A000000000} in all fifty records and
      * begins with a letter. The class documentation records the export-only evidence in full.</p>
      */
+    // WHY : Assumptions: the column is CHAR(10) in V1__account.sql, so a five-digit postal code is
+    //       stored blank-padded to ten. Left as VARCHAR the padded stored value and an unpadded
+    //       parameter would be different strings under PostgreSQL's text comparison rules, so a
+    //       lookup would silently miss rather than fail loudly.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_zip", length = 10, nullable = false)
     private String addressZip;
 
@@ -359,6 +371,12 @@ public class Account {
      * another context owns rather than a constrained one. The class documentation records both the
      * disclosure-group evidence and why no foreign key is declared.</p>
      */
+    // WHY : Assumptions: this is the join side of the disclosure-group rate lookup, and CHAR is
+    //       load-bearing for it: the seeded DEFAULT group is stored blank-padded to ten characters,
+    //       and under VARCHAR semantics 'DEFAULT' would not equal the stored value. A miss there
+    //       produces no interest and raises nothing, so the binding is fixed here rather than left
+    //       to every call site to pad correctly.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "group_id", length = 10, nullable = false)
     private String groupId;
 

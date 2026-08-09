@@ -36,19 +36,41 @@ Scope and how to add an entry:
   alternative it rejected together with the concrete consequence of having
   taken it.
 
-  Checks available to name, and only these: JavadocPackage,
+  Checks available to name, and only these ten: JavadocPackage,
   MissingJavadocType, MissingJavadocMethod, MissingJavadocPackage,
   JavadocType, JavadocMethod, NonEmptyAtclauseDescription, SummaryJavadoc,
   AtclauseOrder, CommentsIndentation.
 
-  Assumptions: that list is the complete set checkstyle.xml enables, and naming
-    anything outside it is worse than useless. A suppression for an
-    unconfigured check never fires, so nothing reveals that it is dead, while
-    the entry still reads to the next maintainer as evidence that the check is
-    active and had to be relaxed. SingleLineJavadoc, JavadocVariable,
-    JavadocStyle and WriteTag are the likeliest mistakes: each is deliberately
-    absent from the ruleset, with its reason recorded in that file's EXCLUDED
-    MODULES section.
+  Assumptions: those ten are the WHOLE set checkstyle.xml enables, and the list is
+    written out rather than abbreviated so the two files can be compared name for
+    name. That ruleset configures thirteen module elements, of which Checker,
+    TreeWalker and SuppressionFilter are a container, a container and a filter,
+    leaving exactly the ten documentation checks named above.
+  Assumptions: the practical consequence on the two sanctioned paths is worth
+    stating rather than leaving to be discovered. Every check the ruleset
+    configures is a documentation or comment check, so a `.java` file under
+    target/generated-sources/ or beside a fixture has its documentation
+    obligation waived and carries no other obligation this gate could relax. The
+    documentation obligation is waived where there is no author to ask, and
+    nothing else is waived because nothing else is enforced here.
+  Assumptions: naming a check outside the ten is worse than useless. A
+    suppression for an unconfigured check never fires, so nothing reveals that
+    it is dead, while the entry still reads to the next maintainer as evidence
+    that the check is active and had to be relaxed. SingleLineJavadoc,
+    JavadocVariable, JavadocStyle and WriteTag are the likeliest mistakes:
+    each is deliberately absent from the ruleset, with its reason recorded in
+    that file's EXCLUDED MODULES section. RedundantImport and UnusedImports are
+    the same mistake for a different reason: both were configured for a time and
+    are now withdrawn, so naming either one would read as evidence of an import
+    gate this project does not operate.
+  Refactoring Rationale: this section briefly described the ten-name list as a
+    SUBSET, on the reading that RedundantImport and UnusedImports were also
+    configured. Both have since been withdrawn from the ruleset, which is
+    chartered documentation-only, so the ten names are once again the complete
+    set and the list is described that way. The count is stated together with
+    the element arithmetic above, because a maintainer who counts declarations
+    rather than reading names reaches thirteen and would otherwise take the
+    difference for a defect in this file.
   Assumptions: the justification sits in an adjacent comment because the DTD
     leaves no alternative. The suppress element is declared EMPTY and its
     attribute list admits only files, checks, message, id, lines and columns; a
@@ -63,12 +85,17 @@ Scope and how to add an entry:
     matching, and an entry then either stops suppressing what it was written
     for or starts suppressing something adjacent. Check names carry no such
     dependency.
-  Trade-offs: each checks value spells out all ten names rather than
-    abbreviating them to a pattern such as Javadoc.* plus the leftovers. A
+  Trade-offs: each checks value spells out all ten documentation names rather
+    than abbreviating them to a pattern such as Javadoc.* plus the leftovers. A
     wildcard would silently absorb any check added to the ruleset later, so the
     exemption would widen with no edit to this file and no review, and matching
     is performed against the fully qualified class name so a wildcard's true
     reach is not readable from the pattern. The cost is a long attribute value.
+    That cost has already been repaid once: because both entries enumerate,
+    RedundantImport and UnusedImports arriving in the ruleset and later leaving
+    it widened this file's reach by nothing at all in either direction, whereas a
+    Javadoc.*-plus-leftovers pattern written as a catch-all would have had to be
+    re-audited on both occasions to establish the same thing.
   Trade-offs: exactly two entries are declared and neither is speculative.
     Pre-loading every path the architecture can be predicted to want was
     rejected, because a suppression for a tree that holds no files cannot be
@@ -104,8 +131,11 @@ Scope and how to add an entry:
         reference-only COBOL baseline. The pattern is scoped to the
         target/generated-sources/ directory segment pair rather than to target/
         as a whole, so it cannot reach a hand-authored tree even if build output
-        is ever redirected, and it names all ten configured checks because a
-        generated file would trip the presence and completeness checks alike.
+        is ever redirected, and it names all ten DOCUMENTATION checks because a
+        generated file would trip the presence and completeness checks alike. It
+        names NEITHER import check, so a generated file carrying a duplicate or
+        unreferenced import still fails; that half of the ruleset is not
+        relaxed here, for the reason recorded in the Scope section above.
       Trade-offs: this entry is a GUARD and is not currently load-bearing, which
         is stated rather than glossed. The gate is bound to the validate phase,
         which runs before generate-sources, so no generator has added output to
@@ -131,8 +161,9 @@ Scope and how to add an entry:
         copybook layout, and its meaning lives in that layout, at the declared
         record length, rather than in a docstring attached to it; asking for a
         purpose, parameters and a return value from a 300-byte account image has
-        no answer to give. It names all ten configured checks for the same
-        reason as the entry above.
+        no answer to give. It names all ten DOCUMENTATION checks for the same
+        reason as the entry above, and neither import check for the same reason
+        either.
       Trade-offs: this entry is DEFENSIVE and may never fire. checkstyle.xml
         sets fileExtensions to java, so the fixed-width fixture files under
         resources/ are already outside the audit set; what remains is the narrow

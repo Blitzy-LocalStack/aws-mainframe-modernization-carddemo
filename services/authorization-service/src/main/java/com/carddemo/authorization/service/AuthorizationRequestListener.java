@@ -5,7 +5,6 @@ import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
-import com.carddemo.authorization.config.MessagingIdentityConfig.MessagingTokeniser;
 import com.carddemo.authorization.dto.AuthorizationRequestPayload;
 import com.carddemo.authorization.mapper.AuthorizationMessageMapper;
 import com.carddemo.authorization.repository.OutboxRepository;
@@ -19,7 +18,6 @@ import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.observability.LogSafeText;
-import com.carddemo.common.security.OpaqueIdentifier;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import jakarta.validation.ConstraintViolationException;
 import java.time.Clock;
@@ -28,7 +26,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,7 +61,10 @@ import org.springframework.transaction.annotation.Transactional;
  *       messages-per-poll and concurrency limits carry that bound, again configured.</li>
  *   <li>The reply destination comes from the REQUEST, exactly as the message descriptor's reply-to
  *       queue field did, so one consumer serves however many requesters have their own reply queues --
- *       subject to the allowlist argued at {@link #enqueueReply}.</li>
+ *       subject to the allowlist argued at {@link #requireAllowlistedReplyDestination(Message)}, which
+ *       admits the request only when the destination it names is one the deployment listed. A request
+ *       that names none, or names one that is not listed, is REFUSED before anything is read: this
+ *       method may not commit a decision it cannot answer.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the ordering not reproduced is publish-before-commit. The baseline puts its
@@ -123,6 +124,27 @@ public class AuthorizationRequestListener {
     public static final String HEADER_CORRELATION_ID = "correlationId";
 
     /**
+     * The message attribute declaring the payload's wire format, which must be the delimited text form.
+     *
+     * <p>Assumptions: the same attribute name the reply path sets, so one producer's request and this
+     * consumer's reply describe their payloads through one key. The baseline carries the equivalent in
+     * the message descriptor, {@code MOVE MQFMT-STRING TO MQMD-FORMAT} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 751, and the broker refuses a
+     * mismatched format before the program sees the message.</p>
+     */
+    public static final String HEADER_CONTENT_TYPE = "contentType";
+
+    /**
+     * The one payload format this consumer decodes.
+     *
+     * <p>Assumptions: because the payload is declared as a string format, the field order and the
+     * delimiter ARE the interface. A producer that sent structured text of another shape under another
+     * content type would still present sixteen leading characters that decode as a card number, so the
+     * failure of accepting it is not a decode error but a decision taken on misread fields.</p>
+     */
+    public static final String CONTENT_TYPE_CSV = "text/csv";
+
+    /**
      * The logging context key the shared correlation filter uses, reused here so a message-driven log
      * line and a request-driven one correlate the same way.
      */
@@ -140,13 +162,20 @@ public class AuthorizationRequestListener {
      * How many requests one processing window handles before intake is closed and reopened.
      *
      * <p>Assumptions: read from {@code 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500} at
-     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 40. The DECLARED limit is 500 and
-     * that is the number enforced here; the reference program's own control flow handles 501, its counter
-     * being incremented at line 332 and then tested with {@code >} rather than {@code >=} at line 339, so
-     * counts one through 500 all read another request and only count 501 ends the run. The off-by-one is
-     * an artifact of the order of increment and comparison rather than a rule anything states, and it is
-     * not reproduced. The correction is registered as divergence D-AUTH-REQUEST-WINDOW in
-     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 40. This constant is the DECLARED
+     * limit, and the number of requests one window admits is that limit plus
+     * {@link #BASELINE_COMPARISON_OFFSET} -- see that constant for why the two differ.</p>
+     *
+     * <p>Refactoring Rationale: the window enforced 500 admissions and now enforces 501, which is the
+     * number the reference program actually processes. Its counter is incremented after the get at line
+     * 332 and then tested with {@code >} rather than {@code >=} at line 339, so counts one through 500
+     * all take the {@code ELSE} and read another request at line 342, and only count 501 sets the
+     * loop-end flag at line 340. The earlier revision enforced the declared figure on the grounds that
+     * the off-by-one was an artifact of the comparison rather than a stated rule, and registered the
+     * difference as a divergence. That trade is withdrawn: functional parity with observable behaviour is
+     * a stated constraint of this migration, the observable behaviour is 501 requests per run, and a
+     * divergence registered against a difference that can simply be removed is a difference that should
+     * have been removed. The register entry is withdrawn with it.</p>
      *
      * <p>Refactoring Rationale: it is a default rather than a fixed value, overridable by
      * {@code carddemo.messaging.request-process-limit}, so later performance work can change the window
@@ -154,6 +183,19 @@ public class AuthorizationRequestListener {
      * number so that an unconfigured deployment behaves as the contract published.</p>
      */
     public static final int DEFAULT_REQUEST_PROCESS_LIMIT = 500;
+
+    /**
+     * The extra admission the reference program's increment-then-compare grants beyond its declared limit.
+     *
+     * <p>Assumptions: exactly one. The reference program increments its counter AFTER the get and then
+     * compares with strict greater-than, so the request that makes the counter equal the limit is not the
+     * last one: one further get is issued, and only the count past the limit ends the run. Naming the
+     * offset as a constant rather than writing 501 anywhere keeps the declared limit and the admission
+     * count as one decision -- an operator lowering the limit gets the same relationship, and a reader
+     * sees why the two numbers differ instead of having to reconcile a 500 in configuration with a 501 in
+     * behaviour.</p>
+     */
+    public static final int BASELINE_COMPARISON_OFFSET = 1;
 
     /**
      * The multiplier that places a two-digit year ahead of a three-digit day of year.
@@ -241,30 +283,6 @@ public class AuthorizationRequestListener {
     private final AccountContextClient accounts;
 
     /**
-     * The keyed tokeniser every identity this consumer writes into queue metadata is derived through.
-     *
-     * <p>Refactoring Rationale: this collaborator did not exist, and its absence is the whole of finding
-     * C-04. Without it the only per-card stable value available for a first-in-first-out group identity
-     * was the card number, so the card number was used -- and a group identity is metadata, not payload:
-     * the publisher copies it onto the send, where it leaves the encrypted body, appears in queue
-     * telemetry and reaches every log and metric that observes the queue. Holding the tokeniser as a
-     * collaborator rather than deriving tokens inline also keeps the key in one place, so a rotation is a
-     * configuration change rather than a code change.</p>
-     *
-     * <p>Assumptions: the SAME key is shared with every other producer on this queue. That sharing is
-     * required rather than incidental: the group identity has to be equal for equal cards across
-     * producers, because that equality IS the per-card ordering guarantee. A per-instance key would put
-     * one card's messages into as many groups as there are instances.</p>
-     *
-     * <p>Assumptions: ONE tokeniser serves both queue identities the outbox row carries -- the ordering
-     * group and the deduplication identity -- rather than one collaborator per identity. A second
-     * collaborator would be a second key to rotate for no gain: the two derivations are already kept
-     * unjoinable by their differing PURPOSE strings, which is a property of the derivation rather than
-     * of the key it is performed with.</p>
-     */
-    private final OpaqueIdentifier messagingTokeniser;
-
-    /**
      * The reply destinations this consumer is permitted to publish to.
      */
     private final List<String> replyQueueAllowlist;
@@ -275,9 +293,18 @@ public class AuthorizationRequestListener {
     private final Clock clock;
 
     /**
-     * How many requests this window may still handle before intake is closed.
+     * The declared limit this window's admission allowance is derived from.
      */
     private final int requestProcessLimit;
+
+    /**
+     * How many requests one window ADMITS, which is the declared limit plus the baseline's off-by-one.
+     *
+     * <p>Assumptions: derived once at construction rather than recomputed per message, so the two numbers
+     * cannot disagree between one admission and the next, and so a reader of the log line that reports a
+     * closed window sees the same figure the reservation compared against.</p>
+     */
+    private final int windowAdmissionLimit;
 
     /**
      * The action that closes a full window and opens the next.
@@ -285,21 +312,34 @@ public class AuthorizationRequestListener {
     private final RequestWindowBoundary windowBoundary;
 
     /**
-     * How many requests the current window has handled.
+     * The current window: its generation, and how many admissions it has granted.
      *
-     * <p>Assumptions: an atomic counter rather than a plain field, because the listener container delivers
-     * messages on several threads concurrently -- its concurrency is configured on the annotation below --
-     * so a non-atomic increment would lose counts and the window would run past its quota by an amount
-     * nothing bounds. The counter holds the slots USED in the current window and is advanced and wrapped
-     * in one atomic update, so it is always between zero and one less than the quota.</p>
+     * <p>Refactoring Rationale: this replaces a plain slot counter advanced in the handler's
+     * {@code finally} block, and both halves of the change matter. Counting on COMPLETION bounded the
+     * wrong quantity: the container delivers messages on several threads and keeps polling while they
+     * run, so nothing stopped it admitting far more than the quota before the quota-th one finished --
+     * the bound only took effect once completions caught up, which under load they do not. Counting at
+     * ADMISSION bounds what the container is allowed to hand out, which is the quantity the reference
+     * program's test-before-next-get bounds. Carrying a GENERATION alongside the count is the other half:
+     * the boundary is asynchronous by necessity -- a container cannot be stopped from the thread it is
+     * delivering to -- so admissions can still arrive while the previous window is being closed, and the
+     * generation is what attributes each of them to the window that is now open rather than letting a
+     * late arrival be counted against a window that has already closed.</p>
      *
-     * <p>Trade-offs: the counter is per INSTANCE and therefore per task, not per queue. Two tasks each
-     * handle up to the quota before each closes its own window, so the platform-wide figure is the quota
-     * times the task count. That matches the reference system, where the limit bounded one running program
-     * and the queue could trigger more than one, and a shared counter would need a coordination round trip
-     * on the hot path of every authorization to achieve nothing the bound is for.</p>
+     * <p>Assumptions: the transition is ONE atomic update, so exactly one thread observes the admission
+     * that fills a window and the boundary therefore fires exactly once per generation. A read, a
+     * comparison and a separate write could not hold that: two threads could each observe the last slot,
+     * each fire the boundary, and the container would be cycled twice for one window.</p>
+     *
+     * <p>Trade-offs: the window is per INSTANCE and therefore per task, not per queue. Two tasks each
+     * admit up to the allowance before each closes its own window, so the platform-wide figure is the
+     * allowance times the task count. That matches the reference system, where the limit bounded one
+     * running program and the queue could trigger more than one, and a shared counter would need a
+     * coordination round trip on the hot path of every authorization to achieve nothing the bound is
+     * for.</p>
      */
-    private final AtomicInteger handledInWindow = new AtomicInteger();
+    private final AtomicReference<WindowState> window =
+            new AtomicReference<>(new WindowState(0L, 0));
 
     /**
      * Creates the consumer.
@@ -321,8 +361,6 @@ public class AuthorizationRequestListener {
      * @param payloads the validated crossing from the wire record to the structured payload; must not
      *     be {@code null}
      * @param accounts the account-context seam; must not be {@code null}
-     * @param messagingTokeniser the keyed tokeniser every queue identity is derived through; must not be
-     *     {@code null}
      * @param replyQueueAllowlist the reply destinations this consumer may publish to; must not be empty
      * @param clock the clock staleness, timestamps and authorization keys are read from; must not be
      *     {@code null}
@@ -332,14 +370,19 @@ public class AuthorizationRequestListener {
      *     {@code null}
      * @throws IllegalArgumentException if {@code requestProcessLimit} is not positive, a non-positive
      *     window admitting no request at all
-     * @throws NullPointerException if {@code messagingTokeniser} is {@code null}, because an absent
-     *     tokeniser has no safe fallback: the only value available to group by would be the card number
+     * @throws NullPointerException if {@code windowBoundary} is {@code null}, because a consumer with no
+     *     window boundary would admit requests without ever closing a window
      */
+    // WHY : Refactoring Rationale: this constructor took a keyed tokeniser, and the parameter is
+    //       withdrawn along with the field it assigned. Both queue identities are now the literal values
+    //       the technical specification freezes, taken from the reply itself, so no collaborator derives
+    //       them; leaving an unused parameter in place would keep a bean qualifier and a startup
+    //       dependency alive for a derivation nothing performs, and would suggest to a reader that the
+    //       identities are still derived somewhere.
     public AuthorizationRequestListener(PendingAuthSummaryRepository summaries,
             PendingAuthDetailRepository details, OutboxRepository outbox,
             AuthorizationDecisionService decisions, AuthorizationMessageMapper payloads,
             AccountContextClient accounts,
-            @MessagingTokeniser OpaqueIdentifier messagingTokeniser,
             @Value("${carddemo.messaging.reply-queue-allowlist}") List<String> replyQueueAllowlist,
             Clock clock,
             @Value("${carddemo.messaging.request-process-limit:" + DEFAULT_REQUEST_PROCESS_LIMIT + "}")
@@ -357,15 +400,15 @@ public class AuthorizationRequestListener {
         this.decisions = decisions;
         this.payloads = payloads;
         this.accounts = accounts;
-        // WHY : Assumptions: an absent tokeniser fails here rather than being tolerated with a fallback.
-        //   The only other value this consumer holds that is per-card and stable is the card number
-        //   itself, so any fallback would be the exact exposure the tokeniser exists to remove, and it
-        //   would appear silently at run time on the reply path rather than at startup.
-        this.messagingTokeniser =
-                Objects.requireNonNull(messagingTokeniser, "messagingTokeniser must not be null");
         this.replyQueueAllowlist = List.copyOf(replyQueueAllowlist);
         this.clock = clock;
         this.requestProcessLimit = requestProcessLimit;
+        // WHY : Assumptions: the allowance is the declared limit plus one, and the addition is made HERE
+        //       rather than at the comparison so that the configured number and the enforced number are
+        //       derived in one place. BASELINE_COMPARISON_OFFSET carries the reason they differ: the
+        //       reference program increments after its get and compares with strict greater-than, so it
+        //       issues one get past its declared limit before the loop ends.
+        this.windowAdmissionLimit = requestProcessLimit + BASELINE_COMPARISON_OFFSET;
         this.windowBoundary = Objects.requireNonNull(windowBoundary, "windowBoundary must not be null");
     }
 
@@ -386,6 +429,24 @@ public class AuthorizationRequestListener {
      * @param message the received message, whose payload is the delimited request and whose headers
      *     carry the reply destination, expiry and correlation identifier; must not be {@code null}
      */
+    // WHY : Assumptions: this method deliberately does NOT consult
+    //       com.carddemo.common.control.OnlineWriteGate, even though it writes and even though this
+    //       service holds the gate for its HTTP surface. The absence is recorded here because this is
+    //       the one consumer in the migration that writes anything, so it is where a reader would
+    //       reasonably look for the gate and conclude from silence that it had been forgotten.
+    //       Assumptions: the reference bracket protected five VSAM files -- app/jcl/CLOSEFIL.jcl
+    //       lines 26 to 30 close the transaction master, the cross-reference, the account master, the
+    //       cross-reference alternate index and the security file -- and the authorization store is
+    //       none of them. This method writes the authorization schema, which the posting chain does
+    //       not touch, so gating it would add a quiesce the reference never had.
+    //       Trade-offs: refusing a queued message is not a refusal but a deferral with a deadline.
+    //       An unconsumed message becomes visible again after its timeout and is redelivered, and at
+    //       the fifth receive it lands in the dead-letter queue -- so a closed window of any length
+    //       would convert legitimate authorization traffic into a backlog an operator must redrive by
+    //       hand, for a store the window was not protecting. Alternatives Considered: stopping this
+    //       listener's container for the duration instead, which avoids the dead-letter consequence;
+    //       rejected because it still adds a quiesce the reference does not have, and because a
+    //       container that must be restarted afterwards has a failure mode a flag does not.
     @SqsListener(id = ContainerCyclingWindowBoundary.REQUEST_CONTAINER_ID,
             queueNames = "${carddemo.messaging.pauth-request-queue}",
             maxConcurrentMessages = "${carddemo.messaging.max-concurrent-messages:10}",
@@ -393,6 +454,12 @@ public class AuthorizationRequestListener {
             pollTimeoutSeconds = "${carddemo.messaging.poll-timeout-seconds:5}")
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void onRequest(Message<String> message) {
+        // WHY : Assumptions: the slot is reserved BEFORE anything else, including the correlation read, so
+        //       every message the container hands over occupies one -- exactly as the reference program's
+        //       counter advances on the get itself and not on the outcome. A message dropped as stale, one
+        //       answered from a recorded decision, and one whose handling throws all consumed a get there
+        //       and all consume an admission here.
+        reserveWindowSlot();
         String correlationId = conformingCorrelationId(message);
 
         // WHY : Assumptions: the LOGGING context carries the sanitised rendering while the reply carries
@@ -435,6 +502,17 @@ public class AuthorizationRequestListener {
                         LogSafeText.sanitize(header(message, HEADER_EXPIRES_AT)));
                 return;
             }
+            // WHY : Refactoring Rationale: the reply destination is established HERE, before the payload
+            // is even decoded, and it used to be checked at the point the outbox row was written --
+            // which is after the decision has been taken and its rows written. Both checks there
+            // RETURNED NORMALLY, so the transaction committed, the acknowledgement mode acknowledged
+            // the request, and a decision existed with no reply row: the exact state this module's
+            // outbox exists to make impossible, reached by a requester supplying one bad attribute.
+            // Raising here instead rolls the decision back and leaves the request on the queue to
+            // redeliver and then dead-letter, which is the treatment every other permanent input fault
+            // on this wire already receives.
+            String replyQueueUrl = requireAllowlistedReplyDestination(message);
+            requireDeclaredWireFormat(message);
             AuthRequest request = CsvAuthCodec.decodeRequest(message.getPayload());
             requireDeclaredContract(request);
             Optional<PendingAuthDetail> alreadyDecided = existingDecision(request);
@@ -444,59 +522,125 @@ public class AuthorizationRequestListener {
                 // recorded answer keeps the requester served without incrementing the account's counters
                 // a second time, which is what re-deciding would do.
                 LOG.info("event=auth.request.replayed transactionId={}", request.transactionId());
-                enqueueReply(message, replyFor(alreadyDecided.get()), correlationId, now);
+                enqueueReply(replyQueueUrl, replyFor(alreadyDecided.get()), correlationId, now);
                 return;
             }
-            handleNewRequest(message, request, correlationId, now);
+            handleNewRequest(replyQueueUrl, request, correlationId, now);
         } finally {
             MDC.remove(MDC_CORRELATION_ID);
-            countTowardsWindow();
         }
     }
 
     /**
-     * Counts this message towards the current window and closes the window when it is full.
+     * Reserves this message's place in the current window, closing intake when the window fills.
      *
-     * <p>Assumptions: the count is taken in the {@code finally} block, so every message this consumer took
-     * off the queue counts -- including one dropped as stale and one whose reply was a replay of a decision
-     * already recorded. That matches the reference program, whose counter is incremented at
-     * {@code cbl/COPAUA0C.cbl} line 332 after the get returns and before any outcome is known, so a
-     * request it could not act on still consumed one of its 500. Counting only decisions would let a
-     * flood of expired requests run a window indefinitely.</p>
+     * <p>Assumptions: this is called on ADMISSION -- as the first statement of the handler, before the
+     * correlation identifier is even read -- so every message the container hands over occupies a place
+     * whatever becomes of it. That matches the reference program, whose counter advances at
+     * {@code cbl/COPAUA0C.cbl} line 332 immediately after the get returns and before any outcome is known:
+     * a request it could not act on still consumed one. A message dropped as stale, one answered from a
+     * recorded decision, and one whose handling throws each consume one here for the same reason.</p>
      *
-     * <p>Assumptions: a message whose handling THREW counts as well, the {@code finally} running on the
-     * exceptional path too, and that is deliberate rather than incidental. A request that failed was still
-     * received and still occupied the window; not counting it would let one poison message that redelivers
-     * indefinitely keep a window open indefinitely.</p>
+     * <p>Refactoring Rationale: the reservation was taken on COMPLETION, in the handler's {@code finally}
+     * block, and that bounded the wrong quantity. The container polls continuously and delivers on several
+     * threads, so between the first admission and the quota-th COMPLETION it can hand over an unbounded
+     * number of further messages; the bound only took effect once completions caught up with admissions,
+     * which under sustained load they do not. Worse, because the counter reset in the same step that fired
+     * the boundary, those extra completions landed in the RESET window and closed it early. Reserving on
+     * admission bounds what the container is permitted to hand out, which is the quantity the reference
+     * program's test-before-next-get bounds, and a completion no longer touches the window at all.</p>
      *
-     * <p>Refactoring Rationale: the count and the reset are ONE atomic step, and they were two -- an
-     * increment, a comparison, then a separate subtraction of the observed value. Two steps could not hold
-     * under the container's configured concurrency: with several handlers finishing at once, two threads
-     * could each observe a count at or past the quota, each subtract its own observation, and leave the
-     * counter NEGATIVE -- after which the next window admitted the quota plus the deficit before closing,
-     * and the boundary fired twice for one window. The update below is applied by
-     * {@link java.util.concurrent.atomic.AtomicInteger#getAndUpdate}, which retries until it wins, so the
-     * counter walks 0 to quota-1 and back to 0 and can be neither negative nor greater than the quota.
-     * Exactly one thread observes the last slot of a window, so the boundary fires exactly once.</p>
+     * <p>Assumptions: the update is one atomic transition on a value carrying both the generation and the
+     * places granted, so exactly one thread can observe the admission that fills a window and the boundary
+     * fires exactly once per generation. The transition also advances the generation and resets the count
+     * in the same step, which is what makes an admission arriving while the container is being cycled
+     * belong to the window now open rather than to the one just closed -- the boundary is asynchronous by
+     * necessity, because a container cannot be stopped from a thread it is delivering to.</p>
      *
-     * <p>Assumptions: the quota bounds the messages ADMITTED to a window, not the messages in flight at
-     * one instant. When the boundary fires, up to the container's configured concurrency of messages may
-     * still be executing -- each already counted -- and the boundary stops further INTAKE rather than
-     * interrupting them; a message that arrives while the container is cycling belongs to the next window
-     * and is counted there. That is the same discipline the reference program has: its counter bounds the
-     * gets it issues, and the message it is holding when the count is reached is still processed to
-     * completion before the loop exits.</p>
+     * <p>Assumptions: the allowance bounds messages ADMITTED, not messages in flight at one instant. When
+     * the boundary fires, up to the container's configured concurrency of messages may still be executing
+     * -- each already holding its place -- and the boundary stops further INTAKE rather than interrupting
+     * them. That is the reference program's discipline too: its counter bounds the gets it issues, and the
+     * message it holds when the count is reached is processed to completion before the loop exits.</p>
      */
-    private void countTowardsWindow() {
-        int slotsUsedBefore = this.handledInWindow.getAndUpdate(
-                used -> used + 1 >= this.requestProcessLimit ? 0 : used + 1);
-        if (slotsUsedBefore + 1 >= this.requestProcessLimit) {
-            // WHY : Assumptions: the reported figure is the quota itself rather than a recount, because
-            //       the thread that took the last slot is by construction the quota-th admission of this
-            //       window. Reporting a re-read of the counter would report the NEXT window's count, the
-            //       reset having already happened inside the atomic update above.
-            this.windowBoundary.onWindowComplete(this.requestProcessLimit);
+    private void reserveWindowSlot() {
+        WindowState before = this.window.getAndUpdate(state ->
+                state.granted() + 1 >= this.windowAdmissionLimit
+                        ? new WindowState(state.generation() + 1, 0)
+                        : new WindowState(state.generation(), state.granted() + 1));
+        if (before.granted() + 1 >= this.windowAdmissionLimit) {
+            // WHY : Assumptions: the figures reported are the CLOSING window's generation and the
+            //       allowance itself, not a re-read of the state. The thread that took the last place is by
+            //       construction the allowance-th admission of that generation, and a re-read would report
+            //       the next window, the advance having already happened inside the atomic update above.
+            LOG.info("event=auth.window.filled generation={} admitted={}",
+                    before.generation(), this.windowAdmissionLimit);
+            this.windowBoundary.onWindowComplete(before.generation(), this.windowAdmissionLimit);
         }
+    }
+
+    /**
+     * Refuses a request that does not declare the one payload format this consumer decodes.
+     *
+     * <p>Purpose: the decoder splits a delimited record into eighteen fields by position, so it will read
+     * ANY text that happens to have the right number of separators. A producer sending a differently
+     * shaped record -- another delimited format, or a structured document -- therefore does not fail to
+     * decode; it decodes into fields that are in the wrong places, and the consumer takes an authorization
+     * decision on them. The declared format is the only thing that distinguishes the two cases before the
+     * decode, which is why it is checked here and not after.</p>
+     *
+     * <p>Refactoring Rationale: the attribute was requested from the transport and then never read. The
+     * container asks for every message attribute -- {@code SqsConfig} states why -- and the reply path
+     * SETS this attribute on everything it publishes, so the contract was declared in one direction and
+     * enforced in neither. The baseline does not have that gap: its broker refuses a format the program
+     * did not ask for before the program sees the message.</p>
+     *
+     * <p>Assumptions: the comparison ignores case and surrounding blanks, because a media type's type and
+     * subtype are defined to be case-insensitive and a producer's header library may pad. It does NOT
+     * accept a parameterised form such as a trailing character-set: this payload is a fixed-position
+     * record of digits and blanks whose encoding is settled by the transport, so a character-set parameter
+     * would describe a variation this consumer does not implement, and accepting the header while ignoring
+     * the parameter would be the silent kind of tolerance.</p>
+     *
+     * <p>Assumptions: an ABSENT value is refused as well as a wrong one. Treating absence as consent was
+     * the alternative and is rejected on this flow for the reason the expiry guard states: this consumer
+     * commits a decision and moves an account's counters, so a producer that has not said what it sent is
+     * not a producer to guess for. Every producer in this repository sets the attribute.</p>
+     *
+     * @param message the received message; must not be {@code null}
+     * @throws CsvAuthCodec.AuthMessageFormatException if the attribute is absent, blank or names any
+     *     format other than {@link #CONTENT_TYPE_CSV}; the value is quoted only after sanitising, because
+     *     it came off the wire
+     */
+    private void requireDeclaredWireFormat(Message<String> message) {
+        String declared = header(message, HEADER_CONTENT_TYPE);
+        if (declared == null || declared.isBlank()) {
+            throw new CsvAuthCodec.AuthMessageFormatException("the request declares no "
+                    + HEADER_CONTENT_TYPE + " attribute; this consumer decodes " + CONTENT_TYPE_CSV
+                    + " only, and a positional record read under an undeclared format decodes into"
+                    + " fields that may not be the fields the producer sent");
+        }
+        if (!CONTENT_TYPE_CSV.equalsIgnoreCase(declared.trim())) {
+            throw new CsvAuthCodec.AuthMessageFormatException("the request declares "
+                    + HEADER_CONTENT_TYPE + " " + LogSafeText.sanitize(declared) + "; this consumer"
+                    + " decodes " + CONTENT_TYPE_CSV + " only");
+        }
+    }
+
+    /**
+     * One bounded processing window: which window it is, and how many admissions it has granted.
+     *
+     * <p>Assumptions: the generation is a {@code long} and only ever increases, so it cannot return to a
+     * value a concurrent reader might still be holding. An {@code int} would wrap after roughly two
+     * billion windows, which at this allowance is not reachable in practice -- the type is chosen because
+     * a monotonic identity that provably never repeats needs no argument about reachability.</p>
+     *
+     * @param generation which window this is, counting from zero and increasing by one each time a window
+     *     fills; monotonic
+     * @param granted how many admissions this window has granted so far, always between zero and one less
+     *     than the admission allowance
+     */
+    private record WindowState(long generation, int granted) {
     }
 
     /**
@@ -510,13 +654,19 @@ public class AuthorizationRequestListener {
      * which is why the persistence below is guarded by the presence of the cross-reference and not by the
      * decision.</p>
      *
-     * @param message the received message, needed for its reply destination and expiry; must not be
+     * <p>Assumptions: this method takes the ALREADY-VALIDATED reply destination rather than the message
+     * it came from, so the decision path holds no means of re-reading a requester-supplied attribute and
+     * no second opportunity to reach a different verdict about it. The destination was established before
+     * this method was called, which is what makes the write below and the reply that answers it either
+     * both happen or neither.</p>
+     *
+     * @param replyQueueUrl the allowlisted destination this decision's reply will be sent to; must not be
      *     {@code null}
      * @param request the decoded request; must not be {@code null}
      * @param correlationId the requester's correlation identifier; may be {@code null}
      * @param now the current instant in coordinated universal time; must not be {@code null}
      */
-    private void handleNewRequest(Message<String> message, AuthRequest request, String correlationId,
+    private void handleNewRequest(String replyQueueUrl, AuthRequest request, String correlationId,
             LocalDateTime now) {
         Optional<AccountContextClient.CardXref> xref =
                 this.accounts.findCardXref(request.cardNum());
@@ -527,7 +677,15 @@ public class AuthorizationRequestListener {
             long accountId = xref.get().accountId();
             account = this.accounts.findAccount(accountId);
             customerFound = this.accounts.customerExists(xref.get().customerId());
-            summary = this.summaries.findWithLockByAccountId(accountId);
+            // WHY : Refactoring Rationale: this read used to hold a PESSIMISTIC_WRITE lock on the summary
+            //       row for the rest of the transaction. It no longer holds anything. The lock was a
+            //       target-side addition -- the reference system passes only non-hold retrieval codes -- and
+            //       what it protected, the accumulation of four incremented members, is now performed by
+            //       atomic statements in persist(...). Trade-offs: the decision below is therefore made
+            //       against counters a concurrent contribution may already have moved. That is closer to the
+            //       reference behaviour rather than further from it: the reference reads its root without a
+            //       hold and decides on what it read.
+            summary = this.summaries.findByAccountId(accountId);
         }
         AuthorizationDecisionService.DecisionContext context =
                 new AuthorizationDecisionService.DecisionContext(xref.isPresent(), account,
@@ -560,7 +718,7 @@ public class AuthorizationRequestListener {
             LOG.warn("event=auth.request.declined reason=card-not-cross-referenced respReason={}",
                     decision.responseReason());
         }
-        enqueueReply(message, reply, correlationId, now);
+        enqueueReply(replyQueueUrl, reply, correlationId, now);
         LOG.info("event=auth.request.decided approved={} respCode={} respReason={}",
                 decision.approved(), decision.responseCode(), decision.responseReason());
     }
@@ -602,23 +760,58 @@ public class AuthorizationRequestListener {
             Optional<AccountContextClient.Account> account, Optional<PendingAuthSummary> summary,
             AuthRequest request, AuthorizationDecisionService.Decision decision, AuthReply reply,
             LocalDateTime now) {
-        PendingAuthSummary held = summary.orElseGet(
-                () -> new PendingAuthSummary(xref.accountId(), xref.customerId()));
-        account.ifPresent(read -> held.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
-        if (decision.approved()) {
-            held.recordApproved(decision.approvedAmount().amount());
+        // WHY : Refactoring Rationale: the accumulation is applied by an ATOMIC statement and no longer by
+        //       reading an entity, mutating it and saving it back. The read that fed that sequence used to
+        //       hold a PESSIMISTIC_WRITE lock on the summary row, which is concurrency machinery the
+        //       reference system does not have -- cpy/IMSFUNCS.cpy declares three get-hold function codes
+        //       at L19, L21 and L23 and no reference program passes any of them. The lock existed to stop
+        //       two interleaved read-modify-write sequences losing a contribution, because these members
+        //       are INCREMENTED and not assigned (cbl/COPAUA0C.cbl L814/L815 approved, L820/L821
+        //       declined). Performing the arithmetic in the database removes the read-modify-write
+        //       entirely, so there is no lost update to lock against: two concurrent contributions each
+        //       add to whatever the row holds when their statement runs, and both land.
+        // WHY : Assumptions: the row is CREATED here when the account has none, and only then does an
+        //       entity get built and saved. That path cannot race in the way the increment path could,
+        //       because the summary's primary key is the account identifier -- a second task creating the
+        //       same account's summary conflicts on that key rather than silently overwriting, and the
+        //       account is the message group the queue orders by, so two tasks holding the FIRST
+        //       authorization of one account is the case the group ordering already excludes.
+        long accountId = xref.accountId();
+        if (summary.isEmpty()) {
+            PendingAuthSummary created = new PendingAuthSummary(accountId, xref.customerId());
+            account.ifPresent(read -> created.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
+            if (decision.approved()) {
+                created.recordApproved(decision.approvedAmount().amount());
+            } else {
+                created.recordDeclined(request.transactionAmount().amount());
+            }
+            this.summaries.save(created);
         } else {
-            // WHY : Refactoring Rationale: the amount added here is THIS request's, whereas the baseline
-            // adds PA-TRANSACTION-AMT at its line 821 -- a detail-segment field its line 885 does not
-            // populate until the following paragraph, so the total it accumulates is the previous
-            // message's amount, or zero for the first message of a task. A running total of declined
-            // amounts that is off by one message describes nothing, so the current request's amount is
-            // used and the divergence is registered as D-DECLINED-AMT-CURRENT in
-            // docs/architecture/cobol-to-service-traceability.md.
-            held.recordDeclined(request.transactionAmount().amount());
+            // WHY : Assumptions: the refreshed limits are applied through the entity while the counters go
+            //       through the statement, and the split is deliberate rather than an oversight. Limits are
+            //       ASSIGNED from the account read, not accumulated, so a later write simply wins and there
+            //       is nothing for an atomic statement to protect; the counters are the only members with a
+            //       lost-update exposure.
+            PendingAuthSummary held = summary.get();
+            account.ifPresent(read -> held.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
+            this.summaries.save(held);
+
+            if (decision.approved()) {
+                this.summaries.addApprovedAuthorization(accountId,
+                        decision.approvedAmount().amount());
+            } else {
+                // WHY : Refactoring Rationale: the amount added here is THIS request's, whereas the baseline
+                // adds PA-TRANSACTION-AMT at its line 821 -- a detail-segment field its line 885 does not
+                // populate until the following paragraph, so the total it accumulates is the previous
+                // message's amount, or zero for the first message of a task. A running total of declined
+                // amounts that is off by one message describes nothing, so the current request's amount is
+                // used and the divergence is registered as D-DECLINED-AMT-CURRENT in
+                // docs/architecture/cobol-to-service-traceability.md.
+                this.summaries.addDeclinedAuthorization(accountId,
+                        request.transactionAmount().amount());
+            }
         }
-        this.summaries.save(held);
-        this.details.save(record(xref.accountId(), request, decision, reply, now));
+        this.details.save(record(accountId, request, decision, reply, now));
     }
 
     /**
@@ -777,61 +970,108 @@ public class AuthorizationRequestListener {
     }
 
     /**
+     * Establishes the one destination this request may be answered at, refusing the request otherwise.
+     *
+     * <p>Purpose: the destination arrives as a message attribute, so it is chosen by whoever can put a
+     * message on the request queue. Without a check this service would send a reply carrying a card
+     * number, a transaction identifier and an authorization outcome to any queue address that attribute
+     * named, including one in another account. An allowlist is the only form of the check that works,
+     * because the set of legitimate reply queues is a deployment fact rather than a pattern: a prefix or
+     * a regular-expression test on the address would admit any queue whose name a requester could
+     * arrange to match.</p>
+     *
+     * <p>Refactoring Rationale: this REFUSES where the two checks it replaces returned normally from the
+     * point the outbox row was written. Returning there meant the decision rows had already been written,
+     * so the transaction committed, the container's acknowledgement mode acknowledged the request, and a
+     * committed decision existed that no reply row accounted for -- the phantom-decision state this
+     * module's outbox was introduced to make unreachable, reachable again by one attribute a requester
+     * controls. Raising instead makes the decision and its reply one atomic outcome: the write rolls back
+     * with the refusal, the request stays on the queue, and it redelivers and then dead-letters.</p>
+     *
+     * <p>Alternatives Considered: keeping the decision and writing a TERMINAL reply row addressed to a
+     * configured fallback queue, which the review offered as the second admissible resolution. Rejected
+     * because it answers a requester at an address it never nominated -- the reply carries a card number
+     * and an outcome, so a fallback destination is a disclosure to whoever reads that queue -- and
+     * because a row that can never be delivered to the party that asked is an audit record dressed as a
+     * reply. Refusing keeps one invariant instead of two half-truths: every committed decision has a
+     * reply row addressed to a destination the deployment listed.</p>
+     *
+     * <p>Alternatives Considered: refusing at the point of the write rather than here. Rejected because
+     * by then the account's counters have been moved and the detail row written, so the refusal would
+     * roll back work that need never have been done; and because the ordering that matters is the one
+     * the module already applies to a nonconforming payload -- the crossing runs before every lookup and
+     * every transformation, so a request that cannot be answered touches no row and no account context.
+     * This check therefore sits ahead of the decode, which is the earliest point at which the attribute
+     * is available and nothing has yet been read.</p>
+     *
+     * <p>Assumptions: the refusal message names the ATTRIBUTE and never its value, and the log line
+     * carries no value either. The rejected address is attacker-influenced text bound for a dead-letter
+     * diagnostic and a log field, which is the same exposure the correlation attribute is sanitised for;
+     * the allowlist is short, so its SIZE is enough for an operator to tell a missing entry from a
+     * malicious address without this service quoting the address back.</p>
+     *
+     * <p>Assumptions: the refusal type is the same one a malformed payload raises. That type's own
+     * documentation anticipates this use -- it records that a consumer typically validates a transport
+     * attribute before handing the body over, and that one type for one failure mode leaves a consumer
+     * with one exception to route to its dead-letter queue -- so a second type is not introduced for the
+     * transport half of the same contract.</p>
+     *
+     * @param message the received message, whose attribute names the reply destination; must not be
+     *     {@code null}
+     * @return the destination, exactly as the deployment listed it, never {@code null} or blank
+     * @throws AuthMessageFormatException if the request names no destination or names one the configured
+     *     allowlist does not hold
+     */
+    private String requireAllowlistedReplyDestination(Message<String> message) {
+        String replyQueueUrl = header(message, HEADER_REPLY_TO);
+        if (replyQueueUrl == null || replyQueueUrl.isBlank()) {
+            LOG.warn("event=auth.request.refused reason=no-reply-destination");
+            throw new AuthMessageFormatException(
+                    "the request names no reply destination in attribute " + HEADER_REPLY_TO
+                            + ", so no reply could be guaranteed for a decision");
+        }
+        if (!this.replyQueueAllowlist.contains(replyQueueUrl)) {
+            LOG.warn("event=auth.request.refused reason=destination-not-allowlisted allowlistSize={}",
+                    this.replyQueueAllowlist.size());
+            throw new AuthMessageFormatException(
+                    "the request names a reply destination in attribute " + HEADER_REPLY_TO
+                            + " that is not one of the " + this.replyQueueAllowlist.size()
+                            + " destinations this deployment allows; the value is withheld because it is"
+                            + " requester-supplied");
+        }
+        return replyQueueUrl;
+    }
+
+    /**
      * Writes a reply into the outbox, to be published after this transaction commits.
      *
-     * <p>Refactoring Rationale: the destination is checked against a configured allowlist by exact
-     * match, and previously it was not. The value arrives as a message attribute, so it is chosen by
-     * whoever can put a message on the request queue; without the check this service would send a reply
-     * carrying a card number, a transaction identifier and an authorization outcome to any queue address
-     * that attribute named, including one in another account. An allowlist is the only form of the check
-     * that works, because the set of legitimate reply queues is a deployment fact rather than a pattern:
-     * a prefix or a regular-expression test on the address would admit any queue whose name a requester
-     * could arrange to match.</p>
+     * <p>Assumptions: the destination arrives here ALREADY VALIDATED, from
+     * {@link #requireAllowlistedReplyDestination(Message)}, and is therefore not re-read from the message
+     * and not re-checked. Taking it as a parameter rather than re-deriving it is what makes it impossible
+     * for this method to reach a different verdict from the one the request was admitted under, and it is
+     * why this method has no branch that declines to write a row: by the time it is called, a row is owed.</p>
      *
-     * <p>Trade-offs: a request naming an unlisted destination is decided and then goes unanswered, which
-     * is the same outcome as a request naming no destination at all. The decision still stands because it
-     * is the account's own history and the requester does not get to withdraw it by supplying a bad
-     * address; the unanswered request is logged, without the address, so an operator can add a legitimate
-     * new requester to the allowlist.</p>
-     *
-     * @param message the received message, whose header names the reply destination; must not be
+     * @param replyQueueUrl the allowlisted destination, established before any decision work; must not be
      *     {@code null}
      * @param reply the reply to publish; must not be {@code null}
      * @param correlationId the requester's correlation identifier; may be {@code null}
      * @param now the current instant in coordinated universal time; must not be {@code null}
      */
-    private void enqueueReply(Message<String> message, AuthReply reply, String correlationId,
+    private void enqueueReply(String replyQueueUrl, AuthReply reply, String correlationId,
             LocalDateTime now) {
-        String replyQueueUrl = header(message, HEADER_REPLY_TO);
-        if (replyQueueUrl == null || replyQueueUrl.isBlank()) {
-            // WHY : Trade-offs: with no reply destination there is nobody to answer, so the decision
-            // stands and no outbox row is written. Falling back to a configured queue would answer a
-            // requester that never asked to be answered there, and silently, which is worse than not
-            // answering a request that supplied no address.
-            LOG.warn("event=auth.reply.suppressed reason=no-reply-destination");
-            return;
-        }
-        if (!this.replyQueueAllowlist.contains(replyQueueUrl)) {
-            // WHY : Assumptions: the rejected address is NOT logged. It is attacker-influenced text
-            // reaching a log field, which is the same exposure the correlation attribute is checked for
-            // above; the allowlist is short and an operator can compare it against the requester's own
-            // configuration without this line quoting the value back.
-            LOG.warn("event=auth.reply.suppressed reason=destination-not-allowlisted"
-                    + " allowlistSize={}", this.replyQueueAllowlist.size());
-            return;
-        }
-        // WHY : Refactoring Rationale: the row carries KEYED TOKENS for the two queue identities, and it
-        //   carried the card number and the transaction identifier themselves before. Both values become
-        //   message metadata at publication -- MessageGroupId and MessageDeduplicationId -- and the
-        //   queue's server-side encryption covers a body and not its metadata, so the raw form put the
-        //   primary account number and the acquirer's transaction identifier into queue telemetry and
-        //   every send trace. The tokens keep both SEMANTICS intact, because each is equal for equal
-        //   inputs and different for different ones, which is the only property first-in-first-out
-        //   ordering and duplicate suppression need. This is what docs/adr/ADR-004-messaging.md requires
-        //   under "Ordering is grouped by card".
-        // WHY : Assumptions: both tokens are derived HERE, inside the deciding transaction, rather than at
-        //   publication. The publisher then needs no key material, and a row whose payload could not be
-        //   parsed is still publishable -- which is precisely the case where publishing matters most.
+        // WHY : Refactoring Rationale: the row carries the LITERAL card number and transaction identifier
+        //   as the two queue identities, and it carried keyed tokens derived from them before. Sections
+        //   0.4.1.8 and 0.7.6 of the technical specification freeze MessageGroupId as card_num and
+        //   MessageDeduplicationId as transaction_id, and that specification is the frozen agreement this
+        //   code aligns to. The derivation held each semantic within this one producer, but any other
+        //   party -- a second publisher, a cross-account consumer, a replay tool -- computing an identity
+        //   from the frozen contract computes a different one, so per-card ordering and duplicate
+        //   suppression would both silently fail across producers while appearing correct within this one.
+        // WHY : Trade-offs: both values become message metadata at publication, and a queue's server-side
+        //   encryption covers a body and not its metadata, so the card number reaches queue telemetry and
+        //   the trace of every send. The exposure is bounded by the deployment -- customer-managed-key
+        //   encryption, an interface endpoint inside the private network, and task-role-scoped read
+        //   access -- and the judgement belongs to the specification rather than to this method.
         // WHY : Refactoring Rationale: the row is now assembled through the mapper's publication
         //   projection and OutboxMessage.toPendingRow rather than by calling the entity's constructor with
         //   seven positional arguments here. The values written are identical -- the projection derives
@@ -846,8 +1086,7 @@ public class AuthorizationRequestListener {
         //   compiled.
         OutboxMessage publication = this.payloads.toOutboxMessage(reply,
                 new AuthorizationMessageMapper.ReplyRouting(replyQueueUrl, correlationId,
-                        now.plusSeconds(DEFAULT_REPLY_EXPIRY_SECONDS)),
-                this.messagingTokeniser);
+                        now.plusSeconds(DEFAULT_REPLY_EXPIRY_SECONDS)));
         this.outbox.save(publication.toPendingRow(now));
     }
 

@@ -104,11 +104,28 @@
  * illustration, so that a reviewer auditing the tree by literal search finds only labels that are
  * actually in use. The two forms are never mixed inside one file.</p>
  *
- * <h2>The five mappers, and why four of them are static</h2>
+ * <h2>The six mappers, and why four of them are static</h2>
  *
- * <p>Assumptions: five mappers are landed as compilation units beside this charter, and the closed
- * set of this package is those five plus this file. Nothing is outstanding, so a reader who cannot
- * open one of the five has found a gap rather than the expected state.</p>
+ * <p>Assumptions: six mappers are landed as compilation units beside this charter, and the closed
+ * set of this package is those six plus this file. Nothing is outstanding, so a reader who cannot
+ * open one of the six has found a gap rather than the expected state. The count is measured against
+ * the directory on every build:</p>
+ *
+ * <pre>
+ * this directory: 7 java files = 6 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: this section said five, and enumerated five, while
+ * {@code UsPhoneAreaCodeMapper} stood beside it. Two things made that worse than an ordinary stale
+ * count. The first is that three sibling classes cite this charter by line number, so a reader
+ * arriving from one of them is being told the set is closed by the document those citations point at.
+ * The second is specific to the omitted class: it renders the same entity as {@code LookupMapper}'s
+ * area-code member, so a reader who took "the closed set is those five" literally would conclude a
+ * duplicate conversion had been added in the wrong place -- and would be half right, which is the
+ * hardest kind of wrong document to act on. What is actually true is recorded in its entry below,
+ * including that it has no caller today. The marker line above is measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a seventh mapper arriving without an entry here now fails the build.</p>
  *
  * <dl>
  *   <dt>{@code TransactionTypeMapper}</dt>
@@ -134,6 +151,20 @@
  *   <dd>Renders the date-conversion reply line of the message-driven inquiry flow, transcribed from
  *       {@code app/app-vsam-mq/cbl/CODATE01.cbl}, and frames it to the declared message length. It
  *       converts no entity, because this reply has none.</dd>
+ *
+ *   <dt>{@code UsPhoneAreaCodeMapper}</dt>
+ *   <dd>Renders one seeded area-code row, with the sub-list it belongs to, as
+ *       {@code PhoneAreaCodeResponse}, and renders a list of them. Assumptions: this is the SAME
+ *       conversion {@code LookupMapper}'s area-code member performs, and the duplication is stated
+ *       rather than glossed, because a reader finding two implementations of one conversion needs to
+ *       know which is reached. {@code AddressLookupController} calls {@code LookupMapper} on all three
+ *       lookup routes, so this class has <b>no caller in the delivered code</b>. It carries the
+ *       classification filtering and the list member that a paged area-code route would need, which is
+ *       the reason it exists as a bean rather than as a fifth static member on
+ *       {@code LookupMapper}. Trade-offs: an unreached conversion is dead weight and is recorded as
+ *       such here rather than defended; removing it or routing the controller through it are both
+ *       single-caller changes, and either is preferable to leaving a reader to guess which member the
+ *       area-code route uses.</dd>
  * </dl>
  *
  * <p>Alternatives Considered: the four entity conversions are {@code final} classes with a private
@@ -142,10 +173,15 @@
  * alternative, and the split is deliberate rather than residue. Each of the four is a total function
  * of its argument: it has no collaborator, no configuration and no state, so a static call site
  * states that honestly and leaves no constructor through which a dependency could later be
- * introduced without anyone noticing the class had stopped being a pure conversion. The fifth is not
- * that shape -- it delegates framing to {@code com.carddemo.common.codec.InquiryRequestCodec} and is
- * consumed by the message listeners in {@code com.carddemo.reference.service}, where being a bean is
- * what allows a listener test to supply a substitute without the listener changing.</p>
+ * introduced without anyone noticing the class had stopped being a pure conversion. The other two are
+ * not that shape, for two different reasons. {@code DateInquiryReplyMapper} delegates framing to
+ * {@code com.carddemo.common.codec.InquiryRequestCodec} and is
+ * consumed by the message listener in {@code com.carddemo.reference.service}, where being a bean is
+ * what allows a listener test to supply a substitute without the listener changing.
+ * {@code UsPhoneAreaCodeMapper} is a bean because it was authored for constructor injection into a
+ * route that would page area codes, and its own header records that choice; it is the one member of
+ * this package whose shape is justified by a consumer that does not exist yet, which is why its entry
+ * above says so plainly instead of letting the static/bean split look uniform.</p>
  *
  * <p>Trade-offs: the four static classes are declared {@code final} with private constructors, so
  * nothing can subclass or proxy them, and a later cross-cutting concern that needed to wrap a
@@ -155,19 +191,22 @@
  * directly and gains nothing from indirection. {@code DateInquiryReplyMapper} is correspondingly not
  * declared {@code final}, precisely so that it remains proxyable.</p>
  *
- * <p>Alternatives Considered: five discrete mappers rather than one consolidated
+ * <p>Alternatives Considered: discrete mappers rather than one consolidated
  * {@code ReferenceMapper}. The evidence differs record by record -- three separate copybooks, one Db2
  * declaration pair and one message-flow program -- so a single class would need one Javadoc block
  * speaking for unrelated record layouts, which is precisely the adjacency that L27 requires be kept.
  * There is also no shared text-normalisation class, and that absence is a decision rather than an
- * omission: only two of the five records carry a description, so a third class holding one helper for
+ * omission: only two of the records converted here carry a description at all, so a third class
+ * holding one helper for
  * two callers would add an indirection whose only content is a two-line loop. The helper pair
  * therefore lives on {@code TransactionTypeMapper}, the mapper of the record whose description the
  * baseline manipulates most, and {@code TransactionCategoryMapper} calls it by qualified name.
  * Trade-offs: that makes the category mapper depend on a sibling rather than on a neutral utility,
- * which is the cost accepted for keeping one implementation of the rule. The other two mappers call
- * it not at all: {@code LookupMapper} and {@code DisclosureGroupMapper} convert records that carry no
- * description, so the trim boundary below never reaches them and every value they publish is
+ * which is the cost accepted for keeping one implementation of the rule. Every other mapper calls
+ * it not at all: {@code LookupMapper}, {@code UsPhoneAreaCodeMapper} and
+ * {@code DisclosureGroupMapper} convert records that carry no
+ * description, {@code DateInquiryReplyMapper} converts no record, so the trim boundary below never
+ * reaches any of them and every value they publish is
  * verbatim.</p>
  *
  * <h2>Why the conversion is written rather than generated</h2>
@@ -299,9 +338,17 @@
  * is entitled to hold. And on the outbound path the baseline sends the raw fixed fifty-byte field to
  * the map at {@code COTRTUPC.cbl} L1200 and {@code COTRTLIC.cbl} L1417, whereas this package does not
  * re-pad, so a response carries a description without its padding. In each case the baseline does what
- * those lines say, the Java implements what this ruling says, and the divergence is registered in
+ * those lines say, the Java implements what this ruling says, and the divergence is registered as
+ * {@code D-REFERENCE-TRIM-TRAILING-ONLY} in
  * {@code docs/architecture/cobol-to-service-traceability.md}, which is the one place such a difference
- * is recorded. Everything under {@code app/} is reference material this migration reads and never
+ * is recorded.
+ *
+ * <p>Refactoring Rationale: that citation named no entry, and when it was written no entry existed --
+ * the register held only the integrity-sentence, action-domain and upsert-not-exposed entries, none of
+ * them about trimming. So a claim that the divergence "is registered" was false, and false in the one
+ * direction a reader cannot detect without opening the other document. The entry now exists and is
+ * named here, which is what makes the claim checkable by literal search rather than by reading a
+ * four-thousand-line register.</p> Everything under {@code app/} is reference material this migration reads and never
  * rewrites, so neither statement above describes an edit made to it.</p>
  *
  * <p>Assumptions: the generated declaration pair corroborates where this boundary falls, and the

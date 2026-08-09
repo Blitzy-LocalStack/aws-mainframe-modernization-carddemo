@@ -183,17 +183,22 @@ class BatchServicesTest {
             assertThat(service.accrue(Money.of("507.03"), lookup).amount())
                     .isEqualByComparingTo(new BigDecimal("507.03")
                             .multiply(new BigDecimal("13.25"))
-                            .divide(new BigDecimal("1200"), 2, java.math.RoundingMode.HALF_UP));
+                            .divide(new BigDecimal("1200"), 2, java.math.RoundingMode.DOWN));
         }
 
         /**
          * The mode this service names is the mode the shared arithmetic actually applies.
          *
          * <p>Assumptions: {@code ACCRUAL_ROUNDING} is documentation rather than a parameter -- the
-         * accrual rounds through {@code Money.monthlyInterest}, which fixes the mode for every money
-         * value in the system -- so the constant could drift from the behaviour it describes without any
-         * other case failing. This asserts the two are the same value, which is what lets the constant
-         * stay where a reader of this service looks for the reference's mode.</p>
+         * accrual reduces through {@code Money.monthlyInterest}, which fixes the mode -- so the
+         * constant could drift from the behaviour it describes without any other case failing. This
+         * asserts the two are the same value, which is what lets the constant stay where a reader of
+         * this service looks for the reference's mode.</p>
+         *
+         * <p>Assumptions: the shared constant compared against is {@code BASELINE_INTEREST_ROUNDING},
+         * the accrual's own mode, and not {@code GENERAL_ROUNDING}. Comparing against the general
+         * mode is what let this service name half up while its own summary said the constant records
+         * the reference's mode, which truncates.</p>
          */
         @Test
         @DisplayName("the named accrual mode is the mode the shared arithmetic applies")
@@ -201,7 +206,7 @@ class BatchServicesTest {
             assertThat(InterestCalculationService.ACCRUAL_ROUNDING)
                     .as("a mode named here but not applied by the shared helper would mislead every"
                             + " reader of this service")
-                    .isEqualTo(Money.GENERAL_ROUNDING);
+                    .isEqualTo(Money.BASELINE_INTEREST_ROUNDING);
         }
 
         /** A genuine zero rate accrues nothing, and is not the same outcome as an absent group. */

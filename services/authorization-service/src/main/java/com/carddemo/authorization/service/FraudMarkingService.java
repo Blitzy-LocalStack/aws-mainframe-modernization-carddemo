@@ -1,7 +1,5 @@
 package com.carddemo.authorization.service;
 
-import com.carddemo.authorization.domain.AuthFraud;
-import com.carddemo.authorization.domain.AuthFraudKey;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.dto.FraudMarkRequest;
@@ -9,13 +7,13 @@ import com.carddemo.authorization.dto.FraudMarkResponse;
 import com.carddemo.authorization.mapper.AuthFraudMapper;
 import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.repository.AuthFraudRepository;
+import com.carddemo.authorization.repository.AuthFraudUpserter;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -157,24 +155,30 @@ import org.springframework.transaction.annotation.Transactional;
  * places that own them. A reader looking here for the state-selected pair should find that boundary
  * rather than a third copy of the strings.
  *
- * <h2>An administrative operation, and what the reference tree checked</h2>
+ * <h2>Who may perform it, and what the reference tree checked</h2>
  *
- * <p>Assumptions: this operation REQUIRES the administrative group authority, and this service performs
- * no authority check itself. The requirement is declared once, in {@code config/SecurityConfig.java},
- * which owns the route matrix and matches {@code FRAUD_PATH_PATTERN} against the administrative
- * authority so that a token carrying only the user group is refused. A second check here would be a
- * second place the rule could differ from the published contract, and a reader could no longer tell
- * which of the two decided a refusal. A confirmation step in the interface is not part of this: the
- * reference detail screen marks fraud on a function key at {@code cbl/COPAUS1C.cbl} L187 and L188 with
- * no re-keying, and a client-side confirmation is a guard against a slip, never an authorization.
+ * <p>Assumptions: this operation requires EITHER business group authority, and this service performs no
+ * authority check itself. The requirement is declared once, in {@code config/SecurityConfig.java}, which
+ * owns the route matrix and matches {@code FRAUD_PATH_PATTERN} against
+ * {@code SecurityConfig.fraudAccess()}. A second check here would be a second place the rule could differ
+ * from the published contract, and a reader could no longer tell which of the two decided a refusal. A
+ * confirmation step in the interface is not part of this either: the reference detail screen marks fraud on
+ * a function key at {@code cbl/COPAUS1C.cbl} L187 and L188 with no re-keying, and a client-side
+ * confirmation is a guard against a slip, never an authorization.
  *
- * <p>Assumptions: that authority requirement is an ADDITION and is not carried across from anything,
- * so it is described as one rather than as a port. The reference tree performs NO resource-level and no
- * command-level security checking anywhere in this application: {@code csd/CRDDEMO2.csd} L46 declares
- * {@code RESSEC(NO) CMDSEC(NO)} on transaction {@code CPVD}, and L56 and L66 declare the same pair on
- * its two siblings, so reaching the transaction was the whole of the check. Describing the group claim
- * as preserved behaviour would misstate what the reference did; describing it as added states what it
- * is, and {@code docs/adr/ADR-008-security-and-identity.md} records the substitution.
+ * <p>Refactoring Rationale: this operation REQUIRED the administrative group and no longer does, and the
+ * paragraph that stood here described the requirement as an ADDITION that the reference did not perform.
+ * The description of the reference was right and the conclusion drawn from it was wrong: an addition that
+ * REMOVES a capability from a group the reference grants it to is a behavioural change against the oracle,
+ * not a neutral hardening. The reference reaches this write from the MAIN menu -- {@code app/cpy/
+ * COMEN02Y.cpy} option 11 under the access byte {@code 'U'}, dispatching to {@code COPAUS0C}, while the
+ * administrative table {@code app/cpy/COADM02Y.cpy} names the program nowhere -- and the reference tree
+ * performs NO resource-level and no command-level security checking anywhere in this application:
+ * {@code csd/CRDDEMO2.csd} L46 declares {@code RESSEC(NO) CMDSEC(NO)} on transaction {@code CPVD}, and L56
+ * and L66 declare the same pair on its two siblings, so reaching the transaction was the whole of the
+ * check. The full argument, including what a deployment must do to narrow the rule deliberately, is at
+ * {@code SecurityConfig.fraudAccess()}; {@code docs/adr/ADR-008-security-and-identity.md} records the
+ * identity substitution the rule rests on.
  *
  * <p>Assumptions: the same definitions leave the primary account number visible to diagnostic tracing.
  * {@code csd/CRDDEMO2.csd} L45 declares {@code CONFDATA(NO)} on {@code CPVD}, which is the setting that
@@ -266,9 +270,20 @@ public class FraudMarkingService {
     private final PendingAuthSummaryRepository summaries;
 
     /**
-     * The fraud rows, probed by key and then inserted or replaced.
+     * The fraud rows. Read from only for the database's own report date.
+     *
+     * <p>Refactoring Rationale: this field used to be the WRITE path as well, probed by key and then
+     * inserted or replaced through. Both writes moved to {@link AuthFraudUpserter}, which performs them
+     * as one statement that cannot lose a concurrent race; what remains here is
+     * {@link AuthFraudRepository#currentDate()}. The field is deliberately not removed, because that
+     * date must come from the database server rather than from this process.</p>
      */
     private final AuthFraudRepository fraudRows;
+
+    /**
+     * The single-statement fraud write, carrying both arms of the reference duplicate-key branch.
+     */
+    private final AuthFraudUpserter fraudUpserts;
 
     /**
      * The only route from a sealed selector to a persistent key.
@@ -276,7 +291,7 @@ public class FraudMarkingService {
     private final PendingAuthViewMapper mapper;
 
     /**
-     * Builds the service over its three repositories and the view mapper.
+     * Builds the service over its three repositories, the fraud writer and the view mapper.
      *
      * <p>Refactoring Rationale: a {@link java.time.Clock} was injected here and is not any more. It
      * supplied the fraud report date, which the reference system takes from the DATABASE server rather
@@ -288,17 +303,20 @@ public class FraudMarkingService {
      * @param details the authorization repository; must not be {@code null}
      * @param summaries the parent-summary repository the customer identifier is read from; must not be
      *     {@code null}
-     * @param fraudRows the fraud-row repository, which also supplies the database's report date; must
+     * @param fraudRows the fraud-row repository, read from only for the database's report date; must
      *     not be {@code null}
+     * @param fraudUpserts the single-statement fraud writer carrying both arms of the reference
+     *     duplicate-key branch; must not be {@code null}
      * @param mapper the view mapper that redeems the path selector; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public FraudMarkingService(PendingAuthDetailRepository details,
             PendingAuthSummaryRepository summaries, AuthFraudRepository fraudRows,
-            PendingAuthViewMapper mapper) {
+            AuthFraudUpserter fraudUpserts, PendingAuthViewMapper mapper) {
         this.details = Objects.requireNonNull(details, "details must not be null");
         this.summaries = Objects.requireNonNull(summaries, "summaries must not be null");
         this.fraudRows = Objects.requireNonNull(fraudRows, "fraudRows must not be null");
+        this.fraudUpserts = Objects.requireNonNull(fraudUpserts, "fraudUpserts must not be null");
         this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
     }
 
@@ -362,30 +380,32 @@ public class FraudMarkingService {
         //       path PendingAuthDetailRepository declares for exactly this purpose, and the row it returns
         //       is the one both writes below then operate on. Reproducing the reference sequence without
         //       the fetch would leave the update naming no row.
-        // WHY : Assumptions: no lock mode is requested, because the reference programs hold nothing
-        //       between a read and the write that follows it. Every retrieval they use is a NON-HOLD form:
-        //       cpy/IMSFUNCS.cpy declares the three get-hold codes at L19, L21 and L23 and no program in
-        //       the reference tree passes any of them to a retrieval. Requesting a pessimistic lock here
-        //       would therefore add lock-wait queueing and deadlock-victim rollback to a path that has
-        //       neither today, which is new behaviour rather than preserved behaviour, and the package
-        //       charter records it as the rejected alternative on that boundary.
-        // WHY : Alternatives Considered: serialising two concurrent marks of one authorization on this read,
-        //       so that the probe below could never see an absent fraud row twice. Rejected because the
-        //       reference system does not prevent that collision either -- it lets the duplicate key fire and
-        //       branches on it, testing the insert at cbl/COPAUS2C.cbl L199 and taking PERFORM FRAUD-UPDATE
-        //       at L203 and L204 when SQLCODE is -803, with the update itself at L221 to L229. The fraud
-        //       table's primary key is therefore the arbiter of a concurrent duplicate here as well; the
-        //       consequence accepted is that of two simultaneous marks of the SAME authorization one is
-        //       rejected rather than both being applied, and because both would assert the same fraud state
-        //       the committed state of the row is the same either way.
-        // WHY : Assumptions: that -803 branch is also what makes the pair (card number, composed timestamp)
-        //       a REAL uniqueness contract rather than an assumption this migration imposed. -803 is the
-        //       duplicate-key condition, so the reference program can only have reached its update path by
-        //       having a unique constraint on those two columns refuse the insert -- the constraint has to
-        //       exist for the branch to be reachable. That is why the primary key the probe below reads
-        //       through is declared over exactly that pair and no wider, and why a conflict on exactly that
-        //       pair is the faithful translation of the branch.
-        PendingAuthDetail detail = this.details.findById(key)
+        // WHY : Refactoring Rationale: the row is read HELD, and it used to be read unheld. The paragraph
+        //       that stood here defended the absence of a lock by pointing at the fraud table's primary
+        //       key, and that argument was wrong rather than incomplete: the key settles a duplicate
+        //       INSERT of the FRAUD row, while the row read here is UPDATED, so no constraint stands
+        //       between two writers of it. The two published actions are opposites -- cbl/COPAUS2C.cbl L81
+        //       admits the reporting character and L82 the removing one -- so two operators acting at once
+        //       submitted two states that cannot both be right, both read this row, both applied their own
+        //       state and report date, and the later commit silently replaced the earlier. A removal could
+        //       erase a report nobody saw, or a report could reinstate one just withdrawn, with nothing in
+        //       either response saying so. The reasoning, the rejected optimistic alternative and the
+        //       reference evidence that the baseline itself holds nothing are recorded once on
+        //       PendingAuthDetailRepository.findWithLockById and are not restated here.
+        // WHY : Assumptions: the hold is on the FRAUD path only. The read-only companion still serves the
+        //       detail screen and the loader's presence probe, neither of which follows its read with a
+        //       write to the row it read, so neither pays the lock-wait this path accepts.
+        // WHY : Assumptions: the -803 branch the reference program takes is still reproduced, and it is
+        //       reproduced where it belongs -- on the fraud row, by AuthFraudRepository's insert-if-absent
+        //       statement, not by this read. That branch is what makes the pair (card number, composed
+        //       timestamp) a REAL uniqueness contract rather than an assumption this migration imposed:
+        //       -803 is the duplicate-key condition, so the reference program can only have reached its
+        //       update path by having a constraint on those two columns refuse an insert. The hold here
+        //       does not make that branch unreachable, because the fraud key's timestamp half is composed
+        //       from the acquirer's originating date and the authorization time rather than from this
+        //       row's own key -- so two DIFFERENT authorizations of one card can compose one fraud key,
+        //       and holding one of their rows says nothing about the other.
+        PendingAuthDetail detail = this.details.findWithLockById(key)
                 .orElseThrow(() -> new NoSuchElementException(
                         "the selector names no pending authorization"));
 
@@ -484,6 +504,16 @@ public class FraudMarkingService {
      * at the values they were first inserted with. Both column dispositions are documented once on
      * {@link AuthFraudRepository} and are consumed here rather than restated.</p>
      *
+     * <p>Refactoring Rationale: the create arm now goes through
+     * {@link AuthFraudRepository#insertFraudRowIfAbsent(com.carddemo.authorization.domain.AuthFraud)} and
+     * FALLS THROUGH to the replace arm when the insert reports the key already taken, so this method has
+     * three code paths for its two documented outcomes. It used to probe with a read and then save,
+     * trusting the probe -- and two writers composing one fraud key both saw an absent row, both inserted,
+     * and the second was refused at COMMIT, rolling the whole mark back. That is neither the reference
+     * outcome nor a recoverable one, because a persistence context cannot be used after a constraint
+     * failure on flush. The third path exists to reproduce the reference program's own answer to that
+     * collision, which is to take the update arm on the duplicate-key code rather than to fail.</p>
+     *
      * @param detail the authorization being marked, re-read by key in this transaction; never
      *     {@code null}
      * @param key the row identity the sealed selector redeemed to, whose leading component is the
@@ -494,7 +524,8 @@ public class FraudMarkingService {
      * @throws NoSuchElementException if the authorization's account has no parent summary, so the
      *     customer identifier the fraud row records cannot be read; reached only on the create arm
      * @throws IllegalStateException if the authorization's original date cannot be composed into the
-     *     fraud key's timestamp
+     *     fraud key's timestamp, or if a concurrent writer took the fraud key and the row is then absent,
+     *     which no committed sequence can produce and so reports a state rather than a caller mistake
      * @throws IllegalArgumentException if the requested action lies outside the closed two-character
      *     domain, which the mapper refuses on the replace arm before touching the row
      */
@@ -510,40 +541,45 @@ public class FraudMarkingService {
         //       pivot and its own field moduli, and two copies of a key composition are two rows that can
         //       be addressed: a divergence in either half would not fail, it would read and write a real
         //       but different authorization's fraud row.
-        AuthFraudKey fraudKey = AuthFraudMapper.fraudRowKey(detail);
-        Optional<AuthFraud> existing = this.fraudRows.findById(fraudKey);
-
-        if (existing.isPresent()) {
-            // WHY : Assumptions: only the two columns the reference UPDATE names are touched -- its L222 to
-            //       L225 set the indicator and the current date and nothing else -- so the twenty-four-column
-            //       snapshot the row took when it was first inserted is deliberately left as it was. A row
-            //       replaced here therefore still describes the authorization as it stood at the first
-            //       report, which is the property that makes taking the snapshot worth anything.
-            // WHY : Refactoring Rationale: the transition goes through the mapper, which applies the same
-            //       two columns through the entity's own operation and additionally refuses an action
-            //       outside the closed domain before touching the row. Calling the entity directly here
-            //       left the create path and the replace path reaching the row through two different
-            //       types, so a rule added to one would silently not apply to the other.
-            AuthFraudMapper.applyFraudState(existing.get(), request, today);
-            return false;
-        }
-
+        // WHY : Refactoring Rationale: this method used to PROBE for the row and then branch -- read by
+        //       primary key, mutate the managed row when the read found one, save a new row when it did
+        //       not. That is now ONE statement, and the change is a correctness fix rather than a
+        //       simplification. Two investigators marking the SAME authorization concurrently both saw an
+        //       absent row, both took the insert arm, and the second insert violated the primary key: the
+        //       transaction ABORTED and the second mark was lost with a constraint error. The reference
+        //       program does not behave that way -- it issues the insert at cbl/COPAUS2C.cbl L194, tests
+        //       SQLCODE for the duplicate-key condition -803 at L199 and PERFORMS FRAUD-UPDATE at L203 and
+        //       L204 -- so the probe converted a HANDLED branch into an UNHANDLED failure.
+        // WHY : Refactoring Rationale: the comment that stood on the read above claimed the collision was
+        //       acceptable because "the reference system does not prevent that collision either -- it lets
+        //       the duplicate key fire and branches on it". The premise was right and the conclusion drawn
+        //       from it was wrong: the reference branches and RECOVERS, where the probe branched and
+        //       FAILED. It also claimed the committed state is the same either way because both marks
+        //       assert the same state; that is untrue for the pairing this screen offers, since 'F' reports
+        //       fraud and 'R' releases it, so two concurrent marks can assert OPPOSITE states and the loser
+        //       being rejected is a lost instruction rather than a redundant one. Both claims are withdrawn
+        //       with the code that rested on them.
+        // WHY : Assumptions: the twenty-four snapshot columns are still projected by the MAPPER, on every
+        //       call rather than only on the insert path, and that costs nothing that matters. The
+        //       projection is pure field reads from a row already in memory, and the statement's update arm
+        //       discards all but two of them -- so the row a caller would have to reason about is built
+        //       once, by the one type documenting which columns have exactly one legitimate source,
+        //       instead of the create path and the replace path reaching the row through two different
+        //       types as they did before.
         Long customerId = this.summaries.findByAccountId(key.getAccountId())
                 .orElseThrow(() -> new NoSuchElementException(
                         "the authorization's account has no pending-authorization summary, so the fraud"
                                 + " row's customer identifier cannot be read"))
                 .getCustomerId();
 
-        // WHY : Refactoring Rationale: the row is projected by the mapper, where it used to be built
-        //       through the entity's own factory with the account identifier passed in beside the
-        //       authorization. The mapper reads that identifier from the authorization's OWN key instead
-        //       of accepting it, so the row cannot be written naming an account the authorization does not
-        //       belong to -- an argument that was available to be passed wrongly is now not available at
-        //       all. The projection also carries the documentation of which twenty-four columns have
-        //       exactly one legitimate source, which is the knowledge this call site was silently
-        //       depending on.
-        this.fraudRows.save(AuthFraudMapper.toFraudRow(detail, request, customerId, today));
-        return true;
+        // WHY : Assumptions: only the two columns the reference UPDATE names are touched when a row already
+        //       exists -- its L222 to L225 set the indicator and the current date and nothing else -- so the
+        //       twenty-four-column snapshot the row took when it was first inserted is left as it was. That
+        //       restriction now lives in the statement's own DO UPDATE clause rather than in a branch here,
+        //       which is why it cannot be bypassed by a future caller reaching the row another way. A row
+        //       marked twice therefore still describes the authorization as it stood at the FIRST report,
+        //       which is the property that makes taking the snapshot worth anything.
+        return this.fraudUpserts.upsert(AuthFraudMapper.toFraudRow(detail, request, customerId, today));
     }
 
     /**

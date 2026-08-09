@@ -13,7 +13,7 @@
  * divergence, and how far the parity claim actually reaches. It declares no type and holds no import, so
  * nothing here executes; its entire effect is on what the classes beside it assert.</p>
  *
- * <h2>The closed inventory: twelve files here, eleven of them tests</h2>
+ * <h2>The closed inventory: seventeen files here, sixteen of them tests</h2>
  *
  * <p>The parent charter at {@code com.carddemo.authorization} deliberately fixes no leaf-class count and
  * names no leaf class, making each package's own charter the authority for its own inventory. This is that
@@ -23,12 +23,15 @@
  * citation that normalises either half points at nothing.</p>
  *
  * <pre>
- * this directory: 12 java files = 11 tests + 1 charter
+ * this directory: 17 java files = 16 tests + 1 charter
  * </pre>
  *
  * <p>Alternatives Considered: stating the inventory in prose alone, which is what this charter did before
  * and is what the marker line above replaces. A closed-set claim that nothing checks is false the moment
- * an eleventh test class is authored without an entry below, and nothing reveals it. That line and every
+ * another test class is authored without an entry below, and nothing reveals it. Refactoring Rationale:
+ * this sentence once counted to a specific class -- "an eleventh" -- which made the prose itself go stale
+ * every time the directory grew, so it now states the rule instead of the current total. The total lives
+ * on the marker line, where a machine keeps it honest. That line and every
  * class name under it are compared against this directory on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
  * which asserts the two figures against the file count and asserts that each enumerated name is a file
@@ -75,7 +78,41 @@
  *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL},
  *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL} and
  *       {@code app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL}.</li>
+ *   <li>{@code AuthorizationDecisionUnitOfWorkRepositoryIT} exercises
+ *       {@code AuthorizationRequestListener} against a real engine, for the one property its unit test
+ *       cannot reach: that the summary, the authorization and the reply row of one decision commit and
+ *       roll back together. It also covers the reference's asymmetry at
+ *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 461 and 463, where an unresolved
+ *       card is answered and recorded nowhere.</li>
+ *   <li>{@code OutboxPublisherLifecycleRepositoryIT} exercises {@code OutboxPublisher} against a real
+ *       engine and a scripted queue client, for the claim-send-transition seam: that the claim has
+ *       COMMITTED before the reply is handed to the queue, and that one pass advances the attempt counter
+ *       once however many times the transport is retried inside it.</li>
+ *   <li>{@code PurgeWindowRollbackRepositoryIT} exercises {@code PurgeJob} against a real engine, for the
+ *       checkpoint semantic of {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 358 to
+ *       364: that one window's deletes and its summary reduction share a fate, and that a failure in a
+ *       later window leaves an earlier one committed.</li>
+ *   <li>{@code FraudMarkingTransactionRepositoryIT} exercises {@code FraudMarkingService} against a real
+ *       engine, for the atomicity of its two writes -- the fraud row through a native upsert and the
+ *       authorization's own two fraud members through the persistence context -- against
+ *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl}.</li>
+ *   <li>{@code AuthorizationDiagnosticDisclosureTest} exercises {@code LoadService} and
+ *       {@code PurgeJob} for one property neither of their behavioural tests can observe: that no log
+ *       template and no throwable message in either class names an account or customer identifier, as
+ *       {@code docs/architecture/observability.md} directs. Refactoring Rationale: it reads the two
+ *       SOURCES rather than capturing a logger, because a captured logger proves the property only for
+ *       the paths a test happens to drive, and a template on an undriven path is exactly what let those
+ *       identifiers stand. Its subject is therefore source text rather than a service role, which is
+ *       why it is a class of its own rather than cases inside the round-trip and purge tests.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: four of the last five entries are a SECOND class over a subject that
+ * already has one, and the division is by TIER rather than by subject. Each of those four subjects makes a claim about what
+ * a database RETAINS after a failure, and a mocked collaborator can only record what was asked of it, so
+ * the claims were documented and unproven until these classes were added. Their names end in
+ * {@code RepositoryIT} because the module's Failsafe configuration includes exactly that suffix; the
+ * suffix names the tier they run in and not the subject they exercise, so reading it as a claim about a
+ * repository is a misreading the naming convention makes easy.</p>
  *
  * <p>Alternatives Considered: the load and the unload were planned as two classes named after their two
  * services, and they are one class named after what it proves. Asserting a load and an unload separately
@@ -199,7 +236,7 @@
  *
  * <p>Assumptions: no service method in this package declares a lock mode, and that is the precise form of
  * the claim rather than a claim that the context takes no lock. Row protection exists and is owned on the
- * repository boundary: {@code PendingAuthSummaryRepository} declares {@code findWithLockByAccountId} under
+ * repository boundary: {@code PendingAuthSummaryRepository} declares its atomic accumulation statements under
  * a pessimistic write lock and the listener calls it. A test here therefore asserts that the protected
  * read is the one taken, and never restates the lock mode, because a duplicated lock policy is one that
  * can drift from the declaration that actually runs.</p>
@@ -382,4 +419,3 @@
  * that carry a real behavioural claim.</p>
  */
 package com.carddemo.authorization.service;
-

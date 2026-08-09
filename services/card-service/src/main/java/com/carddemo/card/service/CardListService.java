@@ -1,8 +1,6 @@
 package com.carddemo.card.service;
 
 import com.carddemo.card.domain.Card;
-import com.carddemo.card.dto.AdminCardDetail;
-import com.carddemo.card.dto.CardDetail;
 import com.carddemo.card.dto.CardSummary;
 import com.carddemo.card.mapper.CardMapper;
 import com.carddemo.card.repository.CardRepository;
@@ -13,7 +11,7 @@ import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.NoSuchElementException;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -63,7 +61,8 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>The reference paragraphs this class carries, so that the traceability matrix can cite pairs rather
  * than a whole file: {@code 9000-READ-FORWARD.} at {@code :1123} and {@code 9100-READ-BACKWARDS.} at
- * {@code :1264} become {@link #list(Long, String, boolean)} with {@link #pageOf(List, boolean)};
+ * {@code :1264} become {@link #list(Long, String, boolean, String)} with
+ * {@link #pageOf(List, boolean, boolean, Long, String)};
  * {@code 9500-FILTER-RECORDS.} at {@code :1382} becomes the optional predicate of the repository query;
  * {@code 2210-EDIT-ACCOUNT.} at {@code :1003} becomes {@link #accountFilterState(Long)}; and
  * {@code 1400-SETUP-MESSAGE.} at {@code :895} becomes {@link #pageMessage(PageResponse)} with
@@ -116,8 +115,46 @@ public class CardListService {
      */
     public static final int PAGE_SIZE = 7;
 
-    /** The cursor binding this browse seals and opens its cursors under. */
+    /** The query name every cursor of this browse is bound to. */
     public static final String LIST_BINDING = "card-list";
+
+    /**
+     * The scope element naming the direction a cursor may be presented in.
+     *
+     * <p>Assumptions: the direction belongs in the binding rather than beside it, because the two
+     * boundary cursors of one page are sealed under DIFFERENT bindings and that is what makes them
+     * non-interchangeable. The leading cursor is the position a backward step reads from and the
+     * trailing cursor is the position a forward step reads from; presenting one where the other belongs
+     * would name a row the caller has already been shown, and the authenticated binding refuses it
+     * instead of silently repeating a page.</p>
+     */
+    private static final String CURSOR_SCOPE_BACKWARD = "backward";
+
+    /** The forward counterpart of {@link #CURSOR_SCOPE_BACKWARD}. */
+    private static final String CURSOR_SCOPE_FORWARD = "forward";
+
+    /**
+     * The scope element used when the browse is not narrowed to an account.
+     *
+     * <p>Assumptions: the unnarrowed case needs its own element rather than an empty one, because an
+     * empty element and an account of zero would otherwise compose to the same scope, and a zero
+     * account is exactly what {@link #accountFilterState(Long)} reads as not supplied.</p>
+     */
+    private static final String CURSOR_SCOPE_ALL_ACCOUNTS = "accounts:all";
+
+    /** The prefix of the scope element naming the one account a cursor was narrowed to. */
+    private static final String CURSOR_SCOPE_ACCOUNT_PREFIX = "account:";
+
+    /**
+     * The rendering the account narrowing is fixed to inside a cursor scope.
+     *
+     * <p>Assumptions: the width is the reference's own eleven-digit account domain, and the value is
+     * zero-padded to it so that one account has exactly one rendering. Without the padding, an account
+     * presented as {@code 42} and the same account presented as {@code 00000000042} would compose two
+     * different scopes for one row set, and a cursor sealed under either would be refused for the
+     * other.</p>
+     */
+    private static final String CURSOR_SCOPE_ACCOUNT_FORMAT = "%011d";
 
     /**
      * The name the account narrowing is reported under when it is not acceptable.
@@ -127,30 +164,6 @@ public class CardListService {
      * declared at {@code app/cpy-bms/COCRDLI.CPY:66}, which no caller of this service has.
      */
     public static final String FIELD_ACCOUNT_FILTER = "accountId";
-
-    /**
-     * The refusal raised when no card answers a selector or a submitted number.
-     *
-     * <p>Assumptions: this is the reference sentence, carried across character for character. It is
-     * declared as a condition-name value in three reference programs, and the two card ones are cited
-     * here with the lines each actually uses: {@code app/cbl/COCRDSLC.cbl:151-152} and
-     * {@code app/cbl/COCRDUPC.cbl:201-202}. The pair the published contract cites is the latter, whose
-     * neighbouring sentence about an unmatched search sits at {@code :203-204} of the same file, which is
-     * what identifies which program those two line numbers belong to.
-     *
-     * <p>Trade-offs: this sentence reaches the log and any in-process caller, and it does NOT reach the
-     * HTTP body -- the body carries the shared kernel's own not-found sentence instead. That is stated
-     * here rather than worked around, because the discrepancy is deliberate on both sides. The contract
-     * references the shared not-found response rather than declaring a sentence of its own, and that
-     * response's description says a well-formed identifier standing for no row is reported the same way
-     * whatever the reason -- so a service-specific sentence would make two deployments' bodies differ
-     * where the contract says they must not. The shared advice enforces the same conclusion
-     * mechanically: it carries a service's own sentence onto a body only when the sentence ends in an
-     * ellipsis, and this reference sentence does not, so it is withheld by that gate rather than by an
-     * omission here. Alternatives Considered: appending an ellipsis so the gate would pass it. Rejected
-     * because it would alter a value whose whole purpose is to be reproduced exactly.
-     */
-    public static final String MESSAGE_CARD_NOT_FOUND = "Did not find this account in cards database";
 
     /**
      * The reference refusal for an account narrowing that is not an eleven-digit number.
@@ -171,7 +184,7 @@ public class CardListService {
      * <p>Assumptions: reproduced character for character from {@code app/cbl/COCRDLIC.cbl:1058}, with
      * the same missing space after the comma as the account sentence above. It is carried under Rule T8
      * and is deliberately wired to no branch of this class, because the browse this class publishes has
-     * no card-number narrowing to refuse. See {@link #list(Long, String, boolean)} for why that filter
+     * no card-number narrowing to refuse. See {@link #list(Long, String, boolean, String)} for why that filter
      * is not published and what serves it instead.
      */
     public static final String MESSAGE_CARD_FILTER_INVALID =
@@ -323,18 +336,23 @@ public class CardListService {
      *     {@link #accountFilterState(Long)}
      * @param cursor the sealed cursor from a previous page, or {@code null} for the opening page
      * @param backward whether to read the page preceding the cursor rather than the one following it
-     * @return one page of masked summaries with its two boundary cursors and its further-page
-     *     indicator; never {@code null}
+     * @param subject the authenticated caller every cursor of this page is bound to; must not be blank,
+     *     because a blank one would bind every caller's cursors to the same scope and so bind them to
+     *     none
+     * @return one page of masked summaries with its two boundary cursors and both availability
+     *     indicators; never {@code null}
      * @throws ClientInputException if the account narrowing is outside the eleven-digit domain, carrying
      *     the reference refusal and the field it belongs to
-     * @throws CursorToken.InvalidCursorException if the cursor is not one this browse sealed
+     * @throws CursorToken.InvalidCursorException if the cursor is not one this browse sealed for this
+     *     caller, this narrowing and this direction
      */
     @Transactional(readOnly = true)
-    public PageResponse<CardSummary> list(Long accountId, String cursor, boolean backward) {
+    public PageResponse<CardSummary> list(Long accountId, String cursor, boolean backward,
+            String subject) {
 
-        // WHAT: the narrowing gate, run before anything is read.
-        // WHY : Assumptions: the two narrowings of the reference list screen are OPTIONAL, and the
-        //       reference says so by the value it pre-sets each gate to rather than by a comment.
+        // WHY : Assumptions: the narrowing gate runs before anything is read, and the two narrowings
+        //       of the reference list screen are OPTIONAL. The reference says so by the value it
+        //       pre-sets each gate to rather than by a comment.
         //       2210-EDIT-ACCOUNT. at app/cbl/COCRDLIC.cbl:1003 opens by setting its flag to BLANK at
         //       :1004, and 2220-EDIT-CARD. at :1036 does the same at :1039, so a field left empty is
         //       accepted and simply narrows nothing. The sibling detail program pre-sets NOT-OK
@@ -343,24 +361,53 @@ public class CardListService {
         //       off the reference rather than decided here.
         Long narrowing = acceptedAccountFilter(accountId);
 
+        // WHY : Refactoring Rationale: the binding is now COMPOSED from the query name, the caller's
+        //       name and a direction scope, through CursorToken.binding(String, String, String) -- the
+        //       same composition the paging service of the auth context uses at
+        //       UserService.cursorBinding. It was previously the bare query-name literal, and the
+        //       rationale recorded for that was wrong on both of its claims. It said this layer had no
+        //       subject to bind to: the browse is served on an authenticated route -- this module's
+        //       SecurityConfig ends in anyRequest().denyAll() and admits this path only to a named
+        //       group -- so a validated caller name is available and the controller now carries it in.
+        //       It also said widening the signature was "published in openapi/card-api.yaml and is not
+        //       this class's to change alone": a java.security.Principal parameter is resolved by the
+        //       framework from the security context, appears in no request body, query string, path or
+        //       header, and therefore changes no published operation at all. Nothing had to be
+        //       published to close this.
+        // WHY : Assumptions: the contract already PROMISED both bindings before either existed, which
+        //       makes this the implementation catching up rather than a widening. card-api.yaml states
+        //       that the direction is carried in the seal of each token so that replaying a backward
+        //       cursor as a forward step "cannot silently return the wrong page", and lists a cursor
+        //       "sealed for the other direction" among the refusals of the published 400. A token bound
+        //       to the query alone satisfied neither sentence: it was redeemable by any authorized
+        //       caller and in either direction.
         // WHY : Assumptions: the cursor is opened rather than trusted, and an absent one means the
         //       opening page. The reference is in that state when it positions from a communication
         //       area it has just initialised, at app/cbl/COCRDLIC.cbl:462-463 before the forward read
         //       at :478. Opening is what replaces the reference's trust in an echoed buffer: the value
         //       inside the token is verified before it reaches a predicate, and a token this browse did
         //       not seal is refused rather than used.
-        // WHY : Alternatives Considered: composing the binding through
-        //       CursorToken.binding(String, String, String), which is what the paging service of the
-        //       auth context does -- it names the query, the authenticated subject and a direction
-        //       scope, at UserService.cursorBinding. It is NOT used here, and the reason is a
-        //       missing input rather than a preference: that composition requires a non-blank subject,
-        //       and the published browse operation of this context carries no subject into this layer,
-        //       so there is nothing to put in that part. What this binding therefore does and does not
-        //       do is stated plainly rather than implied -- it binds a token to THIS query, so a cursor
-        //       minted by another listing is refused, and it does not bind one to a caller or to a
-        //       direction. Widening it needs the operation's own signature to carry a subject, which is
-        //       published in openapi/card-api.yaml and is not this class's to change alone.
-        String position = cursor == null ? null : this.cursorToken.open(LIST_BINDING, cursor);
+        // WHY : Refactoring Rationale: the binding used to be the bare query name, and the note here
+        //       recorded that as deliberate on the grounds that the published operation carried no
+        //       subject into this layer, so there was nothing to bind one to. That was true of the
+        //       signature and false as a conclusion: the operation runs behind an authenticated filter
+        //       chain, so the subject was available one frame up and the fix was to carry it, which is
+        //       what the added parameter does. Leaving it out made every minted cursor presentable by
+        //       ANY caller and in EITHER direction -- a token issued to one subject browsing one account
+        //       forward opened unchanged for a different subject stepping backward over a different
+        //       narrowing, and the row it named was returned as though the caller had reached it. The
+        //       harm was not disclosure of the token's contents, which authenticated encryption already
+        //       withholds; it was that a position is only meaningful within the query that produced it,
+        //       so a cursor honoured outside that query silently answers from a place the caller never
+        //       saw.
+        // WHY : Assumptions: all four narrowing facts go into the binding rather than one or two of
+        //       them, because a cursor is safe to honour only when every predicate that shaped the page
+        //       it came from is the same -- the query, the caller, the account narrowing and the
+        //       direction. CursorToken.scope composes the last two length-prefixed, so no combination of
+        //       elements can be mistaken for another, and the whole is authenticated as associated data
+        //       rather than carried in the token, so it cannot be edited by the holder.
+        String position = cursor == null ? null
+                : this.cursorToken.open(listCursorBinding(narrowing, subject, backward), cursor);
 
         // WHY : Assumptions: one row MORE than the page holds is requested, and that surplus row is the
         //       reference's own technique rather than an optimisation added here. The reference zeroes
@@ -429,7 +476,8 @@ public class CardListService {
         //       service declares only the account one, because a query string and a path segment are
         //       both written verbatim into the load balancer's access log before any application code
         //       runs, and the second field's value is a primary account number. The second field is
-        //       served instead by lookup(String), which takes the number in a request body and answers
+        //       served instead by CardViewService.viewByCardNumber(String), which takes the number in a
+        //       request body and answers
         //       with the card itself. The refusal sentence that field would have raised is still
         //       carried, at MESSAGE_CARD_FILTER_INVALID.
         List<Card> rows = readBackward
@@ -454,36 +502,34 @@ public class CardListService {
         //       envelope is assembled, and why not here". This layer holds the signer, so this layer
         //       assembles the page -- and it does so in ONE private method rather than inline in each
         //       direction, so the two directions cannot drift apart on where the surplus row sits.
-        return this.mapper.toSummaryPage(pageOf(rows, readBackward));
+        return this.mapper.toSummaryPage(
+                pageOf(rows, readBackward, position != null, narrowing, subject));
     }
 
     /**
      * Reports whether a backward step is expressible from a page, since the envelope does not say so
      * directly.
      *
-     * <p>Assumptions: this has to be DERIVED because the shared page envelope carries exactly four
-     * components -- the rows, the two boundary tokens and the further-page indicator -- and none of them
-     * is a backward availability flag. The derivation is the presence of the leading boundary token,
-     * which is the position a backward request is issued from, so a page that names one can be paged
-     * away from backward and a page that does not cannot. It agrees with what the reference tests: the
-     * refusal at {@code app/cbl/COCRDLIC.cbl:903} is gated on the page ordinal condition declared at
-     * {@code :238}, which holds exactly on the page that has nothing before it, and the browser client
-     * derives its own backward control the same way.
+     * <p>Refactoring Rationale: this used to DERIVE the answer from the presence of the leading boundary
+     * token, and that derivation was wrong. Every page that returned rows names its own first row, so the
+     * derivation reported an earlier page on the OPENING page too, and a client that followed the report
+     * replaced the rows it was showing with an empty page. The reference does the opposite: its refusal at
+     * {@code app/cbl/COCRDLIC.cbl:903} fires on exactly that page, redisplaying it with the
+     * nothing-precedes notice at {@code :1301-1302}. The envelope now carries the answer as its own
+     * component, established by the read that produced the page, so this method reports it rather than
+     * inferring it.
      *
-     * <p>Trade-offs: a page that names a leading boundary may still have nothing before it -- the
-     * opening page names its own first row like any other page -- so a backward step from it returns an
-     * empty page rather than being refused outright. That is accepted because it is what the reference
-     * does: its backward path sets the further-page condition unconditionally at {@code :1287}, with no
-     * probe of any kind, so no behaviour is lost. The alternative was a fifth envelope component, which
-     * is the component the envelope is fixed not to have.
+     * <p>Trade-offs: the method is kept rather than being replaced at its two call sites by a direct
+     * accessor read, because it is public API this service's controller documents and its tests assert.
+     * Keeping it costs one delegation and leaves one place to look for the definition of the answer.
      *
      * @param page the page whose backward availability is being read; must not be {@code null}
-     * @return {@code true} when the page names a leading boundary a backward request can be issued from
+     * @return {@code true} when an earlier page exists, as established by the read that built this page
      * @throws NullPointerException if {@code page} is {@code null}
      */
     public static boolean backwardAvailable(PageResponse<?> page) {
         Objects.requireNonNull(page, "page must not be null");
-        return page.firstKey() != null;
+        return page.hasPrevious();
     }
 
     /**
@@ -568,78 +614,6 @@ public class CardListService {
         }
 
         return page.hasNext() ? Optional.empty() : Optional.of(MESSAGE_NO_MORE_PAGES);
-    }
-
-    /**
-     * Reads one card's masked detail by the opaque selector a list row carried.
-     *
-     * @param cardKey the sealed selector exactly as the client echoed it back
-     * @return the card's detail with its number masked; never {@code null}
-     * @throws ClientInputException if the selector is not one this deployment sealed
-     * @throws NoSuchElementException if no card answers the selector
-     */
-    @Transactional(readOnly = true)
-    public CardDetail readDetail(String cardKey) {
-
-        return this.mapper.toDetail(require(this.mapper.openCardSelector(cardKey)));
-    }
-
-    /**
-     * Reads one card's detail with its primary account number disclosed in full.
-     *
-     * <p>Assumptions: the disclosure is a property of the ROUTE that reaches this method rather than of
-     * anything decided here -- the administrative path sits behind its own authority in
-     * {@code com.carddemo.card.config.SecurityConfig}. This method exists as a separate entry point, and
-     * returns a separate type, so that the ordinary read cannot reach the disclosure through any
-     * argument a caller supplies.
-     *
-     * @param cardKey the sealed selector exactly as the client echoed it back
-     * @return the card's detail carrying the unmasked number; never {@code null}
-     * @throws ClientInputException if the selector is not one this deployment sealed
-     * @throws NoSuchElementException if no card answers the selector
-     */
-    @Transactional(readOnly = true)
-    public AdminCardDetail readAdminDetail(String cardKey) {
-
-        Card card = require(this.mapper.openCardSelector(cardKey));
-        CardDetail masked = this.mapper.toDetail(card);
-
-        // WHY : Assumptions: the disclosure is recorded by the SELECTOR and never by the number it
-        //       stands for, which is the one log line in this class where the distinction is load
-        //       bearing. An audit reader needs to know that a disclosure happened and which row it
-        //       concerned; writing the disclosed value here would put it in a durable record and make
-        //       the log a second copy of exactly what the route's authority exists to restrict.
-        LOG.info("event=card.admin.disclosed key={}", masked.key());
-
-        return new AdminCardDetail(masked.key(),
-                this.mapper.discloseCardNumberToAdministrator(card), masked.accountId(),
-                masked.embossedName(), masked.expirationDate(), masked.activeStatus(),
-                masked.version());
-    }
-
-    /**
-     * Resolves a submitted primary account number to that card's masked detail.
-     *
-     * <p>Assumptions: this is the only operation in the context that accepts a card number as an input,
-     * and it returns the same masked shape the selector-addressed read returns -- so a caller that
-     * arrives by number leaves holding a selector and never needs to send the number again. It is also
-     * what serves the reference list screen's second narrowing field, for the reason recorded in
-     * {@link #list(Long, String, boolean)}.
-     *
-     * @param cardNumber the sixteen-digit primary account number to resolve
-     * @return the card's detail with its number masked; never {@code null}
-     * @throws NoSuchElementException if no card holds that number
-     */
-    @Transactional(readOnly = true)
-    public CardDetail lookup(String cardNumber) {
-
-        // WHY : Assumptions: the submitted number is absent from this event deliberately, and so is any
-        //       indication of whether it resolved. A log that recorded the miss would accumulate the
-        //       numbers a caller guessed, which is the enumeration the masked rendering exists to
-        //       prevent, and one that recorded the hit would record the number itself.
-        LOG.info("event=card.lookup.performed");
-
-        return this.mapper.toDetail(require(cardNumber));
     }
 
     /**
@@ -746,24 +720,6 @@ public class CardListService {
     }
 
     /**
-     * Reads a card by its number or raises the not-found refusal.
-     *
-     * <p>Assumptions: the three single-card reads share this so they cannot disagree about what a
-     * missing row means, and so that a selector which opens cleanly but names a removed row is answered
-     * the same way as a number that was never issued. From a caller's side the two are one fact: no card
-     * answers.
-     *
-     * @param cardNumber the sixteen-digit number to read
-     * @return the stored card; never {@code null}
-     * @throws NoSuchElementException if no card holds that number
-     */
-    private Card require(String cardNumber) {
-
-        return this.cards.findById(cardNumber)
-                .orElseThrow(() -> new NoSuchElementException(MESSAGE_CARD_NOT_FOUND));
-    }
-
-    /**
      * Trims the surplus row off a read and seals the two boundary cursors the caller pages on.
      *
      * <p>Assumptions: a backward read's surplus row is the LOWEST one, because that read walked down
@@ -777,11 +733,19 @@ public class CardListService {
      *
      * @param rows the rows read, at most the page size plus one, in ascending order
      * @param backward whether the read travelled backward, which decides which end the surplus came from
-     * @return the page of rows with both boundary cursors sealed; never {@code null}
+     * @param resumed whether the request carried a cursor, which settles backward availability on a
+     *     forward read: the cursor names a row the caller was already shown and the forward predicate is
+     *     strictly greater than it, so a page lies behind exactly when one was supplied
+     * @param narrowing the account the page was narrowed to, or {@code null} for an unnarrowed page;
+     *     part of every cursor's binding so a cursor cannot be carried to a differently narrowed browse
+     * @param subject the authenticated caller both boundary cursors are bound to
+     * @return the page of rows with both boundary cursors sealed under their own direction; never
+     *     {@code null}
      * @throws IllegalArgumentException if a sealed boundary is rejected by the envelope's own cursor
      *     check, which no value produced here can provoke
      */
-    private PageResponse<Card> pageOf(List<Card> rows, boolean backward) {
+    private PageResponse<Card> pageOf(List<Card> rows, boolean backward, boolean resumed,
+            Long narrowing, String subject) {
 
         boolean hasSurplus = rows.size() > PAGE_SIZE;
 
@@ -822,17 +786,85 @@ public class CardListService {
         //       rows to a page, resuming strictly after the key of row seven yields rows eight to
         //       fourteen, which is exactly the reference's second page. Registered as a documented
         //       divergence under Rule T9.
-        // WHY : Assumptions: the further-page indicator is the arrival of the surplus row and nothing
-        //       else. A duplicate-key response is a NORMAL outcome for this browse and never a failure,
-        //       which the reference states by pairing it with the normal response in every arm that
-        //       inspects a read -- at :1157 with :1158, at :1208 with :1209, at :1305 with :1306 and at
-        //       :1333 with :1334, each proceeding to filter and display the row. It arises because the
+        // WHY : Refactoring Rationale: the further-page indicator is NOT the surplus row alone, which is
+        //       what this note previously claimed and what the expression previously computed. On a
+        //       BACKWARD read a following page necessarily exists -- the caller reached this page by
+        //       stepping back from one, so the page it came from is still there -- and the surplus row of
+        //       a backward read lies in the other direction entirely. Reporting the surplus for both
+        //       directions therefore answered a backward-read caller that nothing lay ahead whenever the
+        //       backward read happened to exhaust its own end, and pagingRefusal(PageResponse, boolean)
+        //       turns that answer into MESSAGE_NO_MORE_PAGES and withholds the step. The observable
+        //       consequence was the reported one: stepping back from the opening page and then forward
+        //       again was refused instead of returning the page the caller had just left. The two
+        //       availability answers are therefore derived from different facts, each stated on its own
+        //       branch below.
+        // WHY : Assumptions: a duplicate-key response is a NORMAL outcome for this browse and never a
+        //       failure, which the reference states by pairing it with the normal response in every arm
+        //       that inspects a read -- at :1157 with :1158, at :1208 with :1209, at :1305 with :1306 and
+        //       at :1333 with :1334, each proceeding to filter and display the row. It arises because the
         //       secondary access path is declared with a non-unique key, so nothing here models it as an
         //       error either.
+        // WHY : Refactoring Rationale: backward availability is now REPORTED, and the two branches settle
+        //       it without a second query. A backward read's surplus row IS a row lying further back, so
+        //       it answers directly; a forward read's answer is whether a cursor was supplied, so the
+        //       OPENING page reports nothing behind it. That is what the reference does -- its refusal at
+        //       app/cbl/COCRDLIC.cbl:903 fires exactly on the page whose ordinal condition at :238 says
+        //       nothing precedes it -- and it is what the previous derivation from the leading boundary
+        //       could not express, because every page names its own first row.
+        // WHY : Assumptions: the leading boundary is sealed under the BACKWARD binding and the trailing
+        //       one under the FORWARD binding, because each is only ever presented in one direction. That
+        //       is what makes the pair non-interchangeable: a holder who sent the trailing cursor with a
+        //       backward request would be naming the row it had just been shown as the row to read back
+        //       from, and the binding refuses it rather than returning a page that overlaps the one in
+        //       hand. Sealing both under one binding would leave that swap indistinguishable from a
+        //       legitimate step.
         return PageResponse.ofRows(new ArrayList<>(shown),
-                this.cursorToken.seal(LIST_BINDING, shown.getFirst().getCardNum()),
-                this.cursorToken.seal(LIST_BINDING, shown.getLast().getCardNum()),
-                hasSurplus);
+                this.cursorToken.seal(listCursorBinding(narrowing, subject, true),
+                        shown.getFirst().getCardNum()),
+                this.cursorToken.seal(listCursorBinding(narrowing, subject, false),
+                        shown.getLast().getCardNum()),
+                backward || hasSurplus,
+                backward ? hasSurplus : resumed);
+    }
+
+    /**
+     * Composes the authenticated binding every cursor of this browse is sealed and opened under.
+     *
+     * <p>Assumptions: the binding is associated data rather than payload. {@code CursorToken} carries it
+     * into the cipher as the authenticated-but-unencrypted part, so it is never transmitted and cannot be
+     * edited by the holder; a token presented under any other binding fails authentication before its
+     * contents are decrypted. That is why every predicate that shaped the page belongs here rather than
+     * beside the token in the response.</p>
+     *
+     * <p>Assumptions: the two scope elements are composed through {@link CursorToken#scope(String...)},
+     * which length-prefixes each part, so no pair of elements can concatenate into the same string as a
+     * different pair. Joining them with a separator character was rejected: a separator has to be
+     * escaped inside a part or the composition stops being injective, and an account rendering is exactly
+     * the kind of part a future change might widen.</p>
+     *
+     * @param narrowing the account the browse was narrowed to, or {@code null} when it was not
+     * @param subject the authenticated caller, which must not be blank
+     * @param backward whether the cursor being sealed or opened is the backward-facing one
+     * @return the binding string; never {@code null}
+     * <p>Trade-offs: package-private rather than private. Widening it lets this module's own tests assert
+     * the exact binding a token must be presented under, which is the property CARD-02 turns on, instead
+     * of asserting it indirectly through a round trip that would pass even if the composition were wrong.
+     * The cost is that a sibling class in this package could compose a binding of its own; that is
+     * accepted because the package holds only this context's services and the alternative -- keeping it
+     * private and re-deriving the string inside the test from literals -- would put the scope vocabulary
+     * in two places, which is how the two come to disagree.</p>
+     *
+     * @throws IllegalArgumentException if the subject is blank, raised by the composition itself, because
+     *     a blank subject would bind every caller's cursors identically
+     */
+    static String listCursorBinding(Long narrowing, String subject, boolean backward) {
+
+        String accountScope = narrowing == null ? CURSOR_SCOPE_ALL_ACCOUNTS
+                : CURSOR_SCOPE_ACCOUNT_PREFIX
+                        + String.format(Locale.ROOT, CURSOR_SCOPE_ACCOUNT_FORMAT, narrowing);
+
+        return CursorToken.binding(LIST_BINDING, subject, CursorToken.scope(
+                backward ? CURSOR_SCOPE_BACKWARD : CURSOR_SCOPE_FORWARD, accountScope));
     }
 
     /**

@@ -19,15 +19,16 @@ import org.springframework.stereotype.Component;
  * <p>Refactoring Rationale: this is the production {@link RequestWindowBoundary}. It stops the request
  * listener container and starts it again, which is the container-model equivalent of the reference
  * consumer's run ending and the queue re-triggering it. Stopping is what makes the bound real: while the
- * container is stopped it issues no receive, so the request that would have been the quota-plus-first of
- * the window is simply not delivered, and it stays on the queue until the next window opens. Nothing is
- * refused, dead-lettered or deleted unhandled.
+ * container is stopped it issues no receive, so the request that would have been admitted past the
+ * window's allowance is simply not delivered, and it stays on the queue until the next window opens.
+ * Nothing is refused, dead-lettered or deleted unhandled.
  *
  * <p>Assumptions: the work happens on this class's own single-threaded executor rather than on the
  * calling thread, and that is a correctness requirement rather than a performance choice. The boundary is
- * reached on the listener thread that has just finished a message, and
+ * reached on the listener thread that is ADMITTING a message, and
  * {@code AbstractMessageListenerContainer.stop()} waits for in-flight messages to complete; calling it
- * inline would therefore wait for the very message whose completion triggered it.
+ * inline would therefore wait for the very message whose admission triggered it, which is a deadlock
+ * rather than a slow shutdown.
  *
  * <p>Trade-offs: cycling a container is a heavier act than the reference program's run simply ending, and
  * the cost is a brief pause in intake at each boundary -- for the queue depth this workload carries, that
@@ -102,14 +103,20 @@ public class ContainerCyclingWindowBoundary implements RequestWindowBoundary, Di
     }
 
     /**
-     * Cycles the request container so the next window starts with a fresh quota.
+     * Cycles the request container so the next window starts with a fresh allowance.
      *
-     * @param handledInWindow how many requests the closing window handled
+     * <p>Assumptions: the generation is recorded on the closing line, which is what makes a window closed
+     * twice visible in an operational record rather than only in a test. Two lines carrying one generation
+     * are a defect in the admission accounting; two lines carrying consecutive generations are two windows
+     * doing exactly what they should.</p>
+     *
+     * @param generation which window is closing, counting from zero
+     * @param admittedInWindow how many requests the closing window admitted
      */
     @Override
-    public void onWindowComplete(int handledInWindow) {
-        LOG.info("event=auth.window.closed handled={} containerId={}",
-                handledInWindow, REQUEST_CONTAINER_ID);
+    public void onWindowComplete(long generation, int admittedInWindow) {
+        LOG.info("event=auth.window.closed generation={} admitted={} containerId={}",
+                generation, admittedInWindow, REQUEST_CONTAINER_ID);
         this.cycler.execute(this::cycleContainer);
     }
 

@@ -1,7 +1,8 @@
 /**
- * Persistence mapping for the AUTH bounded context: one JPA entity, {@code User}, over the single
- * table {@code auth.users}, derived from a baseline COBOL record through an anti-corruption
- * boundary that this package deliberately does not implement itself.
+ * Persistence mapping for the AUTH bounded context: two JPA entities -- {@code User} over
+ * {@code auth.users}, derived from a baseline COBOL record through an anti-corruption boundary that
+ * this package deliberately does not implement itself, and {@code IdentitySyncTask} over
+ * {@code auth.identity_sync_task}, which has no baseline counterpart at all.
  *
  * <h2>Purpose</h2>
  *
@@ -14,7 +15,7 @@
  * and constraining that decision is why this charter exists: which physical column, of which type
  * and width, in which schema, each field of the baseline user record lands on.</p>
  *
- * <p>The single entity is {@code User}, mapping {@code auth.users}. That table is created by
+ * <p>The FIRST entity is {@code User}, mapping {@code auth.users}. That table is created by
  * {@code services/auth-service/src/main/resources/db/migration/V1__auth.sql} and is the only
  * object this bounded context owns. It is five columns wide: {@code user_id CHAR(8)} as the
  * primary key, {@code first_name} and {@code last_name} as {@code VARCHAR(20)},
@@ -22,6 +23,28 @@
  * {@code cognito_sub UUID NOT NULL UNIQUE}. Four of the five are transcribed from the baseline
  * record; the fifth has no baseline counterpart and exists to link a local row to the managed
  * identity provider that authenticates the person it describes.</p>
+ *
+ * <p>The SECOND entity is {@code IdentitySyncTask}, mapping {@code auth.identity_sync_task}, created
+ * by {@code services/auth-service/src/main/resources/db/migration/V2__auth_identity_sync.sql}. It maps
+ * no baseline field whatsoever, and the reason it exists here at all is worth stating because a reader
+ * comparing this package against {@code app/cpy/CSUSR01Y.cpy} will find no record behind it.
+ * Refactoring Rationale: the baseline held ONE store, so a user change was one file write and could not
+ * be half-done. The migrated context holds two -- {@code auth.users} and the managed identity provider
+ * -- and the provider is not a transaction participant, so a change that must reach both cannot be made
+ * atomic. This entity is the durable record of what the provider still owes, written in the same
+ * transaction as the row it describes and applied after that transaction commits. Making it an entity
+ * of this package rather than a field on {@code User} is what lets the WITHDRAW intention outlive the
+ * row it names, which is why {@code V2__auth_identity_sync.sql} declares its {@code user_id} with no
+ * foreign key.</p>
+ *
+ * <p>Assumptions: this entity carries state TRANSITIONS -- {@code markApplied},
+ * {@code recordFailedAttempt} and their shared {@code requirePending} guard -- where {@code User}
+ * carries none, and that is not an inconsistency in the charter above. The rule this package states is
+ * that a type here holds no BUSINESS rule, and the admitted status values, the attempt ceiling check and
+ * the refusal to transition a settled row are properties of the table's own {@code CHECK} constraints
+ * rather than of any transcribed COBOL paragraph. Placing them on the entity keeps a row that violates
+ * its own constraint unreachable through Java; placing them in {@code com.carddemo.auth.service} would
+ * leave the entity able to construct one and rely on the database to refuse it.</p>
  *
  * <p>Assumptions: the schema itself is created neither here nor by that migration. Schema, role
  * and grant bootstrap belongs to {@code data-migration/sql/V0__schemas_and_roles.sql}, so every

@@ -145,6 +145,13 @@ jobs:
           # so a malformed value fails this step instead of reaching Terraform as a string
           # where a list is required.
           CLOUDFRONT_ALIASES: ${{ vars.CARDDEMO_CLOUDFRONT_ALIASES_JSON }}
+          # Assumptions: the alarm recipients arrive as a JSON list for the same reason
+          # CLOUDFRONT_ALIASES does, and they arrive from a protected environment variable
+          # rather than from this repository because an on-call address is personal data the
+          # tree does not carry. Both roots declare alarm_email_endpoints with NO default and
+          # refuse an empty list, so a deployment that omits this stops at plan rather than
+          # provisioning thirteen alarms whose only action is a topic nobody is subscribed to.
+          ALARM_EMAIL_ENDPOINTS: ${{ vars.CARDDEMO_ALARM_EMAIL_ENDPOINTS_JSON }}
           # Assumptions: the OIDC provider is created once per account by infra/bootstrap,
           # which is deliberately outside this workflow, so its ARN is an input here rather
           # than something this run can discover.
@@ -186,6 +193,7 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY_SLUG" \
             --arg tag "$tag" \
             --argjson aliases "$CLOUDFRONT_ALIASES" \
+            --argjson alarms "$ALARM_EMAIL_ENDPOINTS" \
             --argjson digests "$digests" \
             '{
               cloudfront_api_connect_src_origins: [],
@@ -195,6 +203,7 @@ jobs:
               internal_service_domain_name: $internaldns,
               cloudfront_acm_certificate_arn: $cfcert,
               cloudfront_aliases: $aliases,
+              alarm_email_endpoints: $alarms,
               github_oidc_provider_arn: $oidc,
               github_repository: $repository,
               image_tag: $tag,
@@ -311,6 +320,44 @@ jobs:
           jq --argjson digests "$digests" '.image_digests = $digests' \
             "$root/deployment.auto.tfvars.json" > "$root/deployment.auto.tfvars.json.tmp"
           mv "$root/deployment.auto.tfvars.json.tmp" "$root/deployment.auto.tfvars.json"
+
+      # WHY : This step exists because the environment roots point every task's
+      #       telemetry sidecar at a PRIVATE registry reference rather than at the
+      #       upstream public one. infra/modules/network enumerates the application
+      #       tier's egress instead of allowing 0.0.0.0/0, and the public registry
+      #       has neither an interface endpoint nor a managed prefix list, so a task
+      #       pointed upstream cannot pull its sidecar -- and the sidecar is attached
+      #       to every workload by default, so no task would start. Without this
+      #       mirror the apply below would register task definitions naming an image
+      #       that was never pushed, which is the failure mode the ecr module's own
+      #       exact-set validation exists to prevent for the ten built images.
+      #       Assumptions: the tag is the UPSTREAM version, matching
+      #       local.telemetry_collector_image_tag in both roots, and NOT this
+      #       release's commit tag. The artifact is not built here, so tagging it
+      #       with a CardDemo commit would claim a provenance it does not have.
+      #       Assumptions: the push is unconditional rather than gated on the image
+      #       being absent. A re-push of identical content is a no-op at the layer
+      #       level, whereas a conditional would need a describe-images call whose
+      #       "not found" path is indistinguishable from a permissions failure.
+      #       Trade-offs: the source reference is a mutable version TAG rather than a
+      #       digest, so the mirror inherits whatever that tag points at upstream on
+      #       the day it is copied. Accepted because the tag is an immutable release
+      #       tag by upstream convention and because the mirror repository is itself
+      #       configured for immutable tags, so a subsequent copy of different
+      #       content under the same tag is refused by the registry rather than
+      #       silently accepted.
+      - name: Mirror the pinned telemetry collector image into the private registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          repos="$(cat deploy-reports/ecr-repositories.json)"
+          collector_repository="$(jq -er '."aws-otel-collector"' <<<"$repos")"
+          collector_tag="v0.48.0"
+          upstream="public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}"
+
+          docker pull "$upstream"
+          docker tag "$upstream" "${collector_repository}:${collector_tag}"
+          docker push "${collector_repository}:${collector_tag}"
 
       # Alternatives Considered: a bare auto-approved apply. Rejected because it
       # re-plans at execution time; applying the saved plan guarantees the

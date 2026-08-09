@@ -166,9 +166,27 @@ check would catch.
 
 ## 5. Expected outcome
 
-**Zero records decoded, no reply produced, no error raised.**
+**Two different absences are documented here and they have opposite outcomes.**
+
+| What is absent | Outcome |
+|---|---|
+| **No transport message on the request queue.** The queue is quiet; nothing is delivered. | The receive returns no-message-available, the loop ends, **no reply is produced** and no error is raised. |
+| **A transport message whose payload is zero bytes** — which is what these bytes are, and what the test sends. | The message IS delivered, so it **is answered**: `DateInquiryMessageListenerTest.theEmptyFixtureIsAnswered` sends this fixture as the payload and asserts a reply is published to the configured reply queue. |
+
+Refactoring Rationale: this section read "**Zero records decoded, no reply produced, no
+error raised**" without that distinction, and section 7 repeated it as "a further reason
+this scenario asserts that no reply is produced rather than asserting a reply's content".
+That was false against the module's own test, which sends a zero-length payload and
+asserts a reply — so the document told a maintainer the opposite of what the suite
+enforces, and a maintainer trusting it would have "fixed" the test. The two absences are
+now stated separately because only one of them is a quiet queue: a delivered message with
+an empty body is a message, and this flow answers **every** message on its queue for the
+reason section 5.3 establishes — no field of the request drives the reply, so there is
+nothing an empty payload can fail to supply.
 
 ### 5.1 Why no input is an ordinary terminal condition, not an error
+
+*(This subsection describes the first row of the table above: a quiet queue.)*
 
 The program primes its loop with one get at **L163**
 (`PERFORM 3000-GET-REQUEST`, the paragraph declared at L283), iterates at **L164** to
@@ -182,8 +200,10 @@ entered, so no clock is read and no reply is assembled.
 Draining until the queue reports no message available is the loop's **normal** exit,
 and the receive is bounded by a five-second wait at **L286**
 (`MOVE 5000 TO MQGMO-WAITINTERVAL`), preserved in the target as a five-second
-listener poll timeout. A zero-record input is a normal quiet interval, which is why
-this scenario asserts an absence rather than an error.
+listener poll timeout. A quiet queue is a normal interval, which is why the first row
+of the table in section 5 asserts an absence rather than an error. It is **not** what
+these bytes exercise: a zero-length payload is a message that was delivered, and the
+second row of that table is the one the suite enforces.
 
 ### 5.2 The consumers, and what they assert
 
@@ -200,13 +220,25 @@ Both are present in this module and resolve this file from the **test classpath*
   `CopybookLayout.RecordSpec("REQUEST-MSG-COPY", 1000, 11, 4)` whose fields sit at
   **offsets 0 / 4 / 15 with widths 4 / 11 / 985**, matching sec 4 exactly.
 
-The queue-side consumer of this record shape,
-`DateConversionMessageListener.onDateConversionRequest(...)`, decodes the fixed
-1000-byte buffer through a `RecordSpec` built the same way, and its
-`convert(DateConversionRequest)` is **shared** with the synchronous
-`DateConversionController`, so the HTTP and queue transports produce identical
-replies. **The bytes are the contract**: where a consumer's expectation and these
-bytes disagree, the bytes are read rather than edited.
+The queue-side consumer of this record shape is
+`DateInquiryMessageListener.onRequest(...)` — the **only** `@SqsListener` bound to the
+inquiry request queue, which `ReferenceQueueConsumerContractTest` asserts. It decodes the
+payload through `com.carddemo.common.codec.InquiryRequestCodec` and answers through
+`DateInquiryReplyMapper`, and `DateInquiryMessageListenerTest.theEmptyFixtureIsAnswered`
+sends **these** bytes as the payload and asserts a reply. **The bytes are the contract**:
+where a consumer's expectation and these bytes disagree, the bytes are read rather than
+edited.
+
+Refactoring Rationale: this paragraph named
+`DateConversionMessageListener.onDateConversionRequest(...)` as the queue-side consumer
+and said its `convert(DateConversionRequest)` was "**shared** with the synchronous
+`DateConversionController`, so the HTTP and queue transports produce identical replies".
+Neither statement held. That type carried a **second** `@SqsListener` on this same queue,
+so which consumer answered a given message depended on which container polled first; and
+its evaluation was never reached from the queue. It has been removed, the evaluation now
+lives on `DateConversionService` and is called only by `DateConversionController`, and the
+two routes answer different questions: the queue route emits the current system date and
+time, the HTTP route judges a date a caller submits.
 
 ### 5.3 No field of the request drives the reply
 
@@ -285,9 +317,17 @@ zero**.
 
 The fixture carries **no timestamp, no clock value and no environment-derived
 value**; it carries no byte at all. Every run therefore reads the identical input and
-the scenario is byte-deterministic by construction. The reply the program would build
-from `ASKTIME` is a clock read, a further reason this scenario asserts that no reply
-is produced rather than asserting a reply's content.
+the scenario is byte-deterministic **on its input side**. Its output side is not: the
+reply is built from a clock read, which is why the asserting test injects a fixed
+`java.time.Clock` and asserts the reply's exact bytes rather than pattern-matching
+them.
+
+Refactoring Rationale: this paragraph closed by giving the clock read as "a further
+reason this scenario asserts that no reply is produced rather than asserting a reply's
+content". It does assert a reply's content — with an injected clock, which is the whole
+point of `DateInquiryMessageListener` taking a `Clock` at construction rather than
+reading one. Determinism is a property the injected clock supplies, not a reason to
+assert nothing.
 
 ### 7.1 Failure modes these bytes can produce
 

@@ -1,5 +1,5 @@
 /**
- * Verbatim catalog of the CardDemo user-visible strings whose source is a COBOL
+ * @file Verbatim catalog of the CardDemo user-visible strings whose source is a COBOL
  * copybook constant or a COBOL program literal.
  *
  * Purpose

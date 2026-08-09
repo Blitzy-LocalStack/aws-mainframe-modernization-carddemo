@@ -2,7 +2,6 @@ package com.carddemo.authorization.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -27,11 +26,9 @@ import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.codec.CsvAuthCodec.AuthMessageFormatException;
-import com.carddemo.common.codec.CsvAuthCodec.AuthReply;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
-import com.carddemo.common.security.OpaqueIdentifier;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import java.math.BigDecimal;
@@ -123,6 +120,17 @@ class AuthorizationRequestListenerTest {
     private static final int WINDOW_LIMIT = 3;
 
     /**
+     * How many admissions the configured window above actually grants.
+     *
+     * <p>Assumptions: derived from the consumer's own offset constant rather than written as four, so a
+     * case asserting the boundary asserts the relationship the production code implements rather than a
+     * number copied from it. The offset is the reference program's increment-then-compare artifact: it
+     * issues one get past its declared limit before its loop ends.</p>
+     */
+    private static final int WINDOW_ADMISSIONS =
+            WINDOW_LIMIT + AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET;
+
+    /**
      * The validation engine the payload crossing applies.
      *
      * <p>Assumptions: the default provider's engine is built once and shared, because it is stateless
@@ -133,36 +141,6 @@ class AuthorizationRequestListenerTest {
      */
     private static final Validator VALIDATOR =
             Validation.buildDefaultValidatorFactory().getValidator();
-
-    /**
-     * The keyed tokeniser the consumer derives its queue group identity through.
-     *
-     * <p>Assumptions: the key material is FIXED rather than random, so the token a given card produces is
-     * the same in every run and a failure is reproducible. It is a REAL tokeniser rather than a stub for
-     * the same reason the validation engine is: what these tests assert about the outbox row is that the
-     * stored group identity is a derived token and not the card number, and a stub that returned a
-     * constant would satisfy that assertion without proving the derivation happened.</p>
-     *
-     * <p>Trade-offs: the material is the ascending byte sequence rather than anything resembling a real
-     * key. That is adequate here and would not be in production -- the production key comes from the
-     * secret store through {@code config/MessagingIdentityConfig.java} -- because nothing in this class
-     * asserts that the token is unguessable, only that it is derived, stable and free of the card
-     * number.</p>
-     */
-    private static final OpaqueIdentifier TOKENISER = new OpaqueIdentifier(fixedKeyMaterial());
-
-    /**
-     * Builds deterministic tokeniser key material of the minimum admissible length.
-     *
-     * @return the key material, never {@code null}
-     */
-    private static byte[] fixedKeyMaterial() {
-        byte[] material = new byte[OpaqueIdentifier.MIN_KEY_LENGTH];
-        for (int index = 0; index < material.length; index++) {
-            material[index] = (byte) (index + 1);
-        }
-        return material;
-    }
 
     /** The summary repository mock. */
     private PendingAuthSummaryRepository summaries;
@@ -188,6 +166,9 @@ class AuthorizationRequestListenerTest {
      */
     private List<Integer> closedWindows;
 
+    /** The generation each observed window boundary reported, in the order the boundaries fired. */
+    private List<Long> closedGenerations;
+
     /**
      * Builds a listener over fresh mocks, a real decision service and the fixed clock.
      *
@@ -202,16 +183,17 @@ class AuthorizationRequestListenerTest {
         this.outbox = mock(OutboxRepository.class);
         this.accounts = mock(AccountContextClient.class);
         this.closedWindows = new ArrayList<>();
+        this.closedGenerations = new ArrayList<>();
         // WHY : Refactoring Rationale: the window boundary arrives as a lambda rather than as the
         //       production container-cycling implementation. The bound is what these tests assert, and the
         //       mechanism that acts on it needs a listener container registry and a live queue; separating
         //       the two is what makes the bound assertable at all, and it is why the seam is an interface.
         this.listener = new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
                 new AuthorizationDecisionService(),
-                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
-                handled -> this.closedWindows.add(handled));
+                this::recordClosedWindow);
     }
 
     /**
@@ -223,10 +205,10 @@ class AuthorizationRequestListenerTest {
     private AuthorizationRequestListener listenerWithWindow(int limit) {
         return new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
                 new AuthorizationDecisionService(),
-                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), limit,
-                handled -> this.closedWindows.add(handled));
+                this::recordClosedWindow);
     }
 
     /**
@@ -270,7 +252,7 @@ class AuthorizationRequestListenerTest {
     void theRowKeyComesFromTheServerClock() {
         AuthRequest request = requestFor(Money.of("100.99"));
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         this.listener.onRequest(messageFor(request, ALLOWED_REPLY_QUEUE));
@@ -300,7 +282,7 @@ class AuthorizationRequestListenerTest {
     @DisplayName("an approved authorization is recorded with the pending match status")
     void anApprovedAuthorizationIsRecordedAsPending() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
@@ -329,7 +311,7 @@ class AuthorizationRequestListenerTest {
         givenResolvableCard();
         PendingAuthSummary exhausted = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
         exhausted.refreshLimits(new BigDecimal("100.00"), new BigDecimal("50.00"));
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(exhausted));
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(exhausted));
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
@@ -339,10 +321,17 @@ class AuthorizationRequestListenerTest {
         assertEquals("05", saved.getValue().getAuthRespCode());
         assertEquals(0, BigDecimal.ZERO.compareTo(saved.getValue().getApprovedAmount()));
 
-        ArgumentCaptor<PendingAuthSummary> summary = ArgumentCaptor.forClass(PendingAuthSummary.class);
-        verify(this.summaries).save(summary.capture());
-        assertEquals(1, summary.getValue().getDeclinedAuthCount().intValue());
-        assertEquals(0, summary.getValue().getApprovedAuthCount().intValue());
+        // WHY : Refactoring Rationale: the declined pair used to be asserted on the entity handed to
+        //       save(...), because the listener read the summary, mutated it and saved it back. The
+        //       accumulation is now an ATOMIC statement -- the arithmetic happens in the database, so no
+        //       in-memory counter carries the result and there is nothing on the saved entity to read. The
+        //       assertion moves to the statement, which is where the contribution now lives.
+        // WHY : Assumptions: asserting that the APPROVED statement was not called is as important as
+        //       asserting the declined one was. The two arms write different columns, and a decline that
+        //       advanced the approved total would overstate the credit an account has committed -- which
+        //       is exactly the confusion the two separate statements exist to prevent.
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**
@@ -364,23 +353,29 @@ class AuthorizationRequestListenerTest {
         verify(this.accounts).findCardXref(CARD_NUM);
         verify(this.accounts, never()).findAccount(anyLong());
         verify(this.accounts, never()).customerExists(anyLong());
-        verify(this.summaries, never()).findWithLockByAccountId(anyLong());
+        verify(this.summaries, never()).findByAccountId(anyLong());
         verify(this.details, never()).save(any(PendingAuthDetail.class));
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
 
-        // WHY : Refactoring Rationale: this assertion required the group identity to EQUAL the card
-        //       number, and it is corrected to require the derived token instead. The old expectation
-        //       encoded the defect rather than a requirement: the group identity is copied onto the send
-        //       as MessageGroupId, so it is queue metadata outside the encrypted body and reaches queue
-        //       telemetry and every log that observes the queue. A passing test asserting a primary
-        //       account number belongs there is worse than no test, because it converts the exposure into
-        //       an expectation that a later correct fix appears to break.
+        // WHY : Refactoring Rationale: this assertion has been moved twice and this revision is the one
+        //       the specification mandates. It first required the group identity to equal the card
+        //       number, was then changed to require a keyed token of it, and now requires the card number
+        //       again -- because specification section 0.4.1.8 states the identity literally,
+        //       "MessageGroupId = card_num preserves per-card ordering", and section 0.7.6 repeats it.
+        //       The token was not a free improvement: a group identity has to be EQUAL for equal cards
+        //       across every producer on the queue, and a value keyed from this service's own secret is
+        //       one only this service can compute, so any other producer's replies for the same card land
+        //       in a different group and the per-card ordering guarantee silently stops holding.
+        // WHY : Trade-offs: the card number therefore appears in queue metadata, which is the exposure
+        //       the token was reaching for. It is accepted here and registered as divergence
+        //       D-AUTHORIZATION-FIFO-IDENTITY-METADATA in
+        //       docs/architecture/cobol-to-service-traceability.md, bounded by the three controls the
+        //       queue already carries: server-side encryption under a customer-managed key, reachability
+        //       only through a private-network interface endpoint, and read access scoped to the task
+        //       roles of this service and of the requesting producer.
         ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(reply.capture());
-        assertEquals(TOKENISER.token(CsvAuthCodec.GROUP_PURPOSE, CARD_NUM),
-                reply.getValue().getOrderGroupToken());
-        assertNotEquals(CARD_NUM, reply.getValue().getOrderGroupToken());
-
+        assertEquals(CARD_NUM, reply.getValue().getOrderGroupId());
     }
 
     /**
@@ -398,7 +393,7 @@ class AuthorizationRequestListenerTest {
     @DisplayName("a missing summary is created with the account's limits and the decision's counters")
     void aMissingSummaryIsCreated() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
@@ -430,9 +425,7 @@ class AuthorizationRequestListenerTest {
     @Test
     @DisplayName("a correlation identity carrying a control character refuses the message")
     void aNonCanonicalCorrelationAttributeRefusesTheMessage() {
-        Message<String> message = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "a\nlevel=ERROR")
                 .build();
 
@@ -461,12 +454,10 @@ class AuthorizationRequestListenerTest {
     @DisplayName("a rendering of the baseline's 24-byte correlation field is echoed verbatim")
     void aWideCorrelationAttributeIsEchoedVerbatim() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
         String twentyFourBytesAsHex = "0123456789abcdef0123456789abcdef0123456789abcdef";
-        Message<String> message = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, twentyFourBytesAsHex)
                 .build();
 
@@ -492,12 +483,10 @@ class AuthorizationRequestListenerTest {
     @DisplayName("a log-injection attempt is echoed verbatim but rendered safely for the log")
     void anInjectionAttemptIsEchoedVerbatimAndLoggedSafely() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
         String injection = "a\",\"level\":\"ERROR";
-        Message<String> message = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, injection)
                 .build();
 
@@ -523,11 +512,9 @@ class AuthorizationRequestListenerTest {
     @DisplayName("a conforming correlation attribute is carried through unaltered")
     void aConformingCorrelationAttributeIsCarried() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
-        Message<String> message = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "req-0123456789ab")
                 .build();
 
@@ -539,27 +526,172 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
-     * A reply destination outside the configured allowlist is not published to.
+     * A reply destination outside the configured allowlist REFUSES the request and decides nothing.
      *
-     * <p>Assumptions: the decision is still recorded and only the reply is suppressed. The account's
-     * history is its own and a requester does not get to withdraw an authorization by naming a bad
-     * address; what it does forfeit is the answer.</p>
+     * <p>Purpose: this is the atomicity of a decision and its reply, asserted at the one input that could
+     * separate them. The destination is a message attribute, so a requester chooses it; if an unlisted
+     * value merely stopped the reply being written, the decision rows would still commit and the container
+     * would acknowledge the request, leaving a committed authorization that no reply row accounts for and
+     * no message left to re-derive it from.</p>
+     *
+     * <p>Refactoring Rationale: this case previously asserted the OPPOSITE -- that the decision was
+     * recorded and only the reply suppressed -- and it passed, because that is what the listener did. The
+     * expectation was wrong rather than the code merely incomplete: the outbox exists to make "a committed
+     * decision with no reply" unreachable, so a test pinning that state as correct was pinning the defect.
+     * Both writes are now asserted ABSENT as well as the refusal being raised, because a refusal that
+     * happened after the writes would satisfy an exception-only assertion while leaving the rows.</p>
+     *
+     * <p>Assumptions: the refusal type is the one a malformed payload raises, so the container routes it
+     * the same way -- redelivery and then the dead-letter queue -- rather than a second type having to be
+     * configured for the transport half of the same contract.</p>
+     *
+     * <p>Assumptions: the message of the refusal is asserted NOT to carry the rejected address. The value
+     * is requester-supplied and the refusal travels to a dead-letter diagnostic, so quoting it back would
+     * put attacker-chosen text into an operational record.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("an unlisted reply destination is suppressed while the decision is still recorded")
-    void anUnlistedReplyDestinationIsSuppressed() {
+    @DisplayName("an unlisted reply destination refuses the request and records no decision")
+    void anUnlistedReplyDestinationRefusesTheRequest() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
+        String attackerOwned = "https://sqs.us-east-1.amazonaws.com/999999999999/attacker-owned";
 
-        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")),
-                "https://sqs.us-east-1.amazonaws.com/999999999999/attacker-owned"));
+        AuthMessageFormatException refusal = assertThrows(AuthMessageFormatException.class,
+                () -> this.listener.onRequest(
+                        messageFor(requestFor(Money.of("100.99")), attackerOwned)));
 
+        assertThat(refusal.getMessage())
+                .as("the requester-supplied address must not reach a dead-letter diagnostic")
+                .doesNotContain(attackerOwned)
+                .contains(AuthorizationRequestListener.HEADER_REPLY_TO);
         verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * A request naming NO reply destination is refused on the same terms.
+     *
+     * <p>Assumptions: the absent case is asserted separately from the unlisted case because they are two
+     * branches and the earlier revision treated both by returning normally. An implementation that refused
+     * only the unlisted value would leave the identical phantom-decision state reachable by the simpler
+     * input -- omitting the attribute entirely.</p>
+     *
+     * <p>Assumptions: no lookup is asserted to have happened either, which is what places the check ahead
+     * of the decode and the account-context reads rather than merely ahead of the write.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a request naming no reply destination refuses before any lookup")
+    void aRequestNamingNoReplyDestinationIsRefused() {
+        Message<String> message = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_CONTENT_TYPE,
+                        AuthorizationRequestListener.CONTENT_TYPE_CSV)
+                .build();
+
+        assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(message));
+
+        verifyNoInteractions(this.accounts);
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * A request that declares NO payload format is refused before the payload is decoded.
+     *
+     * <p>Purpose: the decoder splits a delimited record by position, so it reads any text with the right
+     * separator count. A producer that has not said what it sent is therefore not detected by the decode --
+     * the decode succeeds and puts values in the wrong fields -- which is why the declaration is required
+     * rather than merely inspected when present.</p>
+     *
+     * <p>Assumptions: the payload here is WELL FORMED. Using a valid record is what makes the case about
+     * the missing declaration rather than about the decoder: an implementation that dropped the check would
+     * decide this request successfully, so the assertion below would fail rather than pass for the wrong
+     * reason.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a request declaring no payload format is refused before the payload is decoded")
+    void aRequestDeclaringNoWireFormatIsRefused() {
+        Message<String> message = MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .build();
+
+        AuthMessageFormatException refusal = assertThrows(AuthMessageFormatException.class,
+                () -> this.listener.onRequest(message));
+
+        assertThat(refusal.getMessage())
+                .as("the refusal must name the attribute and the one format this consumer decodes")
+                .contains(AuthorizationRequestListener.HEADER_CONTENT_TYPE)
+                .contains(AuthorizationRequestListener.CONTENT_TYPE_CSV);
+        verifyNoInteractions(this.accounts);
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * A request declaring a DIFFERENT payload format is refused, and the declared value is not quoted raw.
+     *
+     * <p>Assumptions: the declared value in this case is a structured-document media type carrying a
+     * control character, so one input exercises two rules at once -- the format is wrong, and the value is
+     * requester-supplied text heading for a dead-letter diagnostic. The assertion therefore checks both
+     * that the request is refused and that the raw value does not survive into the message.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a request declaring a different payload format is refused and the value is sanitised")
+    void aRequestDeclaringAnotherWireFormatIsRefused() {
+        String foreign = "application/json\nevent=auth.request.accepted";
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_CONTENT_TYPE, foreign)
+                .build();
+
+        AuthMessageFormatException refusal = assertThrows(AuthMessageFormatException.class,
+                () -> this.listener.onRequest(message));
+
+        assertThat(refusal.getMessage())
+                .as("a requester-supplied media type must not reach a diagnostic with its newline intact")
+                .doesNotContain(foreign)
+                .contains(AuthorizationRequestListener.CONTENT_TYPE_CSV);
+        verifyNoInteractions(this.accounts);
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * A request declaring the one accepted format is decided normally, including in a padded rendering.
+     *
+     * <p>Assumptions: the declaration is supplied with surrounding blanks and in mixed case, which a
+     * producer's header library may introduce and which a media type's own definition makes immaterial.
+     * Accepting that rendering is asserted rather than assumed because a check written with a bare equality
+     * would refuse a conforming producer, turning a tolerated variation into a dead letter.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a padded, mixed-case rendering of the accepted format is decided normally")
+    void theAcceptedWireFormatIsDecidedNormally() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_CONTENT_TYPE, "  Text/CSV  ")
+                .build();
+
+        this.listener.onRequest(message);
+
         verify(this.details).save(any(PendingAuthDetail.class));
-        verify(this.summaries).save(any(PendingAuthSummary.class));
+        verify(this.outbox).save(any(AuthReplyOutbox.class));
     }
 
     /**
@@ -570,9 +702,7 @@ class AuthorizationRequestListenerTest {
     @Test
     @DisplayName("an expired request is dropped without a lookup or a reply")
     void anExpiredRequestIsDropped() {
-        Message<String> message = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT,
                         String.valueOf(FIXED_INSTANT.minusSeconds(1).toEpochMilli()))
                 .build();
@@ -599,6 +729,12 @@ class AuthorizationRequestListenerTest {
      * setup, so no other case in this class observes a captured logger. Capturing globally would let a
      * record emitted by one case be asserted by another.</p>
      *
+     * <p>Refactoring Rationale: the LEVEL is now captured and restored as well as the appender. The
+     * logger this case configures is a process-wide singleton, so a level left at warn outlasted the
+     * case and silenced every finer record this class's other cases -- and any later class's -- might
+     * have asserted. That is an order-dependent failure, which is the hardest kind to attribute: the
+     * suite stays green until a case that reads a debug record happens to run after this one.
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -609,11 +745,15 @@ class AuthorizationRequestListenerTest {
         ListAppender<ILoggingEvent> captured = new ListAppender<>();
         captured.start();
         listenerLogger.addAppender(captured);
+        // WHY : Assumptions: the prior level may legitimately be null, which is not "no level" but
+        //       "inherit from the parent", and restoring null is what puts the logger back into that
+        //       state. Substituting a concrete default here -- info, say -- would leave the logger
+        //       pinned where it had previously been inheriting, which is a different configuration that
+        //       happens to look the same in this class.
+        Level previousLevel = listenerLogger.getLevel();
         listenerLogger.setLevel(Level.WARN);
         try {
-            Message<String> message = MessageBuilder
-                    .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                    .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+            Message<String> message = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                     .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT,
                             String.valueOf(FIXED_INSTANT.minusSeconds(1).toEpochMilli()))
                     .build();
@@ -631,6 +771,7 @@ class AuthorizationRequestListenerTest {
         } finally {
             listenerLogger.detachAppender(captured);
             captured.stop();
+            listenerLogger.setLevel(previousLevel);
         }
     }
 
@@ -654,9 +795,7 @@ class AuthorizationRequestListenerTest {
     @Test
     @DisplayName("an unparseable expiry is refused while an absent one is answered")
     void anUnparseableExpiryIsRefusedWhileAnAbsentOneProceeds() {
-        Message<String> unparseable = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> unparseable = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT, "not-an-instant")
                 .build();
 
@@ -669,9 +808,7 @@ class AuthorizationRequestListenerTest {
         givenResolvableCard();
         when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
-        Message<String> noExpiry = MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        Message<String> noExpiry = wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .build();
 
         this.listener.onRequest(noExpiry);
@@ -707,12 +844,17 @@ class AuthorizationRequestListenerTest {
         verifyNoInteractions(this.accounts);
         verify(this.details, never()).save(any(PendingAuthDetail.class));
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+        // WHY : Assumptions: the republished row carries the SAME deduplication identity the first
+        //       delivery carried, which is why a redelivery inside the five-minute window is suppressed by
+        //       the queue rather than sent twice. Specification section 0.4.1.8 fixes that identity as the
+        //       literal transaction identifier, so it is asserted as the constant this test already sends
+        //       rather than as a value derived from it -- a derived value would make the suppression
+        //       depend on this service's secret, and the requester resending the same identifier would
+        //       then see two replies from a second producer that keys differently.
         ArgumentCaptor<AuthReplyOutbox> reply = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(reply.capture());
-        assertEquals(new AuthReply(CARD_NUM, TRANSACTION_ID, "104530", "00", "0000",
-                Money.of("100.99")).deduplicationKey(TOKENISER),
-                reply.getValue().getDeduplicationToken());
-        assertThat(reply.getValue().getDeduplicationToken()).doesNotContain(TRANSACTION_ID);
+        assertEquals(TRANSACTION_ID, reply.getValue().getDeduplicationId());
+        assertEquals(CARD_NUM, reply.getValue().getOrderGroupId());
     }
 
     /**
@@ -739,7 +881,7 @@ class AuthorizationRequestListenerTest {
     @DisplayName("an approval is recorded pending and a decline is recorded declined")
     void theStoredMatchStatusFollowsTheDecision() {
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
@@ -750,9 +892,20 @@ class AuthorizationRequestListenerTest {
         assertEquals(PendingAuthDetail.MATCH_STATUS_PENDING,
                 approved.getValue().getMatchStatus());
 
-        reset(this.details, this.summaries, this.outbox);
+        // WHY : Refactoring Rationale: this was ONE reset call taking all three mocks. Mockito's reset
+        //       is generic varargs, so three arguments of three unrelated types infer a common
+        //       supertype and the compiler creates an unchecked generic array for them; one call per
+        //       mock infers each concrete type and needs no suppression to be warning-free.
+        // WHY : Alternatives Considered: splitting this case into two, which is the usual remedy for a
+        //       mid-test reset. Rejected because the LAST assertion of this case depends on the
+        //       approved request having run first in the same case -- a decline that reached the
+        //       approved statement is only observable to a test that drove both -- so splitting would
+        //       discard the property this case exists for, as its own documentation records.
+        reset(this.details);
+        reset(this.summaries);
+        reset(this.outbox);
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         this.listener.onRequest(messageFor(requestFor(Money.of("6000.00")), ALLOWED_REPLY_QUEUE));
@@ -764,11 +917,14 @@ class AuthorizationRequestListenerTest {
                 declined.getValue().getMatchStatus());
         assertEquals(0, BigDecimal.ZERO.compareTo(declined.getValue().getApprovedAmount()));
 
-        ArgumentCaptor<PendingAuthSummary> summary =
-                ArgumentCaptor.forClass(PendingAuthSummary.class);
-        verify(this.summaries).save(summary.capture());
-        assertEquals(1, summary.getValue().getDeclinedAuthCount().intValue());
-        assertEquals(0, summary.getValue().getApprovedAuthCount().intValue());
+        // WHY : Refactoring Rationale: as on the declined case above, the counters moved from the saved
+        //       entity to an atomic statement. This case additionally covers the SECOND half of the
+        //       assertion it used to make -- that the approved arm did not run -- which matters here
+        //       because the same test first drove an APPROVED request through the listener, so a decline
+        //       that reached the approved statement would be invisible to a per-arm assertion made only
+        //       once.
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"));
+        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**
@@ -795,17 +951,17 @@ class AuthorizationRequestListenerTest {
                 org.mockito.Mockito.spy(new AuthorizationMessageMapper(VALIDATOR));
         AuthorizationRequestListener throughTheMapper = new AuthorizationRequestListener(
                 this.summaries, this.details, this.outbox, new AuthorizationDecisionService(),
-                observed, this.accounts, TOKENISER, List.of(ALLOWED_REPLY_QUEUE),
+                observed, this.accounts, List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
-                handled -> this.closedWindows.add(handled));
+                this::recordClosedWindow);
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         throughTheMapper.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(observed).toPendingAuthDetail(any(), any(), any(), any());
-        verify(observed).toOutboxMessage(any(), any(), any());
+        verify(observed).toOutboxMessage(any(), any());
         ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
         verify(this.outbox).save(published.capture());
         assertEquals(java.time.LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC)
@@ -831,11 +987,11 @@ class AuthorizationRequestListenerTest {
                 + "q".repeat(OutboxMessage.REPLY_QUEUE_URL_MAX_LENGTH);
         AuthorizationRequestListener wideAllowlist = new AuthorizationRequestListener(
                 this.summaries, this.details, this.outbox, new AuthorizationDecisionService(),
-                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(tooWide), Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
-                handled -> this.closedWindows.add(handled));
+                this::recordClosedWindow);
         givenResolvableCard();
-        when(this.summaries.findWithLockByAccountId(ACCOUNT_ID))
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
 
         assertThrows(IllegalArgumentException.class, () -> wideAllowlist.onRequest(
@@ -871,16 +1027,54 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
-     * Wraps a request as a message carrying a reply destination and no other attribute.
+     * Records one observed window boundary, keeping the generation and the admitted count together.
+     *
+     * @param generation the closing window's generation
+     * @param admittedInWindow how many requests the closing window admitted
+     */
+    private void recordClosedWindow(long generation, int admittedInWindow) {
+        this.closedGenerations.add(generation);
+        this.closedWindows.add(admittedInWindow);
+    }
+
+    /**
+     * Wraps a request as a message carrying a reply destination and the declared wire format.
      *
      * @param request the request to encode as the payload; must not be {@code null}
      * @param replyQueueUrl the reply destination attribute to set
      * @return the message, never {@code null}
      */
     private Message<String> messageFor(AuthRequest request, String replyQueueUrl) {
-        return MessageBuilder.withPayload(CsvAuthCodec.encodeRequest(request))
+        return wireMessage(CsvAuthCodec.encodeRequest(request), replyQueueUrl).build();
+    }
+
+    /**
+     * Starts a message carrying the allowlisted reply destination and the declared wire format.
+     *
+     * <p>Assumptions: every case that is not ABOUT a missing transport attribute goes through this
+     * builder, so the two attributes the consumer requires are set in one place. Setting them per case was
+     * the alternative and it is what made adding the format check a change to eleven unrelated tests; a
+     * shared builder means the next required attribute is one edit here.</p>
+     *
+     * @param payload the message body; must not be {@code null}
+     * @return a builder with the two required attributes set, never {@code null}
+     */
+    private MessageBuilder<String> wireMessage(String payload) {
+        return wireMessage(payload, ALLOWED_REPLY_QUEUE);
+    }
+
+    /**
+     * Starts a message carrying the supplied reply destination and the declared wire format.
+     *
+     * @param payload the message body; must not be {@code null}
+     * @param replyQueueUrl the reply destination attribute to set
+     * @return a builder with both attributes set, never {@code null}
+     */
+    private MessageBuilder<String> wireMessage(String payload, String replyQueueUrl) {
+        return MessageBuilder.withPayload(payload)
                 .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, replyQueueUrl)
-                .build();
+                .setHeader(AuthorizationRequestListener.HEADER_CONTENT_TYPE,
+                        AuthorizationRequestListener.CONTENT_TYPE_CSV);
     }
 
     /**
@@ -901,100 +1095,121 @@ class AuthorizationRequestListenerTest {
      * @return a message the listener will drop as stale
      */
     private Message<String> expiredMessage() {
-        return MessageBuilder
-                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
-                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+        return wireMessage(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
                 .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT,
                         String.valueOf(FIXED_INSTANT.minusSeconds(1).toEpochMilli()))
                 .build();
     }
 
     /**
-     * A window closes on exactly its quota, not one message past it.
+     * A window closes on exactly its admission allowance, not one message earlier or later.
      *
      * <p>Assumptions: this is the assertion the whole bound exists for. The reference consumer declares a
-     * limit of 500 at {@code cbl/COPAUA0C.cbl} L40 but handles 501, its counter being incremented at L332
-     * and then tested with {@code >} at L339, so counts one through the limit all read another request. The
-     * target enforces the DECLARED number, and the check below is what would fail if the comparison here
-     * were ever loosened to reproduce the off-by-one.</p>
+     * limit of 500 at {@code cbl/COPAUA0C.cbl} L40 and PROCESSES 501, its counter being incremented after
+     * the get at L332 and then compared with strict greater-than at L339, so counts one through the limit
+     * all read another request and only the count past it ends the run. The allowance asserted here is the
+     * declared limit plus that offset, so this case fails both if the offset is dropped -- which would
+     * reintroduce the divergence this migration withdrew -- and if the window ever runs longer than one
+     * message past its limit.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a window closes on exactly its declared quota, not one message past it")
+    @DisplayName("a window closes on exactly its admission allowance, the declared limit plus one")
     void aWindowClosesOnExactlyItsQuota() {
-        for (int handled = 1; handled < WINDOW_LIMIT; handled++) {
+        for (int admitted = 1; admitted < WINDOW_ADMISSIONS; admitted++) {
             this.listener.onRequest(expiredMessage());
             assertEquals(List.of(), this.closedWindows,
-                    "no window may close before the quota is reached");
+                    "no window may close before its allowance is reached");
         }
 
         this.listener.onRequest(expiredMessage());
 
-        assertEquals(List.of(WINDOW_LIMIT), this.closedWindows,
-                "the window must close on the quota-th message carrying the quota as its handled count");
+        assertEquals(List.of(WINDOW_ADMISSIONS), this.closedWindows,
+                "the window must close on the allowance-th message reporting the allowance");
+        assertEquals(List.of(0L), this.closedGenerations,
+                "the first window to close is generation zero");
     }
 
     /**
-     * The counter resets at a boundary, so successive windows each close on their own full quota.
+     * The allowance resets at a boundary, so successive windows each close on their own full allowance.
      *
-     * <p>Assumptions: two windows are driven rather than one, because a counter that closed the first
-     * window correctly and then never reset would show up only on the second -- and a consumer that closed
-     * one window and then ran unbounded forever is the failure this asserts against.</p>
+     * <p>Assumptions: two windows are driven rather than one, because a window that closed correctly and
+     * then never reset would show up only on the second -- and a consumer that closed one window and then
+     * ran unbounded forever is the failure this asserts against.</p>
+     *
+     * <p>Assumptions: the GENERATIONS are asserted as well as the counts, and they are what distinguishes
+     * two windows closing once each from one window closing twice. Two closures reporting one generation
+     * would be the defect; consecutive generations are two windows behaving correctly.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("successive windows each close on their own full quota")
+    @DisplayName("successive windows each close on their own full allowance, in generation order")
     void successiveWindowsEachCloseOnTheirOwnQuota() {
-        for (int handled = 0; handled < WINDOW_LIMIT * 2; handled++) {
+        for (int admitted = 0; admitted < WINDOW_ADMISSIONS * 2; admitted++) {
             this.listener.onRequest(expiredMessage());
         }
 
-        assertEquals(List.of(WINDOW_LIMIT, WINDOW_LIMIT), this.closedWindows,
-                "two full windows must produce two boundaries, each reporting the full quota");
+        assertEquals(List.of(WINDOW_ADMISSIONS, WINDOW_ADMISSIONS), this.closedWindows,
+                "two full windows must produce two boundaries, each reporting the full allowance");
+        assertEquals(List.of(0L, 1L), this.closedGenerations,
+                "the two boundaries must be two DIFFERENT windows, in order");
     }
 
     /**
-     * Every message the consumer takes off the queue counts, whatever the outcome of handling it.
+     * Every message the consumer is handed occupies a place, whatever the outcome of handling it.
      *
-     * <p>Assumptions: a dropped stale request and a request that could not be decoded both count. The
+     * <p>Assumptions: a dropped stale request and a request that could not be decoded both occupy one. The
      * reference program increments its counter after the get returns and before any outcome is known, at
-     * {@code cbl/COPAUA0C.cbl} L332, so a request it could not act on still consumed one of its 500.
+     * {@code cbl/COPAUA0C.cbl} L332, so a request it could not act on still consumed one of its gets.
      * Counting only successful decisions would let a flood of expired or malformed requests keep one window
      * open indefinitely.</p>
+     *
+     * <p>Assumptions: the place is taken on ADMISSION, so the message whose handling threw is counted
+     * because the reservation happened before the throw and not because a {@code finally} block caught up
+     * with it. That distinction is the point of the change this case now covers: a reservation taken on
+     * completion is one the container can outrun.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a dropped and a malformed request each count towards the window")
+    @DisplayName("a dropped and a malformed request each occupy a place in the window")
     void everyReceivedMessageCountsTowardsTheWindow() {
-        AuthorizationRequestListener bounded = listenerWithWindow(2);
+        int declaredLimit = 1;
+        int allowance = declaredLimit + AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET;
+        AuthorizationRequestListener bounded = listenerWithWindow(declaredLimit);
 
         bounded.onRequest(expiredMessage());
-        assertEquals(List.of(), this.closedWindows, "one message must not close a two-message window");
+        assertEquals(List.of(), this.closedWindows,
+                "one message must not close a window that admits two");
 
         assertThrows(AuthMessageFormatException.class,
-                () -> bounded.onRequest(MessageBuilder.withPayload("not,a,request")
-                        .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
-                        .build()));
+                () -> bounded.onRequest(wireMessage("not,a,request").build()));
 
-        assertEquals(List.of(2), this.closedWindows,
+        assertEquals(List.of(allowance), this.closedWindows,
                 "a message whose handling threw must still have occupied its place in the window");
     }
 
     /**
-     * Concurrent handlers close exactly one window per quota and never drive the counter negative.
+     * Concurrent handlers close exactly one window per allowance, each closure a distinct generation.
      *
-     * <p>Assumptions: the container delivers on several threads at once, and the defect this closes was
-     * two-step counting: an increment, a comparison, then a subtraction of the observed value. Two threads
-     * observing a count at or past the quota each subtracted their own observation and left the counter
-     * negative, after which one window admitted the quota plus the deficit and the boundary fired twice for
-     * one window. The case drives a whole number of quotas from several threads and asserts the boundary
-     * count exactly, which is the only externally visible consequence of the counter's arithmetic.</p>
+     * <p>Assumptions: the container delivers on several threads at once, and two defects have been closed
+     * here in turn. The first was two-step counting -- an increment, a comparison, then a subtraction of
+     * the observed value -- under which two threads could each observe the last place, each subtract their
+     * own observation, and leave the counter negative, after which one window admitted the allowance plus
+     * the deficit and the boundary fired twice. The second was counting on COMPLETION rather than on
+     * admission, under which the container could hand out an unbounded number of messages before the
+     * allowance-th one finished. The case drives a whole number of allowances from several threads and
+     * asserts the closures exactly.</p>
      *
-     * <p>Assumptions: every message is an expired one, so the case exercises the counting path without
-     * needing account stubs, and the assertion is on the number of boundaries rather than on timing -- so
+     * <p>Assumptions: the assertion is on the GENERATIONS and not only on the number of closures, because
+     * the number alone cannot tell eight windows closing once each from one window closing eight times.
+     * Asserting the generations are exactly zero through seven, with no repetition, is what makes
+     * "exactly one closure per window" an observed property.</p>
+     *
+     * <p>Assumptions: every message is an expired one, so the case exercises the admission path without
+     * needing account stubs, and the assertions are on counts and identities rather than on timing -- so
      * it is deterministic rather than a race the test hopes to lose.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
@@ -1002,17 +1217,22 @@ class AuthorizationRequestListenerTest {
      * @throws InterruptedException if the wait for the worker threads is interrupted
      */
     @Test
-    @DisplayName("concurrent handlers close one window per quota and never overshoot it")
+    @DisplayName("concurrent handlers close one window per allowance, one closure per generation")
     void concurrentHandlersCloseOneWindowPerQuota() throws InterruptedException {
         int windows = 8;
         int threads = 4;
-        int messagesPerThread = WINDOW_LIMIT * windows / threads;
+        int messagesPerThread = WINDOW_ADMISSIONS * windows / threads;
         List<Integer> observed = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<Long> generations = java.util.Collections.synchronizedList(new ArrayList<>());
         AuthorizationRequestListener concurrent = new AuthorizationRequestListener(this.summaries,
                 this.details, this.outbox, new AuthorizationDecisionService(),
-                new AuthorizationMessageMapper(VALIDATOR), this.accounts, TOKENISER,
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(ALLOWED_REPLY_QUEUE),
-                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT, observed::add);
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                (generation, admitted) -> {
+                    generations.add(generation);
+                    observed.add(admitted);
+                });
 
         java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
         List<Thread> workers = new ArrayList<>();
@@ -1037,8 +1257,16 @@ class AuthorizationRequestListenerTest {
         }
 
         assertEquals(windows, observed.size(),
-                "a whole number of quotas must close exactly that many windows");
-        assertThat(observed).containsOnly(WINDOW_LIMIT);
+                "a whole number of allowances must close exactly that many windows");
+        assertThat(observed).containsOnly(WINDOW_ADMISSIONS);
+        assertThat(generations)
+                .as("each closure must be a distinct window, so no generation may repeat")
+                .doesNotHaveDuplicates()
+                .hasSize(windows);
+        assertThat(new java.util.TreeSet<>(generations))
+                .as("the generations must be the consecutive run zero through %d", windows - 1)
+                .containsExactlyElementsOf(java.util.stream.LongStream.range(0, windows).boxed()
+                        .toList());
     }
 
     /**

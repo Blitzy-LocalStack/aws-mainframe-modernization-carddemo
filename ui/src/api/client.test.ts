@@ -1,3 +1,18 @@
+/**
+ * @file Unit tests for the shared HTTP client in `ui/src/api/client.ts`.
+ *
+ * Purpose
+ * -------
+ * Pin the five cross-cutting boundaries that module applies to every request, because each of them
+ * is invisible at a call site and would therefore fail silently: the bearer-token header, the
+ * correlation identifier's length and alphabet, the clamped timeout, the exact-money response
+ * transform that keeps a monetary value a string, and the recording of the server date.
+ *
+ * Assumptions: these are asserted against the axios instance the module builds rather than against a
+ * live service, so an assertion here fails for a reason inside this package. Contract agreement with
+ * the services is a different question, owned by `ui/src/api/contracts.test.ts`.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient
 // global, because ui/vitest.config.ts sets `globals: false` and records that as a
 // contract: ambient test globals are declared per PROJECT, so admitting them here

@@ -27,11 +27,16 @@
  *   <li>{@code UserAuthorityService}, one public method, {@code reassign}, which moves a user
  *       between the only two authority values the baseline admits, declared as the condition names
  *       on {@code CDEMO-USER-TYPE} at {@code app/cpy/COCOM01Y.cpy} lines 27 and 28.</li>
- *   <li>{@code AuthorityReassignment} carries the outcome of a reassignment between the two services
+ *   <li>{@code IdentitySyncService}, four public methods, {@code record}, {@code applyOwed},
+ *       {@code reconcile} and {@code reconcileOnSchedule}. No reference paragraph answers for it either,
+ *       and for a sharper reason than the provisioner: the baseline keeps its users in ONE file, so a user
+ *       change there is a single write that cannot be half done. This class exists because the migrated
+ *       context writes to two stores and the second is not a transaction participant.</li>
+ *   <li>{@code AuthorityReassignment} carries the outcome of a reassignment between two of the services
  *       above and declares no behaviour of its own for a test to assert.</li>
  * </ul>
  *
- * <p>Those counts are why this package holds the four test types below and no others: one per
+ * <p>Those counts are why this package holds the five test types below and no others: one per
  * service, none for the carrier.</p>
  *
  * <h2>What this package holds</h2>
@@ -45,6 +50,10 @@
  *       who is permitted to choose it.</li>
  *   <li>{@code UserAuthorityServiceTest}, over authority movement and its restoration when the
  *       surrounding transaction does not commit.</li>
+ *   <li>{@code IdentitySyncServiceTest}, over the ledger that carries a committed user change to the
+ *       managed user pool -- which provider call each intention issues, what a provider fault records,
+ *       what a second applier sees, and that the provider is called only after the transaction that
+ *       recorded the intention has ended.</li>
  * </ul>
  *
  * <h2>What this package deliberately does not hold</h2>
@@ -66,7 +75,12 @@
  *   <li>No shared base type, no helper, no builder and no external argument source. Every fixture
  *       vector is written inline by value in the test that reads it, beside a citation of the
  *       reference material it was taken from, so a reader never has to open a second file to learn
- *       where an expected value came from.</li>
+ *       where an expected value came from. Assumptions: the in-memory identity-sync ledger appears in
+ *       BOTH {@code UserServiceTest} and {@code IdentitySyncServiceTest}, declared separately in each,
+ *       and that duplication is the price of this rule rather than an exception to it. Trade-offs: two
+ *       copies of a twenty-line stub can drift, against a shared file that every reader of either test
+ *       has to open before they can tell what the test asserts; the rule above resolves that trade the
+ *       same way everywhere in this package.</li>
  *   <li>No data file and no profile configuration. Both belong under
  *       {@code services/auth-service/src/test/resources}, which is where the two seed scripts and
  *       the test profile already sit.</li>

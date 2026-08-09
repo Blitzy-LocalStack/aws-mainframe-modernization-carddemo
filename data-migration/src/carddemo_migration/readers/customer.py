@@ -2,9 +2,8 @@
 
 Purpose
 -------
-Turn the customer master extract into decoded records the Aurora loaders
-and the verification passes can consume, one record at a time, from either of the two forms the
-baseline ships: the
+Turn the customer master extract into decoded records the Aurora loaders and the verification
+passes can consume, one record at a time, from either of the two forms the baseline ships: the
 line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield the same
 decoded shape, so a caller can swap corpora and compare the two without adapting to a second
 contract.
@@ -14,6 +13,33 @@ from it only in which record descriptor it names. Where the reasoning behind a s
 to that module's it is referenced rather than restated, because two copies of one justification
 drift apart and then one of them is wrong; where this record differs, the difference is recorded
 here at the point it matters.
+
+Parameters
+----------
+None
+    A module takes no argument. Every published callable states its own parameters at its own
+    definition, and this module reads no argument, option or environment variable while being
+    imported.
+
+Returns
+-------
+None
+    Importing binds names only: :data:`LOADED_FIELDS` and :data:`DROPPED_FIELD_NAMES` are derived
+    from the record descriptor, and nothing else is computed. No dataset is opened, no database
+    connection is made, no environment variable is read and no network is reached at import time,
+    so importing this module is safe on a bare checkout with no credential configured.
+
+Raises
+------
+LayoutError
+    At import, from ``carddemo_migration.copybook.layouts``, which this module imports for its
+    record descriptor: that module validates every declared layout's geometry and both disclosure
+    allowlists as it loads, and refuses to import if any of them disagree. The failure belongs to
+    that module and is neither caught nor re-worded here. At call time, from the two masked
+    renderings, if ``CARDDEMO_MASK_HMAC_KEY`` is set to material this package refuses -- anything
+    that is not canonical base64 of at least thirty-two distinct-valued bytes -- because a
+    guessable key returns the redaction tag to the confirmable digest it replaced. Leaving the
+    variable unset is supported and is not an error.
 
 What this module reads
 ---------------------
@@ -34,9 +60,20 @@ leading zero survives in the nine-digit customer identifier and in the national
 identifier.
 The trailing pad is absent; see :data:`DROPPED_FIELD_NAMES`.
 
+One field departs from that rule and it is the only one: ``CUST-FICO-CREDIT-SCORE`` maps to an
+``int``. It shares the unsigned display regime with the customer identifier and the national
+identifier, and it differs from both in KIND -- it is a bounded QUANTITY where they are
+identities, its target column is a ``SMALLINT`` rather than a fixed-width character column, and it
+has no leading zero to preserve because no arithmetic or lookup depends on its width. The two
+identifiers stay characters for exactly the converse reason: converting either would drop a
+leading zero and produce a key that no longer matches the record it came from. See
+:data:`_BOUNDED_SCORE_FIELD_NAME` for the full reasoning, which is stated once at the projection
+rather than at each decode site.
+
 That shape is deliberately the one ``carddemo_migration.copybook.ebcdic_codec.decode_record``
-publishes, minus the pad, which is what makes the two encodings comparable rather than merely
-similar.
+publishes, minus the pad and with that one projection applied, which is what makes the two
+encodings comparable rather than merely similar -- both entry points reach the same projection, so
+neither corpus can yield a different type for the same field.
 
 Customer-data exposure control
 ------------------------------
@@ -127,6 +164,11 @@ from carddemo_migration.copybook.layouts import (
     mask_record,
 )
 from carddemo_migration.copybook.zoned import decode_zoned_field
+from carddemo_migration.readers.source import (
+    data_region_width,
+    iter_seed_lines,
+    require_exact_record_width,
+)
 
 __all__ = [
     "CUSTOMER_LAYOUT",
@@ -144,12 +186,39 @@ __all__ = [
     "render_masked_customer_record",
 ]
 
-# WHY : Assumptions: the decoded value type is `str` alone because this record declares only
-#   character and unsigned display fields -- both regimes yield characters at full
-#   declared width -- so no decoded value is ever a number and this module has no money
-#   path. The projection below still accepts the record decoder's wider union, because
-#   that is what the decoder is typed to return.
-DecodedCustomer = dict[str, str]
+# WHY : Assumptions: the decoded value type is `str | int` because this record declares only
+#   character and unsigned display fields -- both regimes yield characters at full declared width
+#   -- with ONE deliberate exception: `CUST-FICO-CREDIT-SCORE` is projected to `int`. No decoded
+#   value is ever a Decimal and this module has no money path. The projection below still accepts
+#   the record decoder's wider union, because that is what the decoder is typed to return.
+# WHY : Refactoring Rationale: the type was `dict[str, str]` and the score came out as the
+#   three characters the record holds, `'001'` for instance. That was wrong against the target
+#   contract rather than merely unhelpful: the migrated column is a bounded `SMALLINT`, so the
+#   string had to become a number somewhere, and leaving the conversion to the loader put a
+#   decision about a copybook field's MEANING in the layer whose job is to write rows. Doing it
+#   here is also what makes the two encodings agree -- both paths now yield the same Python type
+#   for the same field, which is the property the cross-corpus comparison test rests on.
+DecodedCustomer = dict[str, str | int]
+
+# WHY : Assumptions: the field is named as a CONSTANT and the projection keys off that name,
+#   because the distinction being drawn is about this one field and cannot be drawn from the
+#   descriptor. Three fields of this record share the unsigned display regime -- the customer
+#   identifier, the national identifier and this score -- and only this one is a QUANTITY. The
+#   other two are identifiers whose leading zeroes are significant: `CUST-ID` is the nine-digit
+#   join key the cross-reference points at, and converting either to an integer would drop a
+#   leading zero and produce a key that no longer matches the record it came from. So the rule
+#   cannot be "convert every unsigned display field"; it has to name the field, and the name is
+#   declared once here rather than written at the two decode sites.
+# WHY : Alternatives Considered: adding a scale-or-quantity flag to the field descriptor so the
+#   projection could be driven by geometry rather than by a name. Rejected for now because the
+#   descriptor is a transcription of the copybook and a copybook says nothing about whether
+#   `PIC 9(03)` is a count or an identifier -- the flag would be target knowledge stored in the
+#   source-of-truth layer, and this corpus has exactly one field that needs it.
+# WHY : Trade-offs: the conversion happens after the digit check the display codec performs, never
+#   instead of it. `int()` on this value therefore cannot raise, and the check that would have
+#   caught a letter in the span has already run and named the field -- so a malformed score is
+#   reported as a display-regime violation rather than as a Python conversion error.
+_BOUNDED_SCORE_FIELD_NAME: Final[str] = "CUST-FICO-CREDIT-SCORE"
 
 # WHY : Assumptions: the trailing pad is identified by NAME and not by position, and the
 #   convention was measured rather than assumed: across all fourteen registered layouts every
@@ -201,6 +270,15 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in CUSTOMER_LAYOUT.fields if _is_padding_field(field)
 )
+
+
+# WHY : Assumptions: the boundary between a value and the trailing pad is DERIVED from
+#   the published field tuple and is never written here as a number. Bytes at or beyond it
+#   are the pad a text conversion may legitimately have dropped, so supplying them by
+#   padding restores what was discarded and changes no published value; bytes BEFORE it
+#   belong to a field this reader publishes, so supplying those would not restore anything
+#   -- it would invent a value the source never carried and hand a loader a row to key on.
+_DATA_REGION_WIDTH: Final[int] = data_region_width(LOADED_FIELDS)
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -372,6 +450,46 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str:
     )
 
 
+def _publishable_value(name: str, value: str) -> str | int:
+    """Return one decoded field's published form, converting the bounded score to an integer.
+
+    Purpose
+    -------
+    Apply the ONE projection this record's published shape makes on top of its decoded characters,
+    in a single place both entry points reach, so the ASCII and EBCDIC paths cannot disagree about
+    the type of a field.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook spells it.
+    value : str
+        The field's decoded characters, at full declared width, already proven to be the digits
+        its picture clause requires where the regime demands that.
+
+    Returns
+    -------
+    str | int
+        An ``int`` for :data:`_BOUNDED_SCORE_FIELD_NAME`, whose target column is a bounded
+        ``SMALLINT``; the characters unchanged for every other field, so a significant leading zero
+        survives in every identifier.
+
+    Raises
+    ------
+    None
+        A conversion cannot fail here: the only field converted has already been proven to hold
+        digits by the display codec, which reports a violation naming the field.
+    """
+    # WHY : Trade-offs: the test is an equality against ONE name rather than membership of a set,
+    #   because a set of one invites a second entry to be added without the reasoning above being
+    #   re-read -- and the reasoning is exactly what decides whether a new unsigned display field
+    #   is a quantity or an identifier. A future second quantity should arrive with its own
+    #   recorded justification, which a set makes easy to skip.
+    if name == _BOUNDED_SCORE_FIELD_NAME:
+        return int(value)
+    return value
+
+
 def _project_decoded_fields(
     values: Mapping[str, str | Decimal | bytes],
 ) -> DecodedCustomer:
@@ -392,8 +510,8 @@ def _project_decoded_fields(
     Returns
     -------
     DecodedCustomer
-        The same mapping without any padding field, in
-        declaration order.
+        The same mapping without any padding field, in declaration order, with the bounded credit
+        score projected to an ``int`` by :func:`_publishable_value`.
 
     Raises
     ------
@@ -427,7 +545,13 @@ def _project_decoded_fields(
                 " it declares a computational or mixed-regime area; such an area must be decoded"
                 " by the codec that owns its regime rather than dropped from the row"
             )
-        projected[name] = value
+        # WHY : Assumptions: the Decimal branch is unreachable for THIS record -- it declares no
+        #   signed display, packed or binary field -- and the projection is applied to the str case
+        #   only, which is why the value is narrowed here rather than in `_publishable_value`. A
+        #   Decimal arriving would mean a descriptor edit had given this record a money field, and
+        #   it passes through unprojected rather than being converted, because a money value must
+        #   never be routed through an integer conversion.
+        projected[name] = _publishable_value(name, value) if isinstance(value, str) else value
     return projected
 
 
@@ -453,18 +577,22 @@ def record_key(record: str) -> str:
     Raises
     ------
     RecordLengthError
-        If the record is shorter than the declared width, which would make the sliced key short.
+        If the record is not exactly the declared width. Raised by the shared width guard: a short
+        record would yield a short key that collides with a sibling row, and an over-long one means
+        the source was cut on the wrong boundary, so neither is accepted.
     """
     # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
     #   never by a literal. Writing the width here would be a second statement of it, and a key
     #   sliced one character short still looks like a key -- it collides with a sibling record
     #   instead of raising, which a loader would resolve as an upsert onto the wrong row.
-    if len(record) < CUSTOMER_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"a {CUSTOMER_LAYOUT.name} record of {len(record)} characters is shorter than the"
-            f" declared {CUSTOMER_LAYOUT.reclen}, so its"
-            f" {CUSTOMER_LAYOUT.key_length}-character key cannot be sliced"
-        )
+    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
+    #   now EXACT. This function used to accept any record at least the declared width,
+    #   which its own docstring and every decoder in this module contradict, and the
+    #   over-long case is the more dangerous of the two: the key sliced from it comes from
+    #   the right offsets of the WRONG record -- two rows concatenated, most plausibly --
+    #   so it looks entirely well formed and a loader upserts on it. Delegating also means
+    #   the eight flat readers cannot drift apart on a test they all have to make.
+    require_exact_record_width(record, CUSTOMER_LAYOUT)
     start = CUSTOMER_LAYOUT.key_offset
     return record[start : start + CUSTOMER_LAYOUT.key_length]
 
@@ -529,7 +657,14 @@ def decode_ascii_customer(
     #   record's byte order, so the resulting mapping iterates the record left to right. The pad
     #   is excluded by iterating the published field tuple rather than by decoding every field and
     #   filtering afterwards, which also avoids decoding 168 bytes of pad on every record.
-    return {field.name: _decode_text_field_value(checked, field) for field in LOADED_FIELDS}
+    # WHY : Assumptions: the same `_publishable_value` projection the EBCDIC path applies is
+    #   applied here, through the same function, so the bounded score is an `int` whichever corpus
+    #   the record arrived in. Two projections would be two chances to disagree, and the
+    #   cross-corpus comparison test would then fail on a type rather than on a value.
+    return {
+        field.name: _publishable_value(field.name, _decode_text_field_value(checked, field))
+        for field in LOADED_FIELDS
+    }
 
 
 def iter_ascii_customers(
@@ -585,7 +720,20 @@ def iter_ascii_customers(
     #   the pad the text form omitted. Every row of this dataset's seed is already full
     #   width, so the tolerance never engages here; overriding it would fork the contract
     #   for one reader.
-    records = iter_ascii_text_records(source, CUSTOMER_LAYOUT.reclen)
+    # WHY : Refactoring Rationale: the record cut is bounded by `_DATA_REGION_WIDTH`, and the bound
+    #   closes a data-integrity defect rather than tightening a nicety. The shared iterator
+    #   right-pads a short line -- which is what lets a seed whose trailing pad the conversion
+    #   dropped be read at all -- and it padded a line of ANY length, so a line that stopped
+    #   part-way through a field this reader PUBLISHES was completed with manufactured blanks and
+    #   returned as a well-formed record. Nothing raised: the invented characters are
+    #   indistinguishable from real ones. The bound is the end of the last published field, derived
+    #   from `LOADED_FIELDS` rather than written here, and it is compared against the SOURCE line
+    #   before any padding, which is the only place the comparison is exact.
+    # WHY : Assumptions: the descriptor is passed for DIAGNOSTICS only, so a refusal can name the
+    #   record and the field the line stopped inside. It cannot change which lines are accepted.
+    records = iter_ascii_text_records(
+        source, CUSTOMER_LAYOUT.reclen, min_data_width=_DATA_REGION_WIDTH, layout=CUSTOMER_LAYOUT
+    )
 
     for number, record in enumerate(records, start=1):
         yield decode_ascii_customer(record, number=number)
@@ -635,20 +783,23 @@ def read_ascii_customers(path: pathlib.Path) -> Iterator[DecodedCustomer]:
     #   match would either sweep the placeholder in or load a dataset twice -- and a doubled image
     #   still divides by the record length with remainder zero, so nothing downstream would catch
     #   it and every money total would come out doubled.
-    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that is
-    #   total over all 256 byte values rather than through a strict ASCII decode. Both reject a
-    #   non-conforming file but differ in WHERE: a strict decode fails inside the interpreter's
-    #   reader with an untyped encoding error, which would make the single-byte guard above
-    #   unreachable, whereas a total page maps each byte to one character so the failure surfaces
-    #   as this package's own record-length error naming the offset.
-    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the shared
-    #   iterator's own whole-text scanner, so streaming this handle line by line and passing the
-    #   whole text produce identical records. Leaving the default in place would let the
-    #   interpreter translate and split on a carriage return as well, moving terminator policy out
-    #   of the module that owns it -- which matters for this corpus specifically, because three of
-    #   the nine ASCII seeds carry carriage returns on some rows and not others.
-    with path.open("r", encoding="latin-1", newline="\n") as handle:
-        yield from iter_ascii_customers(handle)
+    # WHY : Refactoring Rationale: the open is DELEGATED to `readers.source.iter_seed_lines` and
+    #   is no longer a `Path.open` here, which closes two faults this reader shared with its seven
+    #   siblings. `Path.open` is a BLOCKING open, so a named pipe or a character device named where
+    #   a seed file was expected did not fail -- it waited, indefinitely and with no diagnostic, in
+    #   a step an operator is watching for a load to finish. And iterating a text handle reads to
+    #   the next separator with NO bound at all, so a file whose first separator lies far past the
+    #   record length was materialised in full before any width check could refuse it: the check
+    #   that would have rejected it ran after the allocation that made it a problem. The shared
+    #   reader opens with O_NONBLOCK, proves the descriptor is a regular file with fstat before a
+    #   byte is read, and bounds each line by the declared width plus its terminators.
+    # WHY : Trade-offs: the code page and the terminator policy move WITH the open, so this module
+    #   no longer names either. That is the point -- eight modules each naming them is eight
+    #   chances to disagree, and a disagreement would be invisible, because a reader that validated
+    #   a file slightly differently from its siblings still returns well-formed records for every
+    #   ordinary input. The accepted cost is one more module to read to see how a file is opened;
+    #   `readers.source` records the full reasoning for both decisions in one place.
+    yield from iter_ascii_customers(iter_seed_lines(path, CUSTOMER_LAYOUT.reclen))
 
 
 def decode_ebcdic_customer(

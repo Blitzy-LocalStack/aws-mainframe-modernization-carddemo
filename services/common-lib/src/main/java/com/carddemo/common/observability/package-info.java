@@ -208,12 +208,13 @@
  * service token, a keyset cursor token, a message-expiry rule, a messaging correlation identifier, a
  * masked card number, a sealed selector, an inquiry request codec, a record-conflict signal, a
  * client-input signal, a field-ordering rule, a security error handler pair and the two named above --
- * so the delivered tree holds <strong>thirty-five production classes, ten package descriptors and
- * forty-five compilation units</strong>:
+ * and the online-write gate with its three companions -- so the delivered tree holds
+ * <strong>forty production classes, eleven package descriptors and fifty-one compilation
+ * units</strong>:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
  * </pre>
  *
  * <p>This package's own share of that total is:
@@ -227,7 +228,7 @@
  * is a different act from correcting a false claim. That distinction does not survive scrutiny: a
  * target presented in a section headed "the count canon", with cross-check sums inviting a reader to
  * re-derive it, is read as a closed inventory, and a closed inventory the tree contradicts is false
- * however it was arrived at. All ten charters now state the measured figures, this one included, and
+ * however it was arrived at. All eleven charters now state the measured figures, this one included, and
  * its own thirty-two-class measurement above was itself already three classes stale by the time the
  * remediation finished -- which is the argument for the check rather than for another hand count.
  * {@code SharedKernelInventoryTest} re-derives every labelled addend, both totals and each charter's

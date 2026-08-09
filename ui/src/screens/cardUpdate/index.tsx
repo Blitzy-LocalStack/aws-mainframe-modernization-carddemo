@@ -1,3 +1,29 @@
+/**
+ * @file The card update screen, migrated from `app/cbl/COCRDUPC.cbl` and its mapset
+ * `app/bms/COCRDUP.bms` (34 `DFHMDF` fields), reached at the card edit route.
+ *
+ * Purpose
+ * -------
+ * Render the reference screen's fetch-then-replace workflow: read the current card, let an operator
+ * edit the fields the reference permits, and submit the replacement behind an explicit confirmation.
+ * It replaces CICS transaction CCUP, which `app/csd/CARDDEMO.CSD` L368-L369 binds to that program,
+ * and it publishes the field labels, the active-status options and the guidance strings the screen
+ * tests assert against.
+ *
+ * Concurrency
+ * -----------
+ * Assumptions: a conflicting concurrent change is reported to the operator rather than silently
+ * overwritten. The reference performs this itself across the pseudo-conversational gap by comparing
+ * a before-image of the record it read; the migrated service expresses the same guarantee with an
+ * optimistic version column and answers HTTP 409, so this screen surfaces the data-changed message
+ * and leaves the operator's edits in place to re-submit.
+ *
+ * Confirmation
+ * ------------
+ * Assumptions: the save is confirmed before it is sent, which is the browser form of the reference's
+ * re-key-to-confirm convention. Losing it would make an accidental keypress a committed write.
+ */
+
 import { Button, Flex, Form, Input, Result, Select, Spin, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';

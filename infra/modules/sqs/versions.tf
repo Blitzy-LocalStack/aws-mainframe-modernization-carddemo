@@ -70,7 +70,8 @@ terraform {
     #       to satisfy every child simultaneously. The 6.56 floor is carried
     #       even here, where no database is provisioned, because the
     #       aurora-postgresql module needs a provider that accepts a zero
-    #       minimum Aurora Serverless capacity -- supported from 5.81.0 onward
+    #       minimum Aurora Serverless capacity -- supported from 5.80.0 onward,
+    #       plus the auto-pause argument that needs 5.81.0, so the floor is 5.81.0
     #       -- and a per-module floor would let a root satisfy this module
     #       while starving that one.
     # WHY : Trade-offs: `~>` against a two-part version pins the major line

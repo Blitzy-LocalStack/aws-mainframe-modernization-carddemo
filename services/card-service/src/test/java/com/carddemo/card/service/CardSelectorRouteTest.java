@@ -63,6 +63,15 @@ class CardSelectorRouteTest {
     /** The card number the single-card cases address. */
     private static final String CARD_NUMBER = "4111111111110011";
 
+    /**
+     * The authenticated caller every cursor in this class is bound to.
+     *
+     * <p>Assumptions: the value is a fabricated eight-character identifier in the shape the reference user
+     * record declares, and it identifies nobody. What it buys is that the cursor bindings composed here are
+     * the same shape a deployment composes.</p>
+     */
+    private static final String SUBJECT = "CARDUSR1";
+
     /** The account the browse cases filter on. */
     private static final Long ACCOUNT_ID = 11L;
 
@@ -152,11 +161,17 @@ class CardSelectorRouteTest {
         Card stored = card(CARD_NUMBER);
         when(cards.findById(CARD_NUMBER)).thenReturn(Optional.of(stored));
 
-        CardListService service =
-                new CardListService(cards, mapper, new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+        // WHY : Refactoring Rationale: the detail route is exercised through CardViewService rather than
+        //       through the browse service. The browse service used to carry a second implementation of
+        //       this read and the controller called it, leaving the transcription of the reference detail
+        //       program with no caller; the duplicate is withdrawn, so this case now drives the one
+        //       implementation the controller reaches. It also drives the CORRECT sentence: the withdrawn
+        //       duplicate answered a card-number miss with the account-path sentence, which the sibling
+        //       case below now asserts against CardViewService instead.
+        CardViewService service = new CardViewService(cards, mapper);
         String selector = mapper.toSummary(stored).key();
 
-        CardDetail detail = service.readDetail(selector);
+        CardDetail detail = service.viewBySelector(selector);
 
         verify(cards).findById(CARD_NUMBER);
         assertThat(detail.displayCardNumber())
@@ -178,13 +193,18 @@ class CardSelectorRouteTest {
         CardMapper mapper = new CardMapper(new SealedSelector(SELECTOR_KEY));
         when(cards.findById(CARD_NUMBER)).thenReturn(Optional.empty());
 
-        CardListService service =
-                new CardListService(cards, mapper, new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+        CardViewService service = new CardViewService(cards, mapper);
         String selector = mapper.toSummary(card(CARD_NUMBER)).key();
 
-        assertThatThrownBy(() -> service.readDetail(selector))
+        // WHY : Assumptions: the sentence asserted here is the SEARCH-CONDITION one and not the
+        //       account-path one, and the two are distinct in the reference. app/cbl/COCRDSLC.cbl sets
+        //       DID-NOT-FIND-ACCTCARD-COMBO at :760 when the read keyed on the card number finds nothing,
+        //       and DID-NOT-FIND-ACCT-IN-CARDXREF at :799 when the read keyed on the account does. A
+        //       selector stands for a card number, so this miss is the former. The withdrawn duplicate on
+        //       the browse service reported the latter, which is the defect this case now pins.
+        assertThatThrownBy(() -> service.viewBySelector(selector))
                 .isInstanceOf(NoSuchElementException.class)
-                .hasMessage(CardListService.MESSAGE_CARD_NOT_FOUND);
+                .hasMessage(CardViewService.MESSAGE_CARD_NOT_FOUND);
     }
 
     /**
@@ -205,7 +225,7 @@ class CardSelectorRouteTest {
         when(cards.findForwardFromCursor(isNull(), isNull(), isNull(), any(Limit.class)))
                 .thenReturn(rows(CardListService.PAGE_SIZE + 1));
 
-        PageResponse<CardSummary> page = service(cards).list(null, null, false);
+        PageResponse<CardSummary> page = service(cards).list(null, null, false, SUBJECT);
 
         assertThat(page.items()).hasSize(CardListService.PAGE_SIZE);
         assertThat(page.hasNext()).isTrue();
@@ -232,7 +252,7 @@ class CardSelectorRouteTest {
         when(cards.findForwardFromCursor(isNull(), eq(ACCOUNT_ID), isNull(), any(Limit.class)))
                 .thenReturn(rows(2));
 
-        PageResponse<CardSummary> page = service(cards).list(ACCOUNT_ID, null, false);
+        PageResponse<CardSummary> page = service(cards).list(ACCOUNT_ID, null, false, SUBJECT);
 
         assertThat(page.items()).hasSize(2);
         assertThat(page.hasNext()).isFalse();
@@ -255,7 +275,13 @@ class CardSelectorRouteTest {
 
         CardRepository cards = mock(CardRepository.class);
         CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
-        String cursor = sealer.seal(CardListService.LIST_BINDING, "4111111111110099");
+        // WHY : Assumptions: the cursor is sealed under the BACKWARD binding because that is the only
+        //       direction it is presented in. The two boundary cursors of a page are sealed under
+        //       different bindings, so sealing this one under the forward binding would be refused by the
+        //       open below -- which is the isolation property, exercised on purpose in the sibling case
+        //       rather than tripped over here.
+        String cursor = sealer.seal(
+                CardListService.listCursorBinding(null, SUBJECT, true), "4111111111110099");
 
         List<Card> descending = new ArrayList<>(rows(CardListService.PAGE_SIZE + 1)).reversed();
         when(cards.findBackwardFromCursor(eq("4111111111110099"), isNull(), isNull(),
@@ -263,7 +289,7 @@ class CardSelectorRouteTest {
 
         CardMapper mapper = new CardMapper(new SealedSelector(SELECTOR_KEY));
         PageResponse<CardSummary> page =
-                new CardListService(cards, mapper, sealer).list(null, cursor, true);
+                new CardListService(cards, mapper, sealer).list(null, cursor, true, SUBJECT);
 
         assertThat(page.items()).hasSize(CardListService.PAGE_SIZE);
         assertThat(page.items().getFirst().accountId())

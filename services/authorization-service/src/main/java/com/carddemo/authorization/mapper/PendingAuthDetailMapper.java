@@ -1529,8 +1529,9 @@ public final class PendingAuthDetailMapper {
      *     holds
      * @throws IllegalArgumentException if a stored complement is out of range, if the decoded key falls
      *     outside the domain its columns declare, if the match status is outside the closed four-value
-     *     domain, if the entry mode is outside the range its picture admits, or if a fraud position is
-     *     present with a report date of the wrong width
+     *     domain, if the entry mode is outside the range its picture admits, if a fraud position is
+     *     present with a report date of the wrong width, or if the fraud position is nonblank and is
+     *     neither of the two marking characters
      */
     public static PendingAuthDetail toEntity(byte[] segment, Long accountId) {
         Objects.requireNonNull(accountId, "accountId must not be null");
@@ -1576,13 +1577,62 @@ public final class PendingAuthDetailMapper {
         //       unconditionally would refuse every ordinary occurrence, because the reference insert path
         //       writes a space into the position and the operation admits no space; and assigning the
         //       members some other way is not available, since the constructor accepts neither.
+        // WHY : Refactoring Rationale: a value that is neither blank nor one of the two marking
+        //       characters used to fall through this branch SILENTLY, leaving the entity unmarked and the
+        //       stored character discarded. That lost audit state without reporting anything: the column
+        //       admits only the two characters and null, so the entity presented null, the check
+        //       constraint ck_pending_auth_detail_auth_fraud never saw the offending byte, and the row
+        //       loaded clean while the extract's own record said an authorization had been marked. It is
+        //       now REFUSED, so a defective extract is reported at the record that carries it instead of
+        //       being normalised into a state the source never held.
         String fraudFlag = text(fields, FIELD_AUTH_FRAUD);
         String reportDate = text(fields, FIELD_FRAUD_RPT_DATE);
         if (PendingAuthDetail.FRAUD_REPORTED.equals(fraudFlag)
                 || PendingAuthDetail.FRAUD_REMOVED.equals(fraudFlag)) {
             detail.applyFraudMark(fraudFlag, reportDate);
+        } else {
+            requireFraudPositionInDomain(fraudFlag);
         }
         return detail;
+    }
+
+    /**
+     * Refuses a decoded fraud position that is neither blank nor one of the two marking characters.
+     *
+     * <p>Assumptions: BLANK is admitted and is not a marking. The copybook at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} L50 declares the field as {@code X(01)}
+     * and names conditions for exactly two values at L51 and L52, and {@code cbl/COPAUS1C.cbl} L344 to
+     * L349 handles the unnamed third state explicitly, so a space is the ordinary unmarked reading of an
+     * authorization no reviewer has touched. Null is admitted for the same reason: the shared codec hands
+     * back {@code null} where a field trims to nothing.
+     *
+     * <p>Assumptions: anything else is a DEFECT IN THE SOURCE and not a value to interpret. The three
+     * admitted states are the whole of what the column accepts, so a fourth character cannot be stored
+     * whatever this class does with it -- the only question is whether it is reported here or discarded
+     * here and reported nowhere.
+     *
+     * <p>Alternatives Considered: normalising the character to unmarked, which is what this class did
+     * before, and normalising it to reported on the grounds that SOMETHING was marked. Both were
+     * rejected for the same reason: each invents a state the source did not hold, and the two invent
+     * opposite ones, which is the clearest possible sign that neither is a reading of the data.
+     *
+     * <p>Trade-offs: the refused character is named in the message and the account is not. The character
+     * is one byte of a domain of printable codes and is the whole of what an operator needs in order to
+     * find the offending records in the extract, whereas the account identifier is the confidential
+     * value this service's logging rules keep out of diagnostics -- and the caller that decoded the
+     * record already knows which record it handed over.
+     *
+     * @param fraudFlag the decoded fraud position, which may be {@code null} or blank
+     * @throws IllegalArgumentException if the position is nonblank and is neither {@code F} nor {@code R}
+     */
+    private static void requireFraudPositionInDomain(String fraudFlag) {
+        if (isBlank(fraudFlag)) {
+            return;
+        }
+        throw new IllegalArgumentException("the authorization fraud position holds '" + fraudFlag
+                + "', which is outside the domain the column admits: '"
+                + PendingAuthDetail.FRAUD_REPORTED + "', '" + PendingAuthDetail.FRAUD_REMOVED
+                + "' or blank");
     }
 
     /**
@@ -1686,7 +1736,6 @@ public final class PendingAuthDetailMapper {
         return FixedWidthCodec.encodeRecordPreservingSign(segmentFieldsOf(detail), SEGMENT,
                 decodedFrom);
     }
-
 
     /**
      * Projects an entity onto the field map the shared codec encodes, supplying every declared field.

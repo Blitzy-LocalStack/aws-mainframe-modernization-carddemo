@@ -1069,8 +1069,23 @@ each produce one registered divergence.
   alongside the identity and role attributes, and carries **no credential column**.
   Seed users are created at provisioning time with generated credentials written to a
   managed secret store, so no credential value appears in source.
+* **And it is not decoded on the way there.** The absence of a destination column is a
+  property of the schema and says nothing about the migration path, which still reads
+  the 80-byte record the eight bytes sit inside. So the field is marked **suppressed**
+  on its field descriptor in
+  [`layouts.py`](../../data-migration/src/carddemo_migration/copybook/layouts.py): the
+  span stays declared, so the two fields after it keep their offsets and the record
+  geometry check still holds, and the bytes are withheld from every decoded record and
+  every rendered diagnostic the ETL produces. It is the only suppressed field in the
+  registry, and `data-migration/tests/test_reader_factory.py` asserts that count.
 * Refactoring Rationale: the target replaces direct cleartext comparison with a
   managed identity boundary that carries no credential column.
+* Refactoring Rationale: this entry described only the destination for as long as the
+  suppression lived inside one hand-written reader module, where the layout-driven
+  reader the ETL command line actually builds could not see it — so the path this entry
+  is silent about was, measurably, publishing the credential. The marker moved onto the
+  shared descriptor and this bullet was added, because an entry that registers a
+  divergence in the schema alone leaves a reader with no way to check the path.
 * **Why the difference is accepted.** **This is the one place parity is explicitly
   declined,** and it is declined deliberately rather than as a side effect. Preserving
   the behaviour would mean carrying a cleartext credential column into a new datastore
@@ -1418,7 +1433,7 @@ which carries the same citations at its update method.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **fifty-two** are cited **by identifier**, the identifier here being the
+source, and all **sixty-five** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1428,15 +1443,38 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-fifty-two is a measured count of the `####` headings in this section and not a running
-tally kept by hand, so a reader adding an entry updates one number here and nothing else.
+seventy-five is a measured count of the `####` headings in **the whole document** and not a
+running tally kept by hand, so a reader adding an entry updates one number here and nothing
+else. Count them document-wide and not within this section's own body: the register
+continues past the horizontal rule that follows *Related documents*, where entries were
+appended after this section had already been closed, so a count confined to the body
+between this heading and `## 8` omits those seven and returns **sixty-eight**. Count the `####`
+headings themselves rather than the ones beginning `D-`: one entry is identified
+`C-ROUNDING`, so a count restricted to the `D-` prefix is short by one and returns
+seventy-four.
 Refactoring Rationale: the figure read forty-three when the section already held forty-five
 headings, so three entries were added against a number that was already two short. It is
 restated as the measured value rather than incremented from the stale one, because
-incrementing a wrong tally is how the figure came to be wrong.
-Count the `####` headings themselves rather than the ones beginning `D-`: one entry is
-identified `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one and
-returns fifty-one.
+incrementing a wrong tally is how the figure came to be wrong. It was then restated twice
+against the wrong population — as fifty-eight, and after `D-AUTH-REQUEST-WINDOW` was
+withdrawn as the same figure again — by counting the whole document while this sentence
+still said "this section", so the number quoted and the number a reader would measure could
+not agree by construction. Both are corrected together: the figure is the document-wide
+count, and the instruction now names that population and names what a section-confined
+count returns instead. It went stale once more at sixty-five, for a reason the naming of the
+population cannot prevent: entries continued to be appended, and an appender who adds a
+heading without recounting leaves every figure here behind. All three numbers are therefore
+re-measured together rather than adjusted by the number of entries anyone believes was added,
+and the two derived figures are stated so that they check the first — the document-wide count
+less the seven appended after *Related documents* is the section-confined count, and less the
+single `C-ROUNDING` heading is the `D-`-prefixed count. A figure that disagrees with its own
+two subtractions is wrong on its face, which is the closest a prose count can come to being
+self-checking. Trade-offs: the alternative was to move the appended entries back
+inside this section's body so that "this section" became true. That was rejected as the
+larger and riskier change for the smaller gain — it relocates several hundred lines and
+every anchor a reader may have bookmarked, to fix a sentence rather than a fact — and it
+would leave the same trap for the next appender, whereas naming the population removes the
+trap whether or not the entries are ever moved.
 
 Assumptions: several entries carry TWO identifiers in one heading, and both are the
 identifier used in shipped source character for character. The four purge entries that
@@ -1446,6 +1484,30 @@ are the ones `PurgeJob` itself uses, and the two schemes name the same differenc
 both in the heading is what keeps the reconcile-by-search discipline below workable from
 either side; assigning one and retiring the other would silently break every citation
 written in the scheme that lost.
+
+Refactoring Rationale: a `D-AUTH-REQUEST-WINDOW` entry stood here and has been withdrawn,
+because the difference it registered has been REMOVED rather than re-argued. It recorded
+that the migrated request consumer enforced the five-hundred-request bound
+[`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) **declares** at
+**L40**, where that program's own control flow admits **501** — its counter is incremented
+after the request is handled at **L332** and then tested with a strict `>` at **L339**, so
+counts one through five hundred all read another request and only the count past the limit
+ends the run. `AuthorizationRequestListener` now publishes that offset as
+`BASELINE_COMPARISON_OFFSET` and derives its admission allowance as the configured limit
+plus it, so the observable behaviour is the same 501 requests per run. The reason for
+withdrawing rather than keeping the entry is that functional parity with observable
+behaviour is a stated constraint of this migration, and a divergence registered against a
+difference that can simply be removed is a difference that should have been removed. The
+entry's own accepted-difference argument — that enforcing 501 would make a constant reading
+500 unreadable — is answered by keeping `carddemo.messaging.request-process-limit` at the
+declared 500 and holding the offset in code beside the citation that derives it, so no
+reader has to be told separately that 500 means 501. Assumptions: the anchor this heading
+published is now dead, so every site that cited it has been rewritten in the same change
+rather than left pointing at a missing heading:
+`services/authorization-service/src/main/resources/application.yml`,
+`services/authorization-service/src/test/resources/application-test.yml`,
+`docs/architecture/messaging-contracts.md` and `docs/adr/ADR-004-messaging.md` in two
+places.
 
 Refactoring Rationale: a `D-REFDATA-CATEGORY-BATCH` entry stood here and has been
 withdrawn. It registered the maintenance-action batch as additionally addressing
@@ -1493,36 +1555,6 @@ claimed in code must acquire an entry here **and** cite it by identifier, and an
 entry here must name the files that implement it, so that the two sides can be
 reconciled by search rather than by reading. That is the only discipline under which
 a register of this size stays true.
-
-#### C-ROUNDING — interest accrual truncates in the baseline and rounds half-up here
-
-* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the
-  monthly interest at **L464-L465** and stores the quotient into a fixed-scale field
-  with **no `ROUNDED` phrase**; a search for that phrase across all 652 lines of the
-  program returns no match. A store into a fixed-scale item without it discards the
-  surplus digits, so the baseline behaviour is **truncation toward zero**.
-* **Target behaviour.** `Money` declares **one** rounding contract, `GENERAL_ROUNDING`
-  = `HALF_UP`, and it governs the accrual as well as ordinary arithmetic.
-  `Money.monthlyInterest(rate)` takes no rounding-mode parameter, so no call site can
-  select a different one; the multiply-before-divide order is preserved unchanged.
-* **Category.** Documented divergence — arithmetic rounding mode.
-* **Why the difference is accepted.** Transformation rule T3 of the plan states half-up
-  for the whole money path without exception, and the difference is exactly one cent and
-  only on a quotient landing on or above a half cent. On the vectors the reference
-  fixtures carry the two behaviours agree: a balance of `1000.00` at a rate of `2.50`
-  yields `2.08333...` and both give `2.08`. They part company at `1000.00` / `2.71`,
-  where the quotient `2.2583...` rounds to `2.26` and truncates to `2.25`, and at
-  `1000.80` / `2.50`, where the quotient is `2.0850` exactly, rounding gives `2.09` and
-  truncation gives `2.08`. Alternatives Considered: keeping the mode as a parameter so a
-  parity caller could ask for truncation. Rejected because a selectable mode is a second
-  money contract in disguise — two call sites computing the same accrual could disagree
-  by a cent with nothing in either one signalling that they had chosen differently.
-* **Where it is verified.** `MoneyTest` asserts both discriminating vectors against the
-  API and against the reference truncation computed alongside it, and the
-  multiply-then-divide order is asserted separately
-  ([§3.2](#32-cbact04c--interest-accrual)).
-* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
-  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`.
 
 #### D-SIGNED-ZERO-ZONED — the plain zoned pair normalises a negative-zero overpunch
 
@@ -2116,7 +2148,7 @@ a register of this size stays true.
   transaction identity, the customer identifier and the four stored balance and limit
   amounts — is withheld, and a field added to either segment later is withheld until it
   is deliberately named.
-* **Refactoring Rationale.** This entry once described the ETL alone, because for a time the
+* Refactoring Rationale: This entry once described the ETL alone, because for a time the
   ETL alone applied the policy. The Java transcription of the same two copybooks marked one
   field sensitive in the detail segment and **none at all** in the summary, so the same
   malformed byte produced a bare diagnostic under Python and a diagnostic naming the credit
@@ -2161,28 +2193,43 @@ a register of this size stays true.
 * **Target behaviour.** `layouts.py` applies a second allowlist,
   `_CORPUS_DISCLOSABLE_FIELDS`, to the twenty records that are not authorization segments,
   and an **import-time audit** refuses to load the module if any record it declares leaves a
-  field disclosable that neither allowlist names. A field is admitted for one of the same
-  five reasons the authorization allowlist established: a date or time, a closed-domain
-  code, a count or sequence rather than a money value, an **account** identifier the
-  published REST contracts already render in full, or the trailing pad.
+  field disclosable that neither allowlist names. A field is admitted for one of **four**
+  reasons: a date or time, a closed-domain code, a count or sequence rather than a money
+  value, or the trailing pad.
+* **A fifth reason was withdrawn, and the withdrawal is the correction this entry now
+  records.** The allowlist also admitted "an **account** identifier the published REST
+  contracts already render in full", naming `ACCT-ID`, `EXP-ACCT-ID`, `CARD-ACCT-ID`,
+  `EXP-CARD-ACCT-ID`, `XREF-ACCT-ID`, `EXP-XREF-ACCT-ID` and `TRANCAT-ACCT-ID`. That reason
+  does not hold. A REST path and an operator diagnostic are different surfaces with different
+  audiences, and [`observability.md`](observability.md) settles it directly: account
+  identifiers are among the values a diagnostic must **omit** — "not its content, not its
+  length, and not a digest of it". All seven were already marked sensitive at their
+  declaration sites, so no rendering changed; what changed is the **declared** policy and the
+  audit's admitted set, which is where the divergence had accumulated. The seven names now sit
+  in `_PROHIBITED_NAMES` in
+  [`test_corpus_disclosure.py`](../../data-migration/tests/test_corpus_disclosure.py), so a
+  record that ever discloses one fails a test rather than passing an audit.
 * **Refactoring Rationale.** The authorization segments were closed and the other twenty were
   not, and a per-field opt-in makes silence mean *disclose*. Measured across those twenty,
   **116 distinct field names** were rendered verbatim by every diagnostic — every account
   balance, credit limit and cycle total, every transaction and daily-transaction amount, the
   transaction-category balance, every merchant name, city, postal code and identifier, the
   customer credit score, the free-text transaction description, and the postal codes of both
-  the account and the customer master. Closing them leaves **65** disclosable names, and the
-  corpus moves from 55 withheld / 184 disclosable fields to **120 withheld / 119 disclosable**
-  across the twenty-two records.
+  the account and the customer master. Closing them leaves, **re-measured against the module
+  as it now stands**, `127` withheld and `112` disclosable field positions over `239` fields
+  across the twenty-two records, and `81` distinct disclosable field names.
+  - Refactoring Rationale: those three figures previously read "65 disclosable names" and
+    "120 withheld / 119 disclosable", and they were stale rather than approximate — records
+    were added to the corpus after the figures were written and nothing recomputed them. They
+    are now stated as what a walk of `layouts._declared_layouts()` reports, which is the same
+    walk the import-time audit and `test_corpus_disclosure.py` use, so a reader can reproduce
+    them rather than trust them.
 * **Category.** Documented divergence — diagnostic disclosure policy, additive and
   target-only.
-* **Why the difference is accepted.** Four classifications look inconsistent read one at a
+* **Why the difference is accepted.** Three classifications look inconsistent read one at a
   time and are deliberate read together, and each follows a precedent already set one record
-  over. An **account** identifier is rendered and a **customer** identifier is not, which is
-  the authorization allowlist's own asymmetry (`PA-ACCT-ID` named, `PA-CUST-ID` not) and
-  follows the contracts: an account identifier travels in a request path, a customer
-  identifier is the join key to name, address, national identifier and date of birth. A
-  **card expiry** date is withheld although it is a date, matching `PA-CARD-EXPIRY-DATE`,
+  over. A **card expiry** date is withheld although it is a date, matching
+  `PA-CARD-EXPIRY-DATE`,
   because it is the value a card-not-present authorization asks for alongside the number;
   account open, expiration and reissue dates stay rendered, and the account expiration date
   is the value the posting reject-103 boundary turns on. A **postal code** is withheld while
@@ -2191,11 +2238,13 @@ a register of this size stays true.
   transaction category — are rendered **in full**, rate and description included, because
   every byte is seeded configuration shared by a whole group and linked to no customer, and
   withholding the rate would make the `DEFAULT`-group fallback diagnostic unreadable.
-  Trade-offs: withholding a record's key costs real ground — a masked customer master, daily
-  transaction, posted transaction or statement-view record no longer names the row an
-  operator would look up, so a failure is localised by the keyed tag and then reproduced
+  Trade-offs: withholding a record's key costs real ground — every account-keyed and
+  identity-keyed record, which is the account master, the card master, the cross-reference, the
+  category balance, the customer master and all four transaction shapes, no longer names the row
+  an operator would look up, so a failure is localised by the keyed tag and then reproduced
   against the source dataset. The alternative was rendering a card-linked transaction
-  identifier and a customer identifier in every diagnostic.
+  identifier, a customer identifier and the account identifier that joins them in every
+  diagnostic.
 * **A narrower partial reveal than the parity oracle's.** The last-four concession now covers
   the four card-number field names only. `CUST-SSN` was in that set and is removed: "quoted
   by its last four" is a practice that is safe for a sixteen-digit card number, whose last
@@ -2238,8 +2287,13 @@ a register of this size stays true.
   HMAC-SHA-256 output size — and refuses a value that is not valid standard base64, a
   non-canonical spelling of valid material, material below the floor, or material that is a
   single repeated byte. Every refusal names the variable and the generation command and
-  **never the value**. An unset, empty or whitespace-only variable keeps its documented
-  meaning and takes the 32-byte process-scoped random fallback.
+  **never the value**. An **unset** variable keeps its documented meaning and takes the
+  32-byte process-scoped random fallback; a variable that is **present but empty or
+  whitespace-only** is refused, because absence means "run without a supplied key" while
+  presence with no content means a key was expected and did not arrive — the shape a failed
+  secret projection or an empty secret version takes. Accepting the second silently defeated
+  the one mode that needs a supplied key at all, the cross-run verification pass, which then
+  derived per-process tags and compared every field unequal with no diagnostic anywhere.
 * **Refactoring Rationale.** Any non-empty string was previously accepted and used by its
   UTF-8 bytes, so the enforcement contradicted the documented contract in the worst
   direction: an operator following `data-migration/README.md` got 32 random bytes while an
@@ -2668,69 +2722,6 @@ a register of this size stays true.
 * **Files.**
   `services/authorization-service/src/main/java/com/carddemo/authorization/service/FraudMarkingService.java`.
 
-#### D-AUTH-REQUEST-WINDOW — the declared five-hundred-request bound is enforced, not the observed 501
-
-* **Baseline behaviour.**
-  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) declares
-  `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500` at **L40**, increments its
-  counter after each request at **L332**, and tests it with `>` rather than `>=` at
-  **L339**. Counts one through five hundred therefore all take the `ELSE` and read
-  another request at **L342**; only count **501** sets the loop-end flag at **L340**.
-  The declared limit is 500 and the observed behaviour is 501, and the difference
-  follows entirely from the order of the increment and the comparison rather than from
-  any rule the program states.
-* **Target behaviour.** `AuthorizationRequestListener` counts every request it takes
-  off the queue and closes its processing window on exactly
-  `DEFAULT_REQUEST_PROCESS_LIMIT` = **500**, overridable by
-  `carddemo.messaging.request-process-limit`. Closing the window means closing
-  **intake**: `ContainerCyclingWindowBoundary` stops the listener container and starts
-  it again, so the request that would have been the 501st of the window is never
-  received and stays on the queue until the next window opens.
-* **Category.** Documented divergence — the declared bound is enforced where the
-  reference program's increment-then-compare admits one more.
-* **Why the difference is accepted.** Both the field name and its literal state five
-  hundred, so five hundred is the number the source declares as its policy, while 501
-  is the number its increment-then-compare arrives at. Enforcing 501 would make the
-  migrated code's own constant unreadable — every reader of `requestProcessLimit = 500`
-  would have to be told separately that it means 501 — and would carry an arithmetic
-  artifact of one implementation into a stated contract. Assumptions: this states a
-  difference between source and target and asserts nothing about the source being
-  wrong; the baseline is the parity oracle, is unchanged, and its behaviour here is
-  quoted, not judged. Alternatives
-  Considered: refusing the 501st request inside the handler rather than closing intake.
-  Rejected because neither outcome available there is correct — throwing sends a
-  legitimate request toward the dead-letter queue over a bound that has nothing to do
-  with the request, and returning without handling deletes a request nobody answered.
-  Only closing intake before the receive keeps the bound and the message both intact,
-  which is exactly what the reference program's test-before-next-read achieves.
-  Alternatives Considered: leaving the bound unimplemented and treating the container's
-  concurrency and poll settings as its replacement. Rejected because those settings
-  bound work **in flight** rather than work **completed**, so they express a different
-  quantity: a consumer configured for ten concurrent messages still handles an
-  unbounded number of them. Trade-offs: cycling a container is heavier than the
-  reference program's run simply ending, and the cost is a brief pause in intake at
-  each boundary. Every failure path in the boundary therefore leaves intake **open** —
-  a window that failed to reopen would halt every authorization in the system, which is
-  strictly worse than a window that ran long. Trade-offs: the counter is per task
-  rather than per queue, so the platform-wide figure is the quota times the task count;
-  that matches the reference system, where the limit bounded one running program and the
-  queue could trigger more than one, and a shared counter would need a coordination
-  round trip on the hot path of every authorization.
-* **Where it is verified.** `AuthorizationRequestListenerTest` asserts that no window
-  closes before the quota, that the window closes on the quota-th message carrying the
-  quota as its reported count, that successive windows each close on their own full
-  quota so the counter resets, that a dropped stale request and a request whose handling
-  threw each occupy their place in the window, that a non-positive window size is refused
-  at construction, that the compiled default is five hundred rather than 501, and that
-  concurrent handlers close exactly one window per quota rather than racing an
-  increment against a comparison.
-* **Files.**
-  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`,
-  `services/authorization-service/src/main/java/com/carddemo/authorization/service/RequestWindowBoundary.java`,
-  `services/authorization-service/src/main/java/com/carddemo/authorization/service/ContainerCyclingWindowBoundary.java`,
-  `docs/architecture/messaging-contracts.md`,
-  `docs/adr/ADR-004-messaging.md`.
-
 #### D-REFERENCE-INTEGRITY-SENTENCE — one integrity branch answers three integrity conditions
 
 * **Baseline behaviour.** The reference programs separate exactly one integrity
@@ -2940,6 +2931,60 @@ a register of this size stays true.
   `services/reference-service/src/main/resources/openapi/reference-api.yaml`,
   `services/reference-service/src/main/resources/db/migration/V1__reference.sql`,
   `services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql`.
+
+
+#### D-REFDATA-DESCRIPTION-TRIM — a reference description is published at its content length, not re-padded to fifty
+
+* **Baseline behaviour.** The two reference descriptions are declared at a **fixed** fifty
+  characters on the VSAM side and are stored blank-padded to that width:
+  [`CVTRA03Y.cpy`](../../app/cpy/CVTRA03Y.cpy) declares `TRAN-TYPE-DESC PIC X(50)` at **L6** and
+  [`CVTRA04Y.cpy`](../../app/cpy/CVTRA04Y.cpy) declares `TRAN-CAT-TYPE-DESC PIC X(50)` at **L8**.
+  The seed extracts hold the padding: the first row of
+  [`app/data/ASCII/trancatg.txt`](../../app/data/ASCII/trancatg.txt) carries
+  `Regular Sales Draft` across bytes **7 to 56**, the remaining thirty-one bytes being blanks, in
+  a row sixty bytes long. Outbound, the padding survives: the online type screens move the whole
+  field into a fixed 3270 map field —
+  [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl) at **L1200** and
+  [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) at **L1417** — and the
+  extract job re-pads a variable-length column back to fixed width with
+  `CAST(TRC_CAT_DATA AS CHAR(50))` at **L109** of
+  [`TRANEXTR.jcl`](../../app/app-transaction-type-db2/jcl/TRANEXTR.jcl).
+* **Target behaviour.** Both columns are `description VARCHAR(50) NOT NULL` —
+  `V1__reference.sql` **L117** for types and **L209** for categories — and both mappers publish
+  `TransactionTypeMapper.trimTrailing(...)`, so a response body carries `Regular Sales Draft` and
+  not that value followed by thirty-one spaces. `TransactionTypeMapper` applies it to the type
+  description and `TransactionCategoryMapper` to the category description; there is one rule and
+  two consumers of it.
+* **Category.** Documented divergence — the width at which a stored value is published, not the
+  value itself.
+* **Why the difference is accepted.** The trailing blanks are padding to a fixed record length
+  rather than content, and the baseline's own Db2 declarations say so: `TR_DESCRIPTION` is
+  `VARCHAR(50)` at **L3** of [`TRNTYPE.ddl`](../../app/app-transaction-type-db2/ddl/TRNTYPE.ddl)
+  and `TRC_CAT_DATA` is `VARCHAR(50)` at **L4** of
+  [`TRNTYCAT.ddl`](../../app/app-transaction-type-db2/ddl/TRNTYCAT.ddl), whose host structure is
+  generated as a length-plus-text pair at **L47-L51** of
+  [`DCLTRCAT.dcl`](../../app/app-transaction-type-db2/dcl/DCLTRCAT.dcl) — so where the baseline
+  had a type capable of expressing content length it used it, and the fixed forms are an artifact
+  of the record and of the terminal. The consumer here is a JSON body, which has no fixed field to
+  fill, so padding would be data a caller has to strip before comparing or displaying. Where a
+  fixed width IS still required the padding is reapplied at that boundary rather than carried
+  through the domain: the statement and report artifacts frame their own columns.
+* **What a consumer must know.** A client that compares a description against a fifty-character
+  literal will not match. Comparison is against the trimmed content.
+* **Where it is verified.** By
+  `services/reference-service/src/test/java/com/carddemo/reference/mapper/ReferenceDescriptionTrimTest.java`,
+  which drives both mappers with a description padded to the full fifty — the form the store actually
+  holds, asserted independently by `ReferenceFixtureContractTest`, which pins the fixture to
+  `"Regular Sales Draft" + " ".repeat(31)` — and requires the published value to carry the content
+  alone. A third case holds the rule to TRAILING blanks, so a change that removed blanks outright
+  would fail rather than pass on length. The published contract's own
+  `ReferenceDescription` pattern does **not** verify this and cannot: it refuses an all-blank value
+  and admits trailing blanks otherwise, so a padded response would satisfy it.
+* **Files.**
+  `services/reference-service/src/main/java/com/carddemo/reference/mapper/TransactionTypeMapper.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/mapper/TransactionCategoryMapper.java`,
+  `services/reference-service/src/main/resources/db/migration/V1__reference.sql`,
+  `services/reference-service/src/test/java/com/carddemo/reference/mapper/ReferenceDescriptionTrimTest.java`.
 
 
 #### D-APPLIED-GROUP-VISIBLE — a rate answer names the group that answered, not only the group asked for
@@ -3569,6 +3614,391 @@ rationale sits on `PendingAuthSummary.reverseApproved` and it is asserted by
 `PurgeJobTest.expiringEveryChildBalancesTheParentToZero`. It is recorded here so that a reader searching
 this register for the identifier learns why it is absent rather than concluding the claim is unhonoured.
 
+#### D-REPORT-ORDER-FINGERPRINT — the report and the statement order on a keyed per-card fingerprint, not on the card number
+
+* **Baseline behaviour.** Both artifacts are ordered by the card number itself, in the clear.
+  [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) declares `SORT FIELDS=(TRAN-CARD-NUM,A,TRAN-PROC-DT,A)`
+  at **L46** over the symbols it defines at **L41-L42**, so the detail lines arrive ordered by the
+  sixteen-digit number and the group break at
+  [`CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl) compares the card it last saw against the one it holds.
+  [`CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) sorts on the card number at **L53** for the same reason,
+  and [`CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) breaks on `WS-SAVE-CARD PIC X(16)` at **L69**.
+* **Target behaviour.** No relation the reporting context may read publishes the unmasked number: every
+  view renders it as twelve asterisks and the last four digits. Ordering, grouping and joining are
+  therefore performed on `card_fingerprint`, a keyed digest each view computes from a secret held in
+  `reporting.card_grouping_key` — a table in the reporting schema that the reporting login is revoked
+  from. Exact selection of one card, which a masked value cannot express, is performed by
+  `reporting.resolve_card`, a definer-rights function that takes the whole number and returns the masked
+  rendering, the fingerprint, the customer and the account.
+* **Category.** Documented divergence — ordering key substituted, ordering PROPERTY preserved.
+* **Why the difference is accepted.** Two properties are preserved and one is deliberately not. The
+  fingerprint is injective on the card number, so one card's lines still sort together and a group break
+  still occurs exactly where the baseline's does — which is what the report's group subtotals depend on.
+  What is NOT preserved is the sequence BETWEEN cards: a digest orders differently from the number it
+  digests, so two cards appear in a different relative order than the reference emits them in. That is
+  accepted because the alternative is to publish the sixteen-digit number to the ordering, and an
+  ordering key reaches an index, a query plan, a statistics sample and any log line that renders a sort
+  key. Alternatives Considered: ordering on the masked rendering, which is what an earlier revision did.
+  Rejected outright, and not merely as a weaker option: twelve of a masked value's sixteen positions are
+  constant, so it names a TAIL rather than a card — two cardholders sharing a tail collapse into one
+  group, and a lookup by it returned a different cardholder's statement where the requested card did not
+  exist. Alternatives Considered: an unkeyed digest, or a keyed digest with a published salt. Both
+  rejected because a sixteen-digit number with a check digit is a small enough candidate space to
+  enumerate, so anyone holding a token could confirm which card produced it; and for the same reason no
+  forward oracle is offered — `resolve_card` answers nothing for a card that does not exist, so it
+  discloses a fingerprint only to a caller that already held the number.
+* **Where it is verified.** `data-migration/tests/test_reporting_views.py` asserts that no view selects
+  the base card column, that the fingerprint is computed from the secret concatenated with the trimmed
+  number, and that the grouping-key table is revoked. `StatementServiceTest.aCardIsResolvedByTheWholeNumber`
+  asserts the argument reaching the resolution query is the whole number and carries no mask character;
+  `TransactionReportServiceTest.groupSubtotalsBreakOnTheCard` asserts the group band closes on the card
+  rather than on the account, using two cards under one account so the two groupings give different
+  answers. The whole chain — the three view edits and the function — was additionally applied to a live
+  PostgreSQL 17 engine, where the fingerprint published by all three views was byte-identical to the one
+  the function returns for the same card, and the reporting login was refused on the grouping-key table.
+* **Files.** `data-migration/sql/V1__reporting_views.sql`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/domain/CardXrefView.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/repository/StatementCardXrefRepository.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/repository/TransactionReportRepository.java`.
+
+#### D-STMT-RESPONSE-BOUNDED — the statement HTTP response carries a bounded window, and reports the true count beside it
+
+* **Baseline behaviour.** The statement generator has no request surface at all: it renders every
+  transaction of every card into two datasets in one pass, and its per-card table has no bounds check —
+  a single card renders up to 512 transactions and the 513th overruns it, which
+  [`tests/README.md`](../../tests/README.md) §1.1 records as a measured defect of the immutable source.
+* **Target behaviour.** The artifact path is unbounded in the same sense the reference is — it streams
+  every transaction of every card, in bounded chunks, with no fixed arity anywhere. The HTTP path,
+  which the reference does not have, returns at most `MAX_RESPONSE_TRANSACTIONS` lines and carries the
+  card's TRUE transaction count in the heading beside them.
+* **Category.** Documented divergence — a bound on a surface the baseline does not publish.
+* **Why the difference is accepted.** The bound applies only to the added surface, so no artifact byte
+  changes and the golden masters are untouched. It is necessary because an unbounded response is an
+  unbounded allocation on a request thread driven by a value the caller does not control — the size of a
+  cardholder's history. Alternatives Considered: paginating the response, which is what the report's
+  line listing does. Rejected for this operation because a statement is a document rather than a
+  browse: the reference emits one statement per card as a unit, and a paged statement would publish a
+  shape the artifact has no equivalent of. Alternatives Considered: returning the count of rows in the
+  body as the transaction count, which is what a naive implementation does. Rejected because the two
+  agree on every statement short of the bound and disagree on exactly the statements where the
+  difference matters, so a caller could not tell a truncated document from a complete one.
+* **Where it is verified.** `StatementServiceTest.aCappedWindowStillReportsTheTrueCount` stubs a card
+  holding 4,211 transactions, asserts the window is requested at exactly the bound, and asserts the
+  heading reports 4,211. `StatementServiceTest.aHeadingOnlyReadMaterialisesNoTransactionRow` asserts
+  the summary operation reads no transaction row at all.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/StatementService.java`.
+
+#### D-ARTIFACT-REPLACE-ON-COMPLETION — a failed run leaves the previous artifact readable, where the reference leaves none
+
+* **Baseline behaviour.** [`CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) deletes both outputs in a
+  preliminary step: `STEP030` at **L66** runs `IEFBR14` over them with `DISP=(MOD,DELETE,DELETE)` across
+  **L67-L75**, and only then does `STEP040` at **L79** allocate both fresh with
+  `DISP=(NEW,CATLG,DELETE)` at **L87** and **L92**. A run that fails after the deletion step therefore
+  leaves NO artifact at all.
+* **Target behaviour.** Nothing is published at the destination key until a run completes: records
+  accumulate into a fixed part buffer and are uploaded a part at a time, and the object appears only on
+  the completion call. A failed run leaves the PREVIOUS artifact in place, and the dataset bucket is
+  versioned with five noncurrent versions retained.
+* **Category.** Documented divergence — failure outcome improved, success outcome identical.
+* **Why the difference is accepted.** On the success path the two are indistinguishable: a write to an
+  existing key replaces it exactly, which is the delete-then-allocate semantic. On the failure path the
+  target's outcome is strictly better — an operator reading yesterday's statements is better served than
+  one reading none — and a half-written object never becomes visible under either scheme. Alternatives
+  Considered: reproducing the deletion literally, as a delete call before the first record. Rejected
+  because it converts every transient storage failure into a total absence of the artifact, and the
+  reference's reason for the step was that a sequential dataset opened `MOD` would otherwise be EXTENDED
+  — a hazard object storage does not have, since a key write is a replacement.
+* **Where it is verified.** `TaskDispatchWiringTest.aStatementRunPublishesTwoArtifacts` asserts a run
+  publishes exactly the two run-wide objects the reference declares and no per-statement object;
+  `StatementServiceTest.anEmptyRunStillClearsThePreviousArtifacts` asserts a run producing no statement
+  still clears, which is the one property the reference's separate deletion step buys and which the
+  target keeps as an explicit sink call rather than as an effect of the first write.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/sink/S3ArtifactWriter.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/sink/S3StatementSink.java`.
+
+#### D-STMT-OPTIONAL-ADDRESS-BLANK — an absent middle name or second address line prints blank rather than stopping the run
+
+* **Baseline behaviour.** [`COSTM01.CPY`](../../app/cpy/COSTM01.CPY) carries each printed customer
+  attribute as a fixed-width character field, and a COBOL `MOVE` of a group with nothing in it leaves the
+  receiving field space-filled. A customer with a one-line street address therefore prints a blank line
+  and the run continues.
+* **Target behaviour.** `account.customers` declares `middle_name` and `addr_line_2` nullable and every
+  other projected attribute not null, and the statement heading normalises those two — and only those
+  two — to blanks as it is constructed.
+* **Category.** Documented divergence — none in observable output; a defect removed on the way to
+  matching the reference.
+* **Why the difference is accepted.** It is not a behavioural change at all: the rendered artifact is
+  byte-identical to the reference's for the same record. It is registered because the code path it
+  replaces was NOT identical — the band assembler refuses a null, which is correct of the assembler, so
+  the first customer with no second address line aborted the whole night's statements with a
+  null-pointer failure naming a field. Alternatives Considered: treating an absent value as an
+  unresolved dimension, alongside the customer and account checks the same factory performs. Rejected
+  because a nullable column is a legitimate record rather than a broken join, and abending over one
+  would stop a run for a customer who simply has a short address.
+* **Where it is verified.**
+  `StatementServiceTest.aCustomerMissingOptionalAttributesStillStatements` drives a run whose only card
+  belongs to a customer with neither attribute and asserts the statement is produced.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/StatementService.java`.
+
+#### D-BROWSE-PREDICATE-STATED — the paging comparison is stated in the query, not left to the access method
+
+* **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) positions its
+  browse in `STARTBR-TRANSACT-FILE` at **L591**, naming the dataset, the record
+  identification field and the key length at **L594-L596**. The line that would state
+  the comparison — the greater-or-equal option at **L597** — is **commented out**, so
+  which rows the position admitted was decided by the access method's default rather
+  than by anything a reader of the source can determine. The same program's forward and
+  backward reads then walk from wherever that position landed.
+* **Target behaviour.** `TransactionListService` states the comparison explicitly in the
+  query: strictly greater than the trailing key when paging forward, strictly less than
+  the leading key when paging backward, each with the matching sort direction and a
+  limit of one more row than the page holds.
+* **Category.** Documented divergence — browse boundary.
+* **Why the difference is accepted.** A predicate that is written down is a predicate
+  that can be tested, and the strict form is the one that makes a cursor a cursor: an
+  inclusive comparison re-delivers the row the cursor names, so a client paging forward
+  would receive its own last row again as the first row of the next page. The baseline
+  cannot exhibit that because its own key-capture and its next-page probe happen to
+  advance past the boundary row, so the strict predicate reproduces the rows the
+  terminal displayed. What changes is only that the rule is now legible at the call
+  site rather than inherited from an access method's default.
+* **Where it is verified.** `TransactionRepositoryIT`'s
+  `theCardFilteredKeysetPathsStepForwardAndBackwardStrictly` steps a live page boundary in
+  both directions and asserts the boundary row is not re-delivered, and
+  `theKeysetPageBoundaryIsUnaffectedByAnInsertBehindTheCursor` asserts the stated
+  predicate is what makes that hold under a concurrent insert.
+  `KeysetPaginationGateProofTest` separately forbids any offset-paging construct in the
+  list-handling packages, so the stated predicate cannot be replaced by one.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/repository/TransactionRepository.java`.
+
+#### D-BROWSE-TRAILING-KEY-ON-SHORT-PAGE — a short page still names the last row it carried
+
+* **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) captures the
+  trailing browse key **inside** the branch that fills the tenth screen slot, at
+  **L438-L439**, so a page that returned fewer than ten rows leaves the previously
+  captured trailing key standing. Its leading key is captured unconditionally at
+  **L393**, and **L315** sets the no-further-page condition whenever the fill read
+  nothing at all.
+* **Target behaviour.** The page envelope's `lastKey` names the last row the page
+  actually carried, whether the page is full or short, and a page carrying no rows names
+  no boundary at all and reports no further page.
+* **Category.** Documented divergence — cursor identity on a short page.
+* **Why the difference is accepted.** A stale trailing key is a cursor that names a row
+  from an earlier page, so a client paging forward from it silently re-reads rows it has
+  already seen. Because the baseline only refreshes the key on a full page, the
+  condition is reachable exactly when the last page is short — which is every browse
+  whose row count is not a multiple of ten. Naming the row actually carried removes the
+  repetition without changing which rows any page contains, and it keeps the envelope's
+  two facts independent in the same way
+  [`D-LASTKEY-RECEIVED`](#d-lastkey-received--the-page-cursor-names-only-rows-the-caller-received)
+  does for the card browse.
+* **Where it is verified.** `PageResponseTest`'s `emptyPageNamesNoBoundary` asserts a page
+  with no rows names neither boundary and reports no further page, and
+  `finalPageMayNameItsTrailingBoundary` asserts a short final page still names the key of
+  its own last row; `TransactionRepositoryIT`'s
+  `theSurplusRowRevealsAFurtherPageWithoutBecomingPartOfIt` asserts the look-ahead row
+  never becomes the boundary.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java`.
+
+#### D-VIEW-READ-WITHOUT-LOCK — the detail read acquires no lock, because nothing rewrites
+
+* **Baseline behaviour.** [`COTRN01C.cbl`](../../app/cbl/COTRN01C.cbl) reads the
+  transaction record with the **UPDATE** option at **L275**, which acquires an exclusive
+  read-for-update lock. The program contains no `REWRITE` and no `WRITE` anywhere in its
+  330 lines, so the lock it takes is never used, and it is held until the task's own
+  syncpoint.
+* **Target behaviour.** `TransactionViewService` performs a plain read-only lookup with
+  no lock mode requested, inside a read-only transaction boundary.
+* **Category.** Documented divergence — locking and contention semantics.
+* **Why the difference is accepted.** The lock protected nothing: no statement in the
+  program modifies the record it locked, so its only observable effect was to exclude
+  other readers-for-update and any writer for the duration of a screen read. Removing it
+  cannot change what the screen displays — the row read is the same row — and it removes
+  a contention point between a detail view and the posting job, which does write the same
+  table. The direction of the change is worth stating plainly: this target holds *fewer*
+  locks than the baseline, so a concurrent writer that the baseline would have blocked
+  now proceeds, and a detail view is therefore a snapshot rather than a pin. That is the
+  correct reading for a screen that displays and does not edit; the contexts that DO edit
+  express contention through a version column instead, as the *Optimistic concurrency is
+  expressed natively* note earlier in this document records.
+* **Where it is verified.** `TransactionViewServiceTest` asserts the read goes through the
+  plain keyed lookup, that no method the repository declares or inherits carries a lock
+  annotation of either family, and that a failed read is reported with this program's own
+  capitalised failed-read sentence rather than as a contention refusal.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionViewService.java`.
+
+#### D-REJECT-109-DURABLE — a failed account rewrite is recorded, and the partial post is discarded
+
+* **Baseline behaviour.** [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) assigns reason
+  **109** when the account rewrite hits `INVALID KEY`, at **L556** inside
+  `2800-UPDATE-ACCOUNT-REC` at **L545**. That paragraph is performed at **L441** from
+  `2000-POST-TRANSACTION` at **L424**, which the record loop enters at **L212** only after
+  **L211** found the reason to be zero. The assignment therefore happens *after* the branch
+  toward the reject write has already not been taken: the `ELSE` arm at **L213-L215** does
+  not run, so no reject row is written and `WS-REJECT-COUNT` is not incremented; **L226-L228**
+  leaves the return code unchanged; **L208-L209** clear the reason at the top of the next
+  record. Meanwhile the transaction write at **L564** and the category-balance change at
+  **L526** have already happened and both stand. The net baseline result is a **posted
+  transaction whose account was never updated, with no record anywhere of why.**
+* **Target behaviour.** The three posting writes are one ACID commit, so a failed account
+  update discards the transaction row and the category-balance change with it; and one row
+  is written to `ledger.transaction_rejects` under reason code **109** with the description
+  `ACCOUNT RECORD NOT FOUND`, carrying the 350-byte source record, so the failure is
+  durable. The reject row is written outside the rolled-back unit of work, because a row
+  written inside it would be discarded by the same rollback it exists to explain.
+* **Category.** Documented divergence — posting atomicity and reject durability.
+* **Why the difference is accepted.** The baseline state is not reconcilable from the data:
+  a ledger row exists, a balance moved, the account did not, and nothing records the
+  failure except a console line. Any downstream reader — a statement, a report, a balance
+  enquiry — sees a posted transaction the account does not reflect, and no query can
+  distinguish that from a data-entry error. Two candidate designs were weighed. Discarding
+  the partial writes and recording nothing was rejected: it removes the inconsistency but
+  loses the event, so an operator has no way to learn a record failed to post. Leaving the
+  partial writes and adding a reject row was rejected for the opposite reason: it records
+  the event while keeping the inconsistency. Doing both is the only combination in which
+  the ledger is explicable and the failure is known. The cost is stated plainly: the reject
+  stream carries a row the baseline's stream does not, so a byte comparison of the two
+  streams differs on exactly the records whose account rewrite failed — which is why this
+  is registered rather than treated as parity.
+* **Where it is verified.** `TransactionRejectRepositoryIT`'s
+  `aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow` asserts the row is
+  an addition to the stream and carries code 109 with 101's description, and
+  `theColumnDomainAdmitsReasonOneHundredAndNine...` asserts the column admits the code. The
+  fixture and its reasoning are
+  `services/transaction-service/src/test/resources/fixtures/reject_109_rewrite_invalid_key`.
+  `RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE` keeps the code distinct from
+  `ACCOUNT_NOT_FOUND_ON_READ` even though their descriptions are byte-identical.
+* **Files.**
+  `services/batch-service/src/main/java/com/carddemo/batch/dto/RejectReason.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/domain/TransactionReject.java`,
+  `services/transaction-service/src/main/resources/db/migration/V1__ledger.sql`.
+
+#### D-REFERENCE-UPSERT-NOT-EXPOSED — the maintenance screen's insert-on-miss has no single operation
+
+* **Baseline behaviour.** Three baseline programs write `TRANSACTION_TYPE` with three
+  different behaviours, and the difference is in what each does when the update matches no
+  row. The maintenance screen is an **upsert**:
+  [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl)
+  `9600-WRITE-PROCESSING` at **L1531-L1592** issues the update and, on `SQLCODE +100`,
+  performs `9700-INSERT-RECORD` instead of reporting a miss. The list screen's inline edit
+  is a **strict update**:
+  [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl)
+  `9200-UPDATE-RECORD` at **L1837-L1894** issues the same update and, on `SQLCODE +100`,
+  reports not found and inserts nothing. The batch driver **soft rejects and continues**:
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl)
+  `10032-UPDATE-DB` at **L166-L195** routes every failure to `9999-ABEND`, which despite its
+  name only displays the message and sets return code 4 at **L230-L233**, leaving the
+  sequential read loop at **L93-L96** free to take the next record.
+* **Target behaviour.** Two of the three are delivered as their own operation and the third
+  is not. `PUT /api/v1/reference/transaction-types/{typeCd}` is the **strict** update: it
+  answers 404 on a miss and inserts nothing, which is what the published contract declares by
+  carrying 404 among that operation's answers. `POST /api/v1/reference/maintenance-actions` is
+  the **soft-reject** run: each action commits in its own transaction and the reply carries one
+  outcome per action with the worst condition code seen. There is **no operation whose single
+  call is an upsert**; a client reaching for the maintenance screen's behaviour issues the
+  create and, if it is refused as a duplicate, the replace.
+* **Category.** Documented divergence — operation granularity, not rule content.
+* **Why the difference is accepted.** The published contract decided it, and it decided it
+  the same way in both directions: the create operation carries 409 among its answers and the
+  replace operation carries 404, so a duplicate and a miss are each reportable conditions
+  rather than silent branches. An upsert cannot report either — that is precisely what makes
+  it an upsert — so exposing one would give this interface a third write whose reply could not
+  distinguish a row it created from a row it replaced. Two alternatives were weighed. Adding
+  an upsert operation to the contract was rejected because the document is the frozen
+  agreement between this service and its clients, and widening it to recover a screen
+  behaviour no migrated client performs is a change to the contract rather than to the code.
+  Making `PUT` an upsert was rejected outright: it would take the 404 the contract publishes
+  and make it unreachable, so a client that mistyped a code would silently create a type
+  instead of being told the code does not exist. The cost is stated plainly: a caller
+  reproducing the maintenance screen makes two calls where the baseline operator made one,
+  and observes an intermediate 409 the baseline never surfaced.
+* **Where it is verified.** `ReferenceApiRoutingContractTest` asserts in both directions that
+  the delivered handlers and the declared operations are the same set and that the count is
+  nineteen, so an upsert added later without a contract entry — or an entry without a handler
+  — fails the build. `ReferenceWriteBehaviourTest` asserts that the strict replace reports the
+  miss rather than inserting, and that the batch run applies later actions after an earlier one
+  is rejected.
+* **Files.**
+  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/service/ReferenceBatchUpdateService.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/api/TransactionTypeController.java`,
+  `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+<sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
+behavioural-divergence register for CardDemo. The baseline under `app/**` is cited
+throughout and never modified. Convention:
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md).</sub>
+
+### 7.5 Withdrawn divergence identifiers
+
+One identifier has been withdrawn. It is recorded here, outside §7.4, so that the
+register above contains only live differences while the identifier still resolves to
+something for a reader who meets it in an older comment or commit message. Assumptions:
+the heading level and the placement are both deliberate — a withdrawn identifier kept as a
+`####` entry inside §7.4 would be counted by that section's own measured heading count and
+would reintroduce the non-`D-` heading the count note there had to warn about.
+
+#### `C-ROUNDING` — interest accrual now truncates as the baseline does
+
+This is not a divergence and is recorded here only so that the identifier resolves to
+something. **There is no longer any behavioural difference to register**, and the entry that
+described one has been removed from the register above rather than reworded, because an
+entry in a divergence register asserts that the target behaves differently, and this one no
+longer would.
+
+* **What it claimed.** That [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the
+  monthly interest at **L464-L465** and stores the quotient into a fixed-scale field with
+  **no `ROUNDED` phrase** — a search for that phrase across all 652 lines of the program
+  returns no match, so the store discards the surplus digits and the baseline behaviour is
+  truncation toward zero — while `Money` reduced the accrual with a single half-up contract,
+  differing by one cent on a quotient landing on a half cent.
+* **What changed.** `Money` now declares **two** rounding modes, each fixed to its
+  operation and neither reachable from any signature. `GENERAL_ROUNDING` is `HALF_UP` and
+  governs the reduction of a supplied amount, general multiplication and general division —
+  three operations with no reference statement to be faithful to. `BASELINE_INTEREST_ROUNDING`
+  is `DOWN` and governs `Money.monthlyInterest(rate)` alone, which is the one monetary
+  computation the baseline performs. The multiply-before-divide order is unchanged.
+* **Why the divergence was closed rather than kept.** The reasoning that accepted it read
+  transformation rule T3's "half up for the whole money path" as covering the accrual. That
+  put the letter of a transformation rule above the requirement it exists to serve: the plan
+  requires observable behaviour to be unchanged, names the exact interest formula among the
+  rules that must be preserved, and admits a behavioural change only as an authorised
+  divergence. The accrual is also one of the business rules the reference test suite asserts
+  verbatim, so the cent was a parity failure in the most heavily asserted computation in the
+  system rather than a rounding preference. It did not stay confined to one accrual either:
+  the accrual paragraph reduces every term before accumulating it (**L467**) and adds the
+  accumulated total to the account balance once per account (**L352**), so a cent gained per
+  transaction category reached the balance the next over-limit comparison is made against,
+  and that comparison is inclusive. What T3 forbids — binary floating point, and a
+  caller-selectable mode — remains forbidden: the mode is fixed at the type and applied to an
+  exact decimal.
+* **Alternatives Considered.** A rounding-mode parameter on the accrual entry point, so a
+  parity caller could ask for truncation while others kept half up. Rejected for the reason
+  the original entry gave and which still holds: two call sites computing the same accrual
+  could then disagree by a cent with nothing in either one signalling that they had chosen
+  differently. Fixing the mode per operation yields the same arithmetic with none of that
+  exposure. Also considered: leaving the entry in place with its text rewritten to say the
+  divergence was closed. Rejected because a reader scanning the register for real differences
+  would have to read each entry to discover which ones are live, which is the property a
+  register exists to remove.
+* **Where the new behaviour is verified.** `MoneyTest` asserts both discriminating vectors
+  against the API, against independently computed reference truncation, and against a half-up
+  counterfactual that must differ; the negative vector is asserted against both a half-up and
+  a floor counterfactual, because `DOWN` and `FLOOR` agree on every positive input and part
+  company only there; and the exact-quotient claim is asserted with `RoundingMode.UNNECESSARY`
+  so it throws rather than passing if a future edit makes the vector inexact.
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`,
+  `services/common-lib/src/test/java/com/carddemo/common/money/MoneyTest.java`.
+
 ## 8. Inventory caveats a reader will otherwise contradict
 
 The inventory in [§1](#1-the-verified-baseline-inventory) counts repository
@@ -3865,6 +4295,7 @@ trees.
 
 ---
 
+
 #### D-BROWSE-PREDICATE-STATED — the paging comparison is stated in the query, not left to the access method
 
 * **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) positions its
@@ -3947,9 +4378,15 @@ trees.
   table. The direction of the change is worth stating plainly: this target holds *fewer*
   locks than the baseline, so a concurrent writer that the baseline would have blocked
   now proceeds, and a detail view is therefore a snapshot rather than a pin. That is the
-  correct reading for a screen that displays and does not edit; the contexts that DO edit
-  express contention through a version column instead, as the *Optimistic concurrency is
-  expressed natively* note earlier in this document records.
+  correct reading for a screen that displays and does not edit. The contexts that DO edit
+  hold contention one of two ways, and which one is decided by the copybook rather than by
+  preference: where the baseline record carries a before-image comparison the target
+  expresses it as a version column, as the *Optimistic concurrency is expressed natively*
+  note earlier in this document records; where it does not — the two authorization segments
+  derive field for field from copybooks with no version member, so no version column exists
+  to compare — the target takes a pessimistic row lock for the duration of the write instead,
+  which is what the reference obtains implicitly by retrieving a segment through the
+  command-level interface before replacing it. `FraudMarkingService` is that second case.
 * **Where it is verified.** `TransactionViewServiceTest` asserts the read goes through the
   plain keyed lookup, that no method the repository declares or inherits carries a lock
   annotation of either family, and that a failed read is reported with this program's own
@@ -4053,6 +4490,135 @@ trees.
   `services/reference-service/src/main/java/com/carddemo/reference/service/ReferenceBatchUpdateService.java`,
   `services/reference-service/src/main/java/com/carddemo/reference/api/TransactionTypeController.java`,
   `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+#### D-REFERENCE-TRIM-TRAILING-ONLY — stored descriptions keep a leading blank the baseline would have dropped
+
+* **Baseline behaviour.** The baseline offers **three** behaviours for the transaction-type and
+  transaction-category description, and they do not agree with one another. Two trim:
+  [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) **L1841-L1842** moves a
+  `FUNCTION TRIM` of the description into the generated host variable while **L1843-L1844**
+  computes the accompanying length from the **untrimmed** field, and
+  [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl) **L1539-L1542** does the
+  same. `FUNCTION TRIM` with no `LEADING` or `TRAILING` operand removes blanks from **both** ends.
+  The third does not trim at all:
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) **L172-L174** binds the raw
+  fixed host variables declared at its **L74** `05 INPUT-REC-NUMBER PIC X(2)` and **L76**
+  `05 INPUT-REC-DESC PIC X(50)` rather than the generated structure, so it preserves leading blanks.
+  What the three converge on is reasoned from the language definition rather than observed from
+  stored bytes: both trimming sites pass a **fixed** fifty-character item — `COTRTLIC.cbl` **L172**
+  declares `30 WS-ROW-TR-DESC-IN PIC X(50)` and `COTRTUPC.cbl` **L335** declares
+  `15 TTUP-NEW-TTYP-TYPE-DESC PIC X(50)` — and the length function applied to a fixed alphanumeric
+  item yields its declared storage size rather than its content length, so the length host variable
+  receives fifty unconditionally. The three therefore **agree on trailing blanks and differ only on
+  leading ones**, which narrows the disagreement to exactly one dimension.
+* **Target behaviour.** One normalisation serves the whole reference package:
+  `TransactionTypeMapper.trimForStorage` removes **trailing** blanks only. A description submitted
+  as `"  FEE"` is therefore stored as `"  FEE"`, where the two trimming baseline programs would have
+  stored `"FEE"`.
+* **Category.** Documented divergence — stored representation of one column, not rule content.
+* **Why the difference is accepted.** The baseline is three-way inconsistent on this field, so **no
+  single package rule can match all three** — matching the two screens would contradict the batch
+  driver and matching the batch driver would contradict the screens. Trailing-only is chosen because
+  it is the dimension all three agree on, and because it is the conservative direction: it preserves
+  a byte the source record was given rather than discarding one, and a leading blank in a submitted
+  description is content a caller typed. The alternative — trimming both ends at the mapping site —
+  was rejected on scope rather than on preference: the same member is the normalisation for
+  `TransactionCategoryMapper`, `TransactionCategoryService` and `ReferenceBatchUpdateService`, so
+  re-deciding it there would silently change the stored form for three other paths, which is exactly
+  the divergence-between-records that a package-scope ruling exists to prevent.
+* **What was corrected alongside this entry.** Two comments — one in `TransactionTypeMapper` and one
+  in that package's `package-info.java` — asserted that this difference was **already registered
+  here**. It was not: this register held `D-REFERENCE-INTEGRITY-SENTENCE`,
+  `D-REFERENCE-ACTION-DOMAIN` and `D-REFERENCE-UPSERT-NOT-EXPOSED` and nothing about trimming, so a
+  reader following the citation found no entry and a reviewer checking the claim found it false.
+  This entry is what those comments now truthfully cite.
+* **Where equality is NOT affected.** The baseline treats surrounding blanks as **insignificant for
+  equality**: every description comparison it makes goes through a trim, at `COTRTLIC.cbl` **L1065**
+  and **L1069** and at `COTRTUPC.cbl` **L791** and **L795**. The target's no-change comparison
+  therefore trims **both** ends before comparing, so a submission differing from the stored value
+  only in leading blanks is recognised as describing the same state — as the baseline recognises it
+  — even though the two stored forms would differ byte for byte. Storage and equality are separate
+  decisions here, and the baseline makes them separately too.
+* **Where it is verified.** `ReferenceWriteBehaviourTest` asserts the stored form keeps a leading
+  blank and drops trailing ones on both create and replace, that the no-change comparison ignores
+  blanks at both ends, and that a category created against a type reuses the same normalisation.
+* **Files.**
+  `services/reference-service/src/main/java/com/carddemo/reference/mapper/TransactionTypeMapper.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/mapper/package-info.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`.
+
+#### D-AUTHORIZATION-FIFO-IDENTITY-METADATA — the queue's two identities are the card and transaction values themselves
+
+* **Baseline behaviour.** The reference consumer publishes its reply through a message
+  descriptor that carries no grouping or deduplication concept at all.
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) saves the
+  requester's correlation identifier at **L412** and its reply-to queue at
+  **L413**–**L414**, echoes the correlation value at **L745** and puts the reply with
+  `MQPUT1` at **L758**. Ordering is not expressed in metadata because it does not need to
+  be: the program reads one message, decides it, commits at **L335** and only then reads
+  the next, at **L326**–**L342**, so per-card order is a consequence of a single task
+  reading a single queue. Duplicate suppression does not exist — the get at **L389**
+  carries `MQGMO-NO-SYNCPOINT`, so a request is destroyed on read and never presented
+  again.
+* **Target behaviour.** The reply queue is FIFO, so both concepts must be expressed as
+  message metadata. `MessageGroupId` is the **card number itself**, sixteen characters
+  from `PA-RQ-CARD-NUM`, and `MessageDeduplicationId` is the **transaction identifier
+  itself**, fifteen characters from `PA-RQ-TRANSACTION-ID`. The two values are stored on
+  the outbox row in `order_group_id` and `deduplication_id` and copied onto the send
+  unchanged. A primary account number therefore appears in queue metadata, which sits
+  outside the message body that server-side encryption protects and which is reported in
+  queue telemetry and in send traces.
+* **Category.** Documented divergence — a data-exposure surface the baseline does not
+  have, created by expressing in metadata what the reference system expressed by being
+  single-threaded.
+* **Why the difference is accepted.** The identities are not this target's to choose.
+  &sect;0.4.1.8 of the technical specification states them literally —
+  "`MessageGroupId = card_num` preserves per-card ordering; `MessageDeduplicationId =
+  transaction_id` gives exactly-once" — and &sect;0.7.6 repeats the grouping rule as the
+  mechanism that preserves per-card ordering. Refactoring Rationale: an earlier revision
+  derived both through a keyed HMAC so that neither raw value reached metadata, and that
+  derivation is withdrawn because it removed the guarantees it was layered on. A group
+  identity orders one card's messages only while **every** producer on the queue computes
+  the same value for that card, and a deduplication identity suppresses a resend only
+  while the **requester** that may resend can predict it; a value keyed from this
+  service's own secret satisfies neither, so a second producer built to the specification
+  would have placed one card's messages in a different group and lost the ordering
+  guarantee outright, and an honest resend arriving by any other path would have been
+  accepted as new. Trade-offs: the accepted cost is the metadata exposure, and it is
+  bounded by three controls that are provisioned in infrastructure code rather than
+  assumed — the queues are encrypted server-side with a customer-managed KMS key
+  (`infra/modules/sqs`), they are reachable only through an interface endpoint inside the
+  private network (`infra/modules/network`), and receive and send capability is scoped to
+  the task roles of this consumer and of the requesting producer. What those controls do
+  not reach is queue telemetry and any log line that records a group identity, which is
+  why the exposure is held to **one** metadata field and asserted to be nowhere else.
+  Assumptions: this states a difference between the baseline and the target and asserts
+  nothing about either being wrong; the baseline needed no such metadata and is unchanged.
+  Alternatives Considered: masking the number to its last four digits in the group
+  identity. Rejected because grouping would then be by masked form, so two different cards
+  sharing four trailing digits would serialise against each other while appearing to be
+  correctly grouped — a correctness change disguised as a redaction. Alternatives
+  Considered: obtaining an approved specification change to permit a derived identity.
+  Rejected as the resolution here because the specification is the frozen agreed source of
+  truth for this migration and code is aligned to it; anyone revisiting the judgement
+  revisits &sect;0.4.1.8, not the publisher.
+* **Where it is verified.** `OutboxMetadataConfidentialityTest` asserts the group
+  identity equals the card number, the deduplication identity equals the transaction
+  identifier, the body still carries the number so the positional wire contract at
+  [`CCPAURLY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy) **L19** holds,
+  and — the containment rule — that no other metadata field carries the whole number, its
+  leading six digits or its trailing four. `AuthorizationRequestListenerTest` asserts the
+  two identities on the row the consumer writes, on both the first-decision and the
+  redelivery paths, and `AuthorizationFixtureContractTest` asserts that seven declined
+  replies for one card carry seven distinct deduplication identities inside one shared
+  ordering group.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/domain/AuthReplyOutbox.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/domain/OutboxMessage.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/OutboxPublisher.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/mapper/AuthorizationMessageMapper.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/config/SqsConfig.java`,
+  `services/authorization-service/src/main/resources/db/migration/V3__authorization_outbox_fifo_identities.sql`.
 
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited

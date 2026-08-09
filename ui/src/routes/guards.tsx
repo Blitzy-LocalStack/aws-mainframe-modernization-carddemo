@@ -1,3 +1,23 @@
+/**
+ * @file The route guards: the two components that decide which screens a caller may SEE, and the
+ * route an unauthenticated caller is sent to.
+ *
+ * Purpose
+ * -------
+ * Publish the sign-on route constant every screen navigates to on sign-out, and the two guard
+ * components `ui/src/router.tsx` wraps its routes in -- one requiring a token, one additionally
+ * requiring the administrative group claim. Together they replace what the reference application did
+ * by branching on the user-type byte it carried in the communication area.
+ *
+ * Rendering, not permission
+ * -------------------------
+ * Assumptions: a guard decides what is RENDERED and never what is permitted. Every service validates
+ * the token and its group claim independently, so a guard that admitted the wrong caller would show
+ * a screen and no data. Stating that here matters because the opposite reading -- treating these as
+ * the authorisation boundary -- would make it reasonable to relax a service check, and the reference
+ * application's own weakness was exactly that kind of client-side trust.
+ */
+
 import { Result } from 'antd';
 import type { ReactElement, ReactNode } from 'react';
 import { Navigate } from 'react-router';

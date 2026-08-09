@@ -101,7 +101,13 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * a decision that never committed. It does not come free, and the cost is stated rather than implied:
  * a publisher that sends and then fails before recording the send will send that reply again, so
  * publication is at-least-once and the duplicate is absorbed by the reply queue on the deduplication
- * token stored on the row. Trading a duplicate for a phantom is the only direction that preserves
+ * identity stored on the row ONLY WHILE THE REPEAT FALLS INSIDE THAT QUEUE'S FIVE-MINUTE DEDUPLICATION
+ * INTERVAL. Refactoring Rationale: that qualification was missing and the sentence read as an absolute
+ * guarantee. It is not one, and the difference decides who carries an obligation: a row whose sends fail
+ * for longer than five minutes -- an unreachable queue, a permissions change, a claim that keeps losing
+ * its race -- is delivered twice once the queue recovers, so the requester must suppress by the
+ * transaction identifier the reply itself carries. Trading a duplicate for a phantom is still the only
+ * direction that preserves
  * the invariant that a reply implies a committed decision, because a duplicate is suppressible
  * downstream and a phantom is not recoverable by anything. This is divergence D-5 in
  * {@code docs/architecture/cobol-to-service-traceability.md}. The reference sources are read as the
@@ -122,17 +128,29 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * publishable state and its state transitions. Reading a boundary assertion into this class would
  * put the service's contract in the wrong package.
  *
- * <h2>Alternatives Considered: the claim is an atomic transition, not a held lock</h2>
+ * <h2>Alternatives Considered: the claim decides by transition, not by lock mode</h2>
  *
  * <p>Alternatives Considered: selecting the candidate rows under a pessimistic row lock, with or
  * without stepping over rows another transaction already holds, and equally requesting that lock
- * through the persistence annotation that expresses a lock mode on a query method. Rejected, and the
- * reason is mechanical rather than stylistic: a lock taken as part of the selection is held until the
- * transaction ends, so the drain would hold it across the call that sends the reply to an external
- * queue service, and the progress of every other worker would then depend on that call's latency.
- * The transition below completes in one statement and holds nothing while the reply is sent. The
- * declaration under test carries the same reasoning, and no repository in this module declares a lock
- * mode at all.
+ * through the persistence annotation that expresses a lock mode on a query method. Rejected -- but
+ * NOT on the ground that the statement under test holds nothing.
+ *
+ * <p>Refactoring Rationale: this section asserted that "the transition below completes in one statement
+ * and holds nothing while the reply is sent", and that was false in both halves. The claim is an UPDATE,
+ * so it takes an ordinary row write lock on every row it changes, and that lock -- together with the
+ * database connection -- is held until the surrounding transaction ends, which for the publisher's drain
+ * is after the last send of the pass has returned. The concurrency case at the end of this class in fact
+ * DEPENDS on that lock: it establishes its overlap by asking the engine whether a session is waiting for
+ * one, which it could not do if nothing were held. The sentence therefore contradicted a mechanism this
+ * class exercises directly, and a reader sizing a connection pool from it would have sized it for a
+ * publisher that releases its connection between sends.
+ *
+ * <p>Assumptions: the real grounds for the rejection are two and both are checkable. Correctness does not
+ * DEPEND on the lock -- the token comparison decides, so a claim that waits and then finds the token
+ * changed receives the row not at all, whereas a skip-locked selection makes the lock itself the arbiter
+ * and has to be configured correctly to be safe. And deadlock is unreachable rather than merely
+ * unlikely, because every claim orders its candidates ascending by identity and so acquires in one global
+ * order. No repository in this module declares a lock mode, and that remains true.
  *
  * <p>Alternatives Considered: this class must therefore assert no pessimistic lock, no lock mode and
  * no statement that steps over locked rows. The prohibition is recorded here rather than merely
@@ -142,14 +160,22 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * its place is the pair of assertions the transition actually supports, a claim that succeeds and a
  * competing claim that takes nothing, and the concurrency proof that runs them at once.
  *
- * <p>Assumptions: the transition is over the ATTEMPT COUNTER and the publication instant, and not
- * over a status column, because this table declares no status column. The migration records
- * publication by whether {@code published_at} is set, counts tries in {@code attempts} and keeps a
- * diagnostic in {@code last_error}; the entity's own contract states the same absence. A claim
- * therefore advances {@code attempts} from the value it observed, under a predicate naming that same
- * value and requiring {@code published_at} to be null, and reports success by RETURNING the rows it
- * changed rather than by an affected-row count. Every assertion below is written against that
- * signal, which is why a claim's result is a row list and never a number.
+ * <p>Assumptions: the transition is over the CLAIM TOKEN and the publication instant, and not over a
+ * status column, because this table declares no status column. The migration records publication by
+ * whether {@code published_at} is set, holds the transition token in {@code claim_version}, counts
+ * transport calls in {@code attempts} and keeps a diagnostic in {@code last_error}. A claim therefore
+ * advances {@code claim_version} from the value it observed, under a predicate naming that same value
+ * and requiring {@code published_at} to be null, and reports success by RETURNING the rows it changed
+ * rather than by an affected-row count. Every assertion below is written against that signal, which is
+ * why a claim's result is a row list and never a number.
+ *
+ * <p>Refactoring Rationale: the token was {@code attempts} and is now a column of its own, added by
+ * {@code V2__authorization_outbox_claim_version.sql}. One column carrying both jobs meant the transition
+ * moved for reasons that were not claims -- a recorded send failure advanced it, and so did retiring an
+ * expired row that was never sent -- so a concurrent claim of an untouched row could be refused by
+ * another pass's reporting, and the counter's value was neither a claim count nor a send count. The
+ * assertions below therefore read the two columns separately, and the ones that previously expected a
+ * counter to have moved on a claim now expect the token to have moved and the counter not to have.
  *
  * <h2>Assumptions: the payload is opaque, and its length is not this package's business</h2>
  *
@@ -185,6 +211,18 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * statement, so it stays the caller's configuration; the module's test profile carries it as
  * {@code carddemo.messaging.request-process-limit}, and the assertion below reads it from there
  * rather than repeating the number, so the provenance is asserted and not just described.
+ *
+ * <p>Assumptions: what is asserted below is the FIGURE and not an effective count, and the two differ
+ * by one in the reference. Its counter is incremented at L332 and only then compared with {@code >} at
+ * L339, so counts one through five hundred each read a further request and the loop ends on count
+ * <b>501</b> -- the declared limit is 500 and the observed behaviour is 501. The migration reproduces
+ * the observed 501 by adding {@code AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET} to this
+ * configured figure, so the number configured stays the number the reference program declares and no
+ * divergence is registered for the bound; the effective count is asserted where the window is
+ * enforced, by {@code service.AuthorizationRequestListenerTest}'s case that a window closes on exactly
+ * its admission allowance and not one message past it. This is recorded here because a reader who took
+ * the provenance assertion below as a statement about behaviour would conclude that both the reference
+ * consumer and this one stop at five hundred, which neither does.
  *
  * <h2>Assumptions: marking published is idempotent, and ordering is by identity</h2>
  *
@@ -399,12 +437,27 @@ class OutboxRepositoryIT {
     private static final int UNRESTRICTIVE_BATCH = 50;
 
     /**
-     * The reference consumer's own per-invocation message bound.
+     * An attempt ceiling high enough that no case reaches it unless it means to.
      *
-     * <p>Assumptions: this mirrors {@code WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500} at
-     * {@code cbl/COPAUA0C.cbl} L40, whose loop ends at L339 once the processed count exceeds it. It
-     * exists here only to be compared against the configured value, so that the configuration is
-     * shown to carry the reference figure rather than some number chosen independently.</p>
+     * <p>Assumptions: the claim now refuses a row whose attempt count has reached the caller's ceiling,
+     * which is the terminal policy that stops a permanently unreachable queue holding a group's head
+     * forever. Every case that is not ABOUT that policy passes this value, so the ceiling is never an
+     * unstated variable in an assertion about ordering, grouping or retention.</p>
+     */
+    private static final int UNRESTRICTIVE_ATTEMPTS = 1_000;
+
+    /**
+     * The reference consumer's own per-invocation message bound, as DECLARED.
+     *
+     * <p>Assumptions: this is the literal of
+     * {@code WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500} at {@code cbl/COPAUA0C.cbl} L40, and
+     * it is the declared limit rather than the 501 that program's increment-then-compare arrives at.
+     * It exists here only to be compared against the configured value, so that the configuration is
+     * shown to carry the reference figure rather than some number chosen independently; the one-message
+     * difference between the declared and the observed bound is carried in code as
+     * {@code AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET}, which the listener adds to the
+     * configured figure, and the resulting admission allowance is asserted where the window is
+     * enforced.</p>
      */
     private static final short REFERENCE_PROCESS_LIMIT = 500;
 
@@ -418,6 +471,35 @@ class OutboxRepositoryIT {
      */
     private static final LocalDateTime BASE_INSTANT =
             LocalDateTime.of(2022, 7, 18, 22, 15, 30, 123_456_000);
+
+    /**
+     * A readiness instant later than any row these cases create, so nothing is withheld by its lease.
+     *
+     * <p>Assumptions: the claim admits only rows whose next-attempt instant has arrived, which is what
+     * makes a claim durable without a lock and what gives a failed row its backoff. A case whose subject
+     * is ordering or grouping rather than readiness passes an instant far past every row it built, so
+     * readiness cannot silently be the reason a row was or was not returned.</p>
+     */
+    private static final LocalDateTime READY_INSTANT = BASE_INSTANT.plusYears(1);
+
+    /**
+     * The lease instant the readiness-agnostic cases hand to the claim.
+     *
+     * <p>Assumptions: it is later than {@link #READY_INSTANT}, so a row this pass claims is withheld from
+     * a second claim at the same readiness instant. That is the property the split between claiming and
+     * sending depends on, so it is the default posture here rather than something each case arranges.</p>
+     */
+    private static final LocalDateTime LEASE_INSTANT = BASE_INSTANT.plusYears(2);
+
+    /**
+     * How many rows one retention chunk removes in the cases that assert chunking.
+     */
+    private static final int RETENTION_CHUNK = 2;
+
+    /**
+     * A retention chunk larger than any population these cases build, for the cases not about chunking.
+     */
+    private static final int UNRESTRICTIVE_CHUNK = 100;
 
     /**
      * How far past its creation instant a row's reply deadline is set, in seconds.
@@ -606,13 +688,13 @@ class OutboxRepositoryIT {
 
         assertThat(stored.getReplyQueueUrl()).isEqualTo(REPLY_QUEUE_URL);
         assertThat(stored.getCorrelationId()).isEqualTo(CORRELATION_ID);
-        assertThat(stored.getOrderGroupToken()).isEqualTo(group);
-        assertThat(stored.getDeduplicationToken()).isEqualTo(token);
+        assertThat(stored.getOrderGroupId()).isEqualTo(group);
+        assertThat(stored.getDeduplicationId()).isEqualTo(token);
         assertThat(stored.getContentType()).isEqualTo(AuthReplyOutbox.CONTENT_TYPE_CSV);
         assertThat(stored.getCreatedAt()).isEqualTo(BASE_INSTANT);
         assertThat(stored.getExpiresAt())
                 .isEqualTo(BASE_INSTANT.plusSeconds(REPLY_DEADLINE_SECONDS));
-        assertThat(stored.getAttempts()).isEqualTo((short) 0);
+        assertThat(stored.getAttempts()).isEqualTo(0);
         assertThat(stored.getPublishedAt()).isNull();
         assertThat(stored.getLastError()).isNull();
         assertThat(stored.isPublished()).isFalse();
@@ -749,9 +831,16 @@ class OutboxRepositoryIT {
     //       reading it from the property instead proves the drain is bounded by configuration rather
     //       than by a figure compiled into a statement. The reference figure is
     //       WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500, declared at
-    //       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L40, whose loop ends at L339 once the
-    //       processed count exceeds it, so keeping the two equal is what stops the migration silently
-    //       changing the throughput characteristic it inherited.
+    //       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L40, so keeping the CONFIGURED figure
+    //       equal to the DECLARED one is what stops the migration silently changing the throughput
+    //       characteristic it inherited.
+    // WHY : Assumptions: equality here is between the configured value and the reference's declared
+    //       literal, and NOT between two effective counts. That program increments at L332 before
+    //       comparing with > at L339, so it admits 501 requests, and the target admits 501 as well --
+    //       AuthorizationRequestListener adds its published BASELINE_COMPARISON_OFFSET to the figure
+    //       asserted here. Keeping the two numbers separate is what lets this case assert provenance
+    //       against the declared literal; the effective allowance is asserted by
+    //       service.AuthorizationRequestListenerTest, not here.
     @Test
     @DisplayName("the configured per-invocation bound carries the reference figure")
     void configuredBoundCarriesTheReferenceFigure() {
@@ -759,29 +848,34 @@ class OutboxRepositoryIT {
     }
 
     /**
-     * Confirms a claim advances the attempt counter of the row it takes.
+     * Confirms a claim advances the claim token of the row it takes and NOT its send counter.
      */
-    // WHY : Assumptions: the counter is the transition's observable half, so this is the positive case
-    //       of the mechanism that replaces a held lock. The row is read back as well as inspected as
-    //       returned, because the returned instance is what the claiming statement produced and only a
-    //       fresh read establishes that the change was committed rather than merely constructed.
+    // WHY : Assumptions: the token is the transition's observable half, so this is the positive case of
+    //       the mechanism the claim decides by. The row is read back as well as inspected as returned,
+    //       because the returned instance is what the claiming statement produced and only a fresh read
+    //       establishes that the change was committed rather than merely constructed.
     // WHY : Assumptions: the publication instant is asserted still absent, because a claim is not a
     //       publication. Conflating the two would make a claimed row look sent, and the row would then
     //       be unrecoverable if the pass that claimed it never reached the queue.
+    // WHY : Refactoring Rationale: the send counter is asserted NOT to have moved, and this case used to
+    //       assert that it had -- the claim advanced it, because one column carried both jobs. That is
+    //       the defect this pair of assertions now pins from both sides: a claim is not a send, and an
+    //       operator reading the two columns has to be able to tell a row claimed forty times and never
+    //       sent from one sent forty times and always failed.
     @Test
-    @DisplayName("a claim advances the attempt counter of the row it takes")
-    void claimAdvancesTheAttemptCounterOfTheRowItTakes() {
+    @DisplayName("a claim advances the claim token of the row it takes and not its send counter")
+    void claimAdvancesTheClaimTokenOfTheRowItTakes() {
         AuthReplyOutbox persisted = persistOne(pendingRow(
                 orderGroup("advance", 1), deduplication("advance", 1), BASE_INSTANT));
 
         List<AuthReplyOutbox> claimed = claimHeads(UNRESTRICTIVE_BATCH);
 
         assertThat(identities(claimed)).containsExactly(persisted.getOutboxId());
-        assertThat(claimed.get(0).getAttempts()).isEqualTo((short) 1);
+        assertThat(claimed.get(0).getAttempts()).isEqualTo(1);
 
         AuthReplyOutbox stored = reload(persisted.getOutboxId());
 
-        assertThat(stored.getAttempts()).isEqualTo((short) 1);
+        assertThat(stored.getAttempts()).isEqualTo(1);
         assertThat(stored.getPublishedAt()).isNull();
     }
 
@@ -805,7 +899,7 @@ class OutboxRepositoryIT {
 
         assertThat(claimHeads(UNRESTRICTIVE_BATCH)).isEmpty();
         assertThatCode(() -> claimHeads(UNRESTRICTIVE_BATCH)).doesNotThrowAnyException();
-        assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo((short) 0);
+        assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo(0);
     }
 
     /**
@@ -825,19 +919,156 @@ class OutboxRepositoryIT {
     //       tolerable only because the reply queue suppresses the duplicate on the deduplication token
     //       stored on the row, and it is the right way round: a duplicate is suppressible downstream
     //       whereas a reply that was never sent is not recoverable by anything.
+    // WHY : Refactoring Rationale: this case now asserts BOTH halves of the lease, and it previously
+    //       asserted only the second. It claimed the same row twice at the same instant and required
+    //       both to succeed, which was true then because a claim left the row immediately eligible --
+    //       and that eligibility is exactly the defect: the only thing keeping a concurrent publisher
+    //       off a row being sent was an uncommitted row write, so the send had to stay inside the
+    //       database transaction that held it. A claim now defers the row to a lease, so the correct
+    //       contract is that a second claim WITHIN the lease is refused and one after it succeeds.
     @Test
-    @DisplayName("a row already claimed but not yet published stays claimable")
-    void rowAlreadyClaimedButNotPublishedStaysClaimable() {
+    @DisplayName("a claimed row is withheld for its lease and claimable again once it lapses")
+    void aClaimedRowIsWithheldForItsLeaseAndClaimableAgainOnceItLapses() {
         AuthReplyOutbox persisted = persistOne(pendingRow(
                 orderGroup("reclaim", 1), deduplication("reclaim", 1), BASE_INSTANT));
 
         List<AuthReplyOutbox> firstClaim = claimHeads(UNRESTRICTIVE_BATCH);
-        List<AuthReplyOutbox> secondClaim = claimHeads(UNRESTRICTIVE_BATCH);
+        List<AuthReplyOutbox> withinLease = claimHeads(UNRESTRICTIVE_BATCH);
+        List<AuthReplyOutbox> afterLease = claimHeads(UNRESTRICTIVE_BATCH,
+                LEASE_INSTANT.plusSeconds(1), LEASE_INSTANT.plusYears(1), UNRESTRICTIVE_ATTEMPTS);
 
         assertThat(identities(firstClaim)).containsExactly(persisted.getOutboxId());
-        assertThat(identities(secondClaim)).containsExactly(persisted.getOutboxId());
-        assertThat(secondClaim.get(0).getAttempts()).isEqualTo((short) 2);
+        assertThat(withinLease).isEmpty();
+        assertThat(identities(afterLease)).containsExactly(persisted.getOutboxId());
+        // WHY : Assumptions: TWO is two CLAIMS here, not one claim and one failure. Each claim advances
+        //       the counter exactly once and nothing else does, so the number is a count of attempts
+        //       BEGUN -- which is what the terminal ceiling is compared against.
+        assertThat(afterLease.get(0).getAttempts()).isEqualTo(2);
+        // WHY : Assumptions: the row is still unpublished throughout. A lease defers a row; it must
+        //       never write off a reply the committed data says was produced, which is the one property
+        //       this whole table exists to provide.
         assertThat(reload(persisted.getOutboxId()).getPublishedAt()).isNull();
+    }
+
+    /**
+     * Confirms a row at the attempt ceiling leaves the ready set instead of being retried forever.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    // WHY : Assumptions: the ceiling is compared with a strict less-than, so a row AT it is refused and
+    //       a row one below it is taken. Asserting both sides is the point: an off-by-one here either
+    //       abandons a reply that still had an attempt left, or leaves a permanently unreachable one
+    //       holding its group's head position forever -- which is the liveness failure the ceiling was
+    //       introduced to remove, and the reason a group's later replies were blocked without bound.
+    @Test
+    @DisplayName("a row at the attempt ceiling is no longer a claim candidate")
+    void aRowAtTheAttemptCeilingIsNoLongerAClaimCandidate() {
+        AuthReplyOutbox persisted = persistOne(pendingRow(
+                orderGroup("ceiling", 1), deduplication("ceiling", 1), BASE_INSTANT));
+        claimHeads(UNRESTRICTIVE_BATCH);
+        claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.plusSeconds(1), LEASE_INSTANT.plusSeconds(2),
+                UNRESTRICTIVE_ATTEMPTS);
+
+        LocalDateTime ready = LEASE_INSTANT.plusSeconds(3);
+        assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo(2);
+        assertThat(claimHeads(UNRESTRICTIVE_BATCH, ready, ready.plusMinutes(1), 2)).isEmpty();
+        assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, ready, ready.plusMinutes(1), 3)))
+                .containsExactly(persisted.getOutboxId());
+    }
+
+    /**
+     * Confirms an abandoned row is invisible to the claim and to the retention sweep alike.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    // WHY : Assumptions: both halves are asserted together because they are one contract. Abandonment is
+    //       terminal, so the claim must not return the row however ready it looks; and it is EVIDENCE,
+    //       so the sweep must not remove it on an operational timer. Trade-offs: the row keeps a payload
+    //       carrying a card number beyond the retention window, which is deliberate -- it is a reply the
+    //       committed decision says was owed and that was never delivered, and deleting it silently
+    //       would destroy the only record of that.
+    @Test
+    @DisplayName("an abandoned row is claimed by nothing and swept by nothing")
+    void anAbandonedRowIsClaimedByNothingAndSweptByNothing() {
+        AuthReplyOutbox persisted = persistOne(pendingRow(
+                orderGroup("abandon", 1), deduplication("abandon", 1), BASE_INSTANT));
+        abandon(persisted.getOutboxId(), BASE_INSTANT, PUBLICATION_FAILURE_REASON);
+
+        assertThat(claimHeads(UNRESTRICTIVE_BATCH)).isEmpty();
+        assertThat(deletePublishedBefore(READY_INSTANT)).isZero();
+        AuthReplyOutbox stored = reload(persisted.getOutboxId());
+        assertThat(stored.isAbandoned()).isTrue();
+        assertThat(stored.getPublishedAt())
+                .as("abandonment must never read as delivered")
+                .isNull();
+    }
+
+    /**
+     * Confirms the ready set prefers the group whose backoff has elapsed over a globally older one.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    // WHY : Refactoring Rationale: this case exists because the earlier ready set was the globally
+    //       OLDEST pending rows and nothing else. A small number of permanently failing heads were
+    //       therefore reselected on every poll -- they never stopped being the oldest -- and at a full
+    //       batch of such rows every healthy group behind them was starved, a liveness failure that
+    //       retrying could not clear. Ordering the candidates by next-attempt instant first is what
+    //       makes a failing group yield its place, so this asserts the younger ready group is returned
+    //       and the older deferred one is not.
+    @Test
+    @DisplayName("among equally ready groups the one waiting longest for its turn is taken first")
+    void amongEquallyReadyGroupsTheOneWaitingLongestForItsTurnIsTakenFirst() {
+        AuthReplyOutbox failing = persistOne(pendingRow(
+                orderGroup("fair", 1), deduplication("fair", 1), BASE_INSTANT));
+        AuthReplyOutbox healthy = persistOne(pendingRow(
+                orderGroup("fair", 2), deduplication("fair", 2), BASE_INSTANT));
+        assertThat(failing.getOutboxId())
+                .as("the failing group must be the globally OLDER row for this to discriminate")
+                .isLessThan(healthy.getOutboxId());
+
+        // WHY : Assumptions: BOTH rows are ready at the claim instant, and that is what makes this a
+        //       test of the ORDERING rather than of the readiness filter. The failing row's backoff has
+        //       already elapsed -- which is the steady state of a permanently failing group, since every
+        //       backoff eventually elapses -- so a readiness predicate alone excludes neither row. The
+        //       only thing that separates them is which the candidate set offers first, so a batch of one
+        //       returns whichever the ordering prefers.
+        LocalDateTime failedAt = BASE_INSTANT.plusMinutes(1);
+        recordFailure(failing.getOutboxId(), PUBLICATION_FAILURE_REASON, failedAt);
+        LocalDateTime ready = failedAt.plusMinutes(1);
+
+        assertThat(identities(claimHeads(1, ready, ready.plusMinutes(1), UNRESTRICTIVE_ATTEMPTS)))
+                .as("a group that has already been attempted yields to one that has not")
+                .containsExactly(healthy.getOutboxId());
+    }
+
+    /**
+     * Confirms the retention sweep removes at most one chunk and reports how many it removed.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    // WHY : Refactoring Rationale: the sweep deletes an ordered, bounded chunk rather than every row
+    //       matching the cut-off, and this case is what holds it to that. The published side of this
+    //       table is the part that grows without limit, so a single statement over the whole matching
+    //       population is unbounded by construction -- worst exactly when the sweep has not run for a
+    //       while, which is when it matters most. Asserting the chunk is honoured AND that a following
+    //       call finishes the job is what makes the bound safe rather than merely smaller.
+    @Test
+    @DisplayName("the retention sweep deletes at most one ordered chunk per call")
+    void theRetentionSweepDeletesAtMostOneOrderedChunkPerCall() {
+        for (int ordinal = 1; ordinal <= 5; ordinal++) {
+            AuthReplyOutbox row = persistOne(pendingRow(orderGroup("chunk", ordinal),
+                    deduplication("chunk", ordinal), BASE_INSTANT));
+            markPublished(row.getOutboxId(), BASE_INSTANT.plusSeconds(ordinal));
+        }
+        LocalDateTime cutoff = BASE_INSTANT.plusMinutes(1);
+
+        assertThat(deletePublishedBefore(cutoff, RETENTION_CHUNK)).isEqualTo(RETENTION_CHUNK);
+        assertThat(deletePublishedBefore(cutoff, RETENTION_CHUNK)).isEqualTo(RETENTION_CHUNK);
+        // WHY : Assumptions: the third call returns fewer than the chunk, which is precisely the signal
+        //       the publisher's sweep loop stops on. Asserting the SHORT chunk rather than only the
+        //       eventual zero is what proves the loop terminates without an extra empty round trip.
+        assertThat(deletePublishedBefore(cutoff, RETENTION_CHUNK)).isEqualTo(1);
+        assertThat(deletePublishedBefore(cutoff, RETENTION_CHUNK)).isZero();
     }
 
     /**
@@ -861,8 +1092,10 @@ class OutboxRepositoryIT {
     //       and the row can be transitioned from a given counter value only once.
     // WHY : Alternatives Considered: asserting that one of the two calls raised, which is what a
     //       pessimistic lock with a no-wait or a skip behaviour would have produced. Rejected because
-    //       the design under test deliberately takes no lock: the losing pass is meant to observe an
-    //       ordinary empty result and move on, and an exception on a contended claim would turn
+    //       the design under test declares no lock MODE -- it does take the row write lock its own
+    //       UPDATE implies, which is what the waiting session this method detects is waiting for -- so
+    //       the losing pass is meant to wait, observe an ordinary empty result and move on, and an
+    //       exception on a contended claim would turn
     //       routine concurrency into an error an operator has to triage.
     @Test
     @DisplayName("two claims reaching one row together leave exactly one winner")
@@ -875,16 +1108,17 @@ class OutboxRepositoryIT {
         try {
             Future<List<AuthReplyOutbox>> holder = claimants.submit(
                     () -> this.commit.execute(status -> {
-                        List<AuthReplyOutbox> taken =
-                                this.repository.claimGroupHeads(UNRESTRICTIVE_BATCH);
+                        List<AuthReplyOutbox> taken = this.repository.claimGroupHeads(
+                                UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT,
+                                UNRESTRICTIVE_ATTEMPTS);
                         claimTaken.countDown();
                         awaitSignal(mayCommit);
                         return taken;
                     }));
             Future<List<AuthReplyOutbox>> contender = claimants.submit(() -> {
                 awaitSignal(claimTaken);
-                return this.commit.execute(
-                        status -> this.repository.claimGroupHeads(UNRESTRICTIVE_BATCH));
+                return this.commit.execute(status -> this.repository.claimGroupHeads(
+                        UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS));
             });
 
             awaitBlockedSession();
@@ -895,7 +1129,7 @@ class OutboxRepositoryIT {
 
             assertThat(identities(winner)).containsExactly(persisted.getOutboxId());
             assertThat(loser).isEmpty();
-            assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo((short) 1);
+            assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo(1);
         } finally {
             claimants.shutdownNow();
         }
@@ -909,7 +1143,7 @@ class OutboxRepositoryIT {
     //       queue orders messages within a group only in the sequence it accepted them, so a pass
     //       holding two rows of one group whose earlier send failed while the drain continued would
     //       place the later reply ahead of the earlier one, reversing two answers for one card, which
-    //       is the single guarantee the group token exists to give.
+    //       is the single guarantee the group identity exists to give.
     // WHY : Assumptions: the follow-on claim is bounded BELOW by the identity just handled rather than
     //       by re-reading the group's head, so a row this pass has already handled cannot come back
     //       whatever its stored state now says. The bound is exclusive, which is asserted directly:
@@ -990,18 +1224,35 @@ class OutboxRepositoryIT {
     //       failed is precisely the reply this table exists to guarantee. A failure that made the row
     //       ineligible would discard an answer the committed data says was produced.
     @Test
-    @DisplayName("a recorded failure advances the counter and leaves the row claimable")
-    void recordedFailureAdvancesTheCounterAndLeavesTheRowClaimable() {
+    @DisplayName("a claim then a failure counts one attempt and defers the row to its backoff")
+    void aClaimThenAFailureCountsOneAttemptAndDefersTheRowToItsBackoff() {
         AuthReplyOutbox persisted = persistOne(pendingRow(
                 orderGroup("failure", 1), deduplication("failure", 1), BASE_INSTANT));
 
-        recordFailedAttempt(persisted.getOutboxId(), PUBLICATION_FAILURE_REASON);
+        List<AuthReplyOutbox> claimed = claimHeads(UNRESTRICTIVE_BATCH);
+        recordFailure(persisted.getOutboxId(), PUBLICATION_FAILURE_REASON, LEASE_INSTANT);
         AuthReplyOutbox afterFailure = reload(persisted.getOutboxId());
 
-        assertThat(afterFailure.getAttempts()).isEqualTo((short) 1);
+        // WHY : Refactoring Rationale: the counter reads ONE after a claim and a recorded failure, and
+        //       that is the assertion this case was changed to make. It previously recorded a failure
+        //       against a row it had never claimed and asserted one, which held whichever way the
+        //       increment was arranged; the defect it could not see was that a claim incremented and
+        //       the failure record incremented AGAIN, so a real failed publication counted two. With a
+        //       sixteen-bit column that reached the signed limit in half the expected time and wrapped
+        //       negative, at which point every attempt-bounded predicate read the row as fresh.
+        assertThat(claimed).hasSize(1);
+        assertThat(afterFailure.getAttempts()).isEqualTo(1);
         assertThat(afterFailure.getLastError()).isEqualTo(PUBLICATION_FAILURE_REASON);
         assertThat(afterFailure.getPublishedAt()).isNull();
-        assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH)))
+        // WHY : Assumptions: the row is claimable again only ONCE ITS BACKOFF HAS ARRIVED, so readiness
+        //       is asserted at an instant after the backoff and refused at one before it. A failure that
+        //       left the row immediately eligible is what starved every healthy group behind a
+        //       permanently failing head, and a failure that made it permanently ineligible would
+        //       discard an answer the committed data says was produced.
+        assertThat(claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.minusSeconds(1), LEASE_INSTANT,
+                UNRESTRICTIVE_ATTEMPTS)).isEmpty();
+        assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.plusSeconds(1),
+                LEASE_INSTANT.plusYears(1), UNRESTRICTIVE_ATTEMPTS)))
                 .containsExactly(persisted.getOutboxId());
     }
 
@@ -1046,9 +1297,9 @@ class OutboxRepositoryIT {
     /**
      * Builds one unpublished reply row, ready to be persisted.
      *
-     * @param orderGroupToken the ordering group the row belongs to, which decides whether a claim
+     * @param orderGroupId the ordering group the row belongs to, which decides whether a claim
      *     treats it as a head or as a follower
-     * @param deduplicationToken the duplicate-suppression token the row carries, distinct per row so
+     * @param deduplicationId the duplicate-suppression token the row carries, distinct per row so
      *     that two rows are never indistinguishable to a reader of the table
      * @param createdAt the creation instant to store, supplied explicitly rather than defaulted
      * @return a new row carrying no publication instant, a zero attempt counter and the opaque
@@ -1064,9 +1315,9 @@ class OutboxRepositoryIT {
     //       Whether that deadline is honoured is service behaviour and is not asserted here; the value
     //       is set so the column is exercised with a realistic one rather than left null.
     private AuthReplyOutbox pendingRow(
-            String orderGroupToken, String deduplicationToken, LocalDateTime createdAt) {
-        return new AuthReplyOutbox(REPLY_QUEUE_URL, CORRELATION_ID, orderGroupToken,
-                deduplicationToken, OPAQUE_PAYLOAD, createdAt.plusSeconds(REPLY_DEADLINE_SECONDS),
+            String orderGroupId, String deduplicationId, LocalDateTime createdAt) {
+        return new AuthReplyOutbox(REPLY_QUEUE_URL, CORRELATION_ID, orderGroupId,
+                deduplicationId, OPAQUE_PAYLOAD, createdAt.plusSeconds(REPLY_DEADLINE_SECONDS),
                 createdAt);
     }
 
@@ -1110,22 +1361,41 @@ class OutboxRepositoryIT {
     //       leave the counter where it started, and the next assertion in the same method would then
     //       observe a row that had never been claimed.
     private List<AuthReplyOutbox> claimHeads(int batchSize) {
-        return this.commit.execute(status -> this.repository.claimGroupHeads(batchSize));
+        return claimHeads(batchSize, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS);
+    }
+
+    /**
+     * Claims group head rows with the readiness instant, lease and attempt ceiling stated, and commits.
+     *
+     * <p>Assumptions: the four-argument form exists so that the cases whose subject IS readiness, the
+     * lease or the terminal ceiling can vary exactly one of them, while every other case goes through
+     * the one-argument form above and cannot accidentally depend on any of the three.</p>
+     *
+     * @param batchSize the greatest number of ordering groups to take a head row from
+     * @param now the instant readiness is judged against
+     * @param leaseUntil the instant each claimed row's next attempt is deferred to
+     * @param maxAttempts the attempt count at or above which a row is no longer a candidate
+     * @return the rows the claim actually transitioned, in ascending identity order
+     */
+    private List<AuthReplyOutbox> claimHeads(int batchSize, LocalDateTime now,
+            LocalDateTime leaseUntil, int maxAttempts) {
+        return this.commit.execute(status ->
+                this.repository.claimGroupHeads(batchSize, now, leaseUntil, maxAttempts));
     }
 
     /**
      * Claims the pending rows of one ordering group above a given identity, and commits.
      *
-     * @param orderGroupToken the ordering group to advance within
+     * @param orderGroupId the ordering group to advance within
      * @param afterOutboxId the identity already handled, treated as an exclusive lower bound
      * @param batchSize the greatest number of follow-on rows to take
      * @return the rows the claim actually transitioned, in ascending identity order, which is empty
      *     when the group holds no further pending row above the bound
      */
     private List<AuthReplyOutbox> claimFollowers(
-            String orderGroupToken, long afterOutboxId, int batchSize) {
-        return this.commit.execute(status ->
-                this.repository.claimGroupFollowers(orderGroupToken, afterOutboxId, batchSize));
+            String orderGroupId, long afterOutboxId, int batchSize) {
+        return this.commit.execute(status -> this.repository.claimGroupFollowers(orderGroupId,
+                afterOutboxId, batchSize, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS));
     }
 
     /**
@@ -1145,14 +1415,32 @@ class OutboxRepositoryIT {
     }
 
     /**
-     * Records one failed publication attempt against a row, and commits.
+     * Records why a publication attempt failed and when the next one may be made, and commits.
      *
-     * @param outboxId the identity of the row to charge the attempt to
+     * <p>Assumptions: this records a failure WITHOUT advancing the attempt counter, because the claim
+     * that took the row already advanced it. The counter is therefore a count of attempts begun, which
+     * is what the terminal ceiling compares against; recording here as well would count every failure
+     * twice.</p>
+     *
+     * @param outboxId the identity of the row to record the failure against
+     * @param reason the diagnostic to store against the row
+     * @param nextAttemptAt the backoff instant before which the row is not a claim candidate
+     */
+    private void recordFailure(long outboxId, String reason, LocalDateTime nextAttemptAt) {
+        this.commit.executeWithoutResult(status ->
+                loadWithinTransaction(outboxId).recordFailure(reason, nextAttemptAt));
+    }
+
+    /**
+     * Abandons one row permanently, and commits.
+     *
+     * @param outboxId the identity of the row to abandon
+     * @param abandonedAt the instant to record as the abandonment instant
      * @param reason the diagnostic to store against the row
      */
-    private void recordFailedAttempt(long outboxId, String reason) {
+    private void abandon(long outboxId, LocalDateTime abandonedAt, String reason) {
         this.commit.executeWithoutResult(status ->
-                loadWithinTransaction(outboxId).recordFailedAttempt(reason));
+                loadWithinTransaction(outboxId).abandon(abandonedAt, reason));
     }
 
     /**
@@ -1194,7 +1482,19 @@ class OutboxRepositoryIT {
     //       read-write transaction, and the boundary declares none of its own, so invoking it bare
     //       would raise before the retention rule under test had a chance to be exercised.
     private int deletePublishedBefore(LocalDateTime cutoff) {
-        return this.commit.execute(status -> this.repository.deletePublishedBefore(cutoff));
+        return deletePublishedBefore(cutoff, UNRESTRICTIVE_CHUNK);
+    }
+
+    /**
+     * Deletes at most one chunk of rows published before a cut-off, and commits.
+     *
+     * @param cutoff the instant a published row must precede to be removed
+     * @param chunkSize the greatest number of rows this call removes
+     * @return how many rows were removed
+     */
+    private int deletePublishedBefore(LocalDateTime cutoff, int chunkSize) {
+        return this.commit
+                .execute(status -> this.repository.deletePublishedBefore(cutoff, chunkSize));
     }
 
     /**

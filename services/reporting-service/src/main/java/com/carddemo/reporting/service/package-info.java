@@ -20,8 +20,30 @@
  * {@code src/main/resources/openapi/reporting-api.yaml} settles the four operations they expose. The
  * business rules stay here and none of them moves into a controller: the report-type exclusivity, the
  * per-type date-range derivation, the confirmation vocabulary, the integrity reconciliation, the
- * subtotal accumulation and the masked-collision refusal are all owned by these classes, and a
+ * subtotal accumulation and the statement selector rules are all owned by these classes, and a
  * controller only maps their outcomes onto statuses.</p>
+ *
+ * <p>Refactoring Rationale: that list named a "masked-collision refusal" and no longer does, because the
+ * refusal it named cannot occur. Statement selection was a lookup by the card's masked rendering, which
+ * is twelve constant asterisks and four digits -- so it named a TAIL, and the collision was the case
+ * where two cards shared one. Two cards sharing a tail raised that refusal and a legitimate request was
+ * refused; worse, ONE card sharing a tail with a card that did not exist matched exactly one row and the
+ * caller received a different cardholder's statement with nothing recording the substitution. Selection
+ * is now an equality on the whole number, performed by a definer-rights function that is the only
+ * construct in the reporting schema able to express one, so at most one row can match and there is
+ * nothing to collide. What replaces the entry is the pair of rules that IS enforced here:
+ * exactly-one-of a card and an account, and a refusal when a named account holds more than one card --
+ * because a statement is a per-card document and an account with several cards has several statements
+ * with no basis for choosing between them.</p>
+ *
+ * <p>Assumptions: these services also serve the BATCH half of the context, and the callers there are
+ * not controllers. {@code com.carddemo.reporting.task} drives the whole-run statement generation and the
+ * report generation through the same two classes the HTTP paths use, passing a sink rather than
+ * receiving a response. That is why the generation methods take a destination as a parameter and hold no
+ * client of their own: one set of business rules, two destinations, and no path where a rule is stated
+ * twice. It is also why no generation method here is transactional across its whole run -- each reads in
+ * bounded chunks and closes each read before offering a record, so no database transaction is open while
+ * an object-store write is in flight.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work

@@ -1,12 +1,14 @@
 package com.carddemo.authorization.repository;
-
 import com.carddemo.authorization.domain.PendingAuthSummary;
-import jakarta.persistence.LockModeType;
+import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 /**
  * Reads and writes the per-account pending-authorization summary.
@@ -18,6 +20,17 @@ import org.springframework.data.jpa.repository.Lock;
  * three movements over that segment appear across the eight reference programs, and all three are
  * below: a keyed read of one account, a whole-segment rewrite, and a sequential walk of every root in
  * key order.</p>
+ *
+ * <p>Assumptions: three movements are served by FOUR declarations, because two of them are declared
+ * twice at different strengths and the walk is declared twice at different widths. The keyed read
+ * appears once holding the row and once not; the walk appears once returning whole summaries and once
+ * returning only the keys they are addressed by. Refactoring Rationale: the key-projected walk was
+ * added for the purge, which must not mutate a summary it read before taking the lock -- a row already
+ * loaded into the persistence context is returned from it again by a later locking read, so the state
+ * the caller then adjusts is the state read BEFORE the lock, which is the read-modify-write the lock
+ * exists to prevent. Projecting the walk to keys means the entity is loaded for the first time under
+ * the lock, and the alternative of refreshing the loaded instance was rejected as a second statement
+ * doing what one correctly-ordered statement already does.</p>
  *
  * <p>The rulings this interface inherits rather than restates -- where the transaction boundary lives,
  * why nothing on this boundary masks a value, why every monetary member is
@@ -105,48 +118,135 @@ import org.springframework.data.jpa.repository.Lock;
  */
 public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthSummary, Long> {
 
+    // WHY : Refactoring Rationale: a findWithLockByAccountId declared under
+    //       @Lock(LockModeType.PESSIMISTIC_WRITE) stood here and has been WITHDRAWN. It was documented as
+    //       a deliberate target-side divergence, and the evidence in that documentation was right: the
+    //       baseline holds nothing on this path -- cpy/IMSFUNCS.cpy declares all three get-hold function
+    //       codes (FUNC-GHU L19, FUNC-GHN L21, FUNC-GHNP L23) and no program in the reference tree passes
+    //       any of them, the codes actually passed being the non-hold FUNC-GU, FUNC-GN and FUNC-GNP, with
+    //       both unload views running PROCOPT=GOTP at ims/PAUTBUNL.PSB L18 and ims/DLIGSAMP.PSB L18. A
+    //       pessimistic row lock is therefore concurrency machinery the reference system does not have,
+    //       and it is not admissible here.
+    // WHY : Assumptions: the PROBLEM that documentation identified is real and still has to be solved.
+    //       These four members are INCREMENTED, not assigned -- cbl/COPAUA0C.cbl adds to the approved
+    //       count and amount at L814 and L815 and to the declined pair at L820 and L821, and
+    //       cbl/CBPAUP0C.cbl subtracts from the same four at L287 to L292 -- so two interleaved
+    //       read-modify-write sequences lose one contribution and store a total that is simply short,
+    //       with nothing in the result to show it. What was wrong was the remedy, not the diagnosis.
+    // WHY : Refactoring Rationale: the remedy is to stop reading-then-writing at all. The three
+    //       @Modifying statements below perform the arithmetic IN THE DATABASE, so each contribution is
+    //       applied to whatever the row holds at the moment the statement runs. Two concurrent
+    //       contributions therefore both land -- the engine serialises the two updates on the row and
+    //       each adds to the other's result -- which is the property the lock was reached for, obtained
+    //       without holding anything across application logic. The decision that precedes them reads the
+    //       summary through the non-locking findByAccountId below.
+    // WHY : Alternatives Considered: (a) an optimistic @Version column, which the previous
+    //       documentation also rejected. Still rejected, and for a stronger reason than it gave: the
+    //       migration declares no version column on this table, and a version check detects a collision
+    //       only at commit and then discards decision work a retry has to redo -- whereas an atomic
+    //       increment has no collision to detect. (b) SELECT ... FOR UPDATE expressed natively instead of
+    //       through @Lock, which is the same lock wearing different clothes. (c) serialising the consumer
+    //       to one task, which would preserve the baseline's one-message-at-a-time model exactly but
+    //       throw away the throughput the queue's per-card ordering exists to permit.
+    // WHY : Trade-offs: the decision now reads counters that a concurrent contribution may already have
+    //       moved, where the lock made the reader wait. That is accepted, and it is closer to the
+    //       baseline rather than further from it: the baseline reads its root without a hold and decides
+    //       on what it read, so a decision made against a summary another task is concurrently updating
+    //       is the behaviour being preserved. What must not be lost is the ACCUMULATION, and that is
+    //       exactly what these statements make safe.
+
     /**
-     * Loads one account's summary and holds its row for the rest of the transaction.
+     * Adds one approved authorization's contribution to an account's summary, atomically.
      *
-     * <p>Purpose: this is the read the authorization consumer performs before it adds to the row's
-     * counters and totals, standing for the keyed root retrieval at {@code cbl/COPAUS0C.cbl} L973 to
-     * L977. The row is returned held so that the read and the write that follows it are one
-     * uninterrupted sequence.</p>
+     * <p>Purpose: this is the write half of {@code cbl/COPAUA0C.cbl} L814 and L815, plus the credit
+     * balance the same paragraph moves. All three members are incremented in ONE statement so a
+     * concurrent contribution to the same row cannot displace this one.</p>
      *
-     * <p>Alternatives Considered: the lock is a TARGET-SIDE addition rather than a transcription, and
-     * the divergence is recorded here rather than presented as preserved behaviour. The baseline holds
-     * nothing on this path: {@code cpy/IMSFUNCS.cpy} declares all three get-hold function codes --
-     * {@code FUNC-GHU} at L19, {@code FUNC-GHN} at L21 and {@code FUNC-GHNP} at L23 -- and no program
-     * in the reference tree passes any of the three to a data-language call, the retrieval codes
-     * actually passed being the non-hold {@code FUNC-GU}, {@code FUNC-GN} and {@code FUNC-GNP}; both
-     * unload views run {@code PROCOPT=GOTP}, at {@code ims/PAUTBUNL.PSB} L18 and
-     * {@code ims/DLIGSAMP.PSB} L18. What changes is not the data but the concurrency model around it:
-     * the baseline decides one message at a time inside a single program bracketed by its own
-     * syncpoint, whereas the migrated consumer runs as several tasks that may hold two messages for
-     * two cards of the SAME account at once, since the queue preserves order per card rather than per
-     * account. Two alternatives were evaluated against that. Taking no lock at all was rejected
-     * because these fields are INCREMENTED and not assigned -- {@code cbl/COPAUA0C.cbl} adds to the
-     * approved count and amount at L814 and L815 and to the declined pair at L820 and L821, and
-     * {@code cbl/CBPAUP0C.cbl} subtracts from the same four at L287 to L292 -- so two interleaved
-     * read-modify-write sequences lose one contribution and store a total that is simply short, with
-     * nothing in the result to show it. An optimistic version check was rejected because the migration
-     * declares no version column on this table, so adopting it would mean adding one, and it detects
-     * the collision only at commit, discarding decision work a retry then has to redo. Holding the row
-     * from the read makes the second task wait instead.</p>
+     * <p>Assumptions: the credit balance moves with the approved pair and not separately, because the
+     * entity's own {@code recordApproved} moves all three together and the three are meaningless apart
+     * -- an approved total that has advanced while the balance has not describes an account no
+     * reference program could produce.
      *
-     * <p>Trade-offs: what this buys is paid for in lock-wait, and the cost is bounded deliberately.
-     * The wait applies to one row of one account inside a transaction that performs no network call
-     * while holding it, so the exposure is the length of that transaction rather than of a request.
-     * The read-only companion below deliberately takes no lock, which is why the two are separate
-     * declarations rather than one method carrying a flag.</p>
+     * <p>Assumptions: the statement reports the number of rows it changed, and the caller is expected
+     * to treat zero as "no summary for this account" rather than ignoring it. That is the same
+     * condition the withdrawn read reported as an empty {@link Optional}, moved to the write.
      *
-     * @param accountId the {@link Long} account identifier whose summary is required, matching
-     *     {@code ACCNTID} in the reference root; must not be {@code null}
-     * @return an {@link Optional} holding the summary with its row held for the transaction, or
-     *     {@link Optional#empty()} when the account has no summary yet
+     * @param accountId the account whose summary receives the contribution; must not be {@code null}
+     * @param amount the approved amount to add to both the approved total and the credit balance; must
+     *     not be {@code null}
+     * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
      */
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    Optional<PendingAuthSummary> findWithLockByAccountId(Long accountId);
+    @Modifying
+    @Query("""
+            update PendingAuthSummary s
+               set s.approvedAuthCount = s.approvedAuthCount + 1,
+                   s.approvedAuthAmount = s.approvedAuthAmount + :amount,
+                   s.creditBalance = s.creditBalance + :amount
+             where s.accountId = :accountId
+            """)
+    int addApprovedAuthorization(@Param("accountId") Long accountId,
+            @Param("amount") BigDecimal amount);
+
+    /**
+     * Adds one declined authorization's contribution to an account's summary, atomically.
+     *
+     * <p>Purpose: this is the write half of {@code cbl/COPAUA0C.cbl} L820 and L821.</p>
+     *
+     * <p>Assumptions: the credit balance is deliberately NOT moved here, matching the reference
+     * paragraph, which moves it on the approved arm only. A declined authorization consumes no credit,
+     * so advancing the balance would overstate what the account has committed.
+     *
+     * @param accountId the account whose summary receives the contribution; must not be {@code null}
+     * @param amount the requested amount to add to the declined total; must not be {@code null}
+     * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
+     */
+    @Modifying
+    @Query("""
+            update PendingAuthSummary s
+               set s.declinedAuthCount = s.declinedAuthCount + 1,
+                   s.declinedAuthAmount = s.declinedAuthAmount + :amount
+             where s.accountId = :accountId
+            """)
+    int addDeclinedAuthorization(@Param("accountId") Long accountId,
+            @Param("amount") BigDecimal amount);
+
+    /**
+     * Removes an expired authorization's contribution from an account's summary, atomically.
+     *
+     * <p>Purpose: this is {@code cbl/CBPAUP0C.cbl} L287 to L292, which subtracts from the same four
+     * members the consumer adds to. It is one statement for the same reason the two above are: the
+     * purge runs while the consumer may be adding to the row it is subtracting from.</p>
+     *
+     * <p>Assumptions: BOTH pairs are expressed in one statement rather than two, because a purged
+     * authorization is either approved or declined and the caller supplies zero for the arm that does
+     * not apply. Two statements would leave a window in which one pair had been reversed and the other
+     * had not, which is a state no reference program produces.
+     *
+     * <p>Assumptions: the counts are decremented by the counts the caller supplies rather than by one,
+     * because the purge reverses a whole account's expired children in one pass and the reference
+     * paragraph subtracts accumulated totals rather than stepping one at a time.
+     *
+     * @param accountId the account whose summary is reduced; must not be {@code null}
+     * @param approvedCount how many approved authorizations are being reversed; must not be negative
+     * @param approvedAmount their total amount; must not be {@code null}
+     * @param declinedCount how many declined authorizations are being reversed; must not be negative
+     * @param declinedAmount their total amount; must not be {@code null}
+     * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
+     */
+    @Modifying
+    @Query("""
+            update PendingAuthSummary s
+               set s.approvedAuthCount = s.approvedAuthCount - :approvedCount,
+                   s.approvedAuthAmount = s.approvedAuthAmount - :approvedAmount,
+                   s.declinedAuthCount = s.declinedAuthCount - :declinedCount,
+                   s.declinedAuthAmount = s.declinedAuthAmount - :declinedAmount
+             where s.accountId = :accountId
+            """)
+    int reverseExpiredAuthorizations(@Param("accountId") Long accountId,
+            @Param("approvedCount") int approvedCount,
+            @Param("approvedAmount") BigDecimal approvedAmount,
+            @Param("declinedCount") int declinedCount,
+            @Param("declinedAmount") BigDecimal declinedAmount);
 
     /**
      * Loads one account's summary without holding its row.
@@ -190,6 +290,27 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
     Optional<PendingAuthSummary> findByAccountId(Long accountId);
 
     /**
+     * Reports which of a stated set of accounts already carry a summary row.
+     *
+     * <p>Assumptions: this exists so a bulk load can settle the presence of a whole CHUNK of accounts in
+     * one statement. Refactoring Rationale: the extract loader previously called the identity-presence
+     * check once per record, so a chunk of five hundred records issued five hundred round trips before
+     * it wrote anything -- and the detail loader issued a second five hundred to check each record's
+     * parent, giving the two-probes-per-row cost that made the load's time grow with the extract rather
+     * than with the work. One statement per chunk replaces both.</p>
+     *
+     * <p>Trade-offs: the caller must bound the collection it passes, because a list parameter becomes a
+     * list of bind parameters and every engine has a ceiling on those. The loader passes a chunk it has
+     * already bounded for its own reasons, so the bound is real rather than asserted here.</p>
+     *
+     * @param accountIds the accounts to test for presence, as a bounded collection; must not be
+     *     {@code null}
+     * @return the subset of those identifiers that already carry a summary row, in no defined order
+     */
+    @Query("select s.accountId from PendingAuthSummary s where s.accountId in :accountIds")
+    List<Long> findExistingAccountIds(@Param("accountIds") Collection<Long> accountIds);
+
+    /**
      * Returns summaries whose account lies strictly beyond a stated position, in ascending key order.
      *
      * <p>Purpose: this is the sequential walk of every root that the unload and purge programs perform.
@@ -227,4 +348,104 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      */
     List<PendingAuthSummary> findByAccountIdGreaterThanOrderByAccountIdAsc(Long accountId,
             Limit limit);
+
+    /**
+     * Walks the account identifiers of every root above a stated identifier, in key order.
+     *
+     * <p>This is the same sequential walk as the method above -- the unqualified {@code EXEC DLI GN}
+     * against the root at {@code cbl/CBPAUP0C.cbl} L223 to L226 -- projected to the field the root is
+     * addressed by. It returns identifiers and not summaries, and that is the whole of its purpose.</p>
+     *
+     * <p>Purpose: a caller that INTENDS to modify each summary it walks cannot use the summary the walk
+     * returned. Every such caller must take the row lock first, and a locking read of a row that is
+     * already in the persistence context hands back the instance loaded by the earlier unlocked read
+     * rather than the state visible once the lock is held. The arithmetic that follows -- the four
+     * counter and total subtractions at {@code cbl/CBPAUP0C.cbl} L287 to L292 -- would then be applied
+     * to a snapshot a concurrent writer has already moved past, and the resulting row would be short by
+     * exactly that writer's contribution with nothing in it to show the loss. Walking keys makes the
+     * locking read the FIRST read of the row, so the state adjusted is the state the lock protects.</p>
+     *
+     * <p>Alternatives Considered: three. Refreshing each summary after locking it was rejected because
+     * it issues a second statement to undo the effect of the first and leaves the correct ordering as a
+     * convention a later reader can drop. Detaching the page before locking was rejected for the same
+     * reason and because it makes correctness depend on a call whose absence is invisible. Reading the
+     * page with the lock already applied -- one locking walk instead of a walk plus per-row locks --
+     * was rejected because it holds every row of a window for the whole window rather than one row at a
+     * time, so an online writer for any account in the window waits for all of it.</p>
+     *
+     * <p>Assumptions: the projection is stated as a query rather than derived from the method name.
+     * Spring Data derives a projection to a single property only through a typed interface or class
+     * projection, and declaring one for a {@code long} would add a type whose only member is the field
+     * this query already names. The ordering and the strict comparison are stated in the query for the
+     * same reason they are stated in the derived form above: a walk that DELETES from the table it is
+     * walking cannot use a counted offset, so the position must be a key and the comparison must
+     * exclude it.</p>
+     *
+     * @param accountId the {@link Long} account identifier of the last root already handled, or a value
+     *     below every real identifier to open the walk; must not be {@code null}
+     * @param limit the {@link Limit} capping how many identifiers one call returns, which the caller
+     *     sets to its window size; must not be {@code null}
+     * @return a {@link List} of at most {@code limit} account identifiers in ascending order, empty
+     *     when the walk has passed the last root
+     */
+    @Query("select s.accountId from PendingAuthSummary s where s.accountId > :accountId "
+            + "order by s.accountId asc")
+    List<Long> findAccountIdsAboveOrderByAccountIdAsc(@Param("accountId") Long accountId, Limit limit);
+
+    /**
+     * Inserts one summary row, leaving an existing row for the same account untouched.
+     *
+     * <p>Purpose: this is the duplicate-tolerant insert the extract loader needs, transcribing the
+     * duplicate-status arm at {@code cbl/PAUDBLOD.CBL} L256 to L258 -- which counts a root already in the
+     * database and moves to the next record rather than replacing it. The statement reports how many rows
+     * it wrote, so the caller distinguishes the two outcomes without asking a second question.
+     *
+     * <p>Refactoring Rationale: the loader probed with {@code existsById} and then called the inherited
+     * save. Those are two statements with a gap between them, so a row created in that gap -- by the
+     * online decision path, which inserts a summary for an account that has none, or by a second loader
+     * run over the same extract -- was OVERWRITTEN by the save rather than counted as already present.
+     * The overwrite is silent and it is not a partial one: the save replaces every column, so counters
+     * and totals a live decision had already moved were reset to whatever the extract carried. One
+     * statement that inserts or does nothing cannot have that gap.
+     *
+     * <p>Assumptions: the conflict target is NAMED rather than left implicit, although the primary key is
+     * the only constraint on this table today. Naming it means a constraint added later -- a uniqueness
+     * rule over the customer, say -- raises rather than being absorbed as though it were the duplicate
+     * this statement exists to tolerate. The narrow-tolerance reading is the safe one because the caller
+     * COUNTS a zero result as an already-present row, so a target wide enough to swallow an unrelated
+     * collision would report a different fault as a skipped duplicate.
+     *
+     * <p>Assumptions: nothing is updated on conflict, and that is the reference behaviour rather than a
+     * simplification. The reference paragraph neither replaces nor merges: it increments its
+     * already-present counter and reads the next record, so the row already stored wins in every field.
+     *
+     * <p>Assumptions: the values are bound from the entity rather than from a positional parameter list
+     * of sixteen. A positional list would put the column-to-value correspondence in a second form that a
+     * reader has to check against the first, and a transposition of two adjacent columns of the same type
+     * -- of which this row has four pairs among its money columns -- would compile and store silently.
+     *
+     * <p>Assumptions: the caller owns the transaction. A modifying query carries none of its own, so an
+     * unwrapped call fails with no active transaction rather than writing outside one.
+     *
+     * @param row the summary to insert, whose account identifier is the whole key; must not be
+     *     {@code null}
+     * @return {@code 1} when the row was written, {@code 0} when the account already had a summary
+     */
+    @Modifying
+    @Query(value = """
+            INSERT INTO pending_auth_summary (
+                account_id, customer_id, auth_status, account_status_1, account_status_2,
+                account_status_3, account_status_4, account_status_5, credit_limit, cash_limit,
+                credit_balance, cash_balance, approved_auth_cnt, declined_auth_cnt,
+                approved_auth_amt, declined_auth_amt)
+            VALUES (
+                :#{#row.accountId}, :#{#row.customerId}, :#{#row.authStatus},
+                :#{#row.accountStatus1}, :#{#row.accountStatus2}, :#{#row.accountStatus3},
+                :#{#row.accountStatus4}, :#{#row.accountStatus5}, :#{#row.creditLimit},
+                :#{#row.cashLimit}, :#{#row.creditBalance}, :#{#row.cashBalance},
+                :#{#row.approvedAuthCount}, :#{#row.declinedAuthCount},
+                :#{#row.approvedAuthAmount}, :#{#row.declinedAuthAmount})
+            ON CONFLICT (account_id) DO NOTHING
+            """, nativeQuery = true)
+    int insertSummaryIfAbsent(@Param("row") PendingAuthSummary row);
 }

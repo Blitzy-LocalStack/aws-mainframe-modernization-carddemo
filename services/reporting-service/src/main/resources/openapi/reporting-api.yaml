@@ -286,6 +286,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /api/v1/reports/transaction-report/lines:
 
@@ -594,6 +596,34 @@ components:
     Forbidden:
       description: >-
         A valid token was presented that carries neither group authority.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       content:
         application/json:
           schema:
@@ -935,6 +965,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       description: >-
         One bounded keyset page. Four members and no more: the shared page
         envelope in common-lib declares exactly these, so a fifth here would
@@ -966,6 +997,18 @@ components:
             Whether a forward step would yield rows. Determined by reading one
             row more than the page holds, which is the mechanism
             app/cbl/COCRDLIC.cbl uses for its own next-page indicator.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
 
     ReportTotalBand:
       type: object
@@ -1027,24 +1070,41 @@ components:
       additionalProperties: false
       description: >-
         Names one card or one account. Exactly one of the two must be supplied;
-        neither is declared required because either may be the one omitted. The
+        neither is declared required because either may be the one omitted, and
+        the exactly-one-of rule is enforced by the service rather than expressible
+        in this schema -- a request supplying both, or neither, is answered 400
+        with a fieldErrors entry naming whichever component is at fault. The
         component list of com.carddemo.reporting.dto.StatementRequest, name for
         name.
+
+
+        Note the widths: each component is bounded at its declared width on BOTH
+        sides, because each is a fixed-width field rather than one with a ceiling.
+        TRNX-CARD-NUM is PIC X(16) at app/cpy/COSTM01.CPY L22 and ACCT-ID is
+        PIC 9(11) at app/cpy/CVACT01Y.cpy L5, and the numeric picture is
+        zero-filled on the left -- so a shorter value cannot match a stored row
+        under any circumstances, and admitting one would answer a malformed
+        request as an absent record. This schema formerly declared maxLength
+        alone.
       properties:
         cardNumber:
           type: string
           pattern: '^[0-9]+$'
+          minLength: 16
           maxLength: 16
           description: >-
-            The card's unmasked number, as a user typed it. This is the only
-            place in this contract an unmasked number appears, and it appears in
-            a body rather than in a target so that neither the edge access log
-            nor the browser's history records it.
+            The card's unmasked number, as a user typed it, in all sixteen
+            positions. This is the only place in this contract an unmasked number
+            appears, and it appears in a body rather than in a target so that
+            neither the edge access log nor the browser's history records it.
         accountId:
           type: string
           pattern: '^[0-9]+$'
+          minLength: 11
           maxLength: 11
-          description: The account identifier, when the caller selected by account.
+          description: >-
+            The account identifier, when the caller selected by account, in all
+            eleven positions with the leading zeroes the record holds.
 
     Statement:
       type: object

@@ -95,6 +95,10 @@ class Declaration(NamedTuple):
     visible_to_ruff : bool
         Whether ruff's D presence checks would require the docstring. ``False`` marks a
         declaration this gate is the only enforcement for.
+    documents_return : bool
+        Whether a function's docstring addresses its return -- a ``Returns`` or a
+        ``Yields`` section. Always ``True`` for a module or a class, which return nothing,
+        so a caller filters on ``kind`` before reading it.
     """
 
     path: Path
@@ -103,6 +107,7 @@ class Declaration(NamedTuple):
     lineno: int
     documented: bool
     visible_to_ruff: bool
+    documents_return: bool
 
 
 def _is_privately_named(name: str) -> bool:
@@ -149,6 +154,34 @@ def _has_docstring(node: ast.AST) -> bool:
     return bool(text and text.strip())
 
 
+def _documents_return(node: ast.AST) -> bool:
+    """Report whether a docstring addresses what the declaration returns.
+
+    Parameters
+    ----------
+    node : ast.AST
+        A module, class or function node.
+
+    Returns
+    -------
+    bool
+        ``True`` when the docstring names a ``Returns`` or a ``Yields`` section, or when
+        there is no docstring at all. The no-docstring case answers ``True`` so that one
+        missing docstring is reported once, by the presence assertion that owns it, rather
+        than a second time here.
+
+    Raises
+    ------
+    TypeError
+        Propagated from :func:`ast.get_docstring` if handed a node kind that cannot carry
+        a docstring, which would mean the walk itself had gone wrong.
+    """
+    text = ast.get_docstring(node)
+    if not (text and text.strip()):
+        return True
+    return "Returns" in text or "Yields" in text
+
+
 def _walk(
     node: ast.AST,
     path: Path,
@@ -177,7 +210,8 @@ def _walk(
     Returns
     -------
     list[Declaration]
-        Every class and function found, in source order, depth-first.
+        Every class and function found, in source order, depth-first. Each function entry
+        also carries whether its docstring addresses its return.
     """
     found: list[Declaration] = []
     for child in ast.iter_child_nodes(node):
@@ -192,6 +226,7 @@ def _walk(
                     lineno=child.lineno,
                     documented=_has_docstring(child),
                     visible_to_ruff=not (inside_function or private_here),
+                    documents_return=is_class or _documents_return(child),
                 )
             )
             found.extend(
@@ -282,6 +317,11 @@ def _declarations(root: Path) -> list[Declaration]:
                 #   private than `_helper.py`, and is in fact the only module name
                 #   pydocstyle has a dedicated public-package rule for.
                 visible_to_ruff=not _is_privately_named(source.stem),
+                # Assumptions: a module returns nothing, so the return element does not
+                #   apply to it and the field is set true rather than left to be filtered
+                #   by every reader. The return assertion filters on `kind` regardless, so
+                #   the two agree.
+                documents_return=True,
             )
         )
         collected.extend(
@@ -349,6 +389,163 @@ def test_every_declaration_carries_a_docstring(root: Path) -> None:
         f"{len(undocumented)} declaration(s) under {root} carry no docstring, which "
         "Rule 1 requires of every module, class, function and constructor:\n"
         f"{_format_undocumented(undocumented)}"
+    )
+
+
+def _functions_missing_a_return_contract(root: Path) -> list[Declaration]:
+    """Collect functions whose docstring documents neither a return nor a yield.
+
+    Parameters
+    ----------
+    root : Path
+        Directory to search recursively.
+
+    Returns
+    -------
+    list[Declaration]
+        One entry per function or method whose docstring carries no ``Returns`` and no
+        ``Yields`` section. A declaration with no docstring at all is excluded, because
+        :func:`test_every_declaration_carries_a_docstring` already owns that failure and
+        reporting it twice would make one defect look like two.
+
+    Raises
+    ------
+    SyntaxError
+        Propagated from :func:`ast.parse` when a source file does not parse.
+    """
+    # Assumptions: the section name is matched as a substring rather than as a parsed
+    #   numpydoc heading, and that is the honest limit of this check. It decides SHAPE --
+    #   that the author addressed the return at all -- and decides nothing about whether
+    #   the description is true, which stays a review obligation exactly as the module
+    #   docstring above records for the "why" requirement.
+    # Assumptions: `Yields` counts, because a generator's return contract IS its yield
+    #   contract; numpydoc names the section `Yields` for that case, and
+    #   `carddemo_migration.loaders.aurora._cursor_of` is one. Requiring `Returns` alone
+    #   would have reported a correctly documented generator and taught a reader that this
+    #   gate's findings are noise.
+    return [
+        declaration
+        for declaration in _declarations(root)
+        if declaration.kind == "function"
+        and declaration.documented
+        and not declaration.documents_return
+    ]
+
+
+def test_every_package_function_documents_its_return() -> None:
+    """Assert Rule 1's return-value element on every function in the package source.
+
+    Returns
+    -------
+    None
+        The test exists for its assertions.
+
+    Raises
+    ------
+    AssertionError
+        Naming every package function whose docstring addresses neither a return nor a
+        yield, one per line.
+    """
+    # Refactoring Rationale: this assertion was added because presence alone let a real
+    #   gap through. Three docstrings in `carddemo_migration.loaders.aurora` --
+    #   `_Connection.commit`, `_Connection.rollback` and `TableTarget.__post_init__` --
+    #   documented their purpose and, in one case, their exception, and said nothing at all
+    #   about what they return, while their own sibling `_Connection.cursor` documented its
+    #   return. Ruff's D family does not look for the section and the presence walk above
+    #   was satisfied by any non-blank docstring, so nothing in the build could see the
+    #   omission and it reached review instead. Rule 1 names "Return values: Type and
+    #   description of what is returned" as its third docstring element, so the element was
+    #   unenforced for this language until this test existed.
+    # Trade-offs: the scope is the PACKAGE tree only, and the suite tree is deliberately
+    #   excluded rather than silently included. Measured at the time this test was added:
+    #   487 of 487 functions under `src/carddemo_migration` document a return or a yield,
+    #   and 355 of 609 under `tests/` do not -- pytest cases and fixtures that return
+    #   nothing and say so in prose rather than in a numpydoc section. Extending the
+    #   assertion there would demand a 355-function mechanical sweep of test docstrings as
+    #   the price of enforcing the element on the code that ships, so the element is
+    #   enforced where the shipping code is and remains a review obligation for the suite.
+    #   That limit is stated here, in the gate, rather than left for a reader to infer from
+    #   a passing run -- a gate whose reach is wider in a reader's mind than in its code is
+    #   the failure this whole module exists to prevent.
+    undocumented = _functions_missing_a_return_contract(_PACKAGE_ROOT)
+    assert not undocumented, (
+        f"{len(undocumented)} function(s) under {_PACKAGE_ROOT} document neither a "
+        "'Returns' nor a 'Yields' section, which Rule 1 requires as its third docstring "
+        f"element:\n{_format_undocumented(undocumented)}"
+    )
+
+
+def test_the_return_contract_check_reaches_a_known_omission() -> None:
+    """Assert the return-contract walk reports a docstring that omits its return.
+
+    Returns
+    -------
+    None
+        The test exists for its assertions.
+
+    Raises
+    ------
+    AssertionError
+        If the walk fails to report a function whose docstring has no return section, or
+        reports one whose docstring has either section.
+    """
+    # Assumptions: the probe is parsed in memory rather than written to disk, because this
+    #   check reads an AST and needs no file. The three shapes cover the whole decision:
+    #   a `Returns` section passes, a `Yields` section passes, and a docstring carrying
+    #   only Purpose and Raises is reported. Without this test a walk narrowed to report
+    #   nothing would pass `test_every_package_function_documents_its_return` while
+    #   enforcing nothing, which is the same quiet regression the presence walk is
+    #   self-tested against above.
+    probe = ast.parse(
+        '"""Module probe."""\n'
+        "\n"
+        "def returns_documented():\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Returns\n"
+        "    -------\n"
+        "    None\n"
+        "        Nothing.\n"
+        '    """\n'
+        "\n"
+        "\n"
+        "def yields_documented():\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Yields\n"
+        "    ------\n"
+        "    int\n"
+        "        A number.\n"
+        '    """\n'
+        "    yield 1\n"
+        "\n"
+        "\n"
+        "def return_undocumented():\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Raises\n"
+        "    ------\n"
+        "    ValueError\n"
+        "        Always.\n"
+        '    """\n'
+        "    raise ValueError\n"
+    )
+    walked = _walk(
+        probe,
+        Path("probe.py"),
+        "probe",
+        inside_function=False,
+        under_private=False,
+    )
+    reported = {
+        declaration.qualified_name
+        for declaration in walked
+        if declaration.kind == "function" and not declaration.documents_return
+    }
+
+    assert reported == {"probe.return_undocumented"}, (
+        "the return-contract walk must report exactly the function whose docstring omits "
+        f"its return section, and it reported {sorted(reported)}"
     )
 
 

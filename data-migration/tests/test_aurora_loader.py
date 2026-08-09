@@ -38,7 +38,7 @@ Trade-offs:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,28 +49,74 @@ from carddemo_migration.config import quote_identifier
 from carddemo_migration.copybook import layouts
 from carddemo_migration.loaders.aurora import (
     AuroraLoadError,
+    LoadContext,
+    Projection,
     TableTarget,
     load_records,
+    prepare_record,
     target_for,
     target_names,
 )
+from carddemo_migration.loaders.protected_columns import (
+    CardVerificationValueCipher,
+    CustomerIdentifierCipher,
+    DataKey,
+    ProtectedColumnError,
+)
+
+# WHY : Assumptions: the composite key's membership is imported from the reader that publishes
+#   it rather than restated here, following the same single-sourcing rule the readers follow for
+#   layouts. Restating the three component names would create a second statement of the key's
+#   composition free to go stale against the descriptor, and the sibling category-reference
+#   record's identically-named key group -- two components where this one has three -- is
+#   exactly the drift that restatement would hide.
+from carddemo_migration.readers.tcatbal import COMPOSITE_KEY_FIELD_NAMES
 
 if TYPE_CHECKING:
     from conftest import FakeAuroraDatabase
 
-# Assumptions: the five loadable records are stated literally, in declaration order, so a
+# Assumptions: the ten loadable records are stated literally, in declaration order, so a
 #   target appearing or disappearing is a visible edit here rather than a silent change in
 #   what a migration run covers. Reading the mapping back would make this assertion true of
 #   any mapping at all, including an empty one.
-_LOADABLE_RECORDS = ("XREF", "TRANTYPE", "TRANCAT", "DISGROUP", "ACCOUNT")
+# WHY : Refactoring Rationale: this table named FIVE records and now names ten. The five that
+#   were missing were the card master, the customer master, the daily-transaction feed, the
+#   category balances and every user of the system -- so `sql/verify/row_counts.sql` listed eleven
+#   dataset baselines against a loader that could satisfy four of them, and the shortfall was
+#   asserted here as if it were a design.
+_LOADABLE_RECORDS = (
+    "XREF",
+    "TRANTYPE",
+    "TRANCAT",
+    "DISGROUP",
+    "ACCOUNT",
+    "CARD",
+    "CUSTOMER",
+    "DALYTRAN",
+    "TCATBAL",
+    "SECUSER",
+)
 
-# Assumptions: these two records are registered, have readers, and deliberately have NO load
-#   target in this module. Their tables declare ciphertext columns as NOT NULL -- the customer
-#   table's national and government identifiers, the card table's verification value -- and the
-#   key that produces that ciphertext belongs to the owning service, not to this package. They
-#   are asserted as an explicit refusal because a loader that inserted plaintext into a column
-#   named `*_encrypted` would succeed and be wrong in the worst available way.
-_CIPHER_BOUND_RECORDS = ("CUSTOMER", "CARD")
+# Assumptions: the three reference records are the only ones declaring a conflict key, because
+#   they are the only target tables with a SECOND writer -- `V2__seed_reference.sql` seeds all
+#   three. They are named here rather than read off the targets so that giving a master table a
+#   conflict key, which would turn a re-run from a reported duplicate into a silent no-op, is a
+#   visible edit to this table.
+_MERGED_RECORDS = ("TRANTYPE", "TRANCAT", "DISGROUP")
+
+# Assumptions: these records are registered and readable and deliberately have NO load target,
+#   and the reason is now the OPPOSITE of a refusal: nothing ships to load. `TRAN` is the
+#   transaction master, which no dataset carries in either encoding and which the posting job
+#   fills from `ledger.daily_transactions`; the other three are layouts the batch chain writes
+#   rather than reads. The message is asserted because "no target" and "no target because there
+#   is no extract" send the next reader to entirely different places.
+_POSTING_FILLED_RECORDS = ("TRAN", "TRNX", "REJECT", "INTTRAN")
+
+# Assumptions: the keys a target may declare that no reader publishes, stated here so the
+#   field-provenance assertion can exempt exactly these and nothing else. `cognito_sub` is the
+#   only one: `auth.users` requires it NOT NULL and UNIQUE, and the 80-byte `USRSEC` record
+#   cannot carry a value the identity provider mints.
+_DERIVED_KEYS = frozenset({"cognito_sub"})
 
 # Assumptions: the migrations are located relative to this file rather than through an
 #   installed distribution, because they are resources of the SERVICE modules and are not
@@ -80,6 +126,79 @@ _SERVICES_ROOT = Path(__file__).resolve().parents[2] / "services"
 _COPY_SHAPE = re.compile(
     r'\ACOPY "(?P<schema>[^"]+)"\."(?P<table>[^"]+)" \((?P<columns>[^)]*)\) FROM STDIN\Z'
 )
+
+# Assumptions: the verification SQL is read from the repository rather than restated here,
+#   because it is the artifact that DECLARES which datasets a migration run is checked against.
+#   Restating its contents in this file would let the two drift apart in exactly the way the
+#   category-balance gap did -- the SQL claiming a dataset is verified while nothing could load
+#   it -- and the restatement would then be the thing asserted rather than the SQL.
+_ROW_COUNTS_SQL = Path(__file__).resolve().parents[1] / "sql" / "verify" / "row_counts.sql"
+
+# Assumptions: one row of the SQL's dataset registration is an ordinal, a quoted dataset name
+#   and a quoted schema-qualified table, in that order, with the PostgreSQL cast suffixes the
+#   first row carries to fix the CTE's column types. The pattern anchors on that shape rather
+#   than on line numbers so it survives a comment being inserted above a row.
+_REGISTRATION_ROW = re.compile(
+    r"^\s*\(\s*\d+(?:::smallint)?\s*,\s*'(?P<dataset>[^']+)'(?:::text)?\s*,"
+    r"\s*'(?P<table>[^']+)'(?:::text)?\s*,",
+    re.MULTILINE,
+)
+
+# Assumptions: every table the verification SQL registers that this module deliberately cannot
+#   load is listed here WITH its reason, one entry per table, so the general assertion below can
+#   be exhaustive rather than approximate. A table missing from both this mapping and TARGETS is
+#   the defect the assertion exists to catch: a dataset declared verified that nothing can fill.
+# Trade-offs: the alternative was to assert only the category-balance table, which is the one
+#   the review named. That was rejected because it would prove the single instance fixed and
+#   leave the defect CLASS undetected -- the next dataset registered without a target would
+#   reproduce it exactly, and the suite would stay green.
+# Refactoring Rationale: four entries stood here and are WITHDRAWN, because each named an
+#   obstacle the loader has since removed rather than a table it cannot fill. `account.customers`
+#   and `card.cards` were excused as cipher-bound, on the ground that this package would otherwise
+#   load plaintext into a column asserting ciphertext; both now project their protected fields
+#   through the sealing projections, so nothing plaintext reaches either column and the objection
+#   is answered rather than deferred. `auth.users` was excused over the baseline's cleartext
+#   credential; the reader never decodes that span, the target declares no column for it, and what
+#   the target does carry is the subject the identity provider mints -- so the record loads without
+#   the credential existing anywhere on the path. `ledger.daily_transactions` was excused as having
+#   no REPRO job of its own; it now has a target with a recorded decision about the conflict key it
+#   deliberately does not declare. Withdrawing an excuse whose obstacle is gone is the point of this
+#   mapping being asserted against the targets: an excuse that outlives its reason is exactly how a
+#   delivered load would come to be reported as impossible.
+_NO_LOAD_TARGET_BY_DESIGN: dict[str, str] = {
+    "ledger.transactions": (
+        "registered against the dataset name '(none)' with a NULL baseline: no seed dataset for"
+        " this table exists in either app/data tree, and it is filled by the posting job rather"
+        " than by any load"
+    ),
+}
+
+
+def _datasets_registered_for_verification() -> dict[str, str]:
+    """Read which schema-qualified tables the row-count verification SQL registers a dataset for.
+
+    Purpose
+    -------
+    Take the set of datasets a migration run is checked against from the SQL that declares it,
+    so the loader's coverage can be asserted against the verification layer's own claim instead
+    of against a second list maintained here.
+
+    Returns
+    -------
+    dict[str, str]
+        Schema-qualified table name to the baseline dataset name the SQL pairs it with.
+
+    Raises
+    ------
+    AssertionError
+        If the SQL file is absent, which would mean the path had moved and every assertion built
+        on it was checking an empty set.
+    """
+    assert _ROW_COUNTS_SQL.is_file(), f"verification SQL not found at {_ROW_COUNTS_SQL}"
+    sql = _ROW_COUNTS_SQL.read_text(encoding="utf-8")
+    return {
+        match.group("table"): match.group("dataset") for match in _REGISTRATION_ROW.finditer(sql)
+    }
 
 
 def _migration_text() -> str:
@@ -107,8 +226,8 @@ def _migration_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in files)
 
 
-def test_the_declared_targets_are_exactly_the_five_loadable_records() -> None:
-    """Declare a load target for exactly the five records this module can load.
+def test_the_declared_targets_are_exactly_the_ten_loadable_records() -> None:
+    """Declare a load target for exactly the ten records this module can load.
 
     Returns
     -------
@@ -121,6 +240,142 @@ def test_the_declared_targets_are_exactly_the_five_loadable_records() -> None:
         If the declared target set differs from the stated one in either direction.
     """
     assert target_names() == _LOADABLE_RECORDS
+
+
+def test_every_dataset_the_verification_sql_registers_has_a_load_target() -> None:
+    """Declare a load target for every dataset the verification SQL claims to check.
+
+    Purpose
+    -------
+    Close the gap that made the category-balance dataset unloadable: the whole-schema
+    verification queries registered it, and the loader did not carry a target for it, so the
+    dataset was reported as verified while no code in this package could put a row in its
+    table. This assertion is deliberately driven from the SQL rather than from a second list,
+    so it fails on either side of that pair going out of step.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the SQL registers a dataset whose layout has a reader but no load target, or if the
+        registration block cannot be found at all -- which would make this assertion pass while
+        proving nothing.
+    """
+    registered = _datasets_registered_for_verification()
+    assert registered, (
+        f"no dataset registration row found in {_ROW_COUNTS_SQL}; the assertion would pass"
+        " while checking an empty set"
+    )
+    # WHY : Assumptions: the comparison is by TABLE rather than by dataset name, because the
+    #   two vocabularies differ on purpose -- the SQL names the baseline dataset (`tcatbal`,
+    #   `cardxref`) and this module names the record layout (`TCATBAL`, `XREF`). Matching on
+    #   the schema-qualified table is the one identifier both sides state identically, so the
+    #   assertion needs no translation table that could itself go stale.
+    targeted = {f"{target_for(name).schema}.{target_for(name).table}" for name in target_names()}
+    unloadable = sorted(
+        table
+        for table in registered
+        if table not in targeted and table not in _NO_LOAD_TARGET_BY_DESIGN
+    )
+    assert not unloadable, (
+        "the verification SQL registers a dataset for these tables but no load target can fill"
+        f" them: {unloadable}"
+    )
+
+
+def test_no_table_is_both_targeted_and_excused_from_having_a_target() -> None:
+    """Keep the excused-table mapping honest by refusing an entry that also has a load target.
+
+    Purpose
+    -------
+    Stop the excuse list becoming the way a future gap is hidden. Left unchecked, adding a
+    target while leaving its table excused would keep the general assertion above green for the
+    wrong reason, and the excuse's stated justification would be false about delivered code.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a table appears both in :data:`_NO_LOAD_TARGET_BY_DESIGN` and among the declared
+        targets, or if an excused table is not one the verification SQL registers at all.
+    """
+    targeted = {f"{target_for(name).schema}.{target_for(name).table}" for name in target_names()}
+    contradictory = sorted(targeted & set(_NO_LOAD_TARGET_BY_DESIGN))
+    assert not contradictory, (
+        f"these tables have a load target and are also excused from having one: {contradictory}"
+    )
+    registered = _datasets_registered_for_verification()
+    # WHY : Assumptions: an excuse for a table the SQL does not register is dead weight that
+    #   would go on excusing a table nothing checks, so it is refused too. That keeps the
+    #   mapping's size a measure of the real exemptions rather than an accumulation.
+    unregistered = sorted(set(_NO_LOAD_TARGET_BY_DESIGN) - set(registered))
+    assert not unregistered, (
+        f"these tables are excused but the verification SQL registers no dataset for them:"
+        f" {unregistered}"
+    )
+
+
+def test_the_category_balance_target_maps_the_composite_key_and_the_balance() -> None:
+    """Map the transaction-category-balance record onto its four ledger columns, in key order.
+
+    Purpose
+    -------
+    Assert the mapping the review prescribed, field by field, rather than only that the target
+    exists. The three key components and the balance are the whole record once the trailing pad
+    is dropped, so a target that mapped three of the four would load rows the primary key
+    accepted and the money-parity pass then reported as short by the whole balance total.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the target names another schema or table, maps a different field set, maps them in
+        another order, or names a column other than the ledger table's own.
+    """
+    target = target_for("TCATBAL")
+    assert (target.schema, target.table) == ("ledger", "transaction_category_balances")
+    # WHY : Assumptions: the pairs are asserted as an ORDERED tuple and not as a mapping
+    #   equality, because iteration order is the COPY column order. A target that mapped the
+    #   right four columns in the wrong order would emit a COPY whose column list disagreed
+    #   with the row tuples written into it, and `type_cd` and `category_cd` are both CHAR, so
+    #   a transposition of those two would load silently and put a two-character code in the
+    #   four-character column.
+    assert tuple(target.columns.items()) == (
+        ("TRANCAT-ACCT-ID", "account_id"),
+        ("TRANCAT-TYPE-CD", "type_cd"),
+        ("TRANCAT-CD", "category_cd"),
+        ("TRAN-CAT-BAL", "balance"),
+    )
+    # WHY : Assumptions: the composite key's arity comes from the reader's own published
+    #   derivation rather than from a list restated here, so the two cannot agree by
+    #   coincidence. That constant is derived from the descriptor's key span, so this assertion
+    #   fails if the key ever gains or loses a component while the mapping above stands still --
+    #   which is the failure mode the identically-named key group on the category REFERENCE
+    #   record makes plausible: that one brackets two fields where this brackets three.
+    assert COMPOSITE_KEY_FIELD_NAMES == ("TRANCAT-ACCT-ID", "TRANCAT-TYPE-CD", "TRANCAT-CD")
+    assert set(COMPOSITE_KEY_FIELD_NAMES) < set(target.columns)
+    layout = layouts.LAYOUTS["TCATBAL"]
+    # WHY : the money field is asserted to be the SIGNED display regime, because that is what
+    #   makes it decode to an exact Decimal rather than to characters. The balance carries a sign
+    #   overpunch in the shipped seed -- `0000000000{` in bytes 18-28 -- and a field read as
+    #   unsigned would hand the loader the overpunch character itself.
+    assert layout.field("TRAN-CAT-BAL").kind is layouts.Kind.ZONED
+    # WHY : the trailing pad is asserted ABSENT from the mapping rather than merely unmentioned.
+    #   The layout declares it, every reader drops it, and a target naming it would raise the
+    #   "missing mapped field" error on the first record -- a load that could never succeed.
+    assert "FILLER" not in target.columns
 
 
 @pytest.mark.parametrize("record", _LOADABLE_RECORDS)
@@ -145,7 +400,18 @@ def test_every_target_maps_only_fields_its_reader_publishes(record: str) -> None
     target = target_for(record)
     layout = layouts.LAYOUTS[record]
     declared = {field.name for field in layout.fields}
+    # WHY : Assumptions: the target's OWN declared derived set is required to be a subset of the
+    #   one this file states, rather than simply trusted. A target free to declare any key derived
+    #   could exempt a misspelled copybook field from this assertion and load nothing into a
+    #   column that looked mapped -- so the exemption is bounded here, at the test, and a new
+    #   derived key is a visible edit rather than a silent one in the module under test.
+    assert target.derived_fields <= _DERIVED_KEYS, (
+        f"{record} declares a derived field this suite does not admit:"
+        f" {sorted(target.derived_fields - _DERIVED_KEYS)}"
+    )
     for field_name in target.columns:
+        if field_name in target.derived_fields:
+            continue
         assert field_name in declared, f"{record} target maps undeclared field {field_name}"
         # WHY : a mapped field is asserted NOT to be padding. Padding is dropped by every
         #   reader, so a target naming it would raise the "missing mapped field" error on the
@@ -188,14 +454,14 @@ def test_every_target_column_exists_in_a_shipped_migration(record: str) -> None:
         assert re.search(rf"\b{column}\b", ddl), f"column {column} is declared by no migration"
 
 
-@pytest.mark.parametrize("record", _CIPHER_BOUND_RECORDS)
-def test_a_cipher_bound_record_is_refused_with_its_reason(record: str) -> None:
-    """Refuse a load target for a record whose table holds ciphertext this package cannot make.
+@pytest.mark.parametrize("record", _POSTING_FILLED_RECORDS)
+def test_a_record_with_no_shipped_extract_is_refused_with_its_reason(record: str) -> None:
+    """Refuse a load target for a record no dataset carries, and say that is why.
 
     Parameters
     ----------
     record : str
-        One record registered and readable here but deliberately not loadable.
+        One record registered here that no seed extract carries.
 
     Returns
     -------
@@ -205,18 +471,63 @@ def test_a_cipher_bound_record_is_refused_with_its_reason(record: str) -> None:
     Raises
     ------
     AssertionError
-        If the record has a target, or is refused without naming the ciphertext reason.
+        If the record has a target, or is refused without naming the absent-extract reason.
     """
+    # WHY : Refactoring Rationale: this test used to run over CUSTOMER and CARD and require the
+    #   refusal to say the word "ciphertext" -- pinning, as a contract, that the customer master
+    #   and the card master had no migration path. Both now load through
+    #   `loaders/protected_columns.py`, so what is pinned here instead is the one refusal that is
+    #   genuinely a design decision: a record for which nothing ships.
     assert record not in target_names()
     with pytest.raises(AuroraLoadError) as refused:
         target_for(record)
     message = str(refused.value)
-    # WHY : the REASON is asserted, not merely the refusal. "No target" and "no target because
-    #   the columns hold ciphertext produced by a key this package does not hold" are read very
-    #   differently by whoever next tries to load the record, and only the second stops them
-    #   adding a mapping that would insert plaintext into an encrypted column.
-    assert "ciphertext" in message
+    # WHY : the REASON is asserted, not merely the refusal. "No target" reads as an omission
+    #   someone should fill in; "no extract ships in either encoding, and the posting job fills
+    #   this table from the daily feed" tells the next reader that adding a mapping would be
+    #   loading a table from a dataset that does not exist.
+    assert "no extract" in message
+    assert "ledger.daily_transactions" in message
     assert record in message
+
+
+def test_every_protected_column_is_declared_sealed_rather_than_verbatim() -> None:
+    """Require every ``*_encrypted`` column this module loads to declare a sealing projection.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If any target maps a field to a protected column without declaring a sealing projection.
+    """
+    # WHY : Assumptions: the check is driven by the COLUMN NAME rather than by a list of fields,
+    #   so a protected column added to any target in future is covered without this test being
+    #   revised. It is the single most consequential declaration in the module: a protected column
+    #   left VERBATIM would load a national identifier, a government-issued identifier or a card
+    #   verification value as PLAINTEXT into a column named `*_encrypted`, and the load would
+    #   succeed. Nothing downstream reads those columns during a migration, so nothing else in
+    #   this suite or in the verification passes could report it.
+    sealing = {Projection.SEALED_IDENTIFIER, Projection.SEALED_VERIFICATION_VALUE}
+    found = 0
+    for record in _LOADABLE_RECORDS:
+        target = target_for(record)
+        for field_name, column in target.columns.items():
+            if not column.endswith("_encrypted"):
+                continue
+            found += 1
+            assert target.projections.get(field_name) in sealing, (
+                f"{record} maps {field_name} to protected column {column} without a sealing"
+                " projection, so it would load plaintext"
+            )
+    # WHY : the count is asserted so the loop cannot pass by finding nothing. Three protected
+    #   columns exist across the ten targets -- the two customer identifiers and the card
+    #   verification value -- and a rename that took one of them out of the `*_encrypted` naming
+    #   would otherwise reduce this test to a tautology.
+    assert found == 3
 
 
 def test_an_unregistered_record_has_no_target() -> None:
@@ -350,15 +661,45 @@ def test_load_records_copies_every_row_and_commits(fake_aurora: FakeAuroraDataba
         If the row count returned differs from the records supplied, if the rows are not the
         projected tuples, or if the transaction did not commit exactly once.
     """
-    target = target_for("TRANTYPE")
+    # WHY : Refactoring Rationale: this test drove TRANTYPE, which now loads through the
+    #   stage-and-merge path because `V2__seed_reference.sql` writes that table too. It is
+    #   repointed at a target that still takes the DIRECT path rather than adapted, so the two
+    #   paths keep separate tests: this one asserts that a single-writer table is copied straight
+    #   into and committed once, and `test_load_records_merges_staged_rows_on_the_declared_key`
+    #   asserts the merge. Adapting one test to cover both would have left neither statement
+    #   sequence pinned.
+    target = target_for("TCATBAL")
     records = [
-        {"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "SYNTHETIC ONE"},
-        {"TRAN-TYPE": "02", "TRAN-TYPE-DESC": "SYNTHETIC TWO"},
+        {
+            "TRANCAT-ACCT-ID": "00000000001",
+            "TRANCAT-TYPE-CD": "01",
+            "TRANCAT-CD": "0001",
+            "TRAN-CAT-BAL": Decimal("10.00"),
+        },
+        {
+            "TRANCAT-ACCT-ID": "00000000002",
+            "TRANCAT-TYPE-CD": "02",
+            "TRANCAT-CD": "0003",
+            "TRAN-CAT-BAL": Decimal("-4.50"),
+        },
     ]
     connection = fake_aurora.connect(**_connection_params())
-    written = load_records(connection, target, records)
-    assert written == len(records)
+    outcome = load_records(connection, target, records)
+    assert outcome.staged == len(records)
+    # WHY : Assumptions: the inserted count is asserted EQUAL to the staged count on this path,
+    #   which is the property that distinguishes it from the merge. Every accepted row goes into
+    #   the table here, so a loader reporting fewer would be reporting a merge it did not perform.
+    assert outcome.inserted == len(records)
+    assert outcome.skipped == 0
     assert fake_aurora.copy_statements == [target.copy_statement()]
+    # WHY : the direct path must create NO staging table and issue NO insert. A stage created
+    #   for a single-writer target would be harmless in itself and would also mean the two paths
+    #   had collapsed into one, which is what this assertion prevents. The COPY itself IS recorded
+    #   as an executed statement by the double, so the assertion names what must be absent rather
+    #   than requiring the log to be empty.
+    executed = " ".join(fake_aurora.executed_sql()).casefold()
+    assert "create temporary table" not in executed
+    assert "insert into" not in executed
     # WHY : Assumptions: the double records each copied row PAIRED with the statement it was
     #   written under, so the statement is projected away here rather than the pair being
     #   compared against a bare tuple. Keeping the pair is what lets the assertion below prove
@@ -367,8 +708,8 @@ def test_load_records_copies_every_row_and_commits(fake_aurora: FakeAuroraDataba
         target.copy_statement()
     ] * len(records)
     assert [row for _, row in fake_aurora.copied_rows] == [
-        ("01", "SYNTHETIC ONE"),
-        ("02", "SYNTHETIC TWO"),
+        ("00000000001", "01", "0001", Decimal("10.00")),
+        ("00000000002", "02", "0003", Decimal("-4.50")),
     ]
     assert fake_aurora.commits == 1
     assert fake_aurora.rollbacks == 0
@@ -437,10 +778,15 @@ def test_load_records_rolls_back_before_reraising(fake_aurora: FakeAuroraDatabas
     AssertionError
         If the failure commits, does not roll back, or copies the failing record.
     """
-    target = target_for("TRANTYPE")
+    target = target_for("TCATBAL")
     records = [
-        {"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "SYNTHETIC ONE"},
-        {"TRAN-TYPE": "02"},
+        {
+            "TRANCAT-ACCT-ID": "00000000001",
+            "TRANCAT-TYPE-CD": "01",
+            "TRANCAT-CD": "0001",
+            "TRAN-CAT-BAL": Decimal("10.00"),
+        },
+        {"TRANCAT-ACCT-ID": "00000000002", "TRANCAT-TYPE-CD": "02"},
     ]
     connection = fake_aurora.connect(**_connection_params())
     with pytest.raises(AuroraLoadError):
@@ -449,7 +795,9 @@ def test_load_records_rolls_back_before_reraising(fake_aurora: FakeAuroraDatabas
     #   loader has already written one row when it fails. A first-record failure would roll
     #   back an empty transaction, which every implementation gets right; only a partway
     #   failure distinguishes a loader that rolls back from one that leaves a row behind.
-    assert [row for _, row in fake_aurora.copied_rows] == [("01", "SYNTHETIC ONE")]
+    assert [row for _, row in fake_aurora.copied_rows] == [
+        ("00000000001", "01", "0001", Decimal("10.00"))
+    ]
     assert fake_aurora.rollbacks == 1
     assert fake_aurora.commits == 0
 
@@ -475,13 +823,13 @@ def test_load_records_rolls_back_a_decode_failure_and_wraps_it(
         If the failure commits, does not roll back, or escapes unwrapped.
     """
 
-    def failing_stream() -> Iterator[dict[str, str]]:
+    def failing_stream() -> Iterator[dict[str, object]]:
         """Yield one good record, then fail the way a truncated extract fails.
 
         Yields
         ------
-        dict[str, str]
-            One valid transaction-type record.
+        dict[str, object]
+            One valid category-balance record.
 
         Raises
         ------
@@ -489,10 +837,15 @@ def test_load_records_rolls_back_a_decode_failure_and_wraps_it(
             Always, after the first record, standing for the width failure a reader raises on
             a truncated extract.
         """
-        yield {"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "SYNTHETIC ONE"}
-        raise layouts.RecordLengthError("record 2 of TRANTYPE is 59 characters against 60")
+        yield {
+            "TRANCAT-ACCT-ID": "00000000001",
+            "TRANCAT-TYPE-CD": "01",
+            "TRANCAT-CD": "0001",
+            "TRAN-CAT-BAL": Decimal("10.00"),
+        }
+        raise layouts.RecordLengthError("record 2 of TCATBAL is 49 characters against 50")
 
-    target = target_for("TRANTYPE")
+    target = target_for("TCATBAL")
     connection = fake_aurora.connect(**_connection_params())
     # WHY : this exercises the SECOND of the loader's two failure arms, and it was added
     #   because a mutation that made that arm commit instead of roll back survived a suite
@@ -547,6 +900,765 @@ def test_the_loader_issues_no_privileged_statement(fake_aurora: FakeAuroraDataba
     #   in particular that it never clears the table before loading it, which would turn a
     #   re-run into silent data loss rather than the duplicate-key failure it should be.
     assert fake_aurora.forbidden_statements() == ()
+
+
+@pytest.mark.parametrize("record", _MERGED_RECORDS)
+def test_only_a_table_with_a_second_writer_declares_a_conflict_key(record: str) -> None:
+    """Declare a conflict key on exactly the tables the seed migration also writes.
+
+    Parameters
+    ----------
+    record : str
+        One record whose target table has a second writer.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a merged target declares no conflict key, if its key is not the table's primary key
+        as the seed migration's own conflict target states it, or if any other target declares
+        one.
+    """
+    target = target_for(record)
+    assert target.conflict_key, f"{record} loads into a table with two writers and must merge"
+    seed = (
+        _SERVICES_ROOT / "reference-service/src/main/resources/db/migration/V2__seed_reference.sql"
+    ).read_text(encoding="utf-8")
+    # WHY : Assumptions: the conflict target is checked against the SEED MIGRATION's own
+    #   `ON CONFLICT` clause, read from disk, rather than against a key written into this file.
+    #   The two writers must conflict on the same key or they do not compose: if the loader
+    #   conflicted on a subset it would silently skip rows the migration had not written, and if it
+    #   conflicted on a superset PostgreSQL would refuse the statement for want of a matching
+    #   unique index. Comparing against the other writer's clause is the only assertion that
+    #   catches either.
+    clause = ", ".join(target.conflict_key)
+    assert f"ON CONFLICT ({clause}) DO NOTHING" in seed, (
+        f"{record} merges on ({clause}), which is not the conflict target"
+        " V2__seed_reference.sql uses for the same table"
+    )
+    for other in _LOADABLE_RECORDS:
+        if other not in _MERGED_RECORDS:
+            assert not target_for(other).conflict_key, (
+                f"{other} loads into a single-writer table and must not merge; a conflict key"
+                " there turns a re-run from a reported duplicate into a silent no-op"
+            )
+
+
+def test_load_records_merges_staged_rows_on_the_declared_key(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Stage into a temporary table, then merge on the declared key, in that order, once.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the COPY does not target the staging table, if the two statements are absent or out
+        of order, or if the transaction did not commit exactly once.
+    """
+    target = target_for("TRANTYPE")
+    records = [
+        {"TRAN-TYPE": "98", "TRAN-TYPE-DESC": "SYNTHETIC ONE" + " " * 37},
+        {"TRAN-TYPE": "99", "TRAN-TYPE-DESC": "SYNTHETIC TWO" + " " * 37},
+    ]
+    fake_aurora.arrange_affected_rows("insert into", 2)
+    connection = fake_aurora.connect(**_connection_params())
+    outcome = load_records(connection, target, records)
+    assert outcome.staged == 2
+    assert outcome.inserted == 2
+    # WHY : Assumptions: the COPY goes to the STAGING table and not to the target, which is the
+    #   whole mechanism. A COPY straight into the target cannot express a conflict clause at all,
+    #   so a loader that kept copying directly and merely appended an insert afterwards would
+    #   still abort on the first key already present.
+    assert fake_aurora.copy_statements == [target.stage_copy_statement()]
+    assert target.stage_name in target.stage_copy_statement()
+    # WHY : the ORDER is asserted, not just the presence. The staging table has to exist before
+    #   the COPY and the merge has to follow it; a merge issued first would insert nothing and
+    #   report success, which is exactly the silent outcome this path exists to avoid.
+    executed = fake_aurora.executed_sql()
+    stage_at = executed.index(target.stage_statement())
+    merge_at = executed.index(target.merge_statement())
+    assert stage_at < merge_at
+    assert fake_aurora.commits == 1
+    assert fake_aurora.rollbacks == 0
+    # WHY : the merged description is asserted TRIMMED. `V2__seed_reference.sql` writes
+    #   'SYNTHETIC ONE' with no padding, so a loader carrying the copybook's fifty-character
+    #   blank-padded form would produce a row differing from the migration's in content while
+    #   agreeing in count -- which the row-count verification pass cannot see.
+    assert [row for _, row in fake_aurora.copied_rows] == [
+        ("98", "SYNTHETIC ONE"),
+        ("99", "SYNTHETIC TWO"),
+    ]
+
+
+def test_a_merge_into_an_already_seeded_table_reports_every_row_skipped(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Report rows staged and none inserted, and commit, when the target already holds them.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the load fails, rolls back, or reports the staged rows as inserted.
+    """
+    # WHY : Assumptions: this is the case the finding was about. `V2__seed_reference.sql` may
+    #   already have written every row, and before the merge path a plain COPY aborted on the
+    #   first primary-key collision -- so the documented claim that the counts "hold whether the
+    #   seed migration ran, the ETL ran, or both did" was false. What must happen instead is a
+    #   clean commit reporting that nothing was added, which is a success and has to read as one.
+    target = target_for("TRANCAT")
+    fake_aurora.arrange_affected_rows("insert into", 0)
+    connection = fake_aurora.connect(**_connection_params())
+    outcome = load_records(
+        connection,
+        target,
+        [{"TRAN-TYPE-CD": "01", "TRAN-CAT-CD": "0001", "TRAN-CAT-TYPE-DESC": "Regular Sales"}],
+    )
+    assert outcome.staged == 1
+    assert outcome.inserted == 0
+    assert outcome.skipped == 1
+    assert "already present" in outcome.describe()
+    assert fake_aurora.commits == 1
+    assert fake_aurora.rollbacks == 0
+
+
+def test_a_merge_that_fails_rolls_back_and_names_the_staged_count(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Roll back and never commit when a record fails partway through a staged merge.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the failure commits, does not roll back, or reaches the merge statement.
+    """
+
+    def failing_stream() -> Iterator[dict[str, str]]:
+        """Yield one good record, then fail the way a truncated extract fails.
+
+        Yields
+        ------
+        dict[str, str]
+            One valid transaction-type record.
+
+        Raises
+        ------
+        RecordLengthError
+            Always, after the first record.
+        """
+        yield {"TRAN-TYPE": "98", "TRAN-TYPE-DESC": "SYNTHETIC ONE"}
+        raise layouts.RecordLengthError("record 2 of TRANTYPE is 59 characters against 60")
+
+    # WHY : Assumptions: the failure is a FOREIGN exception rather than a missing mapped field,
+    #   which exercises the wrapping arm of the merge path. The two arms differ in kind: a missing
+    #   field is already an `AuroraLoadError` and is re-raised with its own message, whereas
+    #   anything a lazy reader raises mid-stream arrives foreign and must be both rolled back AND
+    #   wrapped -- and only the wrapping arm can state how many rows had been staged when it failed.
+    target = target_for("TRANTYPE")
+    connection = fake_aurora.connect(**_connection_params())
+    with pytest.raises(AuroraLoadError) as refused:
+        load_records(connection, target, failing_stream())
+    message = str(refused.value)
+    assert "staged row(s)" in message
+    assert "rolled back" in message
+    assert "1 staged row(s)" in message
+    # WHY : the MERGE must not have been reached. A merge issued after a failed staging COPY
+    #   would insert whatever rows had already been staged -- a partial load that committed, which
+    #   is precisely the outcome the single unit of work exists to make impossible.
+    assert target.merge_statement() not in fake_aurora.executed_sql()
+    assert fake_aurora.rollbacks == 1
+    assert fake_aurora.commits == 0
+
+
+def test_the_merge_path_issues_no_privileged_statement(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Create only a session-temporary table, and issue no privileged statement, while merging.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double, which classifies every statement it is given.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the merge path issues a privileged statement, or creates a table outside the
+        session-temporary schema.
+    """
+    target = target_for("DISGROUP")
+    fake_aurora.arrange_affected_rows("insert into", 1)
+    connection = fake_aurora.connect(**_connection_params())
+    load_records(
+        connection,
+        target,
+        [
+            {
+                "DIS-ACCT-GROUP-ID": "SYNTHGRP01",
+                "DIS-TRAN-TYPE-CD": "01",
+                "DIS-TRAN-CAT-CD": "0005",
+                "DIS-INT-RATE": Decimal("1.00"),
+            }
+        ],
+    )
+    # WHY : Assumptions: the merge path adds two statements to what the loader issues, so the
+    #   privilege contract is re-asserted for it specifically rather than inherited from the direct
+    #   path's test. A runtime role holds SELECT, INSERT and UPDATE and has CREATE revoked on its
+    #   schema, so the staging table has to be TEMPORARY -- created in the session's own temporary
+    #   schema under the database-level privilege PostgreSQL grants PUBLIC -- and it must be
+    #   unqualified, because qualifying it with the target's schema would attempt a PERMANENT table
+    #   there and be refused.
+    assert fake_aurora.forbidden_statements() == ()
+    creates = [sql for sql in fake_aurora.executed_sql() if "CREATE" in sql.upper()]
+    assert len(creates) == 1
+    assert creates[0].startswith("CREATE TEMPORARY TABLE ")
+    assert f".{target.stage_name}" not in creates[0]
+    # WHY : the staging table is asserted to carry only the columns the COPY supplies. `LIKE` was
+    #   the obvious way to build it and would have copied every column of the target, including
+    #   `ledger.daily_transactions`' identity primary key -- as a NOT NULL column with no default,
+    #   which the COPY does not fill.
+    assert " WITH NO DATA" in creates[0]
+
+
+def test_prepare_record_projects_each_declared_transformation() -> None:
+    """Trim padding, null a blank nullable column, and canonicalise both timestamp dialects.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If any projection is not applied, or an unmapped field reaches the prepared record.
+    """
+    target = target_for("DALYTRAN")
+    record = {
+        "DALYTRAN-ID": "0000000000683580",
+        "DALYTRAN-TYPE-CD": "01",
+        "DALYTRAN-CAT-CD": "0001",
+        "DALYTRAN-SOURCE": "POS TERM  ",
+        "DALYTRAN-DESC": "Purchase at Abshire-Lowe" + " " * 76,
+        "DALYTRAN-AMT": Decimal("504.77"),
+        "DALYTRAN-MERCHANT-ID": "800000000",
+        "DALYTRAN-MERCHANT-NAME": "Abshire-Lowe" + " " * 38,
+        "DALYTRAN-MERCHANT-CITY": "North Enoshaven" + " " * 35,
+        "DALYTRAN-MERCHANT-ZIP": "72112     ",
+        "DALYTRAN-CARD-NUM": "4859452612877065",
+        # WHY : the DOTTED dialect is used here deliberately. All 300 shipped records carry the
+        #   space-separated form, so a verbatim loader passes against the corpus and fails on the
+        #   first row the interest calculation writes -- which uses this form, and which PostgreSQL
+        #   cannot cast at all. Using the form the corpus does NOT contain is what makes this test
+        #   able to fail.
+        "DALYTRAN-ORIG-TS": "2022-07-18-10.30.00.123456",
+        "DALYTRAN-PROC-TS": " " * 26,
+        "FILLER": " " * 20,
+    }
+    prepared = prepare_record(target, record)
+    assert prepared["DALYTRAN-DESC"] == "Purchase at Abshire-Lowe"
+    assert prepared["DALYTRAN-MERCHANT-NAME"] == "Abshire-Lowe"
+    assert prepared["DALYTRAN-ORIG-TS"] == "2022-07-18 10:30:00.123456"
+    assert prepared["DALYTRAN-PROC-TS"] is None
+    # WHY : a fixed code keeps its declared width even though a description does not, because the
+    #   distinction is the COLUMN's: `source` is CHAR(10) and `description` is VARCHAR(100). A
+    #   loader that trimmed uniformly would produce a `source` PostgreSQL then pads back, and a
+    #   loader that trimmed nothing would store padding in the description a screen renders.
+    assert prepared["DALYTRAN-SOURCE"] == "POS TERM  "
+    # WHY : the prepared record carries the mapped fields and NOTHING else. `FILLER` was supplied
+    #   above precisely so that a preparation copying the record forward would be caught.
+    assert set(prepared) == set(target.columns)
+
+
+def test_a_stamp_the_column_cannot_hold_is_refused_at_the_load_boundary() -> None:
+    """Refuse a malformed originating stamp when rendering it for a timestamp column.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a malformed stamp reaches a row, or the refusal quotes it.
+    """
+    # WHY : Assumptions: the ORIGINATING stamp is the one this test corrupts, because it is the one
+    #   the reader does NOT validate -- its descriptor marks it deterministic business data, so
+    #   only the run-generated processing stamp is checked on the way in. That leaves the load
+    #   boundary as the only place a corrupt originating stamp can be caught, and it has to be
+    #   caught somewhere: PostgreSQL would otherwise reject the whole COPY with a cast error naming
+    #   a column, after the entire dataset had been streamed.
+    target = target_for("DALYTRAN")
+    record = {
+        "DALYTRAN-ID": "0000000000683580",
+        "DALYTRAN-TYPE-CD": "01",
+        "DALYTRAN-CAT-CD": "0001",
+        "DALYTRAN-SOURCE": "POS TERM  ",
+        "DALYTRAN-DESC": "Synthetic purchase" + " " * 82,
+        "DALYTRAN-AMT": Decimal("1.00"),
+        "DALYTRAN-MERCHANT-ID": "800000000",
+        "DALYTRAN-MERCHANT-NAME": "Synthetic" + " " * 41,
+        "DALYTRAN-MERCHANT-CITY": "Synthetictown" + " " * 37,
+        "DALYTRAN-MERCHANT-ZIP": "72112     ",
+        "DALYTRAN-CARD-NUM": "4859452612877065",
+        "DALYTRAN-ORIG-TS": "2022-13-45 10:30:00.123456",
+        "DALYTRAN-PROC-TS": " " * 26,
+    }
+    with pytest.raises(AuroraLoadError) as refused:
+        prepare_record(target, record)
+    message = str(refused.value)
+    assert "DALYTRAN-ORIG-TS" in message
+    assert "orig_ts" in message
+    # WHY : no part of the value reaches the diagnostic. The shared renderer names the width and
+    #   the two admitted forms only, and this wrapper adds the record and the column -- which is
+    #   the discipline the whole load path holds to, because these records carry account numbers.
+    assert "2022-13-45" not in message
+
+
+def test_prepare_record_nulls_a_blank_nullable_column_and_keeps_a_present_one() -> None:
+    """Yield ``None`` for a blank nullable field and the trimmed text for a populated one.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a blank nullable field becomes an empty string, or a populated one is not trimmed.
+    """
+    target = TableTarget(
+        schema="account",
+        table="customers",
+        columns={"CUST-MIDDLE-NAME": "middle_name", "CUST-PHONE-NUM-2": "phone_num_2"},
+        projections={
+            "CUST-MIDDLE-NAME": Projection.TRIMMED_OR_NULL,
+            "CUST-PHONE-NUM-2": Projection.TRIMMED_OR_NULL,
+        },
+    )
+    prepared = prepare_record(
+        target,
+        {"CUST-MIDDLE-NAME": " " * 25, "CUST-PHONE-NUM-2": "(373)693-8684  "},
+    )
+    # WHY : `None` rather than `''`, and the difference is a fact about the customer. An empty
+    #   string would make "no middle name" and "a middle name of zero characters" the same stored
+    #   value, and every screen and report reading the column would render the second.
+    assert prepared["CUST-MIDDLE-NAME"] is None
+    assert prepared["CUST-PHONE-NUM-2"] == "(373)693-8684"
+
+
+def test_a_target_declaring_a_projection_for_an_unmapped_field_is_refused() -> None:
+    """Refuse a target whose projection names a field it does not map to a column.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If such a target is accepted, or the refusal does not name the offending field.
+    """
+    # WHY : Assumptions: this is checked at CONSTRUCTION because every way it fails otherwise is
+    #   silent. A projection keyed on a misspelled field name simply never applies -- so a money
+    #   column would load padded text, or, far worse, a protected column declared
+    #   `SEALED_IDENTIFIER` under a misspelling would fall through to VERBATIM and load a national
+    #   identifier as plaintext into a column named `ssn_encrypted`, successfully.
+    with pytest.raises(ValueError) as refused:
+        TableTarget(
+            schema="account",
+            table="customers",
+            columns={"CUST-SSN": "ssn_encrypted"},
+            projections={"CUST-SSNN": Projection.SEALED_IDENTIFIER},
+        )
+    assert "CUST-SSNN" in str(refused.value)
+
+
+def test_a_target_declaring_a_conflict_key_it_does_not_produce_is_refused() -> None:
+    """Refuse a target whose conflict key names a column its mapping does not supply.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If such a target is accepted, or the refusal does not name the offending column.
+    """
+    with pytest.raises(ValueError) as refused:
+        TableTarget(
+            schema="reference",
+            table="transaction_types",
+            columns={"TRAN-TYPE": "type_cd"},
+            conflict_key=("type_cd", "description"),
+        )
+    assert "description" in str(refused.value)
+
+
+def test_a_target_with_no_conflict_key_has_no_merge_statement() -> None:
+    """Refuse to compose a merge statement for a target that loads through a direct COPY.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a merge statement is produced for a single-writer target.
+    """
+    with pytest.raises(AuroraLoadError):
+        target_for("ACCOUNT").merge_statement()
+
+
+class _RecordingKeys:
+    """Data-key source answering deterministically and recording every context it was asked for.
+
+    Purpose
+    -------
+    Let the protected-column projections be exercised with no key-management service, while
+    making the encryption context each envelope is bound to observable -- which is the property
+    that decides whether the owning service can read the value back.
+    """
+
+    def __init__(self) -> None:
+        """Start with no recorded requests.
+
+        Returns
+        -------
+        None
+            Initialises the request log.
+
+        Raises
+        ------
+        None
+        """
+        self.requests: list[tuple[str, dict[str, str]]] = []
+
+    def data_key(self, *, key_id: str, encryption_context: Mapping[str, str]) -> DataKey:
+        """Answer with a fixed key pair, recording the key and context asked for.
+
+        Parameters
+        ----------
+        key_id : str
+            The key the caller named.
+        encryption_context : Mapping[str, str]
+            The context the caller bound the key to.
+
+        Returns
+        -------
+        DataKey
+            A fixed 32-byte key and a fixed wrapped form.
+
+        Raises
+        ------
+        None
+        """
+        self.requests.append((key_id, dict(encryption_context)))
+        # WHY : the key material is FIXED rather than random, so an envelope produced here is
+        #   reproducible and its framing can be asserted byte by byte. The vector is still drawn
+        #   from the operating system inside the cipher, so two envelopes over the same value
+        #   differ -- which is asserted below and is the property a fixed key must not destroy.
+        return DataKey(plaintext=bytes(range(32)), wrapped=b"SYNTHETIC-WRAPPED-KEY")
+
+
+def test_a_protected_identifier_is_framed_as_the_account_service_reads_it() -> None:
+    """Frame a customer identifier with a two-byte length, the wrapped key, a vector and a tag.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the framing, the encryption context or the column binding differs from what
+        ``CustomerIdentifierProtectionConfig`` parses.
+    """
+    keys = _RecordingKeys()
+    target = target_for("CUSTOMER")
+    context = LoadContext(
+        identifier_cipher=CustomerIdentifierCipher(key_id="alias/synthetic", keys=keys)
+    )
+    prepared = prepare_record(
+        target,
+        {
+            **_customer_record(),
+            "CUST-SSN": "020973888",
+            "CUST-GOVT-ISSUED-ID": " " * 20,
+        },
+        context,
+    )
+    envelope = prepared["CUST-SSN"]
+    assert isinstance(envelope, bytes)
+    # WHY : the framing is asserted OFFSET BY OFFSET against what the Java class parses, because
+    #   every part of it is load-bearing and a mistake in any of them produces bytes that store
+    #   successfully and never decipher. There is no marker and no version byte here -- the
+    #   customer framing begins with the length prefix at offset zero -- so a framing copied from
+    #   the card envelope would shift everything by five bytes.
+    wrapped = b"SYNTHETIC-WRAPPED-KEY"
+    assert envelope[:2] == len(wrapped).to_bytes(2, "big")
+    assert envelope[2 : 2 + len(wrapped)] == wrapped
+    assert len(envelope) == 2 + len(wrapped) + 12 + len("020973888") + 16
+    # WHY : the encryption context is asserted because it is AUTHENTICATED data on the data key:
+    #   KMS refuses to unwrap under a different context, so a context differing by one character
+    #   makes every identifier permanently unreadable by the service that owns the column.
+    assert keys.requests == [
+        (
+            "alias/synthetic",
+            {"carddemo:purpose": "customer-identifier", "carddemo:column": "ssn_encrypted"},
+        )
+    ]
+    # WHY : the blank government identifier becomes NULL rather than an envelope over nothing.
+    #   That column is nullable; enciphering an empty value would store a present envelope that
+    #   deciphers to zero characters, which no reader can tell apart from a corrupted one.
+    assert prepared["CUST-GOVT-ISSUED-ID"] is None
+
+
+def test_a_protected_verification_value_carries_the_marker_the_card_service_checks() -> None:
+    """Frame a verification value with the marker, the version byte and the length prefix.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the marker, version, framing or encryption context differs from what ``EncryptedCvv``
+        parses, or if two envelopes over one value are identical.
+    """
+    keys = _RecordingKeys()
+    target = target_for("CARD")
+    context = LoadContext(
+        verification_value_cipher=CardVerificationValueCipher(key_id="alias/synthetic", keys=keys)
+    )
+    record = {
+        "CARD-NUM": "0500024453765740",
+        "CARD-ACCT-ID": "00000000050",
+        "CARD-CVV-CD": "123",
+        "CARD-EMBOSSED-NAME": "Aniya Von" + " " * 41,
+        "CARD-EXPIRAION-DATE": "2023-03-09",
+        "CARD-ACTIVE-STATUS": "Y",
+    }
+    first = prepare_record(target, record, context)["CARD-CVV-CD"]
+    second = prepare_record(target, record, context)["CARD-CVV-CD"]
+    assert isinstance(first, bytes)
+    wrapped = b"SYNTHETIC-WRAPPED-KEY"
+    assert first[:4] == b"CDCV"
+    assert first[4] == 1
+    assert first[5:7] == len(wrapped).to_bytes(2, "big")
+    assert first[7 : 7 + len(wrapped)] == wrapped
+    assert len(first) == 4 + 1 + 2 + len(wrapped) + 12 + 3 + 16
+    # WHY : the context here is PURPOSE ONLY -- no column key -- which is where the two framings
+    #   differ beyond their headers. Adding a column key would bind the data key to a context the
+    #   card service never presents on decrypt, so KMS would refuse to unwrap it.
+    assert keys.requests[0][1] == {"carddemo:purpose": "card-cvv"}
+    # WHY : two envelopes over the SAME value must differ, which proves the initialisation vector
+    #   is drawn per value rather than fixed. A repeated vector under one key is the single mistake
+    #   AES-GCM does not survive, and a deterministic envelope would also make the column a
+    #   searchable index of card verification values.
+    assert first != second
+    assert prepare_record(target, record, context)["CARD-EMBOSSED-NAME"] == "Aniya Von"
+
+
+def test_a_sealing_projection_without_its_cipher_refuses_rather_than_loading_plaintext() -> None:
+    """Refuse the load when a protected column's cipher was not supplied.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the projection falls back to plaintext, or the refusal does not name the column.
+    """
+    # WHY : Assumptions: absence of a cipher is a REFUSAL and never a fallback, which is the most
+    #   important single behaviour in the projection layer. A fallback to the plain value would
+    #   load a national identifier as text into `ssn_encrypted`, the load would report success,
+    #   and nothing downstream reads that column during a migration -- so nothing would report it.
+    target = target_for("CUSTOMER")
+    with pytest.raises(AuroraLoadError) as refused:
+        prepare_record(target, {**_customer_record(), "CUST-SSN": "020973888"})
+    message = str(refused.value)
+    assert "ssn_encrypted" in message
+    # WHY : the VALUE must not reach the diagnostic. This message names the column and the table
+    #   and nothing else, because the argument it is refusing is a national identifier.
+    assert "020973888" not in message
+
+
+def test_a_verification_value_of_the_wrong_width_is_refused_without_being_quoted() -> None:
+    """Refuse a verification value that is not exactly three digits, quoting none of it.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a wrong-width value is enciphered, or the refusal quotes the value.
+    """
+    cipher = CardVerificationValueCipher(key_id="alias/synthetic", keys=_RecordingKeys())
+    for candidate in ("12", "1234", "12a"):
+        with pytest.raises(ProtectedColumnError) as refused:
+            cipher.seal(candidate)
+        assert candidate not in str(refused.value)
+
+
+def test_an_identifier_bound_to_an_undeclared_column_is_refused() -> None:
+    """Refuse to bind an identifier envelope to a column this framing does not protect.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If an undeclared column name is accepted into the encryption context.
+    """
+    # WHY : the column name becomes AUTHENTICATED data, so a misspelling produces an envelope
+    #   that frames correctly, stores successfully, and fails its integrity check the first time
+    #   the account service reads it -- weeks later, against a row whose provenance is gone.
+    cipher = CustomerIdentifierCipher(key_id="alias/synthetic", keys=_RecordingKeys())
+    with pytest.raises(ProtectedColumnError) as refused:
+        cipher.seal("020973888", "ssn")
+    assert "ssn" in str(refused.value)
+    assert "020973888" not in str(refused.value)
+
+
+def test_the_security_user_subject_is_resolved_from_the_published_document() -> None:
+    """Fill the subject column from the published document, keyed by the user id.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the subject is not resolved, or an unpublished user id is loaded rather than refused.
+    """
+    target = target_for("SECUSER")
+    record = {
+        "SEC-USR-ID": "ADMIN001",
+        "SEC-USR-FNAME": "Admin" + " " * 15,
+        "SEC-USR-LNAME": "User" + " " * 16,
+        "SEC-USR-TYPE": "A",
+    }
+    subject = "11111111-2222-3333-4444-555555555555"
+    prepared = prepare_record(target, record, LoadContext(subjects={"ADMIN001": subject}))
+    assert prepared["cognito_sub"] == subject
+    assert prepared["SEC-USR-FNAME"] == "Admin"
+    # WHY : the password span must have no column to reach. `auth.users` declares none, and this
+    #   assertion pins that the target maps none either -- so the baseline's cleartext credential
+    #   has no path into the target database even if a reader were changed to publish it.
+    assert "SEC-USR-PWD" not in target.columns
+    assert not any(column.startswith("password") for column in target.columns.values())
+    # WHY : an unpublished user id is REFUSED rather than loaded with a null or a synthesised
+    #   subject. The column is NOT NULL and UNIQUE, so a synthesised value would either abort the
+    #   load partway through or, worse, collide two users onto one identity.
+    with pytest.raises(AuroraLoadError) as refused:
+        prepare_record(target, record, LoadContext(subjects={"OTHER001": subject}))
+    assert "ADMIN001" in str(refused.value)
+    # WHY : the subject document itself must not be enumerated in the diagnostic. It pairs every
+    #   user id with its subject, and an exception string is the least controlled place for that
+    #   whole pairing to end up.
+    assert subject not in str(refused.value)
+
+
+def _customer_record() -> dict[str, object]:
+    """Build one synthetic customer record carrying every field the target maps.
+
+    Purpose
+    -------
+    Keep the eighteen-field customer record in one place, so a projection test states only the
+    field it is about and a target gaining a column is one edit rather than several.
+
+    Returns
+    -------
+    dict[str, object]
+        A record at the declared field widths, with no value resembling a real identifier.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: every value here is padded to the copybook's declared width, because the
+    #   projections under test are exactly the ones that remove that padding -- a record supplied
+    #   already trimmed would let a loader that trimmed nothing pass.
+    return {
+        "CUST-ID": "000000001",
+        "CUST-FIRST-NAME": "Synthetic" + " " * 16,
+        "CUST-MIDDLE-NAME": " " * 25,
+        "CUST-LAST-NAME": "Person" + " " * 19,
+        "CUST-ADDR-LINE-1": "1 Synthetic Way" + " " * 35,
+        "CUST-ADDR-LINE-2": " " * 50,
+        "CUST-ADDR-LINE-3": "Synthetictown" + " " * 37,
+        "CUST-ADDR-STATE-CD": "NC",
+        "CUST-ADDR-COUNTRY-CD": "USA",
+        "CUST-ADDR-ZIP": "12546     ",
+        "CUST-PHONE-NUM-1": "(908)119-8310  ",
+        "CUST-PHONE-NUM-2": " " * 15,
+        "CUST-SSN": "000000000",
+        "CUST-GOVT-ISSUED-ID": "0" * 20,
+        "CUST-DOB-YYYY-MM-DD": "1961-06-08",
+        "CUST-EFT-ACCOUNT-ID": "0053581756",
+        "CUST-PRI-CARD-HOLDER-IND": "Y",
+        "CUST-FICO-CREDIT-SCORE": "274",
+    }
 
 
 def _connection_params() -> dict[str, object]:

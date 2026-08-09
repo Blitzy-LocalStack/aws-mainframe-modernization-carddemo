@@ -448,8 +448,20 @@ public class DisclosureGroupService {
      *
      * <p>Assumptions: this method exists so that one lookup has one implementation. It delegates
      * verbatim to {@link #findRate(String, String, String)}, which carries the transcription and the
-     * reasoning, and it adds no behaviour of its own -- including no transaction demarcation, since
-     * the delegate declares its own and a caller of either name gets the same read-only boundary.</p>
+     * reasoning, and it adds no behaviour of its own.</p>
+     *
+     * <p>Refactoring Rationale: it DOES declare its own read-only transaction, and the sentence here
+     * previously said the opposite -- that no demarcation was needed "since the delegate declares its own
+     * and a caller of either name gets the same read-only boundary". That is not how the framework's
+     * transaction advice works. The advice lives in a proxy around this bean, and a call from one member
+     * of the bean to another goes straight down the {@code this} reference, so the proxy is never
+     * traversed and the annotation on the delegate is not consulted. This method is the one the route
+     * calls, so under the old arrangement the route-facing lookup ran with NO transaction at all: its two
+     * reads each took and returned a connection separately, they could observe different committed states,
+     * and the read-only hint that lets the driver and the database skip write bookkeeping was never
+     * applied. Annotating the entry point is what makes the documented boundary real, and the annotation
+     * on the delegate is retained so a direct caller of that name is equally covered -- a nested call
+     * inside an active transaction joins it rather than starting a second.</p>
      *
      * <p>Alternatives Considered: renaming the single entry point and updating its callers was
      * evaluated and rejected. The controller in {@code com.carddemo.reference.api} and this module's
@@ -457,6 +469,11 @@ public class DisclosureGroupService {
      * files owned elsewhere to no behavioural end, and a delegating name whose body is one statement
      * cannot drift from the method it forwards to. Retaining both names also keeps the transcription
      * discoverable under the name that matches the paragraph it migrates.</p>
+     *
+     * <p>Trade-offs: with both names annotated, an internal call from {@link #findRate(String, String,
+     * String)} to this method would join the caller's transaction rather than start a second, which is
+     * the propagation default and is what is wanted; no such call exists, and the delegation runs the
+     * other way.</p>
      *
      * @param acctGroupId the account group asked for, as a {@code String} at the ten declared
      *     characters of the stored key including any trailing spaces
@@ -469,6 +486,7 @@ public class DisclosureGroupService {
      *     group has a row for that type and category
      * @throws IllegalArgumentException if any component is not exactly its declared width
      */
+    @Transactional(readOnly = true)
     public DisclosureGroupRateResponse resolveRate(
             String acctGroupId, String tranTypeCd, String tranCatCd) {
 

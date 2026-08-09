@@ -4,7 +4,7 @@
 # Purpose:
 #   The complete public contract of the CardDemo cognito module. Everything a
 #   calling root, a sibling module or a running service can learn about this
-#   user pool, it learns from the fourteen outputs below; nothing else in the
+#   user pool, it learns from the sixteen outputs below; nothing else in the
 #   module is visible outside it. Cognito replaces the mainframe sign-on path
 #   -- the USRSEC VSAM file defined at app/csd/CARDDEMO.CSD L88 and read by the
 #   READ-USER-SEC-FILE paragraph of app/cbl/COSGN00C.cbl (L209-L257) -- so
@@ -17,17 +17,28 @@
 #
 # Parameters:
 #   None. An outputs file declares no inputs. This module's parameter surface
-#   is the twenty-five variables in variables.tf beside it, each carrying its
+#   is the twenty-six variables in variables.tf beside it, each carrying its
 #   own name, explicit type, description and validation. Recorded explicitly
 #   because "this file has no parameters" and "this file's parameters are
 #   undocumented" are indistinguishable to a reader otherwise.
 #
 # Returns:
-#   Fourteen values, grouped below in the order a caller wires them: pool
-#   identity, the OIDC issuer, the app client and a reference to its
-#   credential, the API resource server, the two group names, the optional
-#   hosted-UI domain, and the seed-user credential references. Every one
-#   carries a `description`, which is this file's literal answer to Rule 1's
+#   Sixteen values, grouped below in the order a caller wires them: pool
+#   identity (user_pool_id, user_pool_arn, user_pool_endpoint), the OIDC issuer
+#   (issuer_uri), the app client and a reference to its credential
+#   (user_pool_client_id, app_client_secret_arn, app_client_secret_name), the
+#   API resource server (resource_server_identifier,
+#   interactive_route_authorization_scopes, resource_server_scope_identifiers),
+#   the two group names (admin_group_name, user_group_name), the optional
+#   hosted-UI domain (hosted_ui_domain), and the seed-user credential
+#   references (seed_user_secret_arns, seed_user_secret_names,
+#   seed_user_subjects).
+#   WHY the count is enumerated rather than just stated: an earlier revision
+#   said fourteen while sixteen were declared, and a bare number gives a reader
+#   no way to tell WHICH two were missing. Naming every output makes the count
+#   checkable against `grep -c '^output "' outputs.tf` and makes an addition
+#   that forgets this header visible as a missing name rather than as arithmetic.
+#   Every one carries a `description`, which is this file's literal answer to Rule 1's
 #   return-value clause and is also the only thing
 #   infra/.terraform-docs.yml renders into the module README whose freshness CI
 #   drift-checks -- that generator is configured `read-comments: false`, so a
@@ -270,23 +281,35 @@ output "resource_server_scope_identifiers" {
 # Group names -- the invariant cross-language authorization contract
 # -----------------------------------------------------------------------------
 
-# WHY : Assumptions: these are outputs even though they are effectively
-#       constants, because they are a contract spanning three languages rather
-#       than a value any one of them owns.
+# WHY : Assumptions: these two names are IMMUTABLE CONSTANTS, not configuration,
+#       and these outputs publish them rather than parameterise them. The AAP
+#       identity contract fixes the pair, and three languages compile it:
 #       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java
-#       matches these exact strings to turn the group claim into Spring
-#       Security authorities, and ui/src/hooks/useAuth.ts tests them to decide
-#       whether the admin routes are reachable. Emitting them from the module
-#       that creates them lets the calling root write one authoritative value
-#       to Parameter Store, instead of the same literal being maintained
-#       independently in HCL, Java and TypeScript and drifting in whichever one
-#       is edited last.
-#       Refactoring Rationale: main.tf fixes both values independently of
+#       holds them as ADMIN_AUTHORITY and USER_AUTHORITY, ui/src/hooks/useAuth.ts
+#       exports them as ADMIN_GROUP and USER_GROUP, and the
+#       carddemo.security.*-group-name defaults in all seven request-serving
+#       services spell them literally. main.tf fixes both values independently of
 #       name_prefix, and both outputs read the group resources' own names rather
-#       than restating the literals. JwtRoleConverter requires these configured
-#       values in its constructor and refuses startup if either differs from
-#       its compiled authority contract, so drift fails before a request is
-#       authorized.
+#       than restating the literals.
+#       Refactoring Rationale: an earlier revision of this comment claimed that
+#       emitting the names "lets the calling root write one authoritative value
+#       to Parameter Store". NO ROOT DOES THAT, and the claim was corrected here
+#       rather than made true, for a reason that outlives the comment:
+#       JwtRoleConverter's constructor refuses startup when a configured name
+#       differs from its compiled authority, so an injected channel could only
+#       ever carry the value Java already fixes. Injection would model an
+#       unvariable value as configuration and would make a rename look supported
+#       when it is a coordinated three-language change. The two group resources
+#       in main.tf therefore carry a lifecycle precondition pinning each frozen
+#       value, so a rename fails the plan with the list of consumers that must
+#       change in the same commit -- which is the plan-visible dependency that
+#       matters, expressed where the rename would actually happen.
+#       Assumptions: the consumer of both outputs is the calling root's grouped
+#       re-export, output "identity" in infra/envs/{dev,prod}/outputs.tf, which
+#       publishes this module's whole output map. That makes each name readable
+#       with `terraform output identity` as the one authoritative source an
+#       operator or script can quote, without any sibling module having to
+#       accept a value it could not vary.
 output "admin_group_name" {
   description = "Name of the group carrying the baseline's administrator user type: SEC-USR-TYPE 'A' (app/cpy/CSUSR01Y.cpy L22), whose condition name is 88 CDEMO-USRTYP-ADMIN VALUE 'A' at app/cpy/COCOM01Y.cpy L27. It appears in a token's group claim, where common-lib's JwtRoleConverter turns it into a Spring Security authority, and it is what routes a signed-in administrator to the admin screens -- the client-side equivalent of the transfer to COADM01C at app/cbl/COSGN00C.cbl L232. Without it no component can name the group it must test for."
   value       = aws_cognito_user_group.admin.name

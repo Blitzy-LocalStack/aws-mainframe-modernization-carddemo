@@ -2,6 +2,7 @@ package com.carddemo.account.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyShort;
 import static org.mockito.Mockito.mock;
@@ -24,11 +25,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * Asserts what an account update PRESERVES, and that a stale precondition changes nothing.
@@ -274,6 +276,53 @@ class AccountUpdatePreservationTest {
     }
 
     /**
+     * Neither write-path load refusal names the account it was asked for.
+     *
+     * <p>Refactoring Rationale: both messages used to end in the account identifier. The sensitive-data
+     * contract in {@code docs/architecture/observability.md} names account and customer identifiers
+     * alongside the primary account number as values a durable diagnostic may not carry, and requires a
+     * prohibited value to be OMITTED rather than abbreviated. These two are durable in two places at
+     * once, because the shared advice writes them to the operational record and returns them in the
+     * response body.</p>
+     *
+     * <p>Assumptions: both refusals are asserted in ONE case rather than two, because the property is
+     * that no load refusal on this path names the key -- a case per method would pass while a third
+     * method added later disclosed freely. The exact remaining text is pinned alongside the absence, so
+     * emptying a message to satisfy the absence would fail.</p>
+     *
+     * <p>Assumptions: this route DOES carry the identifier in its request line, since
+     * {@code PUT /api/v1/accounts/{accountId}} stays keyed for an end user. That is not a licence to
+     * repeat it: the contract governs what this system writes, and the correlation identifier already
+     * joins this record to the request that provoked it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("neither write-path load refusal names the account identifier")
+    void neitherLoadRefusalNamesTheAccount() {
+        String identifier = String.valueOf(ACCOUNT_ID);
+
+        Fixture absentAccount = new Fixture("12546     ");
+        AccountUpdateRequest accountRequest = absentAccount.request().build();
+        when(absentAccount.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> absentAccount.service.update(ACCOUNT_ID, accountRequest, "12546"))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageNotContaining(identifier)
+                .hasMessage("no account master row exists for the requested account");
+
+        Fixture absentCustomer = new Fixture("12546     ");
+        AccountUpdateRequest customerRequest = absentCustomer.request().build();
+        when(absentCustomer.crossReferences.findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> absentCustomer.service.update(ACCOUNT_ID, customerRequest, "12546"))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageNotContaining(identifier)
+                .hasMessage("no customer could be resolved for the requested account");
+    }
+
+    /**
      * A blank precondition is refused, so the check cannot be opted out of by omission.
      *
      * <p>Assumptions: treating blank as "no opinion" would make the whole check opt-in, and a caller that
@@ -352,8 +401,12 @@ class AccountUpdatePreservationTest {
 
             when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(this.account));
             when(this.customers.findById(CUSTOMER_ID)).thenReturn(Optional.of(this.customer));
-            when(this.crossReferences.findByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
-                    .thenReturn(List.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
+            // Assumptions: the BOUNDED single-row query is stubbed, because the service resolves the
+            //   customer through it rather than reading every cross-reference row and taking the first.
+            //   The row it yields is identical either way -- both name the lowest card number -- so the
+            //   only thing that changed is how much of an account's cardholder data reaches the heap.
+            when(this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
+                    .thenReturn(Optional.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
             when(this.customers.saveAndFlush(any(Customer.class)))
                     .thenAnswer(call -> call.getArgument(0));
             when(this.accounts.saveAndFlush(any(Account.class)))
@@ -377,7 +430,12 @@ class AccountUpdatePreservationTest {
                     new CustomerMapper(Fixture::recognisableCiphertext),
                     new AddressValidationService(new PermissiveLookup()),
                     Clock.fixed(LocalDate.of(2022, 7, 18).atStartOfDay(ZoneOffset.UTC).toInstant(),
-                            ZoneOffset.UTC));
+                            ZoneOffset.UTC),
+                    // Assumptions: the transaction manager is substituted, so both templates run their
+                    //   callbacks and commit nothing. These cases assert which values are written and
+                    //   preserved, not that a database committed; the commit itself belongs to the
+                    //   container-backed integration test.
+                    mock(PlatformTransactionManager.class));
         }
 
         /**

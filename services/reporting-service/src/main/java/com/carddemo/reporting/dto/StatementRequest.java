@@ -18,20 +18,33 @@ import jakarta.validation.constraints.Size;
  * statement is emitted per distinct card present. This record is the selector the migrated surface
  * adds in front of it, and it carries two components and nothing else.
  *
- * <p>Assumptions: each of the three states the two components can be in means something specific, and
- * the third is what makes both optional rather than merely lenient. A card number present narrows the
- * run to that one card, the unit the control break at {@code app/cbl/CBSTM03A.CBL} L69 already works
- * in. An account identifier present names the alternative scope, reached by resolving the account to
- * its cards through the cross-reference {@code app/cbl/CBSTM03B.CBL} opens as its {@code XREF-FILE} at
- * L65. Neither present means every card the prepared input holds, which is exactly the whole-file
- * behaviour of {@code app/jcl/CREASTMT.JCL} L79 and therefore a state this record has to express
- * rather than an incomplete request.
+ * <p>Assumptions: each component means something specific on its own. A card number present narrows
+ * the run to that one card, the unit the control break at {@code app/cbl/CBSTM03A.CBL} L69 already
+ * works in. An account identifier present names the alternative scope, reached by resolving the
+ * account to its cards through the cross-reference {@code app/cbl/CBSTM03B.CBL} opens as its
+ * {@code XREF-FILE} at L65.
  *
- * <p>Assumptions: whether the two components may be supplied together is deliberately not settled
- * here. A rule relating one component to another decides how a run is composed, which is business
- * logic, and the charter at {@code com.carddemo.reporting.dto} closes this package to business logic
- * entirely. What this record guarantees is narrower and unconditional: each component, taken on its
- * own, is either absent or a value of the shape its copybook field declares.
+ * <p>Refactoring Rationale: this charter formerly described a THIRD state -- neither component
+ * present, standing for every card the prepared input holds, on the strength of the whole-file
+ * behaviour at {@code app/jcl/CREASTMT.JCL} L79. That reading is withdrawn, and withdrawing it is a
+ * correction rather than a narrowing. The whole-run scope is real and is still delivered, but it is
+ * delivered by {@code com.carddemo.reporting.task.GenerateStatementsTask}, which walks every
+ * cross-reference row in bounded chunks and writes the two run-wide datasets the reference produces.
+ * Reaching that scope through an HTTP request instead was never sound: the response shape of this
+ * surface is one statement's summary and one pair of artifact locations, so a request selecting the
+ * whole portfolio has no answer to return, and the handler would have had to hold every card's
+ * transactions to compose one. The published contract says so too -- {@code reporting-api.yaml}
+ * declares exactly one of the two as required at its {@code StatementRequest} schema -- so an empty
+ * body was admitted by this record and refused by the contract, which is the disagreement this
+ * revision removes.
+ *
+ * <p>Assumptions: whether the two components may be supplied TOGETHER is still not settled here. A
+ * rule relating one component to another decides how a run is composed, which is business logic, and
+ * the charter at {@code com.carddemo.reporting.dto} closes this package to business logic entirely --
+ * so exactly-one-of is enforced by {@code com.carddemo.reporting.service.StatementService}, which
+ * answers a per-field refusal naming whichever component is at fault. What this record guarantees is
+ * narrower and unconditional: each component, taken on its own, is either absent or a value of the
+ * exact shape and exact width its copybook field declares.
  *
  * <h2>Two things this record deliberately does not carry</h2>
  *
@@ -78,18 +91,20 @@ import jakarta.validation.constraints.Size;
  * nothing in the kernel's money or time packages; a statement request selects a scope and reports no
  * amounts.
  *
- * @param cardNumber the card number a run is narrowed to, as a string of at most 16 digits, or
- *     {@code null} to leave the run unnarrowed by card; 16 is the width
+ * @param cardNumber the card number a run is narrowed to, as a string of exactly 16 digits, or
+ *     {@code null} when the caller selected by account instead; 16 is the width
  *     {@code TRNX-CARD-NUM PIC X(16)} declares at {@code app/cpy/COSTM01.CPY} L22, and a value
  *     arriving with trailing padding is stored without it
- * @param accountId the account identifier whose cards a run is narrowed to, as a string of at most
- *     11 digits, or {@code null} to leave the run unnarrowed by account; 11 is the width
+ * @param accountId the account identifier whose cards a run is narrowed to, as a string of exactly
+ *     11 digits, or {@code null} when the caller selected by card instead; 11 is the width
  *     {@code ACCT-ID PIC 9(11)} declares at {@code app/cpy/CVACT01Y.cpy} L5, and a value arriving
  *     with trailing padding is stored without it
  */
 public record StatementRequest(
-        @Size(max = CARD_NUMBER_WIDTH) @Pattern(regexp = DIGITS_ONLY) String cardNumber,
-        @Size(max = ACCOUNT_ID_WIDTH) @Pattern(regexp = DIGITS_ONLY) String accountId) {
+        @Size(min = CARD_NUMBER_WIDTH, max = CARD_NUMBER_WIDTH)
+        @Pattern(regexp = DIGITS_ONLY) String cardNumber,
+        @Size(min = ACCOUNT_ID_WIDTH, max = ACCOUNT_ID_WIDTH)
+        @Pattern(regexp = DIGITS_ONLY) String accountId) {
 
     /**
      * The number of positions the baseline declares for a card number.
@@ -113,6 +128,20 @@ public record StatementRequest(
      * declared width is what lets a caller be published one contract and held to another -- the
      * guard fired first and answered with a body the constraint would have described per field. The
      * guard is gone and the constraint is the single authority.
+     *
+     * <p>Refactoring Rationale: this constant now bounds the MINIMUM as well as the maximum, and the
+     * change is a correctness fix rather than a tightening for its own sake. Sixteen is a fixed
+     * width, not a ceiling: {@code TRNX-CARD-NUM} is {@code PIC X(16)} and every stored card number
+     * occupies all sixteen positions, so a shorter value cannot match a stored row under any
+     * circumstances. Admitting one meant a four-digit value passed validation, reached the exact
+     * resolution query, matched nothing, and came back as "this card is not cross-referenced" -- a
+     * caller reading that would conclude a real card was missing when it had in fact sent something
+     * that is not a card number. Worse, before the resolution path was rewritten the same short
+     * value reached a tail-extraction step and failed there, so the caller received a server fault
+     * for its own malformed input. Bounding the minimum answers 400 naming the component instead.
+     * The identical reasoning, in the identical words, is recorded on
+     * {@code com.carddemo.account.dto.CardXrefLookupRequest}, which is the house precedent this
+     * follows rather than a second invention.
      */
     private static final int CARD_NUMBER_WIDTH = 16;
 
@@ -124,6 +153,15 @@ public record StatementRequest(
      * key of the account file the statement flow reads. The numeric picture at L5 and the character
      * picture {@code CC-ACCT-ID PIC X(11)} at {@code app/cpy/CVCRD01Y.cpy} L34 describe the same 11
      * positions, which is the overlay discipline recorded on this type.
+     *
+     * <p>Assumptions: this too bounds the MINIMUM, for the same reason the card width does and with
+     * one addition specific to a numeric picture. {@code PIC 9(11)} is zero-filled on the left, so
+     * the stored identifier for account 11 is eleven characters, not two; a caller sending "11"
+     * would be looking for a row that is stored as "00000000011" and would be told no such account
+     * exists. Requiring all eleven positions makes the caller state the identifier the way the
+     * record holds it, which is also the shape every sibling context publishes -- the eleven-digit
+     * domain appears verbatim as {@code [0-9]{11}} on {@code com.carddemo.card.dto.CardPageQuery}
+     * and {@code com.carddemo.card.dto.CardSummary}.
      */
     private static final int ACCOUNT_ID_WIDTH = 11;
 
@@ -141,6 +179,14 @@ public record StatementRequest(
      * value always has content by the time this expression is applied. Constraint evaluation treats
      * an absent value as satisfied, which is what keeps an unsupplied component from being reported
      * as malformed.
+     *
+     * <p>Alternatives Considered: folding the width into this expression as {@code [0-9]{16}} and
+     * {@code [0-9]{11}}, which would need two expressions where one now serves both components.
+     * Rejected because shape and width would then share one violation: a caller sending fifteen
+     * digits and a caller sending sixteen characters one of which is a letter would receive the same
+     * message, and the two are different mistakes with different corrections. Keeping the width on
+     * {@code @Size} and the alphabet on {@code @Pattern} produces one violation per mistake, both
+     * naming the component, which is what the response shape this context publishes is for.
      */
     private static final String DIGITS_ONLY = "[0-9]+";
 

@@ -17,7 +17,7 @@
  * <p>Assumptions: every type name below describes this package's <b>target contract</b> as the
  * migration plan assigns it, not the set of files present beside this one. At the checkpoint that
  * authored this charter the directory held this file alone, so each type named below was
- * <b>planned</b> rather than missing; all twelve have since landed. The counts attached to the COBOL
+ * <b>planned</b> rather than missing; all eleven have since landed. The counts attached to the COBOL
  * sources are different in kind: those are measurements taken from the reference tree, and each names
  * the file and the line range it was taken from so that any reader can re-take it.</p>
  *
@@ -26,7 +26,7 @@
  * <p>Refactoring Rationale: this section exists because the package holds two types for each of two
  * payloads and an earlier state of it did not say which was which. The rule is one sentence:
  * <b>{@code src/main/resources/openapi/authorization-api.yaml} is the contract of record for the HTTP
- * edge, and the six {@code ...View} types plus {@code FraudMarkRequest} and {@code FraudMarkResponse}
+ * edge, and the four {@code ...View} types plus {@code FraudMarkRequest} and {@code FraudMarkResponse}
  * below are its Java realisation.</b> The two symbolic-map projections are the record of what the 3270
  * terminal displayed and received -- the specification the browser screens implement and the module's
  * own tests assert -- and they are not HTTP bodies. Assumptions: the two fraud-area records are the one
@@ -55,7 +55,7 @@
  * layout in {@code app/app-authorization-ims-db2-mq}, which is reference material: it is read as
  * the specification and is never modified.
  *
- * <p><strong>The twelve types.</strong> Every one of them is a Java 21 {@code record}, and not one of
+ * <p><strong>The eleven types.</strong> Every one of them is a Java 21 {@code record}, and not one of
  * them carries a persistence annotation. The record form is what makes the components final and
  * the type a value, which is the whole of what a payload needs to be; the absence of persistence
  * annotations is the load-bearing half, because an annotated payload would be simultaneously a
@@ -118,6 +118,15 @@
  *       fifty-character sentence the fraud subprogram reported. Assumptions: which of the two write
  *       paths ran is carried on the STATUS CODE -- 201 for the insert, 200 for the update -- rather
  *       than as a third member, so a client never learns it by string-matching a sentence.</li>
+ *   <li>{@code PendingAuthPageQuery} - the request body of the list search, carrying the account
+ *       scope and, when a page other than the first is asked for, a sealed cursor and the direction
+ *       it was issued for. Refactoring Rationale: it is enumerated here because it was absent from
+ *       this inventory while the package held it, which is the one defect a charter can have that a
+ *       reader cannot detect from the charter alone -- a type nobody documented reads as a type
+ *       nobody meant to add. Assumptions: it is a request BODY rather than query parameters because
+ *       the scope is an account identifier and a query string is written into the load balancer's
+ *       mandatory access log before any application code runs; the reasoning is on the type itself.
+ *       </li>
  * </ul>
  *
  * <p>Assumptions: the last two are called projections rather than copies, and the word is chosen

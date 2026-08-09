@@ -55,6 +55,34 @@
  * split a multi-step maintenance request into that many independently committed pieces, which is the
  * partial-write behaviour described above arriving back under a different name.
  *
+ * <p>Refactoring Rationale: the boundary spans the DATABASE work and stops there -- the identity
+ * provider is called strictly after the commit, never inside it. This is a correction rather than a
+ * design preference, and the defect it corrects is worth naming because the earlier arrangement looked
+ * safer than it was. Each of the three write paths was annotated transactional and issued its provider
+ * call from within, which described the two stores as one atomic unit. They are not: the provider is
+ * not a transaction participant, so it does not roll back. A provider call that SUCCEEDED and was
+ * followed by a failed commit therefore left the provider holding a change to a row that was never
+ * written -- and in the delete case, destroyed the account behind a row that still exists. Holding a
+ * database connection across provider network latency was the smaller half of the problem.
+ *
+ * <p>What replaces it is a durable intention: each write path commits its row together with a ledger
+ * entry in {@code auth.identity_sync_task} naming what the provider owes, and applies that entry after
+ * the commit. Trade-offs: the two stores become eventually rather than immediately consistent, and the
+ * window is the interval between commit and the post-commit call -- ordinarily sub-second, bounded by
+ * the reconciliation pass otherwise. That is the cost. What is bought is that an inconsistency is now
+ * always RECORDED and always converges, where before it was silent and permanent.
+ * Alternatives Considered: a two-phase commit across the database and the provider, which the provider
+ * does not support at all; and ordering the two calls so the smaller inconsistency is the reachable one
+ * while accepting it, which is what the earlier arrangement did on the create path and which leaves an
+ * identifier permanently unusable through a path only a log line records.
+ *
+ * <p>Assumptions: creation is the one path whose ordering cannot be reversed, because
+ * {@code V1__auth.sql} declares {@code cognito_sub NOT NULL UNIQUE} and the provider mints that value,
+ * so no row can be written before the provider has acted. It therefore provisions first with no
+ * transaction open, flushes its insert inside the handler that compensates, and records its
+ * compensating withdrawal in the same ledger so a failed insert cannot leave an orphaned account behind
+ * nothing but a log line.
+ *
  * <h2>Why paging is by key rather than by offset</h2>
  *
  * <p>The baseline does not read a page; it drives a browse, which {@code app/csd/CARDDEMO.CSD} line

@@ -332,11 +332,18 @@ class ReferenceWireContractTest {
         //       leaves every other record applied. A 409 on this operation would describe the atomic
         //       behaviour it deliberately does not have -- while the per-row operations keep theirs,
         //       because there a conflict IS the whole outcome.
+        // WHY : Refactoring Rationale: 503 joined this set when the online-write gate was wired, and
+        //       the claim above survives unchanged. A batch-level 409 would assert atomic behaviour
+        //       the baseline does not have; a 503 asserts nothing about the batch, only that the
+        //       environment is not accepting mutating work -- so the operation is refused before any
+        //       action is read and there is no per-action outcome to report. The set stays exact so
+        //       that a 409 added here later still fails.
         Map<String, Object> batch =
                 mapping(mapping(contract(), "paths"), "/api/v1/reference/maintenance-actions");
         Map<String, Object> responses = mapping(mapping(batch, "post"), "responses");
 
-        assertThat(responses.keySet()).containsExactlyInAnyOrder("200", "400", "401", "403", "500");
+        assertThat(responses.keySet())
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "500", "503");
 
         Map<String, Object> response = mapping(mapping(mapping(contract(), "components"), "schemas"),
                 "MaintenanceActionBatchResponse");

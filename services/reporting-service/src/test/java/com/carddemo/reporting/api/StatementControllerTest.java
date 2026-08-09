@@ -2,6 +2,8 @@ package com.carddemo.reporting.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -57,6 +59,15 @@ class StatementControllerTest {
 
     /** A specimen card number. Assumptions: the reserved test prefix, so it identifies no real card. */
     private static final String SAMPLE_CARD = "4111111111111111";
+
+    /**
+     * A distinctive account identifier at the declared eleven positions, zero-filled on the left.
+     *
+     * <p>Assumptions: eleven characters and not two, because {@code ACCT-ID} is {@code PIC 9(11)} and a
+     * numeric picture is zero-filled -- the stored identifier is the padded form, so a request naming
+     * the unpadded one is naming a row that does not exist.</p>
+     */
+    private static final String SAMPLE_ACCOUNT = "00021820493";
 
     /** The mapper used to write request bodies, deliberately without the money module. */
     private static final JsonMapper REQUEST_MAPPER = JsonMapper.builder().build();
@@ -195,26 +206,133 @@ class StatementControllerTest {
                 .andExpect(jsonPath("$.status").value(404));
     }
 
+    // WHY : Refactoring Rationale: this case previously stubbed a MASKED-COLLISION refusal -- "the
+    //       requested card number masks to a rendering shared by 2 distinct cards". That refusal no
+    //       longer exists and cannot be reached: selection is an equality on the whole number performed
+    //       by a definer-rights function, which matches at most one row, so a collision has nothing to
+    //       collide on. Stubbing a message the service can no longer raise leaves a green test asserting
+    //       a contract nothing implements, so the stub is replaced with a refusal the service does
+    //       raise -- an account holding more than one card -- and the advice mapping being asserted is
+    //       unchanged.
     /**
-     * Asserts that a masked collision answers 400 naming the card field.
+     * Asserts that a service-raised selector refusal answers 400 naming the account field.
      *
      * @throws Exception if the request cannot be performed
      */
     @Test
-    @DisplayName("a masked collision answers 400 naming the card field")
-    void aMaskedCollisionAnswersBadRequest() throws Exception {
+    @DisplayName("a multi-card account answers 400 naming the account field")
+    void aMultiCardAccountAnswersBadRequest() throws Exception {
         when(statements.compose(any())).thenThrow(new ClientInputException(
-                ApiError.CODE_VALIDATION, "cardNumber",
-                "the requested card number masks to a rendering shared by 2 distinct cards, so a"
-                        + " statement cannot be attributed"));
+                ApiError.CODE_VALIDATION, "accountId",
+                "the requested account holds more than one card, so name the card instead"));
 
         mockMvc.perform(post(StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(REQUEST_MAPPER.writeValueAsString(
-                                new StatementRequest(SAMPLE_CARD, null))))
+                                new StatementRequest(null, SAMPLE_ACCOUNT))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
+    }
+
+    // WHY : Assumptions: a width violation is asserted to be refused BEFORE the service is reached, and
+    //       the never-verification is the substance of the case rather than a flourish. A short value
+    //       admitted at the boundary reaches an exact-equality resolution, matches nothing, and comes
+    //       back as "this card is not cross-referenced" -- so a caller that mistyped a digit is told a
+    //       real card is missing. Earlier still, before the resolution path was rewritten, the same
+    //       value reached a tail extraction and produced a server fault for the caller's own malformed
+    //       input, which is the 500 this constraint exists to remove.
+    /**
+     * Asserts that a card number short of its declared width answers 400 and reaches no service.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a fifteen-digit card number answers 400 naming the card field")
+    void aShortCardNumberAnswersBadRequest() throws Exception {
+        mockMvc.perform(post(StatementController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"cardNumber\":\"411111111111111\"}"))
+                .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
+
+        verify(statements, never()).describe(any());
+    }
+
+    /**
+     * Asserts that a card number past its declared width answers 400 and reaches no service.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a seventeen-digit card number answers 400 naming the card field")
+    void anOverWideCardNumberAnswersBadRequest() throws Exception {
+        mockMvc.perform(post(StatementController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"cardNumber\":\"41111111111111111\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
+
+        verify(statements, never()).describe(any());
+    }
+
+    // WHY : Assumptions: the account case is asserted separately and with an UNPADDED value, because
+    //       the picture is PIC 9(11) and is zero-filled on the left -- the stored identifier for
+    //       account 11 is eleven characters, not two. A caller sending "11" is looking for a row stored
+    //       as "00000000011", so admitting it would answer a malformed request as an absent account.
+    /**
+     * Asserts that an account identifier short of its declared width answers 400.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an unpadded account identifier answers 400 naming the account field")
+    void anUnpaddedAccountIdentifierAnswersBadRequest() throws Exception {
+        mockMvc.perform(post(StatementController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"accountId\":\"11\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
+
+        verify(statements, never()).describe(any());
+    }
+
+    /**
+     * Asserts that a card number of the right width carrying a non-digit answers 400.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a sixteen-character card number carrying a letter answers 400")
+    void aNonNumericCardNumberAnswersBadRequest() throws Exception {
+        mockMvc.perform(post(StatementController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"cardNumber\":\"411111111111111X\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
+
+        verify(statements, never()).describe(any());
+    }
+
+    // WHY : Assumptions: a value at exactly the declared width is asserted to be ADMITTED, so no case
+    //       above can pass by refusing everything. A boundary rule needs both sides measured; asserting
+    //       only the refusals would be satisfied by a constraint that rejected every value.
+    /**
+     * Asserts that a card number at exactly its declared width reaches the service.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a sixteen-digit card number is admitted and reaches the service")
+    void anExactWidthCardNumberIsAdmitted() throws Exception {
+        when(statements.describe(any())).thenReturn(heading());
+
+        mockMvc.perform(post(StatementController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"cardNumber\":\"" + SAMPLE_CARD + "\"}"))
+                .andExpect(status().isOk());
+
+        verify(statements).describe(any());
     }
 
     // WHY : Assumptions: the refusal body is asserted to carry NEITHER the specimen number nor its
@@ -229,9 +347,16 @@ class StatementControllerTest {
     @Test
     @DisplayName("a refusal body repeats neither the card number nor its visible digits")
     void aRefusalBodyRepeatsNoCardNumber() throws Exception {
+        // WHY : Refactoring Rationale: the stubbed refusal was "the requested card resolves to a
+        //       different account than the one stated", which was raised by a cross-check performed when
+        //       both selectors arrived. Both-supplied is now refused outright as a contract violation --
+        //       the published schema states exactly one of the two selects the statement -- so that
+        //       cross-check no longer exists and the message is replaced with the refusal the service
+        //       actually raises for this request. The request still carries both selectors, because that
+        //       is the shape whose refusal body is most likely to quote a card number.
         when(statements.describe(any())).thenThrow(new ClientInputException(
                 ApiError.CODE_VALIDATION, "accountId",
-                "the requested card resolves to a different account than the one stated"));
+                "exactly one of cardNumber and accountId must be supplied, not both"));
 
         String body = mockMvc.perform(post(StatementController.BASE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)

@@ -188,6 +188,23 @@ public class TransactionCategory {
     /** The declared width of the category-code component, from {@code TRAN-CAT-CD PIC 9(04)}. */
     public static final int CAT_CD_WIDTH = 4;
 
+    /**
+     * The closed character domain of a stored category code, as a regular expression.
+     *
+     * <p>Refactoring Rationale: published here, beside the width it accompanies, for the same reason the
+     * type code's expression is published on {@code TransactionType}: two request-handling classes have to
+     * refuse a malformed code at their boundary -- this record's own item routes and the disclosure-group
+     * read, whose third key component is this same code -- and a copy in each is a copy that can drift
+     * into disagreeing with the other without anything failing.</p>
+     *
+     * <p>Assumptions: it is the {@code TransactionCategoryCode} schema's own expression from
+     * {@code openapi/reference-api.yaml}: exactly four digits with leading zeros retained. The digits are
+     * characters and never arithmetic, which is why the expression is over the characters rather than a
+     * numeric range -- a range would admit a value written without its leading zeros, and that value names
+     * a different stored key.</p>
+     */
+    public static final String CAT_CD_PATTERN = "^[0-9]{4}$";
+
     /** The declared width of the description, from {@code TRAN-CAT-TYPE-DESC PIC X(50)}. */
     public static final int DESCRIPTION_WIDTH = 50;
 

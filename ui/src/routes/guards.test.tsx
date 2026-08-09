@@ -1,3 +1,18 @@
+/**
+ * @file Component tests for the authentication and authorisation guards in
+ * `ui/src/routes/guards.tsx`.
+ *
+ * Purpose
+ * -------
+ * Assert what each guard RENDERS in each of its states: a caller with no token is redirected to
+ * sign-on, a caller holding one is admitted, and a caller outside the administrative group receives
+ * the refusal message verbatim from the catalog.
+ *
+ * Assumptions: the guards decide rendering only, never permission. Every service independently
+ * validates the token, so a case here proves the screen an operator sees and proves nothing about
+ * data access -- which is why no case below asserts that a request was refused.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
 import { render, screen } from '@testing-library/react';

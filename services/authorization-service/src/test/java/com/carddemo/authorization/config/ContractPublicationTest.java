@@ -156,11 +156,23 @@ class ContractPublicationTest {
         assertThat(paths.keySet()).containsExactlyInAnyOrder(
                 PendingAuthController.BASE_PATH + PendingAuthController.SEARCH_PATH,
                 PendingAuthController.BASE_PATH + "/{key}",
+                // WHY : Refactoring Rationale: these two paths were ADDED because the service operations
+                //   behind them had no caller at all. Both were implemented, both were tested, and their
+                //   package documentation described them as published, while no controller mapped them and
+                //   no contract declared them -- so the screen shape this migration derived field by field
+                //   from cpy-bms/COPAU01.cpy could not be fetched, and the detail screen's forward paging
+                //   move had no server side. Assumptions: this list is what holds the correction: it is
+                //   compared against BOTH the controllers' mappings and the published contract, so an
+                //   operation cannot become reachable-but-undeclared or declared-but-unreachable again
+                //   without this line failing.
+                PendingAuthController.BASE_PATH + "/{key}/screen",
+                PendingAuthController.BASE_PATH + "/{key}/next",
                 FraudController.FRAUD_PATH);
 
         assertThat(operationIdsOf(paths))
                 .as("each published path declares exactly the operations the module serves")
                 .containsExactlyInAnyOrder("listPendingAuthorizations", "getPendingAuthorization",
+                        "getPendingAuthorizationScreen", "getNextPendingAuthorization",
                         "setAuthorizationFraudState");
     }
 

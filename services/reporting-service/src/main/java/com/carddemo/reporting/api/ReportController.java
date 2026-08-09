@@ -15,7 +15,6 @@ import jakarta.validation.Valid;
 import java.security.Principal;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
-import java.util.List;
 import java.util.Objects;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -144,6 +143,20 @@ public class ReportController {
      * names would be a refusal a caller could not act on.
      */
     public static final String PREVIOUS_DIRECTION = "prev";
+
+    /**
+     * The scope element naming a backward walk, so a leading position cannot be replayed forward.
+     *
+     * <p>Assumptions: the word is an internal binding element and is deliberately NOT the query
+     * parameter's value. The parameter's accepted values are part of the published contract and would
+     * change a client if they moved; this element only has to be stable and distinct from its
+     * counterpart, and keeping the two independent means a contract-level rename cannot silently
+     * invalidate every cursor a running deployment has already issued.</p>
+     */
+    private static final String SCOPE_BACKWARD = "backward";
+
+    /** The scope element naming a forward walk, on the same terms as its counterpart above. */
+    private static final String SCOPE_FORWARD = "forward";
 
     /**
      * Verbatim fragment the reference appends to the report name on a successful submission.
@@ -284,21 +297,75 @@ public class ReportController {
 
         LocalDate start = parseBound(startDate, "startDate");
         LocalDate end = parseBound(endDate, "endDate");
-        List<TransactionReportLineResponse> lines = reports.composeDetailLines(start, end);
 
-        String binding = CursorToken.binding(CURSOR_QUERY_NAME, principal.getName(),
-                start + ".." + end);
-        int from = pageStart(lines.size(), cursor, direction, binding);
-        int to = Math.min(from + PAGE_SIZE, lines.size());
-        if (from >= to) {
-            return PageResponse.empty();
+        // WHY : Refactoring Rationale: the page is read by KEYSET and no longer sliced ordinally out of
+        //       a materialised range. The previous shape assembled every line the range held -- up to
+        //       the service's ten-thousand-row ceiling -- carried a zero-based ordinal inside the sealed
+        //       cursor and returned a sub-list of it. Two properties of that were wrong rather than
+        //       merely inefficient. An ordinal is not a position in the data: a row posted into the
+        //       range between two steps of one walk shifts every ordinal after it, so a page could
+        //       repeat a line already shown or skip one never shown, and the previous prose accepted
+        //       that on the ground that a closed date range makes a late posting unusual -- which is a
+        //       statement about likelihood rather than about correctness, and the migration plan states
+        //       keyset positioning as a rule precisely because offset positioning has this failure. And
+        //       the whole range was read for every page, so the twentieth page cost twenty scans and the
+        //       first page's latency was a function of the range's width rather than the page's.
+        // WHY : Assumptions: TWO bindings are composed and they differ by one scope element, because
+        //       the published contract states that the direction a position was issued for is sealed
+        //       INTO it -- so replaying a trailing position with a backward direction is refused
+        //       rather than answered with the wrong page. The leading key of a page is the position a
+        //       backward step moves from, so it is sealed under the backward binding; the trailing key
+        //       is the position a forward step moves from, so it is sealed under the forward one. A
+        //       request then opens with whichever binding matches the direction it asked for, and a
+        //       mismatch fails the authenticated decryption rather than being detected afterwards.
+        //       Refactoring Rationale: one binding stood here, carrying no direction at all, so the
+        //       contract sentence was false and a trailing token was redeemable backward -- which
+        //       walks a caller past rows it never saw. The same recipe is stated once, for a module
+        //       with several browses, on reference-service's ReferencePaging.binding; this operation
+        //       is the only paged read in this context, so the two elements are composed inline
+        //       rather than through a helper that would have one caller.
+        String backwardBinding = directionBinding(principal.getName(), start, end, true);
+        String forwardBinding = directionBinding(principal.getName(), start, end, false);
+        boolean backward = PREVIOUS_DIRECTION.equalsIgnoreCase(direction);
+        String openedKey = cursor == null || cursor.isBlank()
+                ? null
+                : this.cursorToken.open(backward ? backwardBinding : forwardBinding, cursor);
+        if (backward && openedKey == null) {
+            // WHY : Assumptions: a direction with no cursor is refused rather than answered with the
+            //       leading page. A backward step is taken from the first row of the window the caller
+            //       holds, so without that row the request names nothing; answering the first page
+            //       would tell a caller it had reached the beginning when it had not asked.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, "cursor",
+                    "a paging direction must be sent with the cursor it moves from");
         }
 
-        List<TransactionReportLineResponse> page = lines.subList(from, to);
-        return PageResponse.ofRows(page,
-                this.cursorToken.seal(binding, Integer.toString(from)),
-                this.cursorToken.seal(binding, Integer.toString(to - 1)),
-                to < lines.size());
+        return reports.readDetailLinePage(start, end, openedKey, backward,
+                (key, leading) -> this.cursorToken.seal(
+                        leading ? backwardBinding : forwardBinding, key));
+    }
+
+    /**
+     * Composes the cursor binding one direction's positions are sealed under and opened with.
+     *
+     * <p>Assumptions: the direction is carried as a scope ELEMENT rather than appended to the range
+     * text, because {@code CursorToken.scope} composes its elements injectively -- it length-prefixes
+     * each one -- so no combination of a range and a direction can collide with another combination.
+     * Concatenating them would admit exactly that: a range ending in the direction word would produce
+     * the same binding as the adjacent range without it.</p>
+     *
+     * @param subject the authenticated caller's name, so a position issued to one operator cannot be
+     *     redeemed by another; must not be {@code null}
+     * @param start the first business date the page covers; must not be {@code null}
+     * @param end the last business date the page covers; must not be {@code null}
+     * @param backward {@code true} for the binding a backward step opens with, {@code false} for the
+     *     binding a forward step opens with
+     * @return the composed binding, never {@code null}
+     */
+    private static String directionBinding(
+            String subject, LocalDate start, LocalDate end, boolean backward) {
+        return CursorToken.binding(CURSOR_QUERY_NAME, subject,
+                CursorToken.scope(backward ? SCOPE_BACKWARD : SCOPE_FORWARD,
+                        start.toString(), end.toString()));
     }
 
     /**
@@ -321,53 +388,14 @@ public class ReportController {
         LocalDate start = parseBound(startDate, "startDate");
         LocalDate end = parseBound(endDate, "endDate");
 
-        return new TransactionReportTotals(
-                reports.composeTotals(reports.composeDetailLines(start, end)));
-    }
-
-    /**
-     * Resolves where the requested page of detail lines begins.
-     *
-     * <p>Assumptions: the sealed position is the line's zero-based ORDINAL within the report run for
-     * the requested range, not a value from the row. Alternatives Considered: keying the cursor on the
-     * transaction identifier, which is what every other listing in this system does. Rejected here
-     * because those listings page a relation in key order, whereas this report emits its lines in the
-     * order {@code app/cbl/CBTRN03C.cbl} prints them -- by processing date and card, with subtotal
-     * breaks -- so an identifier-keyed step would page in an order the report does not emit and the
-     * page subtotals would no longer line up with the page they belong to. The range is folded into
-     * the binding, so an ordinal sealed for one range cannot be redeemed against another, which is the
-     * property an ordinal needs in order to be a safe position at all.
-     *
-     * <p>Trade-offs: an ordinal is stable only for as long as the underlying rows are, so a row posted
-     * between two steps of one walk shifts every ordinal after it. That is accepted because this
-     * report is read over a CLOSED business-date range -- both bounds are required and inclusive -- so
-     * a row landing inside a range already closed is not an ordinary event, whereas the alternative
-     * costs the report's own emission order.
-     *
-     * @param available how many lines the run produced
-     * @param cursor the sealed position a caller supplied, or {@code null} for the first page
-     * @param direction the direction the caller asked to read in, or {@code null} for forward
-     * @param binding the composed cursor binding this page is produced under
-     * @return the zero-based index of the first line of the page, never negative
-     * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if the cursor is not a token
-     *     this service issued for this query, this caller and this range
-     */
-    private int pageStart(int available, String cursor, String direction, String binding) {
-        if (cursor == null || cursor.isBlank()) {
-            return 0;
-        }
-
-        int position = Integer.parseInt(this.cursorToken.open(binding, cursor));
-        // WHY : Assumptions: a backward step is expressed relative to the FIRST line of the page the
-        //       caller holds, and a forward step relative to its LAST, which is exactly what the two
-        //       boundary tokens of the envelope name. Reading backward therefore lands a whole page
-        //       earlier than the held page's first line, and reading forward lands one line after its
-        //       last -- the two are not symmetrical, and treating them as though they were is how a
-        //       backward step comes to repeat a row it has already shown.
-        if (PREVIOUS_DIRECTION.equalsIgnoreCase(direction)) {
-            return Math.max(0, position - PAGE_SIZE);
-        }
-        return Math.min(position + 1, Math.max(available, 0));
+        // WHY : Refactoring Rationale: the totals are computed by the service over the RANGE rather than
+        //       over a list of composed lines this method assembled first. The old shape forced the
+        //       grouping to be whatever the response type carried, which is an account identifier, while
+        //       the emitted report groups by card -- so the group subtotal beside a listing page was a
+        //       differently-grouped number presented as the report's own. Reading the range in the
+        //       service lets it group on the per-card fingerprint the report groups on, and it also
+        //       removes an assembly of up to ten thousand response values performed only to sum them.
+        return new TransactionReportTotals(reports.composeTotals(start, end));
     }
 
     /**

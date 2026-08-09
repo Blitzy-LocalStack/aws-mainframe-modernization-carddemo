@@ -473,24 +473,39 @@ public class AccountView {
     }
 
     /**
-     * Returns a diagnostic rendering naming the identifier and the status, and no monetary figure.
+     * Returns a diagnostic rendering naming the status code and nothing else.
      *
-     * <p>Trade-offs: both monetary members are withheld from this rendering, which is the same
-     * decision the sibling transaction projection records for its own amount. The account identifier
-     * is included because the baseline prints it in full on every statement it produces, at L483 of
-     * {@code app/cbl/CBSTM03A.CBL}, so it is not a value this system conceals. A balance and a credit
-     * limit are different: this type carries five declared twelve-digit money fields' worth of
-     * sensitivity in the two it projects, and a rendering is reached from a log statement, an
-     * assertion message and a debugger alike, none of which is a place a customer's balance should
-     * arrive by default. The cost accepted is that a reader cannot tell a row's balance from a log
-     * line and has to ask for it deliberately through the accessor; the compensation is that no log
-     * line written from this type carries a monetary figure at all.</p>
+     * <p>Assumptions: this rendering is governed by the rule
+     * {@code docs/architecture/observability.md} states for every {@code toString()} in this
+     * repository. That rule names account identifiers and monetary amounts among the values a
+     * diagnostic must OMIT rather than abbreviate, and it names a status code among the identity a
+     * rendering may keep. What survives here is therefore the single-character active-status code
+     * declared at {@code app/cpy/CVACT01Y.cpy} L6; the account identifier and both projected money
+     * columns are withheld.</p>
      *
-     * @return a single-line rendering naming the type, the account identifier and the status
+     * <p>Refactoring Rationale: this rendering carried the account identifier, and its documentation
+     * argued for it on the ground that "the baseline prints it in full on every statement it
+     * produces, at L483 of {@code app/cbl/CBSTM03A.CBL}, so it is not a value this system conceals".
+     * That argument is refuted by the authority it was written against, twice over. A statement is a
+     * document delivered to the account holder, whereas a {@code toString()} is reached from a log
+     * statement, an assertion message and a debugger alike, so what one may print says nothing about
+     * the other; and the omission rule covers account identifiers by name, which leaves no room for a
+     * per-type judgement. The argument is recorded rather than deleted because it is a plausible one
+     * that a future reader could reach again from the same baseline line.</p>
+     *
+     * <p>Trade-offs: the cost is that a log line written from this type cannot be joined to a
+     * specific account at all, and it is a real cost. The observability authority names what pays it
+     * down: the correlation identifier {@code CorrelationIdFilter} puts on every request-scoped line,
+     * and the {@code batch.batch_run} step ledger for batch work. Rendering a keyed opaque token
+     * instead was considered and is rejected on that authority's own analysis -- a {@code toString()}
+     * takes no argument and this type is instantiated by the persistence provider, so no tokeniser can
+     * be handed to it without static mutable state read before configuration.</p>
+     *
+     * @return a single-line rendering naming the type and the active-status code, never {@code null}
      */
     @Override
     public String toString() {
-        return "AccountView[accountId=" + accountId + ", activeStatus=" + activeStatus + ']';
+        return "AccountView[activeStatus=" + activeStatus + ']';
     }
 
     /**

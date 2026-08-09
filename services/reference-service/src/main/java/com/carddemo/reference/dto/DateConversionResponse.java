@@ -7,14 +7,22 @@ import java.util.Locale;
  * The verdict on one candidate date, satisfying the contract schema {@code DateEvaluationResult}.
  *
  * <p>Purpose: the outbound shape of the date evaluation, carried by the synchronous read at
- * {@code GET /api/v1/reference/date-evaluations} and by the queue route beside it. Its members are
- * the variable fields of the eighty-character result the baseline date utility hands back, which
+ * {@code GET /api/v1/reference/date-evaluations}. Its members are the variable fields of the
+ * eighty-character result the baseline date utility hands back, which
  * {@code app/cbl/CSUTLDTC.cbl} declares at its lines 42 to 57 and returns through
  * {@code 01 LS-RESULT PIC X(80)} at its line 86. Nothing on this shape reads a datastore, decides a
  * rule or holds state between requests: the rules live in
- * {@code com.carddemo.common.validation.DateEditValidator}, both routes reach them through
- * {@code com.carddemo.reference.service.DateConversionMessageListener}, and this type states only
- * what a caller receives.</p>
+ * {@code com.carddemo.common.validation.DateEditValidator}, the read reaches them through
+ * {@code com.carddemo.reference.service.DateConversionService}, and this type states only what a
+ * caller receives.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph said the shape was carried "by the queue route beside it"
+ * as well, and named a listener type as the path both routes took to the rules. The queue route is
+ * {@code com.carddemo.reference.service.DateInquiryMessageListener}; it answers with a fixed-width
+ * forty-six-character body rendered by
+ * {@code com.carddemo.reference.mapper.DateInquiryReplyMapper} and has never carried this shape. The
+ * claim is corrected rather than dropped so that a reader does not go looking for a queue consumer
+ * that serialises this record.</p>
  *
  * <h2>Why the outcome travels as two independent members</h2>
  *

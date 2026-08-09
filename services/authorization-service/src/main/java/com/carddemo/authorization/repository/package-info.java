@@ -11,8 +11,8 @@
  * against a relational fraud table. Here both collapse onto typed repository interfaces, one per
  * persistent shape, and a caller reaches the {@code authorization} schema through no other route.
  *
- * <p>Four interfaces sit beside this charter, and there is no fifth, because the schema this
- * context owns holds exactly four tables:
+ * <p>Four repository interfaces sit beside this charter, one per table in the schema this context
+ * owns, together with ONE writer fragment and its implementation:
  * <ul>
  *   <li>{@code PendingAuthSummaryRepository} -- the per-account authorization summary. Its shape is
  *       the IMS root segment {@code PAUTSUM0}, declared at 100 bytes in
@@ -30,6 +30,16 @@
  *       {@code auth_reply_outbox}. This one has no baseline counterpart at all: it exists so that a
  *       reply row is committed in the same transaction as the decision it answers, which is the
  *       divergence the module charter records as D-5.</li>
+ *   <li>{@code AuthFraudUpserter} and {@code AuthFraudUpserterImpl} -- the fraud table's single
+ *       atomic write, declared as an interface with a package-private implementation because it is
+ *       one native statement that Spring Data cannot derive: an {@code INSERT ... ON CONFLICT DO
+ *       UPDATE ... RETURNING} that reports which arm ran. Refactoring Rationale: this pair is
+ *       enumerated because the sentence above once said four interfaces stood here "and there is no
+ *       fifth", which stopped being true when the pair landed -- and a charter that forbids what the
+ *       package already holds sends a reader to delete working code. Assumptions: the pair is
+ *       counted separately from the four repositories rather than folded in, because it is not one
+ *       per table: it is a second, narrower writer of a table {@code AuthFraudRepository} already
+ *       reads, and reading the two as peers would suggest a fifth table exists.</li>
  * </ul>
  *
  * <h2>The seam between this package and the service layer</h2>

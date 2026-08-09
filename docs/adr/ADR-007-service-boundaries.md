@@ -213,12 +213,30 @@ graph TB
     RPT -.-> ACCT
     RPT -.-> REFS
 %% Dashed = read-only. Double arrow = the one deliberate cross-schema WRITE exception.
+%% These are the TARGET dependency edges this record decides, not a delivered-state
+%% inventory -- see the note immediately below the diagram.
 %% Every other context reads and writes only its own schema.
 %% The reporting edges are drawn to the three schemas the seven views actually read
 %% -- ledger, account and reference. No view reads the card schema, so no edge is
 %% drawn to CARD even though the NOLOGIN owner role holds a read grant there; an
 %% edge for an unexercised grant would overstate the coupling this diagram is for.
 ```
+
+> **This diagram is the target dependency design, not an inventory of delivered
+> clients.** The distinction matters because the two differ today, and this record's own
+> [status table](#honest-boundary--what-this-record-does-not-establish) is where the
+> difference is tracked. Exactly **three** synchronous cross-context clients are
+> authored: `account-service` → `reference-service`
+> (`RestReferenceAddressLookup`), `transaction-service` → `account-service` and
+> `authorization-service` → `account-service` (each a `RestAccountContextClient`). The
+> delivered edges are enumerated with the operations they carry in
+> [`service-catalog.md`](../architecture/service-catalog.md#cross-service-dependency-rules).
+> *WHY (Assumption made explicit):* the heading above this diagram reads "the
+> dependencies between them," which a reader can reasonably take as a statement of what
+> exists rather than of what is decided. Labelling the diagram's status here keeps the
+> design intent this ADR owns from being read as a delivered-state claim it does not
+> make, without weakening the decision itself.
+
 
 ## Decision
 

@@ -152,17 +152,33 @@ optional.
    gateways; **private-application** subnets carrying the ECS tasks; and
    **isolated-data** subnets carrying the database, **with no route to the
    internet at all**. Eight interface VPC endpoints and one S3 gateway endpoint
-   keep AWS API traffic inside the VPC. Three security groups carry the only
-   permitted flows.
+   keep AWS API traffic inside the VPC. **Three** security groups — `alb`, `app`
+   and `data` — carry the only permitted flows, and the count is frozen: the
+   interface-endpoint ENIs share the `app` group and the API Gateway VPC Link
+   shares the `alb` group rather than either holding one of its own. There are
+   **six** flows, not three, and the extra three are mandatory rather than
+   discretionary: tasks reach S3 through the gateway endpoint (which is also how
+   an ECR image pull fetches its layers), tasks fetch the identity provider's key
+   set, and tasks reach sibling contexts through the internal listener. See the
+   flow table in
+   [security-and-identity.md](../architecture/security-and-identity.md) for the
+   per-flow ports and destination forms.
 2. **Identity.** A **Cognito user pool** with an application client. The
    baseline's `'A'` and `'U'` user types become the groups `carddemo-admin` and
    `carddemo-user`; the `cognito:groups` claim is converted to Spring Security
    authorities. **The password field is not carried forward at all** — the `auth`
    schema's user table keeps only a subject reference.
-3. **Encryption and credentials.** **Customer-managed KMS keys** — four protecting
-   data at rest, one per data domain, plus one the application draws envelope data
-   keys from — and **Secrets Manager** holding every credential, with values
-   generated at provisioning time.
+3. **Encryption and credentials.** **Four** customer-managed KMS keys — one per
+   data domain: Aurora, S3, Secrets Manager and SQS — and **Secrets Manager**
+   holding every credential, with values generated at provisioning time. The
+   field-level envelopes the application produces itself are drawn from the
+   **Aurora** key, under a grant conditioned on a declared `carddemo:purpose`,
+   because the ciphertext is stored in Aurora columns. Refactoring Rationale: this
+   bullet read "four protecting data at rest … plus one the application draws
+   envelope data keys from", which is five, and the frozen design allocates exactly
+   four (technical specification sections 0.4.1.6 and 0.4.1.9). The fifth key was
+   withdrawn and its grant folded into the domain that owns the data rather than
+   the count being restated.
 4. **Least privilege.** **One IAM task role per service**, and **one database role
    per service**, with the single deliberate cross-schema exception owned by
    [ADR-007](ADR-007-service-boundaries.md).
@@ -181,11 +197,10 @@ graph TB
 
     subgraph VPC["VPC — 3 availability zones"]
         subgraph PUB["public subnets"]
-            ALB["internal ALB"]
             NAT["NAT gateway<br/>one per zone"]
         end
         subgraph APP["private-application subnets"]
-            TASK["ECS Fargate tasks<br/>8 services, resource-server JWT check"]
+            TASK["ECS Fargate tasks<br/>8 services; 7 request-serving ones<br/>run a resource-server JWT check"]
             VPCE["8 interface endpoints<br/>+ S3 gateway endpoint"]
         end
         subgraph DATA["isolated-data subnets — NO internet route"]
@@ -198,7 +213,10 @@ graph TB
     ALB -->|"8080"| TASK
     TASK -->|"5432"| DB
     TASK -->|"443, stays in VPC"| VPCE
-%% NAT carries only non-AWS egress; AWS API traffic leaves through VPCE, not NAT.
+    TASK -->|"443, Cognito JWK set"| NAT
+%% Almost all AWS API traffic leaves through VPCE, not NAT. Cognito is the one
+%% exception: it has no interface endpoint in the specified eight-service set, so
+%% the JWK set every service fetches at start-up leaves through NAT.
 %% The data tier has no NAT association at all — that absence is the control.
 ```
 
@@ -320,7 +338,7 @@ has no route added to it, so the absence is an invariant of the network module
 rather than a default a caller can override — the module exposes no variable that
 attaches egress to the data tier.
 
-### AWS API traffic never takes the public path
+### AWS API traffic takes the private path wherever an endpoint exists
 
 Application tasks need to pull images, deliver logs, read secrets, perform
 envelope operations, use queues, start workflow executions and read configuration.
@@ -337,30 +355,74 @@ a gateway endpoint carries no hourly charge (see
 [§Cost Implications](#cost-implications)) and because it is why S3 is deliberately
 absent from the interface set.
 
-The security consequence is specific and checkable: with those endpoints in place,
-no AWS control-plane or data-plane call from a task needs internet egress, so the
-NAT gateways carry only whatever non-AWS traffic remains. Assumptions: the
-endpoint set is treated as identical in every environment and is validated as an
-exact set rather than a minimum, so an environment cannot quietly omit one and
-send that service's traffic out through NAT instead — a drift that would be
-invisible in behaviour and visible only in a flow log.
+The security consequence is specific and checkable, and it is stated with its
+exception rather than without it: with those endpoints in place, **no call to one of
+the nine endpointed services needs internet egress**, so the NAT gateways carry only
+the traffic that has nowhere else to go. Assumptions: the endpoint set is treated as
+identical in every environment and is validated as an exact set rather than a
+minimum, so an environment cannot quietly omit one and send that service's traffic
+out through NAT instead — a drift that would be invisible in behaviour and visible
+only in a flow log.
 
-### Three security-group rules, each with one purpose
+### Six security-group rules, each with one purpose
 
-The permitted flows are narrow enough to enumerate completely:
+* the **security** claim is bounded, not absolute — the accurate statement is that
+  task-to-AWS traffic stays inside the VPC *for every service an endpoint covers*,
+  and that the two uncovered services carry no customer record data in either
+  direction: a token operation carries a credential and a claim set, and a trace
+  segment carries timing and identifiers the observability rules already require to
+  be non-identifying;
+* the **cost** claim in [§Cost Implications](#cost-implications) is bounded the same
+  way — NAT data-processing spend is displaced by the endpoints for the nine covered
+  services and is *not* eliminated, because these two remain.
 
-| Flow | Port | Why it exists |
-|---|---|---|
-| Load balancer → application tasks | **8080** | The only ingress to a service; the tasks accept traffic from the load balancer's group and from nothing else |
-| Application tasks → database | **5432** | The only data-tier ingress, and it is sourced from the application group rather than from a CIDR range |
-| Application tasks → interface endpoints | **443** | Carries every AWS API call, which is what keeps that traffic off the public path |
+Refactoring Rationale: this paragraph previously asserted that no AWS call from a
+task needed internet egress at all. That was untrue in both directions at once — the
+two services above did need it, and the application group carried no egress rule
+permitting it, so the calls would have been dropped rather than routed. Adding the
+endpoints for them was considered and rejected: the eight-service set is a frozen AAP
+decision, and widening it here would resolve a documentation inconsistency by
+editing the specification the documentation describes. Alternatives Considered:
+narrowing the sixth rule to the published address ranges of those two services was
+also rejected, because those ranges change without notice and a rule that silently
+stops matching one of them fails **closed** on sign-on — which is the whole service.
 
-Each rule is written source-group to destination-group rather than by address
-range. Alternatives Considered: CIDR-based rules would be equivalent on the day
-they are written and would drift the moment a subnet is resized or re-numbered,
-because the range and the membership are then two facts that have to agree.
+### Six security-group flows, each with one purpose
 
-### The edge validates, and so does every service
+The permitted flows are narrow enough to enumerate completely, and the table below
+is that complete enumeration — ten rule resources expressing six flows:
+
+| Flow | Port | Destination form | Why it exists |
+|---|---|---|---|
+| Load balancer → application tasks | **8080** | group | The only ingress to a service; the tasks accept traffic from the load balancer's group and from nothing else |
+| Application tasks → database | **5432** | group | The only data-tier ingress, and it is sourced from the application group rather than from a CIDR range |
+| Application tasks → interface endpoints | **443** | group | Carries almost every AWS API call, which is what keeps that traffic off the public path |
+| Application tasks → S3 gateway endpoint | **443** | **prefix list** | Object-storage reads and writes. A gateway endpoint places no network interface and so has no group to reference, so this rule matches the service's managed prefix list instead |
+| Isolated data tier → S3 gateway endpoint | **443** | **prefix list** | What makes the data tier's own gateway-endpoint association usable — a snapshot export, for instance — without giving it any internet path |
+| Application tasks → Cognito | **443** | **CIDR input** | The JWK set every service fetches while starting, and the user-pool admin API `auth-service` calls. Cognito has no interface endpoint in the specified eight-service set, so this leaves through NAT |
+
+Wherever a group can be named, the rule is written source-group to
+destination-group rather than by address range. Alternatives Considered:
+CIDR-based rules would be equivalent on the day they are written and would drift
+the moment a subnet is resized or re-numbered, because the range and the
+membership are then two facts that have to agree.
+
+Assumptions: the last three rules cannot take that form, and the reason differs
+between them. The two S3 rules cannot because the destination is a gateway
+endpoint with no group to reference; a managed prefix list is the narrowest
+destination available and it still resolves to one service. The Cognito rule
+cannot because the destination is a public regional endpoint outside the VPC.
+Trade-offs: that last rule's destination is therefore an **input** with an open
+default rather than a literal, so an environment that has determined its
+provider's ranges can narrow it without editing the module. Deriving it from
+AWS's published ranges was rejected on a hard limit — the regional ranges run to
+hundreds of CIDRs and a security group admits far fewer, so the apply would fail
+on quota. What bounds it meanwhile is that it is TLS-only, that it is one rule
+carrying its purpose in its description so it is identifiable in a plan diff and
+in a flow log, and that it is the only rule in the topology with an open
+destination.
+
+### The edge validates, and so does every request-serving service
 
 Public entry is an **API Gateway HTTP API** with a **Cognito JWT authorizer**,
 reaching the **internal** load balancer through a **VPC Link**. The load balancer
@@ -371,7 +433,8 @@ the distribution is the only reader. The API and UI surface itself belongs to
 [ADR-006](ADR-006-api-and-ui.md).
 
 The token is then validated **twice**: once by the authorizer at the edge, and
-again independently by each service, which runs as an OAuth2 resource server. The
+again independently by each of the **seven request-serving services**, each of which
+runs as an OAuth2 resource server. The
 duplication is deliberate and the reason is concrete rather than stylistic. The
 edge is not the only way to reach the load balancer — anything inside the VPC that
 can route to it can call a service directly, which includes another service and
@@ -382,6 +445,33 @@ than of the path taken to it. Trade-offs: the same token is parsed and verified
 twice on every request, and that cost is accepted because the alternative makes
 the service's security depend on a network assumption that the network does not
 actually enforce.
+
+**`batch-service` is the eighth service and it validates no token, because it
+serves no request.** It carries neither an `oauth2ResourceServer` configuration nor
+the `spring-boot-starter-oauth2-resource-server` dependency, and that absence is
+correct rather than an omission: it is started as a Fargate task by the Step
+Functions state machine ([ADR-005](ADR-005-batch-orchestration.md)), reads its work
+from the database and object storage, and exposes no HTTP surface to the load
+balancer or to the edge. There is no caller to authenticate, so a resource-server
+filter chain would have nothing to filter. Its authority comes from the two
+mechanisms that do govern a task rather than a request: the **IAM task role**, which
+bounds which AWS APIs it may call, and its **database role**, which bounds which
+schemas it may read and write — including the deliberately scoped cross-schema
+grant on `ledger` and `account` that keeps transaction posting a single ACID commit
+(AAP §0.4.1.3). Adding a resource server to it would add a dependency and a
+filter chain that no request would ever reach.
+
+*WHY (Refactoring Rationale).* This section previously said the token is validated
+"again independently by **each service**, which runs as an OAuth2 resource server,"
+under a heading that read "and so does **every service**." Both were false for
+`batch-service`, measured directly: it is the one module of the eight with zero
+`oauth2ResourceServer` configuration sites **and** no resource-server dependency in
+its POM. The error was not merely a miscount. Left as written, the claim describes
+a uniform authentication posture across all eight services, which would lead a
+reader auditing the batch path to look for a token check that does not exist and
+should not, and to miss the two controls that actually bound that path. Naming the
+count as seven and then stating the batch model separately makes the batch tier's
+authority auditable on its own terms instead of hiding it inside a generalisation.
 
 ### Encryption is what the target adds
 
@@ -397,23 +487,45 @@ this section is written as an addition rather than as a comparison:
 * the dataset bucket, the secrets and the queues are each encrypted under their
   own customer-managed key;
 * the card verification value and the two customer identifiers are encrypted at
-  the field level under a fifth, application-purposed key, so they are ciphertext
-  in the table rather than plaintext columns that happen to sit in an encrypted
-  volume;
+  the field level, under an envelope grant on the **Aurora** key conditioned on a
+  declared `carddemo:purpose`, so they are ciphertext in the table rather than
+  plaintext columns that happen to sit in an encrypted volume;
 * traffic is encrypted in transit end to end — client to distribution, client to
   API, API to load balancer, load balancer to task, task to database and task to
   endpoint.
 
-Assumptions: the fifth key is separate from the four at-rest keys because it is
-used differently — the application asks it for envelope data keys under a declared
-purpose, rather than a service using it transparently on the application's behalf.
-Its grants are conditioned on that declared purpose, which is what stops a
-principal holding the grant for one purpose from deciphering a value written under
-another. This is a departure from the four-key sketch in AAP §0.4.1.6 and it is
-recorded here rather than left for a reader to discover: the field-level columns
-that AAP §0.4.1.3 requires cannot be written under a key whose grants are scoped
-to a service, so a fifth key is a consequence of that requirement rather than an
-addition to it.
+Assumptions: the envelope grant is a *second, separate statement* on the Aurora key
+rather than a second key, and separateness is what the field-level use needs. The
+application asks for envelope data keys under a declared purpose, where a service
+uses a key transparently on the application's behalf, so the two grants carry
+different conditions: the RDS statement is constrained by `kms:ViaService` to
+`rds.<region>` and by the cluster's own identifier, while the envelope statement
+carries no `kms:ViaService` at all and is constrained instead by
+`kms:EncryptionContext:carddemo:purpose`. That condition is what stops a principal
+holding the grant for one purpose from deciphering a value written under another.
+
+Refactoring Rationale: this passage previously described a **fifth**,
+application-purposed key and recorded it as "a departure from the four-key sketch
+in AAP §0.4.1.6", arguing that the field-level columns AAP §0.4.1.3 requires
+"cannot be written under a key whose grants are scoped to a service, so a fifth key
+is a consequence of that requirement". The premise was sound and the conclusion did
+not follow. A key's grants are not uniformly scoped — a single key policy carries
+several statements with different conditions — so the requirement is met by adding a
+purpose-conditioned statement to a key whose *other* statement is service-scoped.
+The AAP's four-key allocation is frozen and names the four by data domain, and the
+Aurora key is the domain whose columns hold this ciphertext, so the fifth key was
+withdrawn and the grant folded onto it. The count is now the AAP's rather than a
+recorded departure from it.
+
+Trade-offs: the fold costs defence in depth, and the cost is stated rather than
+absorbed. One key now protects both the RDS-managed volume encryption and the
+field-level envelopes, so a compromise of it reaches both where previously it
+reached one. Two things bound that. Neither principal can perform the other's
+operation, because the RDS grant is unusable except through RDS and the envelope
+grant unusable except under a declared purpose. And each envelope carries an
+encryption context naming its purpose and its column as authenticated additional
+data, so an envelope moved between the card and customer contexts still fails its
+integrity check under one key.
 
 ### Exposure is narrowed in exactly one layer
 
@@ -429,7 +541,20 @@ representation concerns may appear:
    exception, and the assertion has test coverage rather than only a convention
    behind it.
 3. **The national identifier and the government-issued identifier are stored
-   encrypted and returned masked.**
+   encrypted and returned masked.** The storage half is authorised as well as
+   implemented: `com.carddemo.account.config.CustomerIdentifierProtectionConfig`
+   wires `CustomerIdentifierCipher` to draw one envelope data key per identifier,
+   and the **account** task role carries an
+   `EnvelopeEncryptCustomerIdentifiers` statement granting
+   `kms:GenerateDataKey*` and `kms:Decrypt` on the Aurora key, conditioned on
+   `carddemo:purpose = customer-identifier`. Refactoring Rationale: this claim
+   stood while that grant did **not exist** — the card context had its equivalent
+   and the account context had none — so every write of either identifier would
+   have been refused by KMS with an AccessDenied on `GenerateDataKey`, surfacing
+   as a failed account update rather than as a configuration error. The claim is
+   restated to name the authorising path, because a promise of field encryption
+   that only describes the cipher and not the grant is exactly the shape that
+   defect took.
 4. **Money and identifiers cross the wire as strings**, which belongs to
    [ADR-003](ADR-003-datastore-targets.md) and is mentioned only because it is the
    same mapper that applies it.
@@ -616,14 +741,40 @@ than merely observed** — that is, the repository does not depend on every
 contributor remembering it. Six mechanisms carry it, and each is named because each
 closes a different way a credential could otherwise arrive.
 
-1. **Credentials are generated at apply time.** Database credentials and seed-user
-   passwords are generated by the provisioning tool and written straight to
-   Secrets Manager. There is no step at which a human sees a credential, and
-   therefore no step at which one could be pasted into a file.
-   Refactoring Rationale: the alternative — a documented instruction to set a
-   credential by hand and keep it out of source — makes correctness depend on every
-   future reader following it, whereas generation removes the value from human
-   hands entirely.
+1. **Credentials are generated at provisioning time — by four different generators,
+   which is worth naming because "the provisioning tool" is not one of them in every
+   case.** There is no step at which a human sees any of these values, and therefore
+   no step at which one could be pasted into a file.
+
+   | Credential | Generated by | Destination |
+   |---|---|---|
+   | Per-service database role passwords | An ephemeral `random_password` in [`infra/modules/secrets`](../../infra/modules/secrets/main.tf) | Secrets Manager |
+   | Aurora **master** user password | **RDS itself**, via `manage_master_user_password = true` ([`aurora-postgresql/main.tf`](../../infra/modules/aurora-postgresql/main.tf)) | An RDS-managed secret, encrypted with the secrets CMK |
+   | Cognito seed-user temporary passwords | The **Python `secrets` module** in [`cognito/seed_user_bootstrap.py`](../../infra/modules/cognito/seed_user_bootstrap.py) | Secrets Manager, as a **one-time handover**: set with `Permanent = false`, so the user lands in `FORCE_CHANGE_PASSWORD` and the stored value buys exactly one sign-in before going inert |
+   | The five symmetric application keys | An ephemeral `random_password` in each environment root | Secrets Manager |
+
+   *WHY (Refactoring Rationale).* This item previously said database credentials and
+   seed-user passwords "are generated by the **provisioning tool**," and
+   [ADR-009](ADR-009-iac-tool.md) said "by the **random-value provider**." Both
+   attributions are wrong for two of the four classes, and wrong in a way that
+   matters for rotation rather than merely for tidiness. The Aurora master password
+   is generated and rotated by **RDS**, so it is not in Terraform state at all and is
+   not rotated by re-applying; the seed-user passwords are generated by a **Python
+   script**, so they are not governed by the random-value provider's arguments
+   either. An operator reading the old sentence would look for both in the wrong
+   place and could conclude that a `terraform apply` rotates credentials it does not
+   touch. Naming each generator alongside its destination makes the rotation owner of
+   each credential legible from this record.
+
+   The claim the item actually needs is unaffected and still holds: **no generator
+   here takes its value from a repository file, and none writes one back.** That is
+   what makes "no secrets committed" structural rather than observed, and it is true
+   of all four independently.
+
+   Alternatives Considered: a documented instruction to set each credential by hand
+   and keep it out of source. Rejected because it makes correctness depend on every
+   future reader following it, whereas generation removes the value from human hands
+   entirely.
 2. **Per-environment parameter files carry sizing, capacity and retention values
    only.** The `terraform.tfvars` files hold capacity units, task counts,
    retention days and protection flags. They hold no credential of any kind, which
@@ -688,36 +839,80 @@ rather than against a number that was stale when it was written.
 
 ### The network tier, which is where the real money is
 
-| Item | Charge dimensions | What drives it |
-|---|---|---|
-| NAT gateways | Per **hour per gateway**, plus per **GB processed** | One gateway per zone × 3 zones multiplies the hourly term threefold |
-| Interface VPC endpoints | Per **hour per endpoint per availability zone**, plus per **GB processed** | 8 endpoints × 3 zones sets the hourly term; it dominates the data term at this workload's volume |
-| S3 gateway endpoint | **No hourly charge** | It is a route-table entry, not an ENI — which is precisely why object storage uses this form |
+| Item | Charge dimensions | Fixed hourly units | What drives it |
+|---|---|---|---|
+| NAT gateways | Per **hour per gateway**, plus per **GB processed** | **3** (one per zone) | One gateway per zone × 3 zones multiplies the hourly term threefold |
+| Elastic IPs on the NAT gateways | Per **hour per address** | **3** (one per gateway) | Every public NAT gateway carries an address, and all public IPv4 addresses are chargeable |
+| Interface VPC endpoints | Per **hour per endpoint per availability zone**, plus per **GB processed** | **24** (8 endpoints × 3 zones) | 8 endpoints × 3 zones sets the hourly term; it dominates the data term at this workload's volume |
+| S3 gateway endpoint | **No hourly charge** | **0** | It is a route-table entry, not an ENI — which is precisely why object storage uses this form |
 
-**The three NAT gateways are the single largest fixed cost in the network tier, and
-that is stated plainly rather than buried.** The honest trade is that one gateway
-would cost a third of the hourly term. It was not taken, and the reason is
-availability rather than security: with one gateway, egress from the two zones that
-do not hold it becomes a cross-zone data path, and the loss of the zone holding it
-takes egress from all three. Trade-offs: three hourly gateway charges are accepted
-in exchange for per-zone egress independence.
+**The interface-endpoint fleet, not the NAT tier, carries the larger fixed hourly
+term — and the ratio that decides it is stated so the claim survives a price
+change.** The endpoint fleet bills **24** hourly units against the NAT tier's **3**,
+so the endpoints are the larger fixed cost unless a single NAT gateway-hour costs
+**more than eight times** an endpoint-zone-hour. At `us-east-1` list rates read
+while writing this record — `$0.045` per NAT gateway-hour against `$0.01` per
+endpoint per zone-hour ([Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/),
+[AWS PrivateLink pricing](https://aws.amazon.com/privatelink/pricing/)) — the
+actual ratio is **4.5 : 1**, which is below that break-even, so the endpoint fleet
+is the larger fixed charge: `24 × $0.01 = $0.24` per hour against
+`3 × $0.045 = $0.135` per hour for the gateways plus `3 × $0.005 = $0.015` per hour
+for their addresses. The break-even ratio is the durable half of this statement and
+the dollar figures are the perishable half, which is why both are given rather than
+only the second.
 
-**The eight interface endpoints are worth paying for, and the reason is partly
+*WHY (Refactoring Rationale).* This passage previously asserted that **"the three
+NAT gateways are the single largest fixed cost in the network tier,"** and
+commended itself for stating that "plainly rather than buried." The claim was
+false at the list rates above, and it was false in the direction that mattered: it
+pointed a cost review at the smaller of the two line items. It was also
+methodologically inconsistent with this section's own stated approach two
+paragraphs earlier — that only **charge shapes** are recorded, so that reasoning
+stays "checkable against a price list at the time of reading rather than against a
+number that was stale when it was written." A *ranking* of two items is an
+arithmetic claim about their rates wearing the clothes of a structural one, so it
+inherited exactly the staleness the method was designed to avoid while looking
+immune to it. The replacement keeps the method honest by giving the **unit counts**
+(structural, and checkable against the module without any price list) and the
+**break-even ratio** they imply, then naming a region and a read date for the
+rates. The `Fixed hourly units` column and the Elastic IP row were added for the
+same reason: the address charge is a real fixed network cost that the table omitted
+entirely, and unit counts are what make the ranking derivable rather than asserted.
+
+**One NAT gateway would cost a third of that tier's hourly term, and that trade was
+not taken.** The reason is availability rather than security: with one gateway,
+egress from the two zones that do not hold it becomes a cross-zone data path, and
+the loss of the zone holding it takes egress from all three. Trade-offs: three
+hourly gateway charges and three address charges are accepted in exchange for
+per-zone egress independence.
+
+**The ten interface endpoints are worth paying for, and the reason is partly
 financial.** The security consequence is stated in [§Rationale](#rationale) —
-task-to-AWS traffic never takes the public path. The cost consequence is that this
-traffic **stops flowing through the NAT gateways**, so it no longer accrues NAT
-per-GB processing charges. Part of the endpoint spend therefore **displaces** NAT
-data-processing spend rather than adding to it. The hourly per-endpoint-per-zone
-term is genuinely additive; the data term largely moves from one line to another.
-Presenting the endpoints as pure additional cost would overstate them, and
-presenting them as free would understate them.
+task-to-AWS traffic stays inside the VPC for every service an endpoint covers. The
+cost consequence is that this traffic **stops flowing through the NAT gateways**, so
+it no longer accrues NAT per-GB processing charges. Part of the endpoint spend
+therefore **displaces** NAT data-processing spend rather than adding to it. The
+hourly per-endpoint-per-zone term is genuinely additive; the data term largely moves
+from one line to another. Presenting the endpoints as pure additional cost would
+overstate them, and presenting them as free would understate them.
+
+Assumptions: "largely" is doing real work in that sentence and is not a hedge.
+**Cognito and X-Ray have no endpoint in the frozen eight-service set**, so their
+traffic continues to cross the NAT gateways and continues to accrue the per-GB
+processing term. Token operations are small and infrequent relative to image pulls
+and log delivery, so the residue is a small share of what it displaces — but it is
+not zero, and a reader modelling this tier as "endpoints eliminate NAT data
+processing" would model it wrong. Refactoring Rationale: this paragraph previously
+claimed task-to-AWS traffic never takes the public path, which overstated the
+displacement by describing an exception-free rule that the endpoint set does not
+support.
 
 ### Identity, keys and secrets
 
 | Item | Charge dimensions | Assessment |
 |---|---|---|
 | Cognito user pool | Per **monthly active user** | Negligible here: an internal application with a small population, and a seeded set that is tiny |
-| Customer-managed KMS keys | Per **key per month**, plus per **request** | **Five** keys is five monthly charges; the request term tracks use, and the field-level key's requests scale with reads of the encrypted columns |
+| Customer-managed KMS keys | Per **key per month**, plus per **request** | **Four** keys is four monthly charges; the request term tracks use, and the field-level envelope requests — which now resolve the Aurora key — scale with reads of the encrypted columns |
 | Secrets Manager | Per **secret per month**, plus per **retrieval** | Retrievals happen at service start, so the request term is small; the per-secret term is the one that matters |
 
 **Identity, compared honestly.** A self-managed user store has **no per-user
@@ -729,17 +924,32 @@ omit from a cost comparison that only counts invoiced items. The per-monthly-act
 charge for this application's population is small enough that the comparison is not
 close, which is why this is not one of the two close calls.
 
-**Five keys rather than one, with both halves of the argument stated.** One key
-would cost one monthly charge instead of five. The security argument for five is
+**Four keys rather than one, with both halves of the argument stated.** One key
+would cost one monthly charge instead of four. The security argument for four is
 that a key policy is per-key, so a policy mistake reaches exactly the data that key
 protects: a mistake on the queue key does not expose the database, and a mistake on
 the secrets key does not expose the dataset bucket. Four at-rest keys give one
-blast-radius boundary per data domain, and the fifth exists because the field-level
-columns need a key whose grants are conditioned on a declared purpose rather than
-scoped to a service. Trade-offs: four additional monthly key charges and five key
-policies to review instead of one, accepted for per-domain containment. Both halves
-belong in this record because a security argument with a cost consequence is
-incomplete with either half missing.
+blast-radius boundary per data domain. Trade-offs: three additional monthly key
+charges and four key policies to review instead of one, accepted for per-domain
+containment. Both halves belong in this record because a security argument with a
+cost consequence is incomplete with either half missing.
+
+**The field-level envelopes share the Aurora key, and that costs defence in depth.**
+This paragraph argued for a *fifth* key on the ground that "the field-level columns
+need a key whose grants are conditioned on a declared purpose rather than scoped to
+a service". The need is real and is still met — the grant on the Aurora key carries
+a `kms:EncryptionContext:carddemo:purpose` condition and no `kms:ViaService`
+condition — but it did not require a key of its own, and the frozen allocation has
+no room for one. Trade-offs, stated rather than glossed: one key now protects both
+the RDS-managed volume encryption and the application's field-level envelopes, so a
+compromise of it reaches both where previously it reached one. That is a genuine
+reduction and is bounded in two ways rather than dismissed. The two uses are
+separated by **authorization**, not by key material: the RDS grant cannot be
+exercised except through `rds.<region>`, and the envelope grant cannot be exercised
+except under a declared purpose, so neither principal can perform the other's
+operation. And each envelope carries an encryption context naming its purpose and
+its column as authenticated additional data, so an envelope moved between the card
+and customer contexts still fails its integrity check under the one key.
 
 ### The `dev` and `prod` levers, and what is deliberately not one
 
@@ -749,7 +959,7 @@ that their limits are visible: **log retention days**, and the
 **deletion-protection** and **final-snapshot** flags.
 
 **The security topology is not a place `dev` saves money, and that is deliberate.**
-The same three tiers across the same three zones, the same eight interface
+The same three tiers across the same three zones, the same ten interface
 endpoints and the same three NAT gateways are deployed to both, so `dev` pays the
 full network floor. The reason is validation: a `dev` environment with one zone, or
 with the database in the application subnets, or reaching AWS services through NAT
@@ -772,7 +982,7 @@ were also the cheapest. It is not, and that is the point.
 * **A single availability zone** would have **divided the per-zone charges** — one
   NAT gateway and one endpoint ENI per service instead of three. It was rejected on
   zone redundancy.
-* **Service-managed keys** would have removed **all five monthly key charges** and
+* **Service-managed keys** would have removed **all four monthly key charges** and
   every key policy. Rejected for the per-domain containment argued above.
 * **Porting the credential field** would have cost **nothing at all**: no user
   pool, no per-monthly-active-user charge. It was rejected on the risk it carries,
@@ -785,7 +995,7 @@ were also the cheapest. It is not, and that is the point.
 
 ### Trade-offs accepted
 
-* **Three NAT gateways and eight interface endpoints across three zones are the
+* **Three NAT gateways and ten interface endpoints across three zones are the
   price of zone-independent egress and a private AWS API path.** The charge shape
   is in [§Cost Implications](#cost-implications). Accepted: the hourly terms are
   paid so that no zone depends on another for egress and no task needs internet
@@ -806,8 +1016,9 @@ were also the cheapest. It is not, and that is the point.
   Accepted deliberately, and the network module offers no variable to opt out. A
   `dev` environment with a different network shape would not validate the `prod`
   one.
-* **Five customer-managed keys cost five monthly key charges and add key-policy
-  surface.** Accepted for per-domain blast-radius containment.
+* **Four customer-managed keys cost four monthly key charges and add key-policy
+  surface.** Accepted for per-domain blast-radius containment, with the field-level
+  envelope grant folded onto the Aurora key rather than carrying a fifth.
 * **Declining password parity is a behavioural change.** It is the only one of its
   kind in this migration, it is labelled as such in
   [§Identity](#identity-replacing-the-vsam-security-file), and it is registered in
@@ -909,10 +1120,16 @@ establish that the resulting environment behaves as described.
 
 ## Consequences
 
-* **All eight services are stateless with respect to identity.** Authority arrives
-  as a signed claim on each request, so there is no session store and no sticky
-  routing, which is what lets tasks scale horizontally behind the load balancer
-  ([ADR-002](ADR-002-compute-platform.md)).
+* **All seven request-serving services are stateless with respect to identity.**
+  Authority arrives as a signed claim on each request, so there is no session store
+  and no sticky routing, which is what lets tasks scale horizontally behind the load
+  balancer ([ADR-002](ADR-002-compute-platform.md)). `batch-service` holds no
+  session state either, but for a different reason — it serves no request, so its
+  authority is its task role and its database role rather than a per-request claim.
+  *WHY (Assumption made explicit):* the original bullet asserted this of "all eight
+  services" and grounded it in a claim arriving "on each request," which cannot hold
+  for a service that receives none; separating the two cases keeps the horizontal-
+  scaling conclusion attached to the services it actually follows from.
 * **The `auth` schema holds no credential.** Anything that needs to authenticate a
   user calls the pool. A future change that adds a password column to that table
   would contradict this record and requires a superseding ADR, not an edit.
@@ -923,9 +1140,14 @@ establish that the resulting environment behaves as described.
   per-service pattern is the unit of provisioning, and a new service that reuses an
   existing role contradicts options 12–14.
 * **Adding an AWS service dependency means adding an interface endpoint.** Omitting
-  one does not fail — the call falls back to the NAT path — so the endpoint set is
-  validated as an exact set to make that omission visible in provisioning rather
-  than only in a flow log.
+  one no longer falls back to the NAT path: the application group's egress is
+  enumerated, so an omitted service is **dropped at the group**. Refactoring
+  Rationale: this bullet previously said the call falls back to NAT, which was true
+  of an earlier revision carrying a `0.0.0.0/0` egress rule and became false when
+  that rule was withdrawn — and the difference matters, because it turns an omission
+  from a cost and privacy defect into an outage. The endpoint set is validated as an
+  exact set for that reason, and X-Ray and the Cognito identity provider were both
+  added to it after exactly this omission was found.
 * **Two behavioural differences are registered rather than absorbed:** the declined
   password parity, and the sign-on sentence emitted for a refused credential. Both
   belong in

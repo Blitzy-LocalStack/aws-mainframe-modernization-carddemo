@@ -90,9 +90,18 @@
  * {@code ReferenceApiRoutingContractTest} compares the document and the handlers in BOTH directions and
  * asserts that count, so an operation declared without a handler, a handler added without an operation,
  * or a silent narrowing of the surface each fail the build rather than review. The asynchronous entry
- * point is delivered as the queue listener on
- * {@code com.carddemo.reference.service.DateConversionMessageListener}, which shares its evaluation
- * member with the synchronous read so the two routes cannot report different verdicts for one input.</p>
+ * point is delivered as the single queue listener on
+ * {@code com.carddemo.reference.service.DateInquiryMessageListener}, and it is a SEPARATE flow from
+ * the synchronous date evaluation rather than a second transport over it: the queue route emits the
+ * current system date and time and reads no field of its request, while the synchronous read judges a
+ * date a caller submits through
+ * {@code com.carddemo.reference.service.DateConversionService}. Refactoring Rationale: this sentence
+ * named a second listener type and claimed the two routes shared one evaluation "so the two routes
+ * cannot report different verdicts for one input". Neither half held. The type it named carried a
+ * competing {@code @SqsListener} on the same request queue, which made the flow's wire behaviour
+ * depend on which container polled first, and the queue route has never called that evaluation. The
+ * competing consumer has been removed and the two routes are described as the two different questions
+ * they answer.</p>
  *
  * <p>Refactoring Rationale: the section above described this surface before any of it existed, and the
  * description was left unrevised while the packages filled in. Stating what is present, with a count a

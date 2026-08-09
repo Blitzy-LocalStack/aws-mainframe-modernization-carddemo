@@ -121,14 +121,14 @@ providers.
 | Random-value provider | `~> 3.9` | where credentials are generated at apply time |
 
 The two CLI constraint forms are deliberate and are the kind of choice Rule 1's
-third forbidden pattern requires be explained where it is made. **Assumptions:**
+third forbidden pattern requires be explained where it is made. Assumptions:
 Terraform intersects every `required_version` constraint it encounters across a
 configuration and its modules. A module is a *consumed* artifact, so pinning it
 to one minor series would let any module veto the CLI the root has chosen, and
 sixteen modules would then have to be edited in lockstep with every CLI bump; an
 open floor keeps each module consumable. A **root** is where a version is
 actually selected, so the roots carry the pessimistic form and the reviewed
-series lives in exactly three files. **Trade-offs:** the floor in a module admits
+series lives in exactly three files. Trade-offs: the floor in a module admits
 a CLI newer than any yet exercised against it — accepted, because the roots
 constrain what is really run and the modules are never applied on their own.
 
@@ -138,7 +138,7 @@ recorded checksums rather than a silent resolution at init time.
 
 ```mermaid
 graph LR
-    BOOT["infra/bootstrap<br/>state bucket + lock table<br/>local state, applied once"]
+    BOOT["infra/bootstrap — 19 resources<br/>state bucket + CMK + audit bucket<br/>+ trail + lock table + OIDC provider<br/>local state, applied once"]
 
     subgraph MOD["infra/modules — 16 reusable modules"]
         M["network · kms · secrets · ecr<br/>aurora-postgresql · ecs-cluster · ecs-service<br/>alb · api-gateway-http · cognito · sqs<br/>step-functions-batch · eventbridge-scheduler<br/>s3-datasets · cloudfront-spa · observability"]
@@ -279,8 +279,8 @@ material-security policy gate
 reviewer therefore sees a resource-level diff — including which resources would be
 **replaced** rather than updated — before anything is applied.
 
-**Assumptions,** stated because the distinction is easy to overstate: a plan that
-reaches a real backend needs credentials, so that job is opt-in and
+Assumptions: this distinction is stated because it is easy to overstate. A plan
+that reaches a real backend needs credentials, so that job is opt-in and
 operator-triggered rather than running on every push. The always-on gates are the
 ones that need no account.
 
@@ -290,19 +290,41 @@ Teardown is a single command against an environment root rather than a
 hand-maintained reverse sequence. Two values are parameterised precisely so this
 works without a human in the loop where that is wanted: `deletion_protection` and
 `skip_final_snapshot` are variables, set to `false`/`true` in `dev` and
-`true`/`false` in `prod`. **Trade-offs:** `prod` therefore does **not** tear down
+`true`/`false` in `prod`. Trade-offs: `prod` therefore does **not** tear down
 without a deliberate change to those values — that is the intent, not an
 oversight, and it is why they are inputs rather than constants.
 
 ### 4. The provider constraint has a floor for a reason
 
-`~> 6.56` is not a preference. A **zero** minimum database capacity requires a
-provider release at or after **5.81.0**, and `dev` sets exactly that floor
-(`aurora_min_capacity = 0`, with `aurora_seconds_until_auto_pause = 300` because a
-zero floor makes the auto-pause setting mandatory). The constraint clears the
-required floor with room. The capacity semantics themselves belong to
-[ADR-003](ADR-003-datastore-targets.md), which delegates the pin here explicitly;
+`~> 6.56` is not a preference. The floor is **5.81.0**, and it is set by **two**
+provider changes rather than one, which is worth separating because the two arrive in
+different releases:
+
+| Provider release | What it introduced | Why this configuration needs it |
+|---|---|---|
+| **5.80.0** | A **zero** Aurora Serverless minimum capacity | `dev` sets `aurora_min_capacity = 0` |
+| **5.81.0** | The **auto-pause-seconds** argument | A zero minimum makes `aurora_seconds_until_auto_pause = 300` mandatory |
+
+Because `dev` sets both arguments, the **effective floor is the later of the two,
+5.81.0**, and `~> 6.56` clears it with room. The capacity semantics themselves belong
+to [ADR-003](ADR-003-datastore-targets.md), which delegates the pin here explicitly;
 this record owns the pin and not the capacity model.
+
+*WHY (Refactoring Rationale).* This read "a **zero** minimum database capacity
+requires a provider release at or after **5.81.0**," attributing the zero minimum to
+5.81.0. That attribution is wrong by one release: **5.80.0** introduced the zero
+minimum, and 5.81.0 introduced the auto-pause-seconds argument. The **conclusion**
+was right — 5.81.0 genuinely is the floor for *this* configuration — which is exactly
+what made the error durable: nothing downstream broke, so nothing surfaced it, and
+the pinned constraint needed no change. It still mattered, because it collapsed two
+independent feature gates into one and named the wrong feature for the binding
+release. A reader dropping the auto-pause argument would conclude the 5.81.0 floor
+still applied to their zero minimum when 5.80.0 would then suffice, and a reader
+debugging an auto-pause rejection on 5.80.0 would find no record that the argument
+had its own floor. `infra/README.md` and
+[`infra/modules/aurora-postgresql/README.md`](../../infra/modules/aurora-postgresql/README.md)
+already stated the split correctly, so this record was contradicting the modules it
+governs.
 
 **Assumptions:** a provider below that floor does not warn — it fails at apply
 time, and it reports against the capacity argument rather than the provider
@@ -320,12 +342,24 @@ comments.
 
 ### 6. Credentials are generated at apply time, so no secret has a path into source
 
-Database and seed-user credentials are generated by the random-value provider and
-written straight to the secret store; the per-environment parameter files carry
-capacity, sizing, retention and protection values only. There is no variable
-through which a credential could be supplied, which is what makes "no secrets
-committed" structural rather than observed. The full mechanism set belongs to
-[ADR-008](ADR-008-security-and-identity.md) and is not re-argued here.
+No credential in this stack is read from a repository file or written back to one,
+and the per-environment parameter files carry capacity, sizing, retention and
+protection values only. There is no variable through which a credential could be
+supplied, which is what makes "no secrets committed" structural rather than
+observed.
+
+The generation is **not** all done by the random-value provider, and the
+distinction belongs here because this record owns the provider pin: the provider
+generates the per-service database role passwords and the five symmetric
+application keys, while **RDS** generates the Aurora master password
+(`manage_master_user_password = true`) and a **Python script** generates the Cognito
+seed-user temporary passwords. *WHY (Refactoring Rationale):* this paragraph
+credited the random-value provider with "database and seed-user credentials," which
+is wrong for both the Aurora master password and the seed-user passwords — so it
+attributed to the pinned provider two credentials whose rotation it does not
+control. The per-credential table is in
+[ADR-008](ADR-008-security-and-identity.md), which owns the mechanism set; this
+record now names only the split that bears on the pin.
 
 ### 7. The surrounding tooling is what makes the Rule 1 HCL analogue checkable
 
@@ -429,7 +463,7 @@ definition. And the deck defines `DEFINE LIBRARY(COM2DOLL)` at **L44** with **no
 definition records that same library as `STATUS(DISABLED)`
 ([`app/csd/CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) **L494–L495**).
 
-**Refactoring Rationale.** What this demonstrates is a property of **the
+Refactoring Rationale: What this demonstrates is a property of **the
 imperative-deployment-script approach as a class**, and the object of that
 sentence is deliberately the approach and not this file: when the script that
 deploys resources is maintained separately, by hand, from the resources it
@@ -455,7 +489,7 @@ listing reports what is there after the fact.
 
 ### The two scheduler decks show the same shape in another domain
 
-**Alternatives Considered:** porting the scheduler decks as they stand.
+Alternatives Considered: porting the scheduler decks as they stand.
 [`app/scheduler/CardDemo.controlm`](../../app/scheduler/CardDemo.controlm) (92
 lines) declares **five folder-scope containers** in two element types — three
 `<FOLDER>` at **L3**, **L26** and **L64**, and two `<SMART_FOLDER>` at **L32** and
@@ -483,9 +517,12 @@ inventory and why the decks are carried as intent rather than as syntax, belongs
 ### State is the price of the model, and it is named as a cost rather than hidden
 
 The tool needs a record of what it created, and that record is an asset the project
-now owns and has to protect. It is not a by-product. The backend is a **versioned,
-encrypted object-storage bucket plus a lock table**, provisioned by
-`infra/bootstrap`.
+now owns and has to protect. It is not a by-product. At its core the backend is a
+**versioned, encrypted object-storage bucket plus a lock table**, provisioned by
+`infra/bootstrap` — which declares **nineteen resources** in total, because the
+bucket also carries a customer-managed key, an access-audit bucket and a trail
+recording object access. The full inventory and its charge dimensions are in
+[the state-backend cost section](#the-state-backend-is-the-only-resource-the-tool-itself-requires).
 
 * **Versioning** gives the record a history, so a corrupted or truncated state has
   a prior version to recover from.
@@ -494,7 +531,7 @@ encrypted object-storage bucket plus a lock table**, provisioned by
   and generated credentials are among the things created. That is also why the
   ignore file makes the state file uncommittable — `.terraform/` at
   [`.gitignore`](../../.gitignore) **L186** and the explicit pair `*.tfstate`
-  (**L201**) and `*.tfstate.*` (**L202**). **Assumptions:** the pair is written as
+  (**L201**) and `*.tfstate.*` (**L202**). Assumptions: the pair is written as
   two rules rather than one `*.tfstate*` glob deliberately, because a single
   trailing wildcard would also match an unrelated name that merely begins the same
   way. Treating the state file as a security artifact rather than as build output
@@ -533,7 +570,7 @@ the two parameter files are these and no others:
 | Secret recovery window (days) | `0` | `30` | [ADR-008](ADR-008-security-and-identity.md) |
 | Network address range | `10.0.0.0/16` | `10.1.0.0/16` | [ADR-008](ADR-008-security-and-identity.md) |
 
-**Assumptions,** and this is a precision that matters: the address range differs
+Assumptions: this is a precision that matters, because the address range differs
 too, so the accurate claim is that the **resource graph** is identical — the same
 modules, the same subnet tiers, the same availability-zone count, the same
 relationships — while the values that differ are addressing plus sizing, retention
@@ -553,13 +590,37 @@ carry away, neither of them softened:
 
 * **The bootstrap backend is deliberately not destroyed by an environment
   teardown.** It holds the state that makes teardown possible, so it outlives the
-  environments and is removed last and separately, if at all.
-* **Retained artifacts are governed by the flags, not by the command.** With
-  `skip_final_snapshot = false` a final snapshot is deliberately left behind, and
-  log groups persist for their retention period. That residue is intended, and it
-  is intended in `prod` specifically.
+  environments and is removed last and separately, if at all — and it is
+  **nineteen resources**, not two, as
+  [the state-backend cost section](#the-state-backend-is-the-only-resource-the-tool-itself-requires)
+  now enumerates. Removing it is therefore a reviewed act rather than a one-line
+  cleanup.
+* **Exactly one artifact is deliberately retained, and it is the database snapshot.**
+  With `skip_final_snapshot = false` — the `prod` setting — a final snapshot is left
+  behind under a generated identifier. `dev` sets `skip_final_snapshot = true` and so
+  retains nothing. This is the residue that is intended, and it is intended in `prod`
+  specifically.
+* **Log groups are destroyed with the stack, and their log data goes with them.**
+  All **six** log groups in this package — one each in `ecs-service`,
+  `observability`, `network` and `api-gateway-http`, and two in
+  `step-functions-batch` — are deleted by `destroy`, because **not one of them sets
+  `skip_destroy`**. An operator who expects to read a task log or a flow log after
+  tearing an environment down will find neither.
 
-**Trade-offs:** the acceptance criterion is therefore *expressible and verifiable
+  *WHY (Refactoring Rationale).* This bullet previously said that "**log groups
+  persist for their retention period**" and grouped them with the final snapshot as
+  intended residue. That is the opposite of the configured behaviour, and the error
+  came from conflating two unrelated settings. `retention_in_days` governs how long
+  entries live **while the group exists**; whether the group survives `destroy` is
+  governed by `skip_destroy`, which is absent from all six. So retention was read as
+  if it outranked deletion, when it only applies until deletion. The consequence is
+  operational rather than cosmetic: the old text would lead someone to run `destroy`
+  before collecting evidence for a post-mortem, on the belief that the logs would
+  still be there afterwards. Anyone who needs logs to outlive the stack must export
+  them first, or set `skip_destroy` deliberately and accept that the groups then
+  survive and must be removed by hand.
+
+Trade-offs: the acceptance criterion is therefore *expressible and verifiable
 by an operator* through the documented commands, which is a different and weaker
 claim than an observed outcome — see
 [Honest boundary](#honest-boundary--what-this-record-does-not-establish). The exact
@@ -578,13 +639,41 @@ charge it introduces, and three larger charges it gives the project control over
 
 ### The state backend is the only resource the tool itself requires
 
-A versioned, encrypted bucket and a lock table. Both are charged on **storage per
-GB-month** and **per request**; state files are small and locks are taken
-per-operation, which makes this **the smallest recurring cost in the whole stack**
-by a wide margin. It is provisioned **once by a bootstrap shared by both
-environments** rather than per environment, so the charge does not scale with the
-number of environments. Versioning multiplies stored bytes by the number of
-retained versions, which on an object this size is not a material quantity.
+The bootstrap declares **nineteen resources**, and only five of them carry a charge
+of their own. The other fourteen are configuration attached to those five —
+versioning, encryption, public-access blocks, ownership controls, lifecycle rules and
+bucket policies — which are free in themselves:
+
+| Chargeable resource | Charge dimension | Assessment |
+|---|---|---|
+| `aws_kms_key.state` | **Fixed per-CMK per month**, plus per request | The only charge here that is fixed rather than usage-scaled, and the one the earlier text omitted entirely |
+| `aws_s3_bucket.state` | Storage per **GB-month**, plus per request | State files are small; versioning multiplies stored bytes by the retained-version count, immaterial at this object size |
+| `aws_s3_bucket.state_audit` | Storage per **GB-month**, plus per request | Holds the access trail for the state bucket; grows with recorded activity, bounded by its lifecycle rule |
+| `aws_cloudtrail.state_object_access` | Per **data event recorded** | **The one dimension that scales with activity rather than being negligible.** S3 data events are chargeable, so this term grows with how often state is read and written — that is, with how often the pipeline runs |
+| `aws_dynamodb_table.state_lock` | Per **request** (on-demand), plus storage | Locks are taken per operation |
+
+`aws_iam_openid_connect_provider.github_actions` carries **no charge**.
+
+The whole backend remains a **small** recurring cost, and it is provisioned **once by
+a bootstrap shared by both environments** rather than per environment, so it does not
+scale with the number of environments.
+
+*WHY (Refactoring Rationale).* This section previously described the backend as
+"**a versioned, encrypted bucket and a lock table**," stated that "**both**" are
+charged on storage and requests, and concluded it was "the smallest recurring cost in
+the whole stack **by a wide margin**." The inventory was incomplete by three
+chargeable resources, and the two it omitted are precisely the two that break the
+conclusion's reasoning. A **customer-managed KMS key** carries a *fixed* monthly
+charge that does not shrink with the tiny object it protects, so the "state files are
+small" argument does not reach it. A **CloudTrail trail recording S3 data events** is
+billed per event, so its term scales with pipeline activity rather than with stored
+bytes — the one term here that can grow without the state growing at all. Describing
+a nineteen-resource bootstrap as two resources also understated what an operator must
+review before removing it, which matters because
+[the teardown section](#the-teardown-criterion-stated-exactly-as-far-as-it-goes)
+makes removing the bootstrap a separate deliberate act. The word "smallest" is kept
+because it remains true; "by a wide margin" is dropped because it was derived from an
+inventory missing the fixed-charge item.
 
 ### `destroy` is a cost control, and this is the strongest cost argument in the record
 
@@ -730,6 +819,34 @@ Mitigated by typed variables carrying descriptions, and by outputs being the onl
 sanctioned route by which endpoints and identifiers reach services — **no service
 hard-codes an endpoint**, so an interface change surfaces at plan or startup rather
 than as a value that is quietly wrong.
+
+### Risk — the backend's DynamoDB locking mechanism is deprecated
+
+The S3 backend's `dynamodb_table` argument is **deprecated by HashiCorp**, which
+names **`use_lockfile`** — S3-native conditional-write locking — as its replacement.
+This record's backend uses the DynamoDB table, so the locking mechanism it depends on
+is on a deprecation path and will eventually stop being the supported form.
+
+Why the table is still what ships: the `LockID`-keyed table is the mechanism the
+project contract mandates, and the two mechanisms are **not mutually exclusive** —
+Terraform permits both simultaneously, which is what makes the migration
+non-disruptive rather than a cutover. The path is therefore additive and available at
+any time: set `use_lockfile = true` in each root's `backend.tf`, confirm operations
+lock correctly against the object store, and only then remove the `dynamodb_table`
+argument and the table itself. Because both can run at once, there is no window in
+which state is unlocked.
+
+**Assumptions:** the deprecation is an upstream schedule this project does not
+control, so the mitigation is to keep the replacement one argument away rather than
+to pre-empt it. The mechanics of the table — the `LockID` String key that is an
+external backend contract rather than a naming choice, and the on-demand billing that
+suits burst lock traffic — are recorded at their point of use in
+[`infra/bootstrap/README.md`](../../infra/bootstrap/README.md) and are not restated
+here. *WHY (Refactoring Rationale):* that README already documented the deprecation
+and the `use_lockfile` replacement, but this record's Risks section did not, so the
+one document a reader consults for the **durability** of the tooling decision was
+silent about a deprecation its own backend depends on. A risk recorded only in the
+module it affects is not discoverable from the decision that chose it.
 
 ### Assumptions
 

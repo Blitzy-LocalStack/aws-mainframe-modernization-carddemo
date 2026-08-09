@@ -128,9 +128,11 @@
  * identifier are returned masked.
  *
  * <p>Money crosses this boundary as a JSON string. It is held as
- * {@code com.carddemo.common.money.Money} at scale 2 with {@code HALF_UP} rounding, and
- * {@code com.carddemo.common.money.MoneyModule} performs the encoding, so no client can parse an
- * amount into an IEEE-754 binary floating point value.
+ * {@code com.carddemo.common.money.Money} at scale 2, reduced under
+ * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING} which is {@code HALF_UP} -- the type's
+ * other mode, truncation, governs the interest accrual alone and no endpoint in this package
+ * performs one -- and {@code com.carddemo.common.money.MoneyModule} performs the encoding, so no
+ * client can parse an amount into an IEEE-754 binary floating point value.
  *
  * <h2>Documentation contract</h2>
  *
@@ -218,6 +220,17 @@
  * {@code WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7} at L177 and L178, and
  * {@code app/cbl/COTRN00C.cbl} bounds its display loop at 10 at L290 and L344. Each carries its
  * browse cursor forward as a key rather than as a count.
+ *
+ * <p>Assumptions: a boundary token issued here is bound to four facts and not one -- the query it came
+ * from, the authenticated caller's name, the date range it was taken over, and the DIRECTION it is
+ * redeemable in. The published contract states the last of those in words, so the leading key of a page
+ * is sealed under the binding a backward step opens with and the trailing key under the binding a
+ * forward step opens with, and a mismatch fails the authenticated decryption rather than being caught
+ * afterwards. Refactoring Rationale: one binding stood here, carrying no direction, so a trailing
+ * position was redeemable backward -- which walks a caller past rows it never saw, and is invisible in
+ * the response because the page returned is well formed. The contract sentence was therefore false, and
+ * that is the worse half of the defect: a client written against it would have relied on a refusal that
+ * never came.
  *
  * <p>Alternatives Considered: the four decision labels in this file are written in the plural,
  * un-parenthesised forms Rule 1 gives at L31 to L34, and each was retyped by hand from that rule

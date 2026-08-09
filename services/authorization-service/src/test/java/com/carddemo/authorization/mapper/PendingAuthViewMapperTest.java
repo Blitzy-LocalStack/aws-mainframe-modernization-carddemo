@@ -1,7 +1,5 @@
 package com.carddemo.authorization.mapper;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
@@ -10,6 +8,7 @@ import com.carddemo.authorization.dto.PendingAuthDetailView;
 import com.carddemo.authorization.dto.PendingAuthListView;
 import com.carddemo.authorization.dto.PendingAuthRowView;
 import com.carddemo.authorization.dto.PendingAuthSummaryView;
+import com.carddemo.authorization.service.AccountContextClient;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.web.CursorToken;
 import java.math.BigDecimal;
@@ -19,6 +18,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Asserts that the adapter between the persistent authorization rows and the HTTP bodies produces exactly
@@ -37,6 +38,17 @@ import org.junit.jupiter.api.Test;
  */
 @DisplayName("PendingAuthViewMapper")
 final class PendingAuthViewMapperTest {
+
+    /**
+     * The customer display fields the account context resolves for these fixtures.
+     *
+     * <p>Assumptions: a non-null value is the default posture, because the four fields it carries are what
+     * the reference screen shows and a null default would make every case a test of the
+     * unresolved-customer path instead of a test of what it is named for.</p>
+     */
+    private static final AccountContextClient.CustomerDisplay CUSTOMER_DISPLAY =
+            new AccountContextClient.CustomerDisplay("SMITH JOHN", "1 HIGH STREET", "SPRINGFIELD IL",
+                    "5550001111");
 
     /** The account identifier used throughout, chosen to need padding so the padding is exercised. */
     private static final long ACCOUNT_ID = 11L;
@@ -167,7 +179,7 @@ final class PendingAuthViewMapperTest {
     @Test
     @DisplayName("renders both identifiers at their declared width")
     void identifiersArePaddedToTheDeclaredWidth() {
-        PendingAuthSummaryView view = this.mapper.toSummaryView(summaryRow());
+        PendingAuthSummaryView view = this.mapper.toSummaryView(summaryRow(), CUSTOMER_DISPLAY);
 
         assertThat(view.accountId())
                 .hasSize(PendingAuthSummaryView.ACCOUNT_ID_WIDTH)
@@ -183,7 +195,7 @@ final class PendingAuthViewMapperTest {
     @Test
     @DisplayName("wraps every summary amount as fixed-point money")
     void summaryAmountsAreFixedPoint() {
-        PendingAuthSummaryView view = this.mapper.toSummaryView(summaryRow());
+        PendingAuthSummaryView view = this.mapper.toSummaryView(summaryRow(), CUSTOMER_DISPLAY);
 
         assertThat(view.creditLimit()).isEqualTo(Money.of(new BigDecimal("5000.00")));
         assertThat(view.cashLimit()).isEqualTo(Money.of(new BigDecimal("1000.00")));
@@ -249,7 +261,8 @@ final class PendingAuthViewMapperTest {
         assertThatThrownBy(() -> this.mapper.toRowView(detailWith("00"), "  "))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("subject");
-        assertThatThrownBy(() -> this.mapper.toListView(summaryRow(), List.of(), false, null, ""))
+        assertThatThrownBy(
+                () -> this.mapper.toListView(summaryRow(), List.of(), false, false, null, "", CUSTOMER_DISPLAY))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("subject");
     }
@@ -326,7 +339,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("assembles the list body with boundaries taken from the rows returned")
     void listViewCarriesTheEnvelope() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(detailWith("00")), true, null, SUBJECT);
+                summaryRow(), List.of(detailWith("00")), true, false, null, SUBJECT, CUSTOMER_DISPLAY);
 
         assertThat(view.summary().accountId()).isEqualTo("00000000011");
         assertThat(view.page().items()).hasSize(1);
@@ -343,7 +356,8 @@ final class PendingAuthViewMapperTest {
     @DisplayName("returns an empty page with no boundary tokens")
     void emptyPageCarriesNoBoundaries() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(), false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE, SUBJECT);
+                summaryRow(), List.of(), false, false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE,
+                SUBJECT, CUSTOMER_DISPLAY);
 
         assertThat(view.page().items()).isEmpty();
         assertThat(view.page().firstKey()).isNull();
@@ -362,7 +376,8 @@ final class PendingAuthViewMapperTest {
     @DisplayName("refuses a navigation sentence outside the three reference strings")
     void authoredBoundarySentenceIsRefused() {
         assertThatThrownBy(() -> this.mapper.toListView(
-                summaryRow(), List.of(), false, "You are already at the bottom of the page.", SUBJECT))
+                summaryRow(), List.of(), false, false, "You are already at the bottom of the page.",
+                SUBJECT, CUSTOMER_DISPLAY))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("reference navigation sentences");
     }

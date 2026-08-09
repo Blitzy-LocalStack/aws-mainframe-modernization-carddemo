@@ -5,7 +5,7 @@
 #   The entire public contract of the reusable `ecr` module. This directory is
 #   never applied on its own -- it is consumed as
 #   `source = "../../modules/ecr"` by the infra/envs/dev and infra/envs/prod
-#   roots -- so everything a caller can see of the ten container repositories
+#   roots -- so everything a caller can see of the eleven container repositories
 #   provisioned in infra/modules/ecr/main.tf is what the four blocks below
 #   publish, and nothing else.
 #
@@ -14,8 +14,9 @@
 #   governing rule for runtime identifiers in this package -- module outputs
 #   are the only sanctioned source of an endpoint or an identifier, and no
 #   consumer hard-codes one. Two consumers read these values, both through
-#   the calling root: the deployment workflow, which pushes the ten images
-#   under a short-lived federated role, and the sibling ecs-service module,
+#   the calling root: the deployment workflow, which pushes the ten built
+#   images and mirrors the pinned telemetry sidecar image under a short-lived
+#   federated role, and the sibling ecs-service module,
 #   whose task definitions and task-execution policies are wired from them.
 #
 # Parameters:
@@ -34,7 +35,7 @@
 #                      namespaced name the registry actually stores
 #   repository_arns ... map, keyed by logical artifact name, of the ARN an
 #                      IAM policy statement is scoped to
-#   registry_id ....... string, the one registry all ten repositories live in
+#   registry_id ....... string, the one registry all eleven repositories live in
 #
 #   These four NAMES are a one-way contract rather than an implementation
 #   detail. Both environment roots transcribe them, so renaming one here
@@ -232,7 +233,7 @@ output "registry_id" {
 # rejected, because an unused output is still a public surface a consumer can
 # come to depend on and this file cannot then be narrowed without a breaking
 # change. A per-repository map of registry identifiers would repeat one value
-# ten times, since all ten repositories share a single registry. A flattened
+# eleven times, since all eleven repositories share a single registry. A flattened
 # list of addresses would reintroduce exactly the positional indexing the map
 # shape above exists to prevent. And a convenience map of complete image URIs
 # with a tag already appended would put image tagging in this module, whereas

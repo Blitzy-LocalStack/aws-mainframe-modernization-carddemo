@@ -83,56 +83,57 @@ public class AuthReplyOutbox {
     private String correlationId;
 
     /**
-     * The ordering group the reply belongs to, as the purpose-scoped keyed token over the card number.
+     * The ordering group the reply belongs to: the sixteen-character card number the reply answers for.
      *
      * <p>Assumptions: grouping by card preserves per-card ordering while leaving different cards free
      * to be delivered in parallel, which is what the queue's group semantics provide. A single constant
      * group would serialise every reply in the system behind one another; a per-message group would
      * preserve no ordering at all.</p>
      *
-     * <p>Refactoring Rationale: the value stored here is a TOKEN and no longer the card number itself,
-     * and the column is named for what it holds. That mattered because this column is not payload: the
-     * publisher copies it onto the send as the queue's {@code MessageGroupId}, which is message
-     * METADATA -- server-side encryption covers the message body and not its metadata, so a group
-     * identifier appears in queue telemetry, in send traces and in anything observing the queue.
-     * Storing the raw number therefore both wrote a primary account number into this table and
-     * published one on every reply. A keyed token from
-     * {@link com.carddemo.common.codec.CsvAuthCodec.AuthReply#orderGroup(
-     * com.carddemo.common.security.OpaqueIdentifier)} preserves the whole grouping SEMANTIC -- equal
-     * for equal cards, different for different cards -- which is the only property the ordering
-     * guarantee rests on, and it discloses nothing to a holder without the key. The requirement is
-     * stated in {@code docs/adr/ADR-004-messaging.md} under "Ordering is grouped by card".</p>
+     * <p>Refactoring Rationale: the value stored here is the CARD NUMBER, and it was a keyed,
+     * purpose-scoped token derived from it. The change is an alignment rather than a preference: sections
+     * 0.4.1.8 and 0.7.6 of the technical specification freeze the reply queue's {@code MessageGroupId} as
+     * {@code card_num}, and that specification is the agreed source of truth. The derivation preserved the
+     * grouping semantic -- equal for equal cards -- but it changed the identity a queue observer, a
+     * cross-account consumer or a second publisher built from the same specification would compute, so
+     * two producers written to the frozen contract and to the derivation would place one card's messages
+     * in two different groups and lose the ordering guarantee entirely. The column was renamed from
+     * {@code order_group_token} by {@code V3__authorization_outbox_fifo_identities.sql} so that its name
+     * describes what it holds.</p>
      *
-     * <p>Assumptions: the token is derived once, inside the deciding transaction, and stored. Deriving
-     * it at publication time would make the publisher hold key material and would make an unparseable
-     * payload unpublishable, which is precisely the case where publishing matters most.</p>
+     * <p>Trade-offs: the consequence is stated rather than left for a reader to discover, because it is
+     * real. A group identifier is message METADATA: server-side encryption covers a message body and not
+     * its metadata, so this value appears in queue telemetry, in send traces and to anything permitted to
+     * observe the queue. What bounds that exposure is the deployment rather than this column -- the reply
+     * queues are encrypted with a customer-managed key, reachable only through an interface endpoint
+     * inside the private network, and readable only by the task roles the infrastructure grants -- and it
+     * is the specification's own judgement that the frozen identity is worth that exposure. Anyone
+     * revisiting the judgement has to revisit the specification, not this field.</p>
      *
-     * <p>Assumptions: the declared width stays 128 although a token occupies exactly
-     * {@code OpaqueIdentifier.TOKEN_LENGTH} characters. The column is not narrowed to the token width,
-     * because narrowing it would make the schema depend on the current derivation's output length, and a
-     * future purpose-scoped derivation with a different width would then need a migration to store a
-     * value that is in every other respect the same thing.</p>
-
+     * <p>Assumptions: the declared width stays 128 although the value occupies sixteen characters. The
+     * width is not a contract on the value, nothing reads this column as fixed width, and narrowing it
+     * would rewrite the table to remove headroom that a widened grouping key would need.</p>
      */
-    @Column(name = "order_group_token", nullable = false, length = 128)
-    private String orderGroupToken;
+    @Column(name = "order_group_id", nullable = false, length = 128)
+    private String orderGroupId;
 
     /**
-     * The deduplication identity, as the purpose-scoped keyed token over the card and transaction pair.
+     * The deduplication identity: the acquirer's transaction identifier the reply answers.
      *
-     * <p>Assumptions: tokenising the card-and-transaction pair rather than hashing the payload makes
-     * duplicate suppression independent of the bytes, so a re-published reply whose rendering changed is
-     * still recognised as the same reply. A content hash would treat it as a new message and the
-     * acquirer would receive two answers to one request.</p>
+     * <p>Assumptions: identifying the authorization rather than hashing the payload makes duplicate
+     * suppression independent of the bytes, so a re-published reply whose rendering changed is still
+     * recognised as the same reply. A content hash would treat it as a new message and the acquirer would
+     * receive two answers to one request.</p>
      *
-     * <p>Refactoring Rationale: the acquirer's transaction identifier was stored and published raw. It
-     * is tokenised for the same reason as the group: a deduplication identifier is metadata rather than
-     * body, and the transaction identifier is the value that joins a queue observer's view to a
-     * cardholder's purchase everywhere else it is recorded. The purpose string differs from the
-     * correlation purpose, so the two tokens over that one pair cannot be joined to each other.</p>
+     * <p>Refactoring Rationale: this stores the transaction identifier itself, where it stored a keyed
+     * token over the card-and-transaction pair. The reason is the one recorded on the field above: the
+     * technical specification freezes {@code MessageDeduplicationId} as {@code transaction_id}, and two
+     * publishers -- one following the specification and one following the derivation -- would compute
+     * different identities for one authorization, so a duplicate would not be suppressed at all. The
+     * column was renamed from {@code deduplication_token} by the same migration.</p>
      */
-    @Column(name = "deduplication_token", nullable = false, length = 128)
-    private String deduplicationToken;
+    @Column(name = "deduplication_id", nullable = false, length = 128)
+    private String deduplicationId;
 
     /**
      * The encoded reply body, in the wire format named by {@link #getContentType()}.
@@ -175,10 +176,55 @@ public class AuthReplyOutbox {
     private LocalDateTime publishedAt;
 
     /**
-     * How many publication attempts have been made.
+     * How many transport send attempts have been made for this reply.
+     *
+     * <p>Refactoring Rationale: this counted three unrelated events and now counts one. A claim by
+     * {@code OutboxRepository} advanced it, {@code OutboxPublisher} advanced it again when a send failed,
+     * and it advanced a third time when an expired row was retired without being sent at all -- so its
+     * value was neither a claim count nor a send count and answered no operational question. The claim
+     * transition moved to {@link #claimVersion} and the retirement of an expired row no longer touches
+     * this member, so one increment now corresponds to one transport call.</p>
+     *
+     * <p>Assumptions: the type is {@code Integer} and the column INTEGER, widened from a small integer by
+     * {@code V2__authorization_outbox_claim_version.sql}. The old width was reachable: a permanently
+     * failing row advanced the shared counter twice per drain pass, which at the default one-second poll
+     * interval exhausted a small integer in under five hours, and the engine reports an integer overflow
+     * as an error rather than wrapping -- so the drain transaction would abort and every reply behind that
+     * row would stop being published.</p>
      */
     @Column(name = "attempts", nullable = false)
-    private Short attempts;
+    private Integer attempts;
+
+    /**
+     * When this reply next becomes eligible for a publication attempt.
+     *
+     * <p>Assumptions: this single column carries BOTH the claim lease and the retry backoff, because
+     * the two are the same statement of fact -- the instant before which no publisher should touch
+     * this row. A claim moves it forward by the lease, a failed send moves it forward by the backoff,
+     * and the ready predicate admits only rows whose instant has arrived. Refactoring Rationale: an
+     * earlier revision had no such column, so a claim was an uncommitted row write held for the whole
+     * publication pass, which forced the network send to occur inside the database transaction; and
+     * the ready set was the globally oldest pending rows, so permanently failing heads were reselected
+     * on every poll and starved every healthy group behind them.</p>
+     *
+     * <p>Trade-offs: the column is NOT NULL with a past default so that a newly inserted reply is
+     * immediately eligible. A nullable column meaning "eligible now" was rejected because every
+     * predicate would then need to spell the null case, and one that forgot it would silently exclude
+     * every fresh row -- the failure mode being defended against.</p>
+     */
+    @Column(name = "next_attempt_at", nullable = false)
+    private LocalDateTime nextAttemptAt;
+
+    /**
+     * When this reply was abandoned, if it was.
+     *
+     * <p>Assumptions: this is the terminal state and it is deliberately SEPARATE from the publication
+     * instant. A published row was answered and an abandoned row never will be, so recording both in
+     * one column would let a reply that was never sent read as delivered in any audit that joins on
+     * publication.</p>
+     */
+    @Column(name = "abandoned_at")
+    private LocalDateTime abandonedAt;
 
     /**
      * Why the last publication attempt failed, truncated to the column width.
@@ -212,28 +258,34 @@ public class AuthReplyOutbox {
      * @param replyQueueUrl where the reply must be sent, taken from the request; must not be
      *     {@code null}
      * @param correlationId the correlation identifier to echo; may be {@code null}
-     * @param orderGroupToken the ordering group, as the keyed token over the card number rather than
-     *     the number itself; must not be {@code null}
-     * @param deduplicationToken the deduplication identity, as the keyed token over the card and
-     *     transaction pair rather than the pair itself; must not be {@code null}
+     * @param orderGroupId the ordering group, which is the card number itself as the technical
+     *     specification freezes it; must not be {@code null}
+     * @param deduplicationId the deduplication identity, which is the acquirer's transaction
+     *     identifier as the technical specification freezes it; must not be {@code null}
      * @param payload the encoded reply body; must not be {@code null}
      * @param expiresAt when the reply stops being worth sending, in coordinated universal time; may be
      *     {@code null} to mean it never expires
      * @param createdAt when this row was written, in coordinated universal time; must not be
      *     {@code null}
      */
-    public AuthReplyOutbox(String replyQueueUrl, String correlationId, String orderGroupToken,
-            String deduplicationToken, String payload, LocalDateTime expiresAt,
+    public AuthReplyOutbox(String replyQueueUrl, String correlationId, String orderGroupId,
+            String deduplicationId, String payload, LocalDateTime expiresAt,
             LocalDateTime createdAt) {
         this.replyQueueUrl = replyQueueUrl;
         this.correlationId = correlationId;
-        this.orderGroupToken = orderGroupToken;
-        this.deduplicationToken = deduplicationToken;
+        this.orderGroupId = orderGroupId;
+        this.deduplicationId = deduplicationId;
         this.payload = payload;
         this.contentType = CONTENT_TYPE_CSV;
         this.expiresAt = expiresAt;
         this.createdAt = createdAt;
         this.attempts = 0;
+        // WHY : Assumptions: a fresh reply is eligible AT its creation instant rather than at some
+        // offset from it. The row is written inside the decision's transaction and the publisher runs
+        // on its own poll, so any positive offset here would be a delay added to every reply for no
+        // stated reason; the column is set rather than left to its database default because an
+        // in-memory instance is read by the publisher's own tests before it is ever persisted.
+        this.nextAttemptAt = createdAt;
     }
 
     /**
@@ -266,21 +318,21 @@ public class AuthReplyOutbox {
     /**
      * Returns the ordering group the reply belongs to.
      *
-     * @return the keyed group token, never the card number and never {@code null} on a persisted
-     *     instance
+     * @return the card number this reply answers for, which is the group identity the technical
+     *     specification freezes; never {@code null} on a persisted instance
      */
-    public String getOrderGroupToken() {
-        return this.orderGroupToken;
+    public String getOrderGroupId() {
+        return this.orderGroupId;
     }
 
     /**
      * Returns the deduplication identity.
      *
-     * @return the keyed deduplication token, never the transaction identifier and never {@code null} on
-     *     a persisted instance
+     * @return the acquirer's transaction identifier, which is the deduplication identity the technical
+     *     specification freezes; never {@code null} on a persisted instance
      */
-    public String getDeduplicationToken() {
-        return this.deduplicationToken;
+    public String getDeduplicationId() {
+        return this.deduplicationId;
     }
 
     /**
@@ -330,12 +382,39 @@ public class AuthReplyOutbox {
     }
 
     /**
-     * Returns how many publication attempts have been made.
+     * Returns how many transport send attempts have been made for this reply.
      *
-     * @return the attempt count, never {@code null} on a persisted instance
+     * @return the send-attempt count, never {@code null} on a persisted instance
      */
-    public Short getAttempts() {
+    public Integer getAttempts() {
         return this.attempts;
+    }
+
+    /**
+     * Returns the instant before which no publisher should attempt this reply.
+     *
+     * @return the lease and backoff instant, never {@code null}
+     */
+    public LocalDateTime getNextAttemptAt() {
+        return this.nextAttemptAt;
+    }
+
+    /**
+     * Returns when this reply was abandoned.
+     *
+     * @return the abandonment instant, or {@code null} while the reply is still being attempted
+     */
+    public LocalDateTime getAbandonedAt() {
+        return this.abandonedAt;
+    }
+
+    /**
+     * Reports whether this reply has been abandoned and will never be attempted again.
+     *
+     * @return {@code true} when an abandonment instant has been recorded
+     */
+    public boolean isAbandoned() {
+        return this.abandonedAt != null;
     }
 
     /**
@@ -383,16 +462,84 @@ public class AuthReplyOutbox {
     }
 
     /**
-     * Records a failed publication attempt and its reason.
+     * Records why an attempt failed and when the next one may be made.
      *
-     * <p>Assumptions: the attempt count and the reason are written together and the count is
-     * incremented even when the reason does not fit, because the count is what a retry policy reads and
-     * losing it to a formatting concern would make a permanently-failing row retry forever.</p>
+     * <p>Refactoring Rationale: this method DOES NOT increment the attempt counter, and the removal is
+     * the point of it. The counter is advanced in exactly one place -- the claiming statement that
+     * takes the row -- so every attempt is counted once whether it then succeeds, fails or is
+     * abandoned. The method it replaces incremented here as well, so a failed publication was counted
+     * twice: the stored number was double the attempts actually made, and because the column was
+     * sixteen bits a row whose reply queue stayed unreachable reached the signed limit in half the
+     * expected time and wrapped negative, at which point every attempt-bounded predicate read it as a
+     * fresh row and retried it forever.</p>
+     *
+     * <p>Assumptions: the reason is truncated rather than rejected when it exceeds the column, because
+     * losing the diagnostic entirely to a formatting concern would leave an operator with a failing row
+     * and no shape of the failure. The backoff instant is a parameter rather than computed here so that
+     * the policy -- how long, growing how -- stays with the publisher that owns the retry budget, and
+     * this class stays a record of what happened.</p>
      *
      * @param reason why the attempt failed; may be {@code null}, and is truncated to the column width
+     * @param nextAttemptAt the instant before which no publisher should attempt this reply again, in
+     *     coordinated universal time; must not be {@code null}
      */
-    public void recordFailedAttempt(String reason) {
-        this.attempts = (short) (this.attempts + 1);
+    public void recordFailure(String reason, LocalDateTime nextAttemptAt) {
+        this.nextAttemptAt = nextAttemptAt;
+        if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
+            this.lastError = reason;
+        } else {
+            this.lastError = reason.substring(0, LAST_ERROR_MAX_LENGTH);
+        }
+    }
+
+    /**
+     * Retires a reply whose deadline passed before it could be sent, recording why.
+     *
+     * <p>Refactoring Rationale: this is ONE call rather than a publication mark followed by a failure
+     * record, and the consolidation is recorded because the pair it replaces was order-dependent in a
+     * way nothing enforced. {@link #markPublished(java.time.LocalDateTime)} CLEARS the diagnostic, which
+     * is right for a reply that succeeded after failing and exactly wrong for one retired for staleness,
+     * so the two calls only produced the intended row in one of their two possible orders and a reader
+     * had to be told which. Retirement is a single fact about the row, so it is now a single method and
+     * the order cannot be got wrong.</p>
+     *
+     * <p>Assumptions: retirement sets the PUBLICATION instant even though nothing was sent, because that
+     * column is also the predicate that removes a row from the pending indexes and from the claim's
+     * candidate set. The reason column is what distinguishes a retired row from a delivered one, which is
+     * why it is written in the same call rather than left optional.</p>
+     *
+     * @param retiredAt the instant the retirement is recorded at, in coordinated universal time; must
+     *     not be {@code null}
+     * @param reason why the reply was retired; may be {@code null}, and is truncated to the column width
+     */
+    public void retire(LocalDateTime retiredAt, String reason) {
+        this.publishedAt = retiredAt;
+        if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
+            this.lastError = reason;
+        } else {
+            this.lastError = reason.substring(0, LAST_ERROR_MAX_LENGTH);
+        }
+    }
+
+    /**
+     * Abandons this reply permanently, leaving the reason that ended it on the row.
+     *
+     * <p>Assumptions: abandonment does NOT set the publication instant, so an abandoned reply can
+     * never be counted as delivered. It is removed from the ready set by the terminal column alone,
+     * which is why that column and the publication column are distinct.</p>
+     *
+     * <p>Trade-offs: the payload and the diagnostic are retained rather than cleared, so an operator
+     * can see which reply was given up on and why. The accepted cost is that a row carrying a primary
+     * account number in its payload persists beyond the retention sweep -- which is deliberate: this
+     * is a reply the committed decision says was owed and never delivered, and removing it silently
+     * would destroy the only evidence of that.</p>
+     *
+     * @param abandonedAt the instant the reply was given up on, in coordinated universal time; must
+     *     not be {@code null}
+     * @param reason why it was given up on; may be {@code null}, and is truncated to the column width
+     */
+    public void abandon(LocalDateTime abandonedAt, String reason) {
+        this.abandonedAt = abandonedAt;
         if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
             this.lastError = reason;
         } else {

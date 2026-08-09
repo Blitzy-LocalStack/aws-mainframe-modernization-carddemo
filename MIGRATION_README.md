@@ -101,17 +101,28 @@ npm run dev
 Use [the data-migration runbook](docs/runbooks/data-migration.md) to validate
 the package, stage byte-preserved source extracts, create schemas/roles and
 masked reporting views, verify database trust boundaries, bulk-load each dataset,
-and run all three verification passes.
+and run the verification passes.
 
 The fixed-width readers, the Aurora bulk loader and the three verification passes
 are implemented and are reachable as the `load-dataset`, `verify-row-counts`,
-`verify-checksum` and `verify-money-parity` subcommands. Source-record cutover
-nevertheless remains **closed**, for one specific and documented reason:
-`load-dataset` refuses `CUSTOMER` and `CARD`, whose tables declare ciphertext
-columns as `BYTEA NOT NULL` under a key the owning services hold and this package
-does not. The runbook's cutover-gate section states what that requires. Schema
-and security validation success must not be reported as a complete data
-migration, and neither must a partial load.
+`verify-checksum` and `verify-money-parity` subcommands. `load-dataset` serves all
+**ten** loadable records, covering every seeded table across the eight schemas; the
+three columns that hold ciphertext are sealed by the loader under the same key and
+in the same envelope framing the owning service reads, so nothing is written in the
+clear and nothing is left for a service to backfill.
+
+Two conditions still gate a cutover, and the runbook's cutover-gate section states
+both: the load must have resolved the keys of the environment the application will
+run in, which no verification pass can confirm; and the checksum pass serves three
+of the ten records today, so the evidence for the other seven is the row-count and
+money-parity passes plus the two whole-schema queries. Schema and security
+validation success must not be reported as a complete data migration, and neither
+must a partial load.
+
+Refactoring Rationale: this section recorded cutover as closed because `CUSTOMER`
+and `CARD` could not be loaded at all. That reason no longer exists, and leaving it
+would have understated the delivery while hiding the two conditions that do still
+apply — a gate citing a resolved obstacle is read as a gate that can be ignored.
 
 ## Validate
 

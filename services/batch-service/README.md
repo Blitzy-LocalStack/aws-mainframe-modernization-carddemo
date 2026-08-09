@@ -394,18 +394,30 @@ computationally different — it yields different cents on many inputs, because 
 intermediate quotient is rounded before the multiplication rather than after.
 Re-ordering is forbidden, and the ordering is asserted by test to the cent.
 
-**The quotient is rounded `HALF_UP`, under one money contract.** Transformation
-rule T3 states scale-2 `HALF_UP` for the whole money path without exception, so
-`Money.monthlyInterest` takes no rounding-mode parameter and no call site can
-select another. Assumptions: the baseline truncates instead — the result is stored
-into `WS-MONTHLY-INT PIC S9(09)V99` at `:168` and a COBOL `COMPUTE` without
-`ROUNDED` discards the surplus digits toward zero — so the two differ by one cent
-on a quotient landing exactly on a half cent. That is registered as divergence
-**C-ROUNDING** in `docs/architecture/cobol-to-service-traceability.md`.
+**The quotient is truncated toward zero, matching the baseline cent for cent.**
+Assumptions: the reference stores its result into `WS-MONTHLY-INT PIC S9(09)V99` at
+`:168` and a COBOL `COMPUTE` without `ROUNDED` discards the surplus digits toward
+zero — and no statement anywhere in that program's 652 lines carries `ROUNDED`. The
+accrual therefore reduces under `Money.BASELINE_INTEREST_ROUNDING`, which is
+`RoundingMode.DOWN` and which governs that one operation; every other reduction in
+the money path uses `Money.GENERAL_ROUNDING`, half up.
+`InterestCalculationService.ACCRUAL_ROUNDING` names the mode beside this service and
+is asserted equal to the shared constant, so a name that drifted from the behaviour
+fails the build. `Money.monthlyInterest` takes no rounding-mode parameter and no call
+site can select another.
+
+Refactoring Rationale: the accrual reduced with `HALF_UP` and the resulting cent was
+registered as divergence **C-ROUNDING**. That is withdrawn — the accrual formula is
+one of the business rules the reference test suite asserts verbatim, so a cent of
+drift in it is a parity failure rather than a rounding preference, and the cent did
+not stay local: line 467 adds each reduced term into the account total and line 352
+adds that total to the account balance, which the next **inclusive** over-limit
+comparison is made against. The identifier survives only as a withdrawal record in
+§7.5 of `docs/architecture/cobol-to-service-traceability.md`.
 Alternatives Considered: keeping a mode parameter so a parity caller could ask for
-truncation. Rejected because a selectable mode is a second money contract in
-disguise: two call sites computing the same accrual could disagree by a cent with
-nothing signalling that they had chosen differently.
+truncation while others kept half up. Rejected because a selectable mode is a second
+money contract in disguise: two call sites computing the same accrual could disagree
+by a cent with nothing signalling that they had chosen differently.
 
 The operand types set the shape of the arithmetic:
 

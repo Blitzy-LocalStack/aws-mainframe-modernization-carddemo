@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,8 +20,9 @@ import org.springframework.core.retry.RetryPolicy;
 import org.springframework.core.retry.RetryTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.exception.SdkServiceException;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -193,17 +195,92 @@ public class OutboxPublisher {
      * <p>Assumptions: 500 is the reference consumer's own per-invocation quota, declared as
      * {@code 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.} at
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L40 and enforced at L339, where the
-     * loop ends once the processed count exceeds it. That makes it the largest figure anything in
-     * this migration treats as one unit of work, so a value above it is a misconfiguration rather
-     * than a tuning choice. {@link OutboxRepository#claimGroupHeads(int)} cites the same two lines,
-     * so the ceiling here and the bound there cannot disagree.</p>
+     * loop ends once the processed count exceeds it. That makes it the largest number of replies
+     * anything in this migration treats as ONE PASS, so a value above it is a misconfiguration
+     * rather than a tuning choice. {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime, int)} cites the same two
+     * lines, so the ceiling here and the bound there cannot disagree.</p>
+     *
+     * <p>Refactoring Rationale: this ceiling was once justified as the largest figure treated as one
+     * TRANSACTION, which was true of a superseded revision in which a whole pass -- claims, sends and
+     * transitions -- ran inside one. {@link #transition} records why that was split. The number is
+     * unchanged and its source is unchanged; what the bound now limits is how many rows one pass
+     * claims and leases before it publishes any of them, which is why the wording was corrected
+     * rather than the value.</p>
      *
      * <p>Trade-offs: the ceiling refuses a value an operator might have meant as "drain
      * everything". Draining everything is what the fixed-delay poll already does across passes, one
      * bounded batch at a time, so the refusal costs nothing an operator cannot express while
-     * keeping one unit of work from spanning an unbounded number of sends.</p>
+     * keeping one pass from leasing an unbounded number of rows ahead of the sends that clear
+     * them.</p>
      */
     private static final int MAX_BATCH_SIZE = 500;
+
+    /**
+     * The greatest per-pass row budget an operator may configure.
+     *
+     * <p>Assumptions: the ceiling is ten times the reference consumer's own per-invocation limit, so an
+     * operator draining a backlog has room to raise the figure while the bound still forbids the
+     * unbounded pass it exists to prevent.</p>
+     */
+    private static final int MAX_ROWS_PER_DRAIN_CEILING = 5_000;
+
+    /**
+     * The greatest attempt ceiling an operator may configure.
+     *
+     * <p>Assumptions: a value this large is already far past any transient outage -- with the doubling
+     * backoff below, a hundred attempts spans days -- so the bound refuses a figure that is a ceiling
+     * only nominally.</p>
+     */
+    private static final int MAX_ATTEMPTS_CEILING = 100;
+
+    /**
+     * How long a claimed row is owned by the pass that claimed it.
+     *
+     * <p>Assumptions: two minutes comfortably exceeds one send plus its whole retry budget -- the
+     * template above allows a small number of retries at sub-second delays -- so a slow but healthy
+     * send cannot lose its row mid-flight. Trade-offs: a publisher killed mid-send strands its group
+     * for at most this long, which is the price of not holding a database lock across the send.</p>
+     */
+    private static final Duration CLAIM_LEASE = Duration.ofMinutes(2);
+
+    /**
+     * The base delay before a failed reply is attempted again.
+     *
+     * <p>Assumptions: five seconds is the reference consumer's own get-with-wait interval, so the first
+     * retry of a failed reply arrives no sooner than the reference would have polled for the next
+     * request; nothing is gained by retrying a refused transport faster than that.</p>
+     */
+    private static final Duration RETRY_BACKOFF = Duration.ofSeconds(5);
+
+    /**
+     * The ceiling the doubling backoff is clamped to.
+     */
+    private static final Duration MAX_RETRY_BACKOFF = Duration.ofMinutes(15);
+
+    /**
+     * The greatest number of doublings applied to the base backoff.
+     *
+     * <p>Assumptions: the exponent is clamped before the shift rather than after, because a shift wider
+     * than the type's own width is undefined in the language's terms and produces a small or negative
+     * delay -- reintroducing in the arithmetic exactly the wraparound the widened attempt counter was
+     * changed to remove. Twelve doublings of five seconds already exceeds the ceiling above, so
+     * clamping here costs nothing.</p>
+     */
+    private static final int MAX_BACKOFF_DOUBLINGS = 12;
+
+    /**
+     * How many published rows one retention transaction deletes.
+     */
+    private static final int PURGE_CHUNK_SIZE = 500;
+
+    /**
+     * How many chunks one retention sweep deletes before yielding to the next scheduled sweep.
+     *
+     * <p>Assumptions: twenty chunks of five hundred is ten thousand rows per sweep, which at the
+     * default hourly interval clears far more than a day of replies; the bound exists so the first
+     * sweep after an outage is bounded too, not to ration ordinary retention.</p>
+     */
+    private static final int MAX_PURGE_CHUNKS_PER_SWEEP = 20;
 
     /**
      * The shortest polling interval the publisher accepts, in milliseconds.
@@ -338,6 +415,94 @@ public class OutboxPublisher {
     private final int retentionDays;
 
     /**
+     * The transaction template every claim, transition and purge chunk runs in.
+     *
+     * <p>Refactoring Rationale: the unit of work is opened PROGRAMMATICALLY at each of those points
+     * rather than declared once on the drain method, and the change is the substance of this class's
+     * restructuring. A declarative transaction on the drain spans the whole pass, so it necessarily
+     * encloses every synchronous queue send and the retry budget behind each one -- a pooled database
+     * connection and the write locks of every claimed row held across seconds of network work. A
+     * template lets the transaction END at a visible point in the code, which is what allows the claim
+     * to commit before the send begins and the outcome to be written in a second short transaction
+     * afterwards.</p>
+     *
+     * <p>Assumptions: the template propagates as REQUIRES_NEW for the same reason the annotation it
+     * replaces did. Both scheduled entry points may also be invoked directly -- by an operator endpoint
+     * or a test -- and neither may join a caller's transaction, because joining would put the caller's
+     * commit in charge of whether a claim it knows nothing about is durable.</p>
+     */
+    private final TransactionTemplate shortTransaction;
+
+    /**
+     * The greatest number of rows one drain pass may reach a decision about, across every group.
+     *
+     * <p>Assumptions: the default is five hundred because that is the reference consumer's own
+     * per-invocation processing limit -- {@code cbl/COPAUA0C.cbl} bounds one invocation at five hundred
+     * messages -- so the migrated publisher inherits the figure rather than inventing one. Refactoring
+     * Rationale: before this bound existed the batch size limited only how many GROUPS a pass opened,
+     * and each group's follow-on loop then drained that group until it ran dry, so one card with a
+     * backlog gave the pass no upper bound at all.</p>
+     */
+    private final int maxRowsPerDrain;
+
+    /**
+     * The greatest number of rows one drain pass may reach a decision about within a single group.
+     *
+     * <p>Assumptions: this is DERIVED as an even share of the pass budget across the groups the pass
+     * opens, rather than configured separately, so the two numbers cannot be set into contradiction. A
+     * separate property was rejected because an operator could then configure a per-group budget larger
+     * than the pass budget, at which point one hot group consumes the pass and the fairness this
+     * division exists to provide silently disappears. The share is at least one row, so a pass always
+     * makes progress however many groups it opened.</p>
+     */
+    private final int perGroupRowBudget;
+
+    /**
+     * How long a claimed row is owned by the pass that claimed it.
+     *
+     * <p>Assumptions: the lease is what replaces the row lock the earlier revision relied on. It must
+     * comfortably exceed one send including its retry budget, or a slow but healthy send would lose its
+     * row to a concurrent publisher mid-flight; and it must be short enough that a publisher killed
+     * mid-send does not strand its group for long.</p>
+     */
+    private final Duration claimLease;
+
+    /**
+     * How many attempts a reply is given before it is abandoned.
+     *
+     * <p>Assumptions: this is the terminal policy, and it is a bound on ATTEMPTS BEGUN rather than on
+     * elapsed time, because the attempt counter is the one durable record of how many times the
+     * transport has refused the row. Refactoring Rationale: there was no such bound, so a reply whose
+     * queue was permanently unreachable was retried forever and held its group's head position
+     * forever.</p>
+     */
+    private final int maxAttempts;
+
+    /**
+     * The base delay before a failed reply is attempted again.
+     */
+    private final Duration retryBackoff;
+
+    /**
+     * The ceiling the doubling backoff is clamped to.
+     */
+    private final Duration maxRetryBackoff;
+
+    /**
+     * How many published rows one retention transaction deletes.
+     */
+    private final int purgeChunkSize;
+
+    /**
+     * How many chunks one retention sweep deletes before yielding to the next scheduled sweep.
+     *
+     * <p>Assumptions: the sweep yields rather than looping until the table is clear, so its duration is
+     * bounded even on the first pass after an outage; the next scheduled sweep resumes with the same
+     * predicate, so nothing eligible is missed, only deferred.</p>
+     */
+    private final int maxPurgeChunksPerSweep;
+
+    /**
      * Creates the publisher over the outbox table, the queue client and the clock it reads.
      *
      * <p>Assumptions: the three configured numbers are properties this service's own
@@ -348,7 +513,8 @@ public class OutboxPublisher {
      * <p>Refactoring Rationale: both retained numbers are VALIDATED here rather than left to fail in
      * use. A non-positive batch size reaches the database as a row limit it rejects, so the failure
      * surfaces once per poll interval from a scheduled thread instead of at start-up, and an
-     * enormous one puts an unbounded number of sends inside one unit of work. Refusing either turns
+     * enormous one leases an unbounded number of rows at the head of a pass, each of them withheld
+     * from any other publisher until this pass reaches it or its lease lapses. Refusing either turns
      * a recurring background fault into a container that does not start, which an orchestrator
      * reports.</p>
      *
@@ -370,19 +536,109 @@ public class OutboxPublisher {
      *     and {@value #MAX_POLL_INTERVAL_MILLIS} inclusive
      * @param retentionDays for how many days a published reply is retained before
      *     {@link #purgePublished()} removes it; must be positive
-     * @throws NullPointerException if {@code outbox}, {@code sqs} or {@code clock} is {@code null}
+     * @param transactionManager the manager the short claim, transition and purge transactions are
+     *     opened against; must not be {@code null}
+     * @param maxRowsPerDrain the greatest number of rows one pass may reach a decision about across
+     *     every group; must be at least {@code batchSize} and at most
+     *     {@value #MAX_ROWS_PER_DRAIN_CEILING}
+     * @param maxAttempts how many attempts a reply is given before it is abandoned; must be positive
+     *     and at most {@value #MAX_ATTEMPTS_CEILING}
+     * @throws NullPointerException if {@code outbox}, {@code sqs}, {@code clock} or
+     *     {@code transactionManager} is {@code null}
      * @throws IllegalArgumentException if any configured number falls outside its stated bounds
      */
     public OutboxPublisher(OutboxRepository outbox, SqsClient sqs, Clock clock,
+            PlatformTransactionManager transactionManager,
             @Value("${carddemo.messaging.outbox-batch-size:25}") int batchSize,
             @Value("${carddemo.messaging.outbox-poll-interval-ms:1000}") long pollIntervalMillis,
-            @Value("${carddemo.messaging.outbox-retention-days:7}") int retentionDays) {
+            @Value("${carddemo.messaging.outbox-retention-days:7}") int retentionDays,
+            @Value("${carddemo.messaging.outbox-max-rows-per-drain:500}") int maxRowsPerDrain,
+            @Value("${carddemo.messaging.outbox-max-attempts:10}") int maxAttempts) {
         this.outbox = Objects.requireNonNull(outbox, "outbox must not be null");
         this.sqs = Objects.requireNonNull(sqs, "sqs must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.batchSize = validatedBatchSize(batchSize);
         requireBoundedPollInterval(pollIntervalMillis);
         this.retentionDays = validatedRetentionDays(retentionDays);
+        this.maxRowsPerDrain = validatedMaxRowsPerDrain(maxRowsPerDrain, this.batchSize);
+        this.maxAttempts = validatedMaxAttempts(maxAttempts);
+        // WHY : Assumptions: integer division rounds the share DOWN and the floor of one lifts it, so
+        // the per-group budget never exceeds the pass budget and is never zero. Rounding up was
+        // rejected because at a batch size that does not divide the pass budget the rounded-up shares
+        // sum above it, which would let the groups collectively exceed the pass bound; the pass bound
+        // is then still enforced by the drain loop, but the two numbers would disagree and a reader
+        // could not tell which one governed.
+        this.perGroupRowBudget = Math.max(1, this.maxRowsPerDrain / this.batchSize);
+        this.claimLease = CLAIM_LEASE;
+        this.retryBackoff = RETRY_BACKOFF;
+        this.maxRetryBackoff = MAX_RETRY_BACKOFF;
+        this.purgeChunkSize = PURGE_CHUNK_SIZE;
+        this.maxPurgeChunksPerSweep = MAX_PURGE_CHUNKS_PER_SWEEP;
+        // WHY : Assumptions: the template is configured here rather than injected as a bean, because
+        // its propagation is a property of THIS class's contract -- both scheduled methods must own
+        // their units of work -- and a shared bean would carry whatever propagation its other users
+        // wanted. Trade-offs: the template is stateless once configured and is safe to reuse across
+        // the scheduled threads, so one instance is held rather than one built per pass.
+        TransactionTemplate template = new TransactionTemplate(Objects
+                .requireNonNull(transactionManager, "transactionManager must not be null"));
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.shortTransaction = template;
+    }
+
+    /**
+     * Returns the per-pass row budget after refusing a value that cannot bound a pass.
+     *
+     * <p>Assumptions: the budget must be at least the batch size, because a pass claims that many head
+     * rows before it publishes anything; a smaller budget would leave heads claimed and unhandled every
+     * pass, so their leases would have to lapse before anything drained them and the queue would move
+     * at the lease interval rather than the poll interval.</p>
+     *
+     * @param configured the budget as the configuration bound it
+     * @param batchSize the already-validated batch size the budget must accommodate
+     * @return that same value once it is known to be inside its bounds
+     * @throws IllegalArgumentException if the value is below the batch size or above
+     *     {@value #MAX_ROWS_PER_DRAIN_CEILING}
+     */
+    private static int validatedMaxRowsPerDrain(int configured, int batchSize) {
+        if (configured < batchSize) {
+            throw new IllegalArgumentException(
+                    "carddemo.messaging.outbox-max-rows-per-drain must be at least the batch size "
+                            + batchSize + " but was " + configured
+                            + "; a pass claims one head per group before publishing any of them, so a"
+                            + " smaller budget leaves heads claimed and unhandled every pass");
+        }
+        if (configured > MAX_ROWS_PER_DRAIN_CEILING) {
+            throw new IllegalArgumentException(
+                    "carddemo.messaging.outbox-max-rows-per-drain must be at most "
+                            + MAX_ROWS_PER_DRAIN_CEILING + " but was " + configured
+                            + "; the bound exists to keep one pass short, and a larger value returns"
+                            + " the unbounded pass it was introduced to remove");
+        }
+        return configured;
+    }
+
+    /**
+     * Returns the attempt ceiling after refusing a value that cannot terminate a failing row.
+     *
+     * @param configured the ceiling as the configuration bound it
+     * @return that same value once it is known to be inside its bounds
+     * @throws IllegalArgumentException if the value is not positive or exceeds
+     *     {@value #MAX_ATTEMPTS_CEILING}
+     */
+    private static int validatedMaxAttempts(int configured) {
+        if (configured <= 0) {
+            throw new IllegalArgumentException(
+                    "carddemo.messaging.outbox-max-attempts must be positive but was " + configured
+                            + "; a non-positive ceiling abandons every reply on its first attempt");
+        }
+        if (configured > MAX_ATTEMPTS_CEILING) {
+            throw new IllegalArgumentException(
+                    "carddemo.messaging.outbox-max-attempts must be at most " + MAX_ATTEMPTS_CEILING
+                            + " but was " + configured
+                            + "; the ceiling is what stops a permanently unreachable queue holding a"
+                            + " group's head forever, and a value this large is not a ceiling");
+        }
+        return configured;
     }
 
     /**
@@ -403,9 +659,9 @@ public class OutboxPublisher {
         if (configured > MAX_BATCH_SIZE) {
             throw new IllegalArgumentException(
                     "carddemo.messaging.outbox-batch-size must be at most " + MAX_BATCH_SIZE
-                            + " but was " + configured + "; one drain runs in a single transaction,"
-                            + " so a larger batch puts more sends inside one unit of work than any"
-                            + " pass should hold");
+                            + " but was " + configured + "; one pass claims and LEASES every head"
+                            + " before it publishes any of them, so a larger batch holds more leases"
+                            + " across more sends than any pass should");
         }
         return configured;
     }
@@ -458,7 +714,7 @@ public class OutboxPublisher {
      * Claims and publishes one bounded batch of committed replies, one ordering group at a time.
      *
      * <p>Assumptions: the claim is an atomic STATUS TRANSITION and not a selection under a lock.
-     * {@link OutboxRepository#claimGroupHeads(int)} moves each row it takes from the attempt count it
+     * {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime, int)} moves each row it takes from the attempt count it
      * observed to the next one and returns only the rows whose transition it actually performed, so
      * single delivery is a property of the DATA rather than of anything held open while a reply is
      * sent. A concurrent pass that observed the same candidate finds the comparison no longer true
@@ -466,37 +722,61 @@ public class OutboxPublisher {
      *
      * <p>Alternatives Considered: claiming by taking a pessimistic row lock in the selection --
      * {@code SELECT ... FOR UPDATE SKIP LOCKED}, or the same lock requested through a JPA lock mode
-     * on a query method -- and stepping over rows another transaction holds. Rejected on evidence
-     * from the reference rather than on preference: {@code cpy/IMSFUNCS.cpy} DECLARES all three
-     * get-hold retrieval codes at L19, L21 and L23 and no program in the reference tree passes any of
-     * them to a data-language call, while both unload views run get-only at {@code ims/PAUTBUNL.PSB}
-     * L18 and {@code ims/DLIGSAMP.PSB} L18. The concrete consequence of adopting a lock would be
-     * lock-wait queueing and deadlock-victim rollback on a path that has neither today, visible only
-     * under concurrency and so absent while a single publisher is tested. The transition needs no
-     * lock mode to be safe, because it either applies or it does not.</p>
+     * on a query method -- and stepping over rows another transaction holds. Rejected, but NOT because
+     * it would introduce locking where there is none. Refactoring Rationale: this paragraph claimed the
+     * alternative would bring "lock-wait queueing and deadlock-victim rollback on a path that has
+     * neither today", and that was false -- the claim is an UPDATE, so it takes an ordinary row write
+     * lock and a concurrent pass waits for it. The true grounds are that correctness does not depend on
+     * the lock, the token comparison deciding instead, so a claim that waited and then lost receives the
+     * row not at all; and that deadlock is unreachable because every claim acquires in one global order,
+     * ascending by identity. The reference evidence bears on the shape rather than the presence of
+     * locking: {@code cpy/IMSFUNCS.cpy} declares all three get-hold codes at L19, L21 and L23, no
+     * program passes any of them to a data-language call, and both unload views run get-only at
+     * {@code ims/PAUTBUNL.PSB} L18 and {@code ims/DLIGSAMP.PSB} L18.</p>
      *
-     * <p>Trade-offs: the whole pass is nevertheless ONE unit of work, and the sends happen inside it.
-     * What that buys is not the claim -- the transition above is the claim -- but the behaviour of a
-     * concurrent pass: the claiming update holds an ordinary row write until this transaction ends,
-     * so a second publisher BLOCKS on it and then finds the attempt comparison stale and skips the
-     * row, instead of observing it as pending at its new count and sending a reply that is already in
-     * flight. What it costs is a connection held across bounded network work, and the exposure that a
-     * send which succeeds in a pass that then fails to commit leaves the row pending to be sent
-     * again; the deduplication identifier makes that a suppressed duplicate rather than a second
-     * answer.</p>
+     * <p>Trade-offs: the whole pass is ONE unit of work and the sends happen inside it, so the claiming
+     * update's row locks AND the database connection are both held from the first claim until after the
+     * last send of the pass returns. That is the cost, and it is stated plainly because it is what sizes
+     * a connection pool: a publisher with a slow or unreachable queue occupies one connection for the
+     * whole of its retry budget. What it buys is that a second publisher BLOCKS on the row and then
+     * finds the claim token stale and skips it, instead of observing the row as pending and sending a
+     * reply that is already in flight. The second exposure is that a send which succeeds in a pass that
+     * then fails to commit leaves the row pending and it is sent again; the deduplication identity makes
+     * that a suppressed duplicate ONLY within the queue's five-minute deduplication interval, so a
+     * retried send after a longer outage reaches the requester twice and the requester suppresses it by
+     * the transaction identifier the reply carries.</p>
      *
      * <p>Assumptions: the claim is per ORDERING GROUP -- one head row per group -- and that is what
      * preserves per-card order rather than an incidental effect of grouping. A first-in-first-out
      * queue orders messages within a group only after it accepts them, so the sequence of send calls
      * is the delivered sequence; a pass holding two rows of one group whose FIRST send failed and
      * carrying on to the second would place a newer reply ahead of an older one for the same card,
-     * which is the single guarantee the group token exists to provide.</p>
+     * which is the single guarantee the group identity exists to provide.</p>
      *
      * <p>Assumptions: a send failure is recorded on its row and the drain CONTINUES with the next
      * group rather than propagating, and it never advances the group that failed. Propagating would
      * roll back the attempt counts of every row already handled in this batch, so one unreachable
      * reply queue would erase the evidence of every other group's progress; advancing the failed
      * group would be the reordering this method exists to prevent.</p>
+     *
+     * <p>Assumptions: the configured batch size bounds the ROWS this pass handles in total, not merely
+     * the groups it starts from. The head claim consumes one unit of that budget per group it takes, and
+     * whatever remains is shared across the follow-on claims of those groups in the order they were
+     * claimed; when as many groups are pending as the budget allows, no follower is claimed at all and
+     * each of those groups advances by one reply this pass. Refactoring Rationale: the budget is threaded
+     * through because the follow-on loop had NONE. Its own documentation stated that the follow-on claim
+     * was "bounded by the same batch size as the head claim", and nothing bounded it: the loop advanced
+     * one group for as long as that group had pending rows, so a single card with a large backlog drained
+     * all of it inside one transaction -- holding the connection and the row locks of the whole backlog
+     * for however long it took, which is the opposite of the bounded-batch shape the reference works in
+     * and the opposite of what the sentence promised.</p>
+     *
+     * <p>Trade-offs: spending the budget on BREADTH first -- one row of every pending group before any
+     * second row of any group -- rather than draining each group fully in turn. Draining fully in turn
+     * was the alternative and it starves: one busy card would take the entire budget and the replies of
+     * every other card would wait however many passes that took, while the requester of each is holding
+     * a five-second deadline. Breadth-first bounds the wait of every group by the drain interval and
+     * costs a busy group more passes to clear, which is the direction the deadline argues for.</p>
      *
      * @return how many replies were published in this pass, which a caller may use to decide whether
      *     to drain again immediately
@@ -505,18 +785,87 @@ public class OutboxPublisher {
      *     a failure to SEND is recorded on the row instead and never propagates
      */
     @Scheduled(fixedDelayString = "${carddemo.messaging.outbox-poll-interval-ms:1000}")
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int drain() {
-        List<AuthReplyOutbox> heads = this.outbox.claimGroupHeads(this.batchSize);
-        if (heads.isEmpty()) {
+        List<AuthReplyOutbox> heads = this.shortTransaction.execute(status -> this.outbox
+                .claimGroupHeads(this.batchSize, now(), leaseUntil(), this.maxAttempts));
+        if (heads == null || heads.isEmpty()) {
             return 0;
         }
-        LocalDateTime now = LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC);
+        int passBudget = this.maxRowsPerDrain;
         int published = 0;
+        // WHY : Assumptions: the heads already claimed count against the pass budget, so the remainder
+        //       is what the follow-on claims may spend. A saturated pass -- as many pending groups as the
+        //       budget allows -- therefore leaves nothing for followers, which is the correct answer
+        //       rather than a degenerate one: every pending group has already been advanced by one.
+        int followerBudget = this.batchSize - heads.size();
         for (AuthReplyOutbox head : heads) {
-            published += publishGroupFrom(head, now);
+            if (passBudget <= 0) {
+                // WHY : Assumptions: the remaining heads of this pass are already CLAIMED and their
+                // leases will lapse, so abandoning the loop here defers them rather than losing them.
+                // Breaking is preferred to never claiming them because the head claim is one statement
+                // whose cost does not depend on how many of its rows this pass then goes on to publish.
+                LOG.info("event=auth.reply.drain-budget-exhausted maxRowsPerDrain={}",
+                        this.maxRowsPerDrain);
+                break;
+            }
+            GroupProgress progress = publishGroupFrom(head,
+                    Math.min(this.perGroupRowBudget, passBudget));
+            published += progress.published();
+            passBudget -= progress.handled();
         }
         return published;
+    }
+
+    /**
+     * How much of one ordering group a single drain pass got through.
+     *
+     * <p>Assumptions: HANDLED and PUBLISHED are separate counts because they answer different
+     * questions, and collapsing them would break one of the two. Handled is every row this pass reached
+     * a decision about -- sent, retired, abandoned or failed -- and is what the pass budget is spent
+     * from, because each of those cost a claim and a transaction. Published is only what reached the
+     * wire, and is what the caller returns so a scheduler can tell whether the queue is moving. A
+     * budget spent from the published count alone would let a group of expiring or failing rows consume
+     * an unbounded number of claims while reporting no progress, which is the exact shape of the
+     * unboundedness this record exists to close.</p>
+     *
+     * @param handled how many rows of the group this pass reached a decision about
+     * @param published how many of those were put on the wire
+     */
+    private record GroupProgress(int handled, int published) {
+    }
+
+    /**
+     * Samples the current instant, freshly, in coordinated universal time.
+     *
+     * <p>Refactoring Rationale: every caller samples through this method at the moment it needs the
+     * value, rather than one instant being taken at the start of a pass and reused. An earlier revision
+     * did the latter, and it made two separate claims untrue: a reply whose deadline fell DURING the
+     * pass was judged against an instant before its expiry and so was sent to a requester that had
+     * already stopped waiting, consuming the deduplication identifier a legitimate retry would need;
+     * and every row completed in the pass recorded the same publication instant, which is a false
+     * timestamp for all but the first and destroys the ordering evidence an operator reads the column
+     * for.</p>
+     *
+     * @return the current instant as a local date-time in coordinated universal time, never
+     *     {@code null}
+     */
+    private LocalDateTime now() {
+        return LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC);
+    }
+
+    /**
+     * Computes the instant a row claimed right now is leased until.
+     *
+     * <p>Assumptions: the lease is measured from a FRESH sample rather than from a pass-wide one, for
+     * the same reason the readiness sample is: a lease computed from a stale instant is shorter than
+     * configured by however long the pass has already run, and at the limit is already expired when it
+     * is written, which would hand the row to a concurrent publisher while this one is still sending
+     * it.</p>
+     *
+     * @return the instant until which a row claimed now is owned by this pass, never {@code null}
+     */
+    private LocalDateTime leaseUntil() {
+        return now().plus(this.claimLease);
     }
 
     /**
@@ -536,31 +885,63 @@ public class OutboxPublisher {
      *
      * <p>Trade-offs: the follow-on claim is bounded by the same batch size as the head claim, so one
      * busy card cannot monopolise a pass indefinitely and its remaining rows are taken by the next
-     * drain. A larger bound would drain a hot group sooner while holding one unit of work open
+     * drain. A larger bound would drain a hot group sooner while holding that group's rows leased for
      * longer.</p>
      *
+     * <p>Assumptions: the current instant is read ONCE PER ROW, immediately before that row's deadline is
+     * judged, and it used to be read once for the whole pass and passed to every row. Refactoring
+     * Rationale: a pass is not instantaneous -- each row costs a network send, and a failing send costs a
+     * retry with a delay -- so one instant captured at the start becomes progressively staler as the pass
+     * runs. Two consequences followed. A reply whose five-second deadline passed WHILE the pass was
+     * working was judged live against the stale instant and sent to a requester that had stopped waiting,
+     * consuming its deduplication identity so that a legitimate retry would be suppressed. And the
+     * publication instant stamped on a successful row was the pass's start rather than the send's
+     * completion, so the durable record of when a reply was published was wrong by the length of the
+     * pass -- which is precisely the interval an operator reconstructing a latency complaint measures.</p>
+     *
      * @param head the already-claimed head row of the group; must not be {@code null}
-     * @param now the current instant in coordinated universal time; must not be {@code null}
-     * @return how many replies of this group were put on the wire in this pass
+     * @param groupBudget the greatest number of rows of this group this pass may reach a decision
+     *     about, already reduced to whatever remains of the pass budget
+     * @return how many rows of this group this pass handled and how many of those reached the wire
      * @throws org.springframework.dao.DataAccessException if a follow-on claim cannot be executed
      */
-    private int publishGroupFrom(AuthReplyOutbox head, LocalDateTime now) {
+    private GroupProgress publishGroupFrom(AuthReplyOutbox head, int groupBudget) {
         int published = 0;
+        int handled = 0;
         AuthReplyOutbox row = head;
         while (row != null) {
-            boolean expired = row.isExpiredAsOf(now);
-            if (!handleOne(row, now, expired)) {
+            // WHY : Assumptions: staleness is judged against an instant sampled HERE, once per row,
+            // rather than once per pass. A pass that publishes many rows takes real time, so a row
+            // whose deadline falls part-way through it must be judged against the clock as it stands
+            // when its turn comes -- otherwise it is sent to a requester that has already stopped
+            // waiting and its deduplication identifier is spent on an answer nobody reads.
+            boolean expired = row.isExpiredAsOf(now());
+            handled++;
+            if (!handleOne(row, expired)) {
                 // WHY : Assumptions: the group stops HERE and its later rows are left pending.
                 // Returning rather than continuing is what makes the ordering guarantee hold under
                 // failure: the only reply that may follow this one is the one still waiting for it.
-                return published;
+                return new GroupProgress(handled, published);
             }
             if (!expired) {
                 published++;
             }
+            if (handled >= groupBudget) {
+                // WHY : Assumptions: the group yields at its budget with rows still pending, and the
+                // next pass resumes it from the same head. Refactoring Rationale: an earlier revision
+                // had no such stop -- it re-claimed the group's next row until the group ran dry -- so
+                // the configured batch size bounded only how many GROUPS a pass opened and not how
+                // much work it did, and one card with a large backlog held the publisher for an
+                // unbounded number of claims and sends while every other claimed head waited behind
+                // it. Yielding costs a hot group some latency and buys a pass whose duration is
+                // bounded by configuration rather than by the backlog it happens to meet.
+                LOG.info("event=auth.reply.group-budget-reached handled={} groupBudget={}",
+                        handled, groupBudget);
+                return new GroupProgress(handled, published);
+            }
             row = nextInGroup(row);
         }
-        return published;
+        return new GroupProgress(handled, published);
     }
 
     /**
@@ -578,9 +959,10 @@ public class OutboxPublisher {
      *     executed
      */
     private AuthReplyOutbox nextInGroup(AuthReplyOutbox handled) {
-        List<AuthReplyOutbox> followers = this.outbox.claimGroupFollowers(
-                handled.getOrderGroupToken(), handled.getOutboxId(), 1);
-        return followers.isEmpty() ? null : followers.get(0);
+        List<AuthReplyOutbox> followers = this.shortTransaction.execute(status -> this.outbox
+                .claimGroupFollowers(handled.getOrderGroupId(), handled.getOutboxId(), 1, now(),
+                        leaseUntil(), this.maxAttempts));
+        return followers == null || followers.isEmpty() ? null : followers.get(0);
     }
 
     /**
@@ -591,16 +973,16 @@ public class OutboxPublisher {
      * published cannot disagree about the same instant.</p>
      *
      * @param row the already-claimed row; must not be {@code null}
-     * @param now the current instant in coordinated universal time; must not be {@code null}
-     * @param expired whether the caller judged this row's deadline to have passed at {@code now}
+     * @param expired whether the caller judged this row's deadline to have passed at the instant it
+     *     sampled for this row
      * @return {@code true} when this row reached a terminal state, so its group may advance
      */
-    private boolean handleOne(AuthReplyOutbox row, LocalDateTime now, boolean expired) {
+    private boolean handleOne(AuthReplyOutbox row, boolean expired) {
         if (expired) {
-            retire(row, now);
+            retire(row);
             return true;
         }
-        return publishReply(row, now);
+        return publishReply(row);
     }
 
     /**
@@ -612,22 +994,72 @@ public class OutboxPublisher {
      * nobody read. Marking it published rather than deleting it keeps the row auditable and keeps it
      * out of the pending index, which is the same index predicate the claim uses.</p>
      *
-     * <p>Assumptions: the two calls below are in this order because the first CLEARS the diagnostic.
-     * {@link AuthReplyOutbox#markPublished(java.time.LocalDateTime)} sets the publication instant and
-     * resets the last-error column, which is right for a reply that succeeded after failing; a row
-     * retired for staleness needs the opposite, so the reason is recorded AFTER the mark and would be
-     * erased by the reverse order. The attempt counter advancing once more is the cost, and the
-     * repository records that no decision anywhere is taken on its value.</p>
+     * <p>Refactoring Rationale: retirement is now a SINGLE call on the row rather than a publication
+     * mark followed by a failure record, and the attempt counter is not advanced by it. The pair it
+     * replaces was order-dependent -- the publication mark CLEARS the diagnostic, so only one of the two
+     * orders produced the intended row -- and it also incremented the counter a second time on a path
+     * that made no attempt at all.</p>
      *
      * @param row the already-claimed row whose deadline has passed; must not be {@code null}
-     * @param now the instant the retirement is recorded at, in coordinated universal time; must not
-     *     be {@code null}
      */
-    private void retire(AuthReplyOutbox row, LocalDateTime now) {
-        row.markPublished(now);
-        row.recordFailedAttempt(RETIREMENT_REASON);
+    private void retire(AuthReplyOutbox row) {
+        transition(row, (stored, at) -> stored.retire(at, RETIREMENT_REASON));
         LOG.warn("event=auth.reply.expired outboxId={} attempts={}", row.getOutboxId(),
                 row.getAttempts());
+    }
+
+    /**
+     * Applies one terminal or retryable transition to a claimed row in its own short transaction, only
+     * if this pass still owns it.
+     *
+     * <p>Refactoring Rationale: the transition is a SEPARATE, SHORT unit of work that begins after the
+     * network send has returned, and the row is re-read inside it. An earlier revision made the whole
+     * pass -- claims, sends and transitions -- one transaction, so a database connection and the write
+     * locks taken by every claim were held for the duration of every synchronous send and of the retry
+     * budget behind it. At a full batch that pinned one pooled connection across many seconds of
+     * network work and blocked any concurrent publisher on rows it was not going to reach for most of
+     * that time. Splitting it means a connection is held only for the claim and for this transition,
+     * and the send holds none.</p>
+     *
+     * <p>Assumptions: the transition is CONDITIONAL on the row still carrying the attempt count this
+     * pass claimed it at, and on its still being neither published nor abandoned. That is what makes
+     * the split safe. If this pass's lease lapsed -- because it was slow, or because the process was
+     * restarted mid-send -- another publisher may have re-claimed the row, which incremented the
+     * counter; writing the outcome of the older send would then overwrite a newer attempt's state. The
+     * guard makes the late write a no-op that is logged instead, which is the correct outcome: the
+     * reply's fate belongs to whichever pass currently owns it.</p>
+     *
+     * <p>Trade-offs: a send that succeeded in a pass whose transition is refused leaves the row for the
+     * current owner to send again. The deduplication identifier makes that a suppressed duplicate
+     * rather than a second answer, which is the same trade the table's own schema comment records for
+     * the send-then-mark ordering.</p>
+     *
+     * @param claimed the row as this pass claimed it, carrying the attempt count the guard compares;
+     *     must not be {@code null}
+     * @param change what to apply to the stored row, given a freshly sampled instant; must not be
+     *     {@code null}
+     */
+    private void transition(AuthReplyOutbox claimed,
+            BiConsumer<AuthReplyOutbox, LocalDateTime> change) {
+        Boolean applied = this.shortTransaction.execute(status -> {
+            AuthReplyOutbox stored = this.outbox.findById(claimed.getOutboxId()).orElse(null);
+            if (stored == null || stored.isPublished() || stored.isAbandoned()
+                    || !Objects.equals(stored.getAttempts(), claimed.getAttempts())) {
+                return Boolean.FALSE;
+            }
+            // WHY : Assumptions: the instant is sampled INSIDE this transaction, so a completion
+            // records when it actually completed rather than when its pass started. The publication
+            // column is the only ordering evidence an operator has for what the publisher did and in
+            // what sequence, and a pass-wide instant makes every row after the first carry a time at
+            // which nothing happened to it.
+            change.accept(stored, now());
+            this.outbox.save(stored);
+            return Boolean.TRUE;
+        });
+        if (!Boolean.TRUE.equals(applied)) {
+            LOG.warn("event=auth.reply.transition-superseded outboxId={} claimedAttempts={}",
+                    claimed.getOutboxId(), claimed.getAttempts());
+        }
     }
 
     /**
@@ -656,11 +1088,30 @@ public class OutboxPublisher {
      *     instance because the runtime role holds no delete privilege on the table
      */
     @Scheduled(fixedDelayString = "${carddemo.messaging.outbox-retention-sweep-interval-ms:3600000}")
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int purgePublished() {
-        LocalDateTime cutoff = LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC)
-                .minusDays(this.retentionDays);
-        int deleted = this.outbox.deletePublishedBefore(cutoff);
+        LocalDateTime cutoff = now().minusDays(this.retentionDays);
+        int deleted = 0;
+        // WHY : Refactoring Rationale: the sweep is a LOOP of bounded transactions rather than one
+        // statement, and it stops as soon as a chunk comes back short. An earlier revision deleted
+        // every row matching the cut-off in a single transaction, which is unbounded by construction --
+        // the published side of this table is the part that grows without limit -- so a sweep that had
+        // not run for a while, or a widened retention window, took a table-wide lock footprint and a
+        // transaction whose duration nothing bounded. Alternatives Considered: keeping the single
+        // statement and relying on the sweep running often enough that its population stays small;
+        // rejected because that makes a correctness property depend on an interval an operator may
+        // lengthen, and because the first run after any outage is precisely when the population is
+        // largest. Trade-offs: the sweep issues more statements and is not atomic across chunks, so a
+        // failure part-way leaves some rows deleted; that is harmless here because each row's deletion
+        // is independent and the next sweep resumes with the same predicate.
+        for (int pass = 0; pass < this.maxPurgeChunksPerSweep; pass++) {
+            Integer removed = this.shortTransaction
+                    .execute(status -> this.outbox.deletePublishedBefore(cutoff, this.purgeChunkSize));
+            int chunk = removed == null ? 0 : removed;
+            deleted += chunk;
+            if (chunk < this.purgeChunkSize) {
+                break;
+            }
+        }
         if (deleted > 0) {
             LOG.info("event=auth.reply.retention-swept deleted={} retentionDays={}", deleted,
                     this.retentionDays);
@@ -691,12 +1142,10 @@ public class OutboxPublisher {
      * than stepping over it and delivering that card's later replies out of order.</p>
      *
      * @param row the already-claimed outbox row; must not be {@code null}
-     * @param now the instant a success is recorded at, in coordinated universal time; must not be
-     *     {@code null}
      * @return {@code true} when the reply was put on the wire, {@code false} when the attempt failed
      *     and its group must not advance
      */
-    private boolean publishReply(AuthReplyOutbox row, LocalDateTime now) {
+    private boolean publishReply(AuthReplyOutbox row) {
         try {
             SendMessageRequest request = requestFor(row);
             // WHY : Assumptions: the lambda is written as a BLOCK that discards the send's result,
@@ -705,9 +1154,15 @@ public class OutboxPublisher {
             // the result carries only the transport's own message identifier, which nothing here
             // records, so discarding it loses nothing.
             SEND_RETRIES.invoke(() -> {
+                // WHY : Assumptions: the attempt counter is NOT advanced here. It is advanced once by
+                // the claiming statement, so one pass over one row is one attempt however many times
+                // the transport is retried inside it. Counting per transport call instead would burn a
+                // permanently unreachable queue's whole ceiling in a handful of passes and abandon
+                // replies that were never given the tries the configuration promises -- which is the
+                // property OutboxPublisherLifecycleRepositoryIT asserts against a real engine.
                 this.sqs.sendMessage(request);
             });
-            row.markPublished(now);
+            transition(row, AuthReplyOutbox::markPublished);
             LOG.info("event=auth.reply.published outboxId={} attempts={}", row.getOutboxId(),
                     row.getAttempts());
             return true;
@@ -717,11 +1172,61 @@ public class OutboxPublisher {
             // row's payload carries a primary account number, so the message is the one part that
             // must not be persisted into a column an operator reads. The class name names the fault
             // without carrying the data, which is the package-wide discipline for this service.
-            row.recordFailedAttempt(failure.getClass().getName());
-            LOG.error("event=auth.reply.publish-failed outboxId={} attempts={} fault={}",
-                    row.getOutboxId(), row.getAttempts(), failure.getClass().getName());
+            String reason = failure.getClass().getName();
+            if (row.getAttempts() >= this.maxAttempts) {
+                // WHY : Assumptions: a row that has used its whole attempt budget is ABANDONED rather
+                // than failed again, and this is the only place the terminal state is entered.
+                // Refactoring Rationale: an earlier revision had no terminal state at all, so a reply
+                // whose queue was permanently unreachable -- a deleted queue, a revoked permission --
+                // was retried forever, held its group's head position forever, and blocked every later
+                // reply for that card. Trade-offs: abandonment gives up on an answer the committed
+                // decision says was owed, which is why the row is retained with its diagnostic rather
+                // than deleted, is excluded from the retention sweep, and is logged at error.
+                transition(row, (stored, at) -> stored.abandon(at, reason));
+                LOG.error("event=auth.reply.abandoned outboxId={} attempts={} maxAttempts={} fault={}",
+                        row.getOutboxId(), row.getAttempts(), this.maxAttempts, reason);
+                // WHY : Assumptions: the group does NOT advance past an abandoned row, so this returns
+                // false. Advancing would deliver that card's later replies with a gap where the
+                // abandoned one belongs, and the whole reason a group exists is that its replies are
+                // only meaningful in order; a stalled card that an operator must look at is the
+                // intended outcome, and the error line above is how they learn to.
+                return false;
+            }
+            LocalDateTime retryAt = backoffFrom(row.getAttempts());
+            transition(row, (stored, at) -> stored.recordFailure(reason, retryAt));
+            LOG.error(
+                    "event=auth.reply.publish-failed outboxId={} attempts={} nextAttemptAt={} fault={}",
+                    row.getOutboxId(), row.getAttempts(), retryAt, reason);
             return false;
         }
+    }
+
+    /**
+     * Computes when a row that has just failed its nth attempt becomes eligible again.
+     *
+     * <p>Assumptions: the delay grows with the attempt count and is capped, so a transport that is
+     * briefly unavailable is retried quickly while one that is durably unavailable stops being polled
+     * every interval. Refactoring Rationale: without a backoff the failed row stayed immediately
+     * eligible, and because the claim selected the globally oldest pending rows a small number of
+     * permanently failing heads were re-selected on every poll and every healthy group behind them was
+     * starved -- the failing rows never stopped being the oldest, so retrying could not clear it.</p>
+     *
+     * <p>Trade-offs: the growth is a doubling of the base delay, computed with a SHIFT bounded by the
+     * exponent that keeps it inside a long, and then clamped to the configured ceiling. Computing it
+     * with an unbounded shift was rejected because a large attempt count would shift past the width of
+     * the type and produce a small or negative delay -- the exact failure the widened counter was
+     * introduced to remove, reintroduced in the arithmetic.</p>
+     *
+     * @param attempts how many attempts the row has now had, as the claim recorded it; must be positive
+     * @return the instant the row next becomes eligible, never {@code null}
+     */
+    private LocalDateTime backoffFrom(int attempts) {
+        int exponent = Math.min(Math.max(attempts - 1, 0), MAX_BACKOFF_DOUBLINGS);
+        Duration delay = this.retryBackoff.multipliedBy(1L << exponent);
+        if (delay.compareTo(this.maxRetryBackoff) > 0) {
+            delay = this.maxRetryBackoff;
+        }
+        return now().plus(delay);
     }
 
     /**
@@ -759,14 +1264,25 @@ public class OutboxPublisher {
      * omitted rather than sent empty and why the question is asked through the publication's own
      * accessor instead of being re-tested at each send.</p>
      *
-     * <p>Assumptions: the ordering and deduplication identities are the purpose-scoped KEYED TOKENS
-     * stored on the row, not the card number and the acquirer's transaction identifier they stand
-     * for, and both are read from the row rather than recomputed. Both fields become message
-     * METADATA, which server-side encryption does not cover, so the raw values would appear in queue
-     * telemetry and in every send trace; a token is equal for equal cards and equal for one
-     * authorization, so per-card ordering and payload-independent deduplication survive exactly.
-     * Reading them from the row also leaves this publisher holding no key material and keeps a row
-     * publishable even when its payload could not be parsed.</p>
+     * <p>Assumptions: the ordering and deduplication identities are the CARD NUMBER and the acquirer's
+     * TRANSACTION IDENTIFIER, read from the row rather than recomputed here. Sections 0.4.1.8 and 0.7.6
+     * of the technical specification freeze them as those literals, and reading them from the row keeps
+     * the identity a reply is published under identical to the one committed with the decision.</p>
+     *
+     * <p>Refactoring Rationale: both were purpose-scoped keyed tokens derived from those values. The
+     * derivation preserved each semantic within this one publisher -- equal for equal cards, equal for
+     * one authorization -- but it changed the identity every OTHER party computes, so a second publisher,
+     * a cross-account consumer or a replay tool written to the frozen contract would group one card's
+     * messages separately and would fail to recognise a duplicate of one authorization. Aligning to the
+     * frozen identities is what makes the queue's guarantees hold across producers rather than only
+     * within this one.</p>
+     *
+     * <p>Trade-offs: a group identifier and a deduplication identifier are message METADATA, which the
+     * queue's server-side encryption of a body does not cover, so the card number reaches queue telemetry
+     * and the trace of every send. What bounds that is the deployment -- customer-managed-key encryption,
+     * an interface endpoint inside the private network, and task-role-scoped read access -- and the
+     * judgement that the frozen identity is worth it belongs to the specification rather than to this
+     * class.</p>
      *
      * <p>Assumptions: three descriptor fields the reference sets have no counterpart to set here, and
      * they are named so their absence is not read as an omission. L744 moves {@code MQMT-REPLY} into
@@ -801,8 +1317,8 @@ public class OutboxPublisher {
         return SendMessageRequest.builder()
                 .queueUrl(publication.replyQueueUrl())
                 .messageBody(publication.payload())
-                .messageGroupId(publication.orderGroupToken())
-                .messageDeduplicationId(publication.deduplicationToken())
+                .messageGroupId(publication.orderGroupId())
+                .messageDeduplicationId(publication.deduplicationId())
                 .messageAttributes(attributes)
                 .build();
     }

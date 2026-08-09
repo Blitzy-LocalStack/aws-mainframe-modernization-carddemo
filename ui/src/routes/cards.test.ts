@@ -1,3 +1,17 @@
+/**
+ * @file Unit tests for the card route helpers and selector guards in `ui/src/routes/cards.ts`.
+ *
+ * Purpose
+ * -------
+ * Pin the two properties every card screen and the card API client depend on: that a path builder
+ * produces the route the router declares, and that the guards accept only the published selector and
+ * card-number shapes. A guard that accepted a wrong shape would let a primary account number reach a
+ * request line, which is the disclosure the selector exists to prevent.
+ *
+ * Assumptions: the card number and selector literals used below are fabricated test vectors of the
+ * published length and alphabet; neither addresses anything real.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient
 // global, because ui/vitest.config.ts sets `globals: false` and records that as a
 // contract: ambient test globals are declared per PROJECT, so admitting them here

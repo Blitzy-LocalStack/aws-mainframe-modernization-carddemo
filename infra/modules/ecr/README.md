@@ -1,7 +1,8 @@
 # Amazon ECR repositories
 
-> **Purpose.** This module provisions the ten Amazon ECR repositories used by
-> the CardDemo migration, with immutable image tags, server-side scan-on-push,
+> **Purpose.** This module provisions the eleven Amazon ECR repositories used by
+> the CardDemo migration -- the ten images it builds plus one mirror of a pinned
+> third-party image -- with immutable image tags, server-side scan-on-push,
 > customer-managed encryption, and bounded retention. These independently
 > versioned image stores replace the single shared CICS load library used by the
 > online region and part of the batch tier.
@@ -14,7 +15,8 @@
 
 ## Repository inventory
 
-The fixed repository set follows deployable images, not source modules.
+The fixed repository set follows deployable images, not source modules, plus one
+mirror.
 
 | Repository | Image source |
 |---|---|
@@ -28,6 +30,7 @@ The fixed repository set follows deployable images, not source modules.
 | `reporting-service` | `services/reporting-service/Dockerfile` |
 | `ui` | `ui/Dockerfile` |
 | `data-migration` | `data-migration/Dockerfile` |
+| `aws-otel-collector` | Mirror of `public.ecr.aws/aws-observability/aws-otel-collector` at its pinned tag; this repository builds nothing |
 
 ### `common-lib` is not an image
 
@@ -35,8 +38,26 @@ Alternatives Considered: provisioning a repository for `common-lib` was
 rejected because `services/common-lib` contains a POM, Java sources, and no
 Dockerfile. It is compiled from source inside each service's Maven reactor
 build; no deployment pushes it and no task definition pulls it. Counting nine
-Maven modules as nine service images would therefore create an eleventh phantom
+Maven modules as nine service images would therefore create a phantom
 repository whose emptiness would not make `terraform apply` fail.
+
+### Why a third-party image is mirrored here
+
+`infra/modules/ecs-service` attaches an AWS Distro for OpenTelemetry collector
+sidecar to every workload by default, and `infra/modules/network` enumerates the
+application tier's egress instead of allowing `0.0.0.0/0`. The public registry
+the collector image was previously pulled from has neither an interface endpoint
+nor a managed prefix list, so with that egress enumerated **no task could pull
+its sidecar and therefore no task could start** -- while `terraform plan`
+reported nothing. Mirroring the image into this registry puts the pull on the
+`ecr.api` and `ecr.dkr` endpoints every task already reaches.
+
+Alternatives Considered: reopening a `0.0.0.0/0` egress rule for the pull, which
+was rejected because it restores the allow-all the enumerated egress replaced.
+Alternatives Considered: pushing the collector into one of the ten deployable
+repositories under a distinct tag, which was rejected because a repository's
+lifecycle policy expires images by count, so ordinary service releases would
+expire the sidecar image out from under running tasks.
 
 ## Measured baseline
 
@@ -89,7 +110,7 @@ the thirty-eight jobs:
 `READXREF.jcl`, `TRANREPT.jcl`, and `WAITSTEP.jcl`.
 
 Each names the dataset as a `STEPLIB`, so the one artifact store served both the
-CICS online region and part of the batch tier. Ten independently addressed
+CICS online region and part of the batch tier. Independently addressed
 repositories remove that deployment coupling while preserving the application
 behaviour implemented by those programs.
 
@@ -138,13 +159,15 @@ overrides them.
 ### Consuming the outputs
 
 The deployment workflow applies the repository graph, reads the environment
-root's projection of `repository_urls`, and pushes all ten images under an
-immutable release tag that defaults to the reviewed commit SHA. The environment
+root's projection of `repository_urls`, pushes all ten built images under an
+immutable release tag that defaults to the reviewed commit SHA, and mirrors the
+pinned telemetry sidecar image into `aws-otel-collector` under its own upstream
+version tag. The environment
 roots use the same URL map to compose task-definition image references and use
 `repository_arns` to scope each task execution role to its own repository.
 `repository_names` supports registry operations that require a name rather
 than an address, while `registry_id` identifies the one registry shared by all
-ten repositories.
+eleven repositories.
 
 The maps are keyed by the logical artifact names in the inventory above. A
 consumer selects by key; it never depends on a list position or reconstructs an
@@ -178,13 +201,13 @@ source of runtime endpoints and resource identifiers.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_environment"></a> [environment](#input\_environment) | Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all ten repository names within one account and region. | `string` | n/a | yes |
+| <a name="input_environment"></a> [environment](#input\_environment) | Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all eleven repository names within one account and region. | `string` | n/a | yes |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | Exact customer-managed KMS key ARN encrypting image layers at rest, supplied by the `kms` module through the calling root. Registry-managed AES256 is deliberately not an accepted fallback. | `string` | n/a | yes |
 | <a name="input_force_delete"></a> [force\_delete](#input\_force\_delete) | Whether `terraform destroy` may delete a repository that still holds images. False makes such a destroy fail rather than discard the artifacts a redeploy would need. | `bool` | `false` | no |
 | <a name="input_image_tag_mutability"></a> [image\_tag\_mutability](#input\_image\_tag\_mutability) | Repository tag-mutability mode. The module accepts only `IMMUTABLE`, binding every deployment tag permanently to one image digest in every environment. | `string` | `"IMMUTABLE"` | no |
 | <a name="input_max_image_count"></a> [max\_image\_count](#input\_max\_image\_count) | Number of tagged images the lifecycle policy retains per repository before expiring the oldest, bounding a tag set that grows by one entry with every deployment. | `number` | `30` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Application prefix that opens every repository name, keeping CardDemo repositories grouped and legible within a registry shared by every workload in the same account and region. | `string` | `"carddemo"` | no |
-| <a name="input_repository_names"></a> [repository\_names](#input\_repository\_names) | Trailing name segment of each container image repository to create, one per deployable artifact; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Defaults to the ten deployables of this migration: the eight services plus the browser SPA and the ETL image. | `set(string)` | <pre>[<br/>  "auth-service",<br/>  "account-service",<br/>  "card-service",<br/>  "transaction-service",<br/>  "reference-service",<br/>  "batch-service",<br/>  "authorization-service",<br/>  "reporting-service",<br/>  "ui",<br/>  "data-migration"<br/>]</pre> | no |
+| <a name="input_repository_names"></a> [repository\_names](#input\_repository\_names) | Trailing name segment of each container image repository to create; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Defaults to the ten deployables of this migration -- the eight services plus the browser SPA and the ETL image -- together with `aws-otel-collector`, which mirrors the pinned telemetry sidecar image so a task pulls it over the private registry endpoints rather than from a public registry the application tier's enumerated egress does not reach. | `set(string)` | <pre>[<br/>  "auth-service",<br/>  "account-service",<br/>  "card-service",<br/>  "transaction-service",<br/>  "reference-service",<br/>  "batch-service",<br/>  "authorization-service",<br/>  "reporting-service",<br/>  "ui",<br/>  "data-migration",<br/>  "aws-otel-collector"<br/>]</pre> | no |
 | <a name="input_scan_on_push"></a> [scan\_on\_push](#input\_scan\_on\_push) | Whether the registry scans each image for vulnerabilities server-side as it is pushed, with findings read from the registry rather than gated in the pushing pipeline. | `bool` | `true` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Per-module tags merged onto every repository, additive to whatever the calling root already applies through its provider `default_tags`. | `map(string)` | `{}` | no |
 | <a name="input_untagged_image_expiry_days"></a> [untagged\_image\_expiry\_days](#input\_untagged\_image\_expiry\_days) | Age in days at which an untagged image becomes eligible for expiry, reclaiming manifests and layers that no container task definition can reference. | `number` | `14` | no |
@@ -392,10 +415,10 @@ resource.
 ### Stable resource and output identities
 
 Alternatives Considered: `for_each` over the artifact-name set was chosen over
-`count` and over ten repeated resource blocks. `count` addresses instances by
+`count` and over repeated resource blocks. `count` addresses instances by
 position, so removing a middle entry renumbers every following repository and
 can turn a list edit into image-bearing repository replacement. Repeated blocks
-avoid renumbering but create ten places for one policy to drift.
+avoid renumbering but create one place per repository for a single policy to drift.
 
 Alternatives Considered: repository outputs are maps keyed by artifact rather
 than lists. A list position is not a property of a repository; reordering it
@@ -404,7 +427,7 @@ plan and apply still succeed.
 
 Assumptions: `registry_id` reads the first value from the deterministically
 key-ordered repository map. That is safe because input validation requires the
-exact non-empty ten-name set, and every repository created by one provider
+exact non-empty eleven-name set, and every repository created by one provider
 configuration belongs to the same registry.
 
 Assumptions: each lifecycle policy references

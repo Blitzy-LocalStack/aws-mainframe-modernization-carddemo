@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * Verifies that the account update path actually RUNS the address value-domain edits.
@@ -143,8 +144,12 @@ class AccountAddressValidationTest {
 
             when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
             when(this.customers.findById(CUSTOMER_ID)).thenReturn(Optional.of(customer));
-            when(this.crossReferences.findByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
-                    .thenReturn(List.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
+            // Assumptions: the BOUNDED single-row query is stubbed, because the service resolves the
+            //   customer through it rather than reading every cross-reference row and taking the first.
+            //   The row it yields is identical either way -- both name the lowest card number -- so the
+            //   only thing that changed is how much of an account's cardholder data reaches the heap.
+            when(this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
+                    .thenReturn(Optional.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
             when(this.customers.saveAndFlush(any(Customer.class)))
                     .thenAnswer(call -> call.getArgument(0));
             when(this.accounts.saveAndFlush(any(Account.class)))
@@ -166,7 +171,12 @@ class AccountAddressValidationTest {
                     new CustomerMapper(Fixture::cipherFor),
                     new AddressValidationService(this.lookup),
                     Clock.fixed(LocalDate.of(2022, 7, 18).atStartOfDay(ZoneOffset.UTC).toInstant(),
-                            ZoneOffset.UTC));
+                            ZoneOffset.UTC),
+                    // Assumptions: the transaction manager is substituted, so both templates run their
+                    //   callbacks and commit nothing. These cases assert which values are written and
+                    //   preserved, not that a database committed; the commit itself belongs to the
+                    //   container-backed integration test.
+                    mock(PlatformTransactionManager.class));
         }
 
         /**

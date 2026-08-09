@@ -230,6 +230,18 @@ class CardListServiceTest {
     /** The zero-record corpus, standing for a browse that matched nothing at all. */
     private List<Card> emptyCorpus;
 
+    /**
+     * The authenticated caller every cursor in this class is bound to.
+     *
+     * <p>Assumptions: one subject serves the whole class because the cases here exercise paging rather
+     * than isolation between callers; the isolation property has its own cases below, which name a second
+     * subject explicitly so the difference between the two is visible in the case that depends on it.</p>
+     */
+    private static final String SUBJECT = "CARDUSR1";
+
+    /** A second caller, used only to show that one caller's cursor is refused for another. */
+    private static final String OTHER_SUBJECT = "CARDUSR2";
+
     /** The signer that seals and opens every cursor in this class, one instance so tokens round-trip. */
     private CursorToken sealer;
 
@@ -281,8 +293,8 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> first = service.list(null, null, false);
-        PageResponse<CardSummary> second = service.list(null, first.lastKey(), false);
+        PageResponse<CardSummary> first = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> second = service.list(null, first.lastKey(), false, SUBJECT);
 
         String lastRowOfFirstPage = this.corpus.get(CardListService.PAGE_SIZE - 1).getCardNum();
 
@@ -298,7 +310,7 @@ class CardListServiceTest {
         assertThat(positions.getAllValues().get(1))
                 .as("the resume position is the key of the last row shown, not of the row beyond it")
                 .isEqualTo(lastRowOfFirstPage);
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, first.lastKey()))
+        assertThat(this.sealer.open(forwardBinding(), first.lastKey()))
                 .as("the published boundary cursor opens to that same key, so a caller can hand it back")
                 .isEqualTo(lastRowOfFirstPage);
         assertThat(bounds.getAllValues())
@@ -333,10 +345,10 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> first = service.list(null, null, false);
-        PageResponse<CardSummary> second = service.list(null, first.lastKey(), false);
-        PageResponse<CardSummary> third = service.list(null, second.lastKey(), false);
-        PageResponse<CardSummary> backToSecond = service.list(null, third.firstKey(), true);
+        PageResponse<CardSummary> first = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> second = service.list(null, first.lastKey(), false, SUBJECT);
+        PageResponse<CardSummary> third = service.list(null, second.lastKey(), false, SUBJECT);
+        PageResponse<CardSummary> backToSecond = service.list(null, third.firstKey(), true, SUBJECT);
 
         String firstRowOfThirdPage = this.corpus.get(CardListService.PAGE_SIZE * 2).getCardNum();
 
@@ -392,7 +404,7 @@ class CardListServiceTest {
 
         PageResponse<CardSummary> page = null;
         for (int issued = 0; issued < requests; issued++) {
-            page = service.list(null, page == null ? null : page.lastKey(), false);
+            page = service.list(null, page == null ? null : page.lastKey(), false, SUBJECT);
         }
 
         ArgumentCaptor<Limit> bounds = ArgumentCaptor.forClass(Limit.class);
@@ -448,7 +460,7 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(live);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> firstPage = service.list(null, null, false);
+        PageResponse<CardSummary> firstPage = service.list(null, null, false, SUBJECT);
 
         int arrivalIndex = CardListService.PAGE_SIZE - 2;
         String below = this.corpus.get(arrivalIndex - 1).getCardNum();
@@ -477,7 +489,7 @@ class CardListServiceTest {
         // already returned moves the row count while leaving the key untouched.
         live.add(arrivalIndex, cardOf(arrivingKey, this.corpus.get(arrivalIndex)));
 
-        PageResponse<CardSummary> secondPage = service.list(null, firstPage.lastKey(), false);
+        PageResponse<CardSummary> secondPage = service.list(null, firstPage.lastKey(), false, SUBJECT);
 
         List<String> shownFirst = publishedIdentities(firstPage);
         List<String> shownSecond = publishedIdentities(secondPage);
@@ -548,7 +560,7 @@ class CardListServiceTest {
         String cursor = null;
         int pagesWalked = 0;
         do {
-            PageResponse<CardSummary> page = service.list(null, cursor, false);
+            PageResponse<CardSummary> page = service.list(null, cursor, false, SUBJECT);
             assertThat(page.items().size())
                     .as("no page may exceed the window")
                     .isLessThanOrEqualTo(CardListService.PAGE_SIZE);
@@ -607,10 +619,10 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> opening = service.list(null, null, false);
-        PageResponse<CardSummary> second = service.list(null, opening.lastKey(), false);
-        PageResponse<CardSummary> last = service.list(null, second.lastKey(), false);
-        PageResponse<CardSummary> beforeTheOpening = service.list(null, opening.firstKey(), true);
+        PageResponse<CardSummary> opening = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> second = service.list(null, opening.lastKey(), false, SUBJECT);
+        PageResponse<CardSummary> last = service.list(null, second.lastKey(), false, SUBJECT);
+        PageResponse<CardSummary> beforeTheOpening = service.list(null, opening.firstKey(), true, SUBJECT);
 
         assertThat(CardListService.pagingRefusal(last, false))
                 .contains(CardListService.MESSAGE_NO_MORE_PAGES);
@@ -659,7 +671,7 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        assertThatThrownBy(() -> service.list(TOO_WIDE_FOR_ELEVEN_DIGITS, null, false))
+        assertThatThrownBy(() -> service.list(TOO_WIDE_FOR_ELEVEN_DIGITS, null, false, SUBJECT))
                 .isInstanceOfSatisfying(ClientInputException.class, refusal -> {
                     assertThat(refusal.getMessage())
                             .isEqualTo(CardListService.MESSAGE_ACCOUNT_FILTER_INVALID);
@@ -671,7 +683,7 @@ class CardListServiceTest {
                             .isEqualTo(FieldValidationFlag.NOT_OK);
                 });
 
-        assertThatThrownBy(() -> service.list(NEGATIVE_NARROWING, null, false))
+        assertThatThrownBy(() -> service.list(NEGATIVE_NARROWING, null, false, SUBJECT))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(CardListService.MESSAGE_ACCOUNT_FILTER_INVALID);
 
@@ -757,7 +769,7 @@ class CardListServiceTest {
                 .isEmpty();
 
         CardRepository cards = keysetStore(this.emptyCorpus);
-        PageResponse<CardSummary> page = serviceOver(cards).list(null, null, false);
+        PageResponse<CardSummary> page = serviceOver(cards).list(null, null, false, SUBJECT);
 
         assertThat(page.items()).isEmpty();
         assertThat(page.hasNext()).isFalse();
@@ -805,8 +817,8 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> withoutNarrowing = service.list(null, null, false);
-        PageResponse<CardSummary> withZero = service.list(0L, null, false);
+        PageResponse<CardSummary> withoutNarrowing = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> withZero = service.list(0L, null, false, SUBJECT);
 
         assertThat(publishedIdentities(withZero))
                 .as("zero narrows nothing, so it must answer exactly as an omitted narrowing does")
@@ -844,7 +856,7 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         Long narrowing = this.corpus.getFirst().getAccountId();
 
-        PageResponse<CardSummary> page = serviceOver(cards).list(narrowing, null, false);
+        PageResponse<CardSummary> page = serviceOver(cards).list(narrowing, null, false, SUBJECT);
 
         ArgumentCaptor<Limit> bounds = ArgumentCaptor.forClass(Limit.class);
         verify(cards).findForwardFromCursor(isNull(), eq(narrowing), isNull(), bounds.capture());
@@ -861,6 +873,166 @@ class CardListServiceTest {
     }
 
     /**
+     * Asserts nothing recoverable from a published cursor is any part of a card number.
+     *
+     * <p>Assumptions: the assertion is made from OUTSIDE the token, by base64url-decoding every segment of
+     * both boundary cursors and searching the recovered bytes. That is the position an attacker occupies, so
+     * it is the only position from which the claim is worth making: a test that asked the token type whether
+     * it had encrypted its payload would be asking the implementation to confirm its own intention.</p>
+     *
+     * <p>Assumptions: three renderings of the number are searched for, not one. The whole sixteen digits is
+     * the obvious one; the LAST FOUR are searched because they are what the masked rendering already
+     * discloses and their appearance in a token would let a holder confirm a guess; and the LEADING SIX are
+     * searched because they are the issuer identification number, which narrows an enumeration. A test that
+     * looked only for the whole number would pass against a token that leaked half of it.</p>
+     */
+    @Test
+    @DisplayName("a decoded cursor reveals no part of any card number")
+    void aDecodedCursorRevealsNoPartOfAnyCardNumber() {
+
+        PageResponse<CardSummary> page = serviceOver(keysetStore(this.corpus)).list(null, null, false,
+                SUBJECT);
+
+        String leadingRow = this.corpus.getFirst().getCardNum();
+        String trailingRow = this.corpus.get(CardListService.PAGE_SIZE - 1).getCardNum();
+
+        for (String token : List.of(page.firstKey(), page.lastKey())) {
+            StringBuilder recovered = new StringBuilder();
+            for (String segment : token.split("\\.")) {
+                recovered.append(new String(
+                        java.util.Base64.getUrlDecoder().decode(segment), StandardCharsets.ISO_8859_1));
+            }
+            String material = recovered.toString();
+            for (String number : List.of(leadingRow, trailingRow)) {
+                assertThat(material)
+                        .as("the whole card number must not be recoverable from a published cursor")
+                        .doesNotContain(number)
+                        .as("nor its last four digits, which the masked rendering already discloses")
+                        .doesNotContain(number.substring(number.length() - 4))
+                        .as("nor its leading six, which are the issuer identification number")
+                        .doesNotContain(number.substring(0, 6));
+            }
+        }
+    }
+
+    /**
+     * Asserts a cursor issued to one caller is refused for another.
+     *
+     * <p>Assumptions: the two requests are identical in every respect except the subject, so a refusal can
+     * only come from the subject part of the binding. Without it a position issued to one caller was
+     * honoured for any other, and the row it named was returned as though that caller had reached it.</p>
+     */
+    @Test
+    @DisplayName("a cursor issued to one caller is refused for another")
+    void aCursorIssuedToOneCallerIsRefusedForAnother() {
+
+        CardRepository cards = keysetStore(this.corpus);
+        PageResponse<CardSummary> mine = serviceOver(cards).list(null, null, false, SUBJECT);
+
+        assertThatThrownBy(() -> serviceOver(cards).list(null, mine.lastKey(), false, OTHER_SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Asserts a cursor issued for an unnarrowed browse is refused when presented with a narrowing.
+     *
+     * <p>Assumptions: the harm this prevents is a silent MISPOSITION rather than a disclosure. A cursor
+     * names a card number, and the same card number is a valid position within a differently narrowed set,
+     * so honouring it would answer from a place the caller was never shown -- and would do so without any
+     * error, which is what makes it worth a case of its own.</p>
+     */
+    @Test
+    @DisplayName("a cursor issued for an unnarrowed browse is refused when a narrowing is supplied")
+    void aCursorIssuedForOneNarrowingIsRefusedForAnother() {
+
+        CardRepository cards = keysetStore(this.corpus);
+        PageResponse<CardSummary> unnarrowed = serviceOver(cards).list(null, null, false, SUBJECT);
+        Long narrowing = this.corpus.getFirst().getAccountId();
+
+        assertThatThrownBy(() -> serviceOver(cards).list(narrowing, unnarrowed.lastKey(), false, SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Asserts the trailing cursor cannot be replayed as a backward position, nor the leading one forward.
+     *
+     * <p>Assumptions: the two boundary cursors of one page are sealed under different bindings precisely so
+     * that this swap is refused. Presenting the trailing cursor backward would name the row the caller had
+     * just been shown as the row to read back FROM, which would return a page overlapping the one in hand;
+     * presenting the leading cursor forward would re-return the same page. Neither is distinguishable from a
+     * legitimate step without the direction in the binding.</p>
+     */
+    @Test
+    @DisplayName("neither boundary cursor can be replayed in the other direction")
+    void neitherBoundaryCursorCanBeReplayedInTheOtherDirection() {
+
+        CardRepository cards = keysetStore(this.corpus);
+        PageResponse<CardSummary> second = serviceOver(cards)
+                .list(null, serviceOver(cards).list(null, null, false, SUBJECT).lastKey(), false, SUBJECT);
+
+        assertThatThrownBy(() -> serviceOver(cards).list(null, second.lastKey(), true, SUBJECT))
+                .as("the forward boundary must not open as a backward position")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+        assertThatThrownBy(() -> serviceOver(cards).list(null, second.firstKey(), false, SUBJECT))
+                .as("nor the backward boundary as a forward one")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Asserts the opening page advertises no page behind it, and that the refusal sentence is the
+     * reference's.
+     *
+     * <p>Assumptions: the reference refuses a backward step from its first page rather than re-reading it
+     * silently -- {@code app/cbl/COCRDLIC.cbl:903} raises its sentence exactly on the page whose ordinal
+     * condition at {@code :238} says nothing precedes it -- so an envelope that advertised a previous page
+     * there would offer the caller a step the reference does not have.</p>
+     */
+    @Test
+    @DisplayName("the opening page reports no previous page and refuses a backward step")
+    void theOpeningPageReportsNoPreviousPage() {
+
+        PageResponse<CardSummary> opening = serviceOver(keysetStore(this.corpus))
+                .list(null, null, false, SUBJECT);
+
+        assertThat(opening.hasPrevious()).isFalse();
+        assertThat(CardListService.backwardAvailable(opening)).isFalse();
+        assertThat(CardListService.pagingRefusal(opening, true))
+                .contains(CardListService.MESSAGE_NO_PREVIOUS_PAGES);
+    }
+
+    /**
+     * Asserts a backward page reports a page AHEAD of it, so the caller can step forward again.
+     *
+     * <p>Assumptions: this is the defect the further-page indicator carried. A following page necessarily
+     * exists on a backward read -- the caller reached this page by stepping back from one, and that page is
+     * still there -- but the indicator was derived from the backward read's own surplus row, which lies in
+     * the opposite direction. When the backward read exhausted its end the envelope therefore reported
+     * nothing ahead, {@code pagingRefusal} turned that into {@code MESSAGE_NO_MORE_PAGES}, and the step the
+     * caller had just come from was withheld.</p>
+     */
+    @Test
+    @DisplayName("a backward page reports a following page so the caller can return to it")
+    void aBackwardPageReportsAFollowingPage() {
+
+        CardRepository cards = keysetStore(this.corpus);
+        PageResponse<CardSummary> opening = serviceOver(cards).list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> second = serviceOver(cards).list(null, opening.lastKey(), false, SUBJECT);
+        PageResponse<CardSummary> backToOpening =
+                serviceOver(cards).list(null, second.firstKey(), true, SUBJECT);
+
+        assertThat(backToOpening.items())
+                .as("the backward step returns the page the caller came from")
+                .isEqualTo(opening.items());
+        assertThat(backToOpening.hasNext())
+                .as("and it must advertise the page it stepped back from")
+                .isTrue();
+        assertThat(CardListService.pagingRefusal(backToOpening, false)).isEmpty();
+        assertThat(backToOpening.hasPrevious())
+                .as("while still reporting nothing behind the opening page")
+                .isFalse();
+    }
+
+    /**
      * Asserts that a backward request carrying no position is answered by the forward query.
      *
      * <p>Assumptions: this is the target's statement of the reference's opening-page condition, declared
@@ -871,15 +1043,13 @@ class CardListServiceTest {
      * position predicate, so reaching it without a position would be a different outcome entirely rather
      * than a merely redundant call.
      *
-     * <p>Assumptions: backward availability itself is DERIVED rather than published, because the shared
-     * envelope carries four components -- the rows, the two boundary cursors and the further-page
-     * indicator -- and no backward flag among them. The derivation used is the presence of the leading
-     * boundary cursor, which is exactly the position a backward request would be issued from.
-     * Alternatives Considered: adding a fifth component to the envelope so availability could be stated
-     * outright. Rejected because the envelope's shape is shared by every browse in the migration and
-     * carries four components and no more, and because the reference itself keeps no such flag either:
-     * it gates its backward refusal on the page ordinal at {@code :902}, not on any recorded
-     * availability.
+     * <p>Refactoring Rationale: backward availability is PUBLISHED by the envelope and is no longer
+     * derived from the leading boundary cursor. The derivation was wrong: every page carrying rows names
+     * its own first row, so it reported an earlier page on the opening page too, and a client that
+     * followed the report replaced its rows with an empty page. The reference does the opposite -- its
+     * backward refusal at {@code :903} fires on exactly that page and redisplays it -- so the assertion
+     * below now expects the opening page to report NO earlier page, which is the behaviour the reference
+     * has and the derivation could not express.
      *
      * <p>It takes no parameter and returns no value.
      */
@@ -890,8 +1060,8 @@ class CardListServiceTest {
         CardRepository cards = keysetStore(this.corpus);
         CardListService service = serviceOver(cards);
 
-        PageResponse<CardSummary> backwardWithoutPosition = service.list(null, null, true);
-        PageResponse<CardSummary> opening = service.list(null, null, false);
+        PageResponse<CardSummary> backwardWithoutPosition = service.list(null, null, true, SUBJECT);
+        PageResponse<CardSummary> opening = service.list(null, null, false, SUBJECT);
 
         verify(cards, never()).findBackwardFromCursor(any(), any(), any(), any());
         verify(cards, times(2))
@@ -900,8 +1070,14 @@ class CardListServiceTest {
         assertThat(publishedIdentities(backwardWithoutPosition))
                 .isEqualTo(publishedIdentities(opening));
         assertThat(CardListService.backwardAvailable(opening))
-                .as("a page carrying rows names a leading boundary, which is the derived availability")
-                .isTrue();
+                .as("the opening page reports no earlier page even though it names its own first row")
+                .isFalse();
+        assertThat(opening.firstKey())
+                .as("the position a later backward request is issued from is still published")
+                .isNotNull();
+        assertThat(CardListService.backwardAvailable(backwardWithoutPosition))
+                .as("a backward request with no position is answered as the opening page")
+                .isFalse();
     }
 
     /**
@@ -929,17 +1105,17 @@ class CardListServiceTest {
     void theBoundaryCursorNamesTheLastRowReturned() {
 
         CardRepository cards = keysetStore(this.corpus);
-        PageResponse<CardSummary> opening = serviceOver(cards).list(null, null, false);
+        PageResponse<CardSummary> opening = serviceOver(cards).list(null, null, false, SUBJECT);
 
         String lastReturned = this.corpus.get(CardListService.PAGE_SIZE - 1).getCardNum();
         String beyondTheWindow = this.corpus.get(CardListService.PAGE_SIZE).getCardNum();
 
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, opening.lastKey()))
+        assertThat(this.sealer.open(forwardBinding(), opening.lastKey()))
                 .isEqualTo(lastReturned);
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, opening.lastKey()))
+        assertThat(this.sealer.open(forwardBinding(), opening.lastKey()))
                 .as("publishing the probed row's key would drop that row from the following page")
                 .isNotEqualTo(beyondTheWindow);
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, opening.firstKey()))
+        assertThat(this.sealer.open(backwardBinding(), opening.firstKey()))
                 .isEqualTo(this.corpus.getFirst().getCardNum());
     }
 
@@ -964,14 +1140,14 @@ class CardListServiceTest {
         assertThat(this.singleRow).hasSize(1);
 
         PageResponse<CardSummary> page = serviceOver(keysetStore(this.singleRow))
-                .list(null, null, false);
+                .list(null, null, false, SUBJECT);
         String onlyKey = this.singleRow.getFirst().getCardNum();
 
         assertThat(page.items()).hasSize(1);
         assertThat(page.hasNext()).isFalse();
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, page.firstKey()))
+        assertThat(this.sealer.open(backwardBinding(), page.firstKey()))
                 .isEqualTo(onlyKey);
-        assertThat(this.sealer.open(CardListService.LIST_BINDING, page.lastKey()))
+        assertThat(this.sealer.open(forwardBinding(), page.lastKey()))
                 .isEqualTo(onlyKey);
         assertThat(CardListService.pageMessage(page))
                 .isEqualTo(CardListService.MESSAGE_NO_MORE_RECORDS);
@@ -985,6 +1161,29 @@ class CardListServiceTest {
      */
     private CardListService serviceOver(CardRepository cards) {
         return new CardListService(cards, this.mapper, this.sealer);
+    }
+
+    /**
+     * Returns the binding the TRAILING boundary cursor of an unnarrowed page is sealed under.
+     *
+     * <p>Assumptions: the two boundaries of one page are sealed under different bindings, so a test that
+     * opens one must name the matching direction. Opening the trailing cursor under the backward binding
+     * fails authentication, which is the property the isolation cases assert deliberately and which every
+     * other case must therefore avoid doing by accident.</p>
+     *
+     * @return the forward binding for this class's subject and no account narrowing, never {@code null}
+     */
+    private static String forwardBinding() {
+        return CardListService.listCursorBinding(null, SUBJECT, false);
+    }
+
+    /**
+     * Returns the binding the LEADING boundary cursor of an unnarrowed page is sealed under.
+     *
+     * @return the backward binding for this class's subject and no account narrowing, never {@code null}
+     */
+    private static String backwardBinding() {
+        return CardListService.listCursorBinding(null, SUBJECT, true);
     }
 
     /**
@@ -1170,6 +1369,95 @@ class CardListServiceTest {
     }
 
     /**
+     * Asserts that a cursor issued to one caller is refused when a different caller presents it.
+     *
+     * <p>Purpose: this is the property the cursor's subject binding exists for. A published cursor is a
+     * value a client holds, so nothing stops it being copied out of one operator's session and sent by
+     * another; what stops the SECOND operator being answered is that the token was sealed against the
+     * first one's name and does not open under the second's.
+     *
+     * <p>Refactoring Rationale: before the binding was composed, this browse sealed every cursor under a
+     * bare query-name literal. Both requests below would then have succeeded identically, because the
+     * only thing the token was bound to was the listing itself -- which every caller of this operation
+     * shares. Nothing in the corpus, the store or the seal key differs between the two requests here;
+     * the only difference is the name, so a pass proves the name is what was refused.
+     *
+     * <p>Assumptions: the SAME sealer instance serves both requests, so the refusal cannot be explained
+     * by a key mismatch. The published contract states the refusal directly -- a cursor that "was not
+     * issued to this caller" is among the causes of its 400 -- and the raised type is the one the shared
+     * advice renders as that status.
+     *
+     * <p>It takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("a cursor issued to one caller is refused when another caller presents it")
+    void aCursorIsNotTransferableBetweenCallers() {
+
+        CardListService service = serviceOver(keysetStore(this.corpus));
+        PageResponse<CardSummary> issued = service.list(null, null, false, SUBJECT);
+
+        assertThat(issued.lastKey())
+                .as("the opening page must publish a trailing cursor for this case to mean anything")
+                .isNotNull();
+
+        assertThat(service.list(null, issued.lastKey(), false, SUBJECT).items())
+                .as("the caller it was issued to must still be able to redeem it")
+                .isNotEmpty();
+
+        assertThatThrownBy(() -> service.list(null, issued.lastKey(), false, OTHER_SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Asserts that each boundary cursor opens only for the step it was issued for.
+     *
+     * <p>Purpose: the two boundaries of a page are sealed under different direction scopes, so the
+     * trailing cursor is redeemable only as a forward step and the leading cursor only as a backward one.
+     * Presenting either with the other direction is refused at the seal.
+     *
+     * <p>Refactoring Rationale: the published contract promised exactly this before it was true, stating
+     * that the direction is carried in the seal of each token so that replaying one with the other
+     * direction "cannot silently return the wrong page", and naming a cursor "sealed for the other
+     * direction" among the causes of its 400. With a bare query-name binding both mismatched requests
+     * were answered with a page from the wrong end of the set instead, which is the failure the sentence
+     * described and the service did not prevent.
+     *
+     * <p>Assumptions: both mismatches are asserted rather than one, because the two scopes are
+     * independent -- sealing both boundaries under a single scope would refuse one mismatch and admit the
+     * other, and a case asserting only one direction would pass against that.
+     *
+     * <p>Assumptions: the positive controls are asserted alongside the refusals. Without them a
+     * regression that refused every cursor in either direction would satisfy the negative assertions
+     * completely.
+     *
+     * <p>It takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("each boundary cursor is refused when presented with the opposite direction")
+    void eachBoundaryCursorIsBoundToItsOwnDirection() {
+
+        CardListService service = serviceOver(keysetStore(this.corpus));
+        PageResponse<CardSummary> opening = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> second = service.list(null, opening.lastKey(), false, SUBJECT);
+
+        assertThat(second.firstKey())
+                .as("the second page must publish a leading cursor for the backward case to matter")
+                .isNotNull();
+
+        assertThat(service.list(null, second.firstKey(), true, SUBJECT).items())
+                .as("a leading cursor must still be redeemable as the backward step it was issued for")
+                .isNotEmpty();
+
+        assertThatThrownBy(() -> service.list(null, opening.lastKey(), true, SUBJECT))
+                .as("a trailing cursor is a forward position and must not open a backward step")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+
+        assertThatThrownBy(() -> service.list(null, second.firstKey(), false, SUBJECT))
+                .as("a leading cursor is a backward position and must not open a forward step")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
      * Reduces a published page to the stable identity of each row it carries, in order.
      *
      * <p>Assumptions: the sealed selector a published row carries is the identity used, because sealing
@@ -1229,7 +1517,7 @@ class CardListServiceTest {
      */
     private static String refusalTextOf(CardListService service, Long narrowing) {
         try {
-            service.list(narrowing, null, false);
+            service.list(narrowing, null, false, SUBJECT);
             return null;
         } catch (ClientInputException refused) {
             return refused.getMessage();

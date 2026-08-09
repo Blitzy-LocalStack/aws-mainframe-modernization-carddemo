@@ -2,10 +2,14 @@ package com.carddemo.authorization.repository;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
+import jakarta.persistence.LockModeType;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -169,16 +173,21 @@ public interface PendingAuthDetailRepository
      * two different write shapes, and applying the narrow one here would rewrite a different
      * contract.</p>
      *
-     * <p>Assumptions: no lock mode is declared on this read, and the reference programs are the
-     * reason rather than an omission. {@code cpy/IMSFUNCS.cpy} declares all three get-hold
-     * retrieval codes, {@code FUNC-GHU} at L19, {@code FUNC-GHN} at L21 and {@code FUNC-GHNP} at
-     * L23, and no program in the reference tree passes any of them to a retrieval: the codes used
-     * throughout are the non-hold forms, so no occurrence is ever held between a read and the write
-     * that follows it. Where two concurrent markings of one authorization could otherwise both
-     * observe the same absent fraud row, it is the fraud table's own primary key that settles it --
-     * which is how the reference system settles it too, taking its update branch on the duplicate-key
-     * code at {@code cbl/COPAUS2C.cbl} L203 and L204 after the insert at L199 rather than preventing
-     * the duplicate in advance.</p>
+     * <p>Assumptions: no lock mode is declared on this read, and that is what makes it the READ-ONLY
+     * companion of {@link #findWithLockById(PendingAuthDetailKey)} beside it rather than a second way
+     * to reach a row that is about to be written. Every path that goes on to REWRITE the row uses the
+     * held form; this one serves the detail screen and the loader's presence probe, neither of which
+     * follows the read with a write to the row it read.</p>
+     *
+     * <p>Refactoring Rationale: the fraud path used to come through HERE, and the paragraph that stood
+     * in place of this one defended the absence of a lock by pointing at the fraud table's primary key
+     * -- which settles a duplicate INSERT of the fraud row and settles nothing about the authorization
+     * row this method returns. That row is UPDATED, not inserted, so no constraint refuses a second
+     * writer: two concurrent marks of one authorization both read it, both applied their own state and
+     * report date, and the later commit silently replaced the earlier one, so an investigator's removal
+     * could erase a report or a report could reinstate one just withdrawn. The held form was added for
+     * that path and the earlier argument was wrong rather than merely incomplete, so it is superseded
+     * here rather than left standing beside its replacement.</p>
      *
      * @param id the composite key of account identifier, decoded Julian authorization date and
      *     decoded millisecond authorization time; must not be {@code null}
@@ -186,6 +195,94 @@ public interface PendingAuthDetailRepository
      *     which is a normal outcome and not an error
      */
     Optional<PendingAuthDetail> findById(PendingAuthDetailKey id);
+
+    /**
+     * Reads one authorization by its composite key and holds its row for the rest of the transaction.
+     *
+     * <p><strong>Purpose.</strong> Serve the one path that REWRITES an authorization row -- the fraud
+     * mark, transcribed from {@code cbl/COPAUS1C.cbl}, whose paragraph {@code UPDATE-AUTH-DETAILS} at
+     * L520 to L552 moves a prepared record over the segment at L522 and replaces it at L525 to L528.
+     * The row is returned held so that the read and the write that follows it are one uninterrupted
+     * sequence.
+     *
+     * <p>Purpose: what the hold prevents is a LOST UPDATE, and the fraud state is the field where
+     * losing one matters most. The two published actions are opposites -- {@code cbl/COPAUS2C.cbl} L81
+     * admits the reporting character and L82 the removing one, and L137 moves whichever arrived
+     * straight into the column -- so two operators acting at once on one authorization submit two
+     * states that cannot both be right. Without the hold both read the row, both apply their own state
+     * and report date, and the later commit replaces the earlier: a removal can erase a report nobody
+     * saw, or a report can reinstate one an investigator had just withdrawn, and nothing in either
+     * response says so. Holding the row makes the second operator wait and then act on the state the
+     * first left behind.
+     *
+     * <p>Alternatives Considered: an optimistic version column on this entity, which would answer the
+     * second writer with a conflict rather than making it wait. Rejected on two counts. It would
+     * require adding a version column to a table derived field for field from
+     * {@code cpy/CIPAUDTY.cpy}, which declares no such field, so the schema would carry a column with
+     * no baseline counterpart on a table whose mapping is documented column by column. And the refusal
+     * arrives at COMMIT, discarding the fraud-row write already staged beside it, so the caller would
+     * have to redo both halves of a two-table write the reference system performs once. The published
+     * contract's conflict response is therefore the lock-acquisition one rather than a version one, and
+     * {@code openapi/authorization-api.yaml} says so.
+     *
+     * <p>Alternatives Considered: taking no lock and treating the fraud table's primary key as the
+     * arbiter, which is what this path did. Rejected because that key governs the OTHER row. It settles
+     * which of two writers INSERTS the fraud row -- and
+     * {@code AuthFraudRepository.insertFraudRowIfAbsent} now reproduces the reference program's branch
+     * on exactly that condition -- but the authorization row is rewritten rather than inserted, so no
+     * constraint stands between two writers of it.
+     *
+     * <p>Assumptions: this is a TARGET-SIDE addition and is not presented as preserved behaviour. The
+     * reference programs hold nothing between a read and its write: {@code cpy/IMSFUNCS.cpy} declares
+     * all three get-hold retrieval codes -- {@code FUNC-GHU} at L19, {@code FUNC-GHN} at L21 and
+     * {@code FUNC-GHNP} at L23 -- and no program in the reference tree passes any of them, the codes
+     * actually used being the non-hold forms. What differs is the concurrency model rather than the
+     * data: the reference screen is one terminal task at a time under one transaction monitor, whereas
+     * this service runs several tasks that can receive two marks of one authorization at once. The same
+     * class of defect on the summary's four counters is closed WITHOUT a lock, by reversing them in one
+     * statement computed in the database, and {@code PendingAuthSummaryRepository} records why a lock is
+     * not admissible there; the difference is that this row is rewritten field by field from a projection
+     * and has no single-statement form to be expressed as.
+     *
+     * <p>Assumptions: this is the ONLY lock family in this schema, so no acquisition order can produce a
+     * cycle. The fraud path takes this lock alone and asks for nothing else afterwards. A reader adding a
+     * second locking read anywhere in this context has to state an order between the two and take the
+     * PARENT row first, because the decision path writes an authorization beneath a summary and the purge
+     * reads a summary's children.
+     *
+     * <p>Trade-offs: what the hold buys is paid for in lock-wait, and the cost is bounded deliberately.
+     * It applies to ONE row inside a transaction that makes no network call while holding it, and
+     * {@code carddemo.datasource.lock-timeout-ms} bounds the wait, after which the shared advice
+     * answers 409 with the lock-unavailable sentence rather than leaving a request parked. The
+     * read-only companion above takes no lock, which is why the two are separate declarations rather
+     * than one method carrying a flag -- a flag would let a caller reach the write path without the
+     * hold by passing {@code false}.
+     *
+     * @param id the composite key of account identifier, decoded Julian authorization date and decoded
+     *     millisecond authorization time; must not be {@code null}
+     * @return the authorization that key names with its row held for the transaction, or an empty
+     *     optional when the key names no row, which is a normal outcome and not an error
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<PendingAuthDetail> findWithLockById(PendingAuthDetailKey id);
+
+    /**
+     * Reports which of a stated set of authorization keys already carry a row.
+     *
+     * <p>Assumptions: this exists so a bulk load can settle the presence of a whole CHUNK of
+     * authorizations in one statement, instead of issuing the identity lookup above once per record. The
+     * key is composite, so the predicate compares the embedded identifier itself rather than its three
+     * members separately -- which is what lets one bind list cover the chunk.</p>
+     *
+     * <p>Trade-offs: the caller must bound the collection it passes, for the same bind-parameter reason
+     * the summary boundary records. The loader passes a chunk it has already bounded.</p>
+     *
+     * @param ids the authorization keys to test for presence, as a bounded collection; must not be
+     *     {@code null}
+     * @return the subset of those keys that already carry a row, in no defined order
+     */
+    @Query("select d.id from PendingAuthDetail d where d.id in :ids")
+    List<PendingAuthDetailKey> findExistingIds(@Param("ids") Collection<PendingAuthDetailKey> ids);
 
     /**
      * Reads the opening page of one account's authorizations, newest first.
@@ -369,4 +466,67 @@ public interface PendingAuthDetailRepository
      *     has none
      */
     List<PendingAuthDetail> findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(Long accountId);
+    /**
+     * Inserts one authorization row, leaving an existing row for the same key untouched.
+     *
+     * <p>Purpose: this is the duplicate-tolerant insert the extract loader needs, transcribing the child
+     * duplicate arm at {@code cbl/PAUDBLOD.CBL} L329 to L331 -- which counts an authorization already in
+     * the database and moves to the next record rather than replacing it. The statement reports how many
+     * rows it wrote, so the caller distinguishes the two outcomes without asking a second question.
+     *
+     * <p>Refactoring Rationale: the loader probed with {@code existsById} and then called the inherited
+     * save. Those are two statements with a gap between them, so an authorization created in that gap --
+     * by the decision path, which inserts exactly this shape for a live request -- was OVERWRITTEN by the
+     * save rather than counted as already present. The overwrite replaces every column, so a decision's
+     * response code, its approved amount and any fraud mark on it were all reset to whatever the extract
+     * carried, and the summary counters that decision had already moved were left describing a row that
+     * no longer said the same thing. One statement that inserts or does nothing cannot have that gap.
+     *
+     * <p>Assumptions: the conflict target is NAMED and it is the primary key, which is load-bearing here
+     * rather than defensive. This table carries a SECOND uniqueness rule --
+     * {@code uq_pending_auth_detail_card_transaction} over the card and the transaction identifier -- and
+     * a collision on that one is a different fault entirely: two distinct authorization keys claiming one
+     * card-and-transaction pair means the extract disagrees with itself. Left implicit, the tolerance
+     * would swallow that as though it were the ordinary duplicate and the loader would report it as a
+     * skipped record. The sibling fraud statement leaves its target implicit precisely because its table
+     * has only the one constraint, so the two are not inconsistent with each other.
+     *
+     * <p>Assumptions: nothing is updated on conflict, and that is the reference behaviour rather than a
+     * simplification. The reference paragraph neither replaces nor merges: it increments its
+     * already-present counter and reads the next record, so the row already stored wins in every field.
+     *
+     * <p>Assumptions: the values are bound from the entity rather than from a positional list of
+     * twenty-five, for the reason the sibling summary statement records -- a positional list restates the
+     * column-to-value correspondence in a transposable second form, and this row has nine adjacent
+     * same-typed character columns among which a transposition would store silently.
+     *
+     * <p>Assumptions: the caller owns the transaction. A modifying query carries none of its own, so an
+     * unwrapped call fails with no active transaction rather than writing outside one.
+     *
+     * @param row the authorization to insert, whose embedded key supplies the three key columns; must not
+     *     be {@code null}
+     * @return {@code 1} when the row was written, {@code 0} when the key was already taken
+     */
+    @Modifying
+    @Query(value = """
+            INSERT INTO pending_auth_detail (
+                account_id, auth_date, auth_time, auth_orig_date, auth_orig_time, card_num, auth_type,
+                card_expiry_date, message_type, message_source, auth_id_code, auth_resp_code,
+                auth_resp_reason, processing_code, transaction_amt, approved_amt,
+                merchant_category_code, acqr_country_code, pos_entry_mode, merchant_id, merchant_name,
+                merchant_city, merchant_state, merchant_zip, transaction_id, match_status, auth_fraud,
+                fraud_rpt_date)
+            VALUES (
+                :#{#row.id.accountId}, :#{#row.id.authDate}, :#{#row.id.authTime},
+                :#{#row.authOrigDate}, :#{#row.authOrigTime}, :#{#row.cardNum}, :#{#row.authType},
+                :#{#row.cardExpiryDate}, :#{#row.messageType}, :#{#row.messageSource},
+                :#{#row.authIdCode}, :#{#row.authRespCode}, :#{#row.authRespReason},
+                :#{#row.processingCode}, :#{#row.transactionAmount}, :#{#row.approvedAmount},
+                :#{#row.merchantCategoryCode}, :#{#row.acqrCountryCode}, :#{#row.posEntryMode},
+                :#{#row.merchantId}, :#{#row.merchantName}, :#{#row.merchantCity},
+                :#{#row.merchantState}, :#{#row.merchantZip}, :#{#row.transactionId},
+                :#{#row.matchStatus}, :#{#row.authFraud}, :#{#row.fraudReportDate})
+            ON CONFLICT (account_id, auth_date, auth_time) DO NOTHING
+            """, nativeQuery = true)
+    int insertDetailIfAbsent(@Param("row") PendingAuthDetail row);
 }

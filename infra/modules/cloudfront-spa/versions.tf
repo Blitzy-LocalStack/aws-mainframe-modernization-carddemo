@@ -78,8 +78,10 @@ terraform {
     #       or credentialed provider source, so the bare `hashicorp/` namespace
     #       is unambiguous.
     #       Assumptions: 6.56 is a capability floor, not a preference. A
-    #       5.81.0-or-newer provider is required for the zero-minimum Aurora
-    #       serverless capacity this package's data tier uses, and 6.56 clears
+    #       5.80.0-or-newer provider is required for the zero-minimum Aurora
+    #       serverless capacity this package's data tier uses, and a 5.81.0-or-
+    #       newer one for the auto-pause argument it makes mandatory, so the pair
+    #       floors at 5.81.0, and 6.56 clears
     #       that comfortably. Holding every module in this package on the
     #       identical constraint is what lets a single root resolve one shared
     #       .terraform.lock.hcl across all of them; a module that disagreed

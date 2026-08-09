@@ -1,6 +1,7 @@
 package com.carddemo.account.service;
 
 import com.carddemo.account.domain.Account;
+import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
@@ -24,6 +25,9 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -596,6 +600,28 @@ public class AccountUpdateService {
     private final Clock clock;
 
     /**
+     * The template the pre-edit read runs inside.
+     *
+     * <p>Assumptions: read-only and short. Its whole content is the two keyed loads the edits compare
+     * against, and it ends before the first remote validation is issued.</p>
+     */
+    private final TransactionTemplate readTransaction;
+
+    /**
+     * The template the write runs inside.
+     *
+     * <p>Refactoring Rationale: the write is a template rather than an annotation because the unit of work
+     * has to have a VISIBLE beginning and end. This operation was one annotated method containing up to
+     * four synchronous calls to another service, so a database transaction and two row locks were held
+     * for the duration of that many network round trips; a reader could not see where the transaction
+     * started because it started at a method boundary. Alternatives Considered: keeping the annotation and
+     * moving the edits into a second annotated method on this same class; rejected because a
+     * self-invocation does not pass through the transactional proxy, so the declared propagation would
+     * silently not apply.</p>
+     */
+    private final TransactionTemplate writeTransaction;
+
+    /**
      * Creates the update service over the rows it writes, the projections it publishes and its edits.
      *
      * @param accounts the account master repository; must not be {@code null}
@@ -610,11 +636,14 @@ public class AccountUpdateService {
      *     {@code null}
      * @param clock the time source the date-of-birth range edit compares against; must not be
      *     {@code null}
+     * @param transactionManager the manager both short units of work are opened against; must not be
+     *     {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public AccountUpdateService(AccountRepository accounts, CustomerRepository customers,
             CardXrefRepository crossReferences, AccountMapper accountMapper,
-            CustomerMapper customerMapper, AddressValidationService addressValidation, Clock clock) {
+            CustomerMapper customerMapper, AddressValidationService addressValidation, Clock clock,
+            PlatformTransactionManager transactionManager) {
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.customers = Objects.requireNonNull(customers, "customers must not be null");
         this.crossReferences =
@@ -624,6 +653,17 @@ public class AccountUpdateService {
         this.addressValidation =
                 Objects.requireNonNull(addressValidation, "addressValidation must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        Objects.requireNonNull(transactionManager, "transactionManager must not be null");
+
+        // WHY : Assumptions: both templates are REQUIRES_NEW so each is a unit of work of its own even
+        //       when a caller already holds one. That is what keeps the write span -- and therefore the
+        //       span during which two rows are locked -- independent of anything enclosing this call.
+        this.readTransaction = new TransactionTemplate(transactionManager);
+        this.readTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.readTransaction.setReadOnly(true);
+
+        this.writeTransaction = new TransactionTemplate(transactionManager);
+        this.writeTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /**
@@ -664,13 +704,23 @@ public class AccountUpdateService {
      * precondition first was the alternative and would have reported a conflict for a submission the
      * baseline would never have carried as far as the comparison.</p>
      *
-     * <p>Refactoring Rationale: the whole method is ONE transaction and no rollback is ever called by
-     * hand. {@code EXEC CICS SYNCPOINT} at {@code app/cbl/COACTUPC.cbl} L952 to L954 is the commit, and
-     * the baseline's two rewrite failure paths handle rollback asymmetrically -- the account arm at
-     * L4076 to L4081 has none because nothing had been written, the customer arm at L4095 to L4103 has
-     * one at L4099 to L4101 with the verb on L4100 because the account had. A single boundary subsumes
-     * both: an exception propagates, the provider discards the unit of work, and there is no rollback
-     * statement to place correctly or to forget.</p>
+     * <p>Refactoring Rationale: the WRITE is one transaction and no rollback is ever called by hand.
+     * {@code EXEC CICS SYNCPOINT} at {@code app/cbl/COACTUPC.cbl} L952 to L954 is the commit, and the
+     * baseline's two rewrite failure paths handle rollback asymmetrically -- the account arm at L4076 to
+     * L4081 has none because nothing had been written, the customer arm at L4095 to L4103 has one at L4099
+     * to L4101 with the verb on L4100 because the account had. A single boundary subsumes both: an
+     * exception propagates, the provider discards the unit of work, and there is no rollback statement to
+     * place correctly or to forget.</p>
+     *
+     * <p>Refactoring Rationale: what that boundary does NOT contain any more is the edits. This method was
+     * a single transaction spanning the reads, the edits and the write, and the edits issue up to four
+     * synchronous calls to {@code reference-service}, so a connection and two row locks were held across
+     * that many network round trips. It is now three phases -- a short read-only load, the edits with no
+     * transaction open, then a short write that re-reads both rows and re-checks the precondition against
+     * what it re-read. Trade-offs: the rows are read twice and a concurrent update committing between the
+     * two reads is answered as a conflict where it previously would have been answered as one too, by the
+     * version column; what is bought is that a slow or unreachable reference-service can no longer hold
+     * this service's connections or block another writer of the same two rows.</p>
      *
      * <p>Assumptions: both rows are written inside that one boundary because the baseline rewrites both
      * inside one unit of work and commits once. Splitting them would make a state observable that the
@@ -695,43 +745,84 @@ public class AccountUpdateService {
      * @throws org.springframework.dao.OptimisticLockingFailureException if either row moves between
      *     this transaction's read and its flush, which the shared advice renders as the same conflict
      */
-    @Transactional
     public AccountUpdateResponse update(long accountId, AccountUpdateRequest request,
             String expectedRevision) {
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(expectedRevision, "expectedRevision must not be null");
 
-        Account account = loadAccount(accountId);
-        Customer customer = loadCustomer(accountId);
+        // WHY : Refactoring Rationale: the rows the edits compare against are read in a short READ-ONLY
+        //       unit of work that ends before any remote validation is issued. This method was one
+        //       transaction spanning the reads, the edits and the write, and the edits issue up to four
+        //       synchronous calls to reference-service -- the state allow-list, two telephone checks and
+        //       the state-with-postal-prefix pairing -- so a database connection and two row locks were
+        //       held across that many network round trips. A reference-service that answers slowly, or not
+        //       at all, therefore consumed this service's connection pool and blocked every other writer
+        //       of the same two rows for as long as it took to time out.
+        LoadedPair loaded = this.readTransaction.execute(status ->
+                new LoadedPair(loadAccount(accountId), loadCustomer(accountId)));
+        LoadedPair before = Objects.requireNonNull(loaded,
+                "the read transaction returned no rows, which its callback cannot do");
 
-        EditVerdict verdict = editMapInputs(request, account, customer);
+        // WHY : Assumptions: the edits run with NO transaction open, which is the point of the split. The
+        //       verdict is a pure function of the submission and the rows as read, so nothing it decides
+        //       needs a transaction; only the write does.
+        EditVerdict verdict = editMapInputs(request, before.account(), before.customer());
         refuseWhenAnyEditFailed(verdict);
-        requireCurrentRevision(account, customer, expectedRevision);
 
-        this.accountMapper.applyUpdate(account, request);
-        this.customerMapper.applyUpdate(customer, request);
+        AccountUpdateResponse written = this.writeTransaction.execute(status -> {
 
-        // WHY : Assumptions: the flush is FORCED here rather than left to the transaction's end, so an
-        //       optimistic failure is raised while this method is still on the stack and the response
-        //       below is never assembled from rows that failed to persist. Left to commit time it would
-        //       surface from the transaction interceptor after a response object had already been built.
-        //       Alternatives Considered: catching it here and raising a conflict of our own. Rejected
-        //       because the shared advice ALREADY renders an optimistic-lock failure as HTTP 409 with
-        //       the baseline's verbatim changed-record sentence, so translating it here would put one
-        //       behaviour in two places and the two could disagree about the wording.
-        this.customers.saveAndFlush(customer);
-        this.accounts.saveAndFlush(account);
+            // WHY : Refactoring Rationale: both rows are RE-READ inside the write transaction rather than
+            //       the rows read above being reattached, and the revision is checked against the re-read
+            //       pair. The rows read above are detached by the time the edits finish and a concurrent
+            //       update may have committed while the remote validations were in flight, so writing the
+            //       earlier images would either resurrect stale values or rely on the version column
+            //       alone to notice. Re-reading makes the precondition answer the state the write will
+            //       actually replace, which is what keeps the conflict outcome truthful.
+            Account account = loadAccount(accountId);
+            Customer customer = loadCustomer(accountId);
+            requireCurrentRevision(account, customer, expectedRevision);
 
-        // WHY : Assumptions: the aggregate channel carries the baseline's no-change sentence when the
-        //       comparison found nothing to change and its accepted sentence otherwise, because those
-        //       are the two texts the baseline latches on these two paths -- app/cbl/COACTUPC.cbl L1769
-        //       reaching the condition at L491 and L492, and the condition at L527 and L528. Emitting
-        //       the accepted sentence on both paths would tell a user that a submission which changed
-        //       nothing had changed something.
-        return this.accountMapper.toAccountUpdateResponse(account,
-                this.customerMapper.toCustomerDetail(customer),
-                verdict.noChangesFound() ? MESSAGE_NO_CHANGES_DETECTED : MESSAGE_UPDATE_ACCEPTED,
-                List.of());
+            this.accountMapper.applyUpdate(account, request);
+            this.customerMapper.applyUpdate(customer, request);
+
+            // WHY : Assumptions: the flush is FORCED here rather than left to the transaction's end, so an
+            //       optimistic failure is raised while this callback is still on the stack and the
+            //       response below is never assembled from rows that failed to persist. Left to commit
+            //       time it would surface from the template after a response object had already been
+            //       built. Alternatives Considered: catching it here and raising a conflict of our own.
+            //       Rejected because the shared advice ALREADY renders an optimistic-lock failure as HTTP
+            //       409 with the baseline's verbatim changed-record sentence, so translating it here would
+            //       put one behaviour in two places and the two could disagree about the wording.
+            this.customers.saveAndFlush(customer);
+            this.accounts.saveAndFlush(account);
+
+            // WHY : Assumptions: the aggregate channel carries the baseline's no-change sentence when the
+            //       comparison found nothing to change and its accepted sentence otherwise, because those
+            //       are the two texts the baseline latches on these two paths -- app/cbl/COACTUPC.cbl
+            //       L1769 reaching the condition at L491 and L492, and the condition at L527 and L528.
+            //       Emitting the accepted sentence on both paths would tell a user that a submission
+            //       which changed nothing had changed something.
+            return this.accountMapper.toAccountUpdateResponse(account,
+                    this.customerMapper.toCustomerDetail(customer),
+                    verdict.noChangesFound() ? MESSAGE_NO_CHANGES_DETECTED : MESSAGE_UPDATE_ACCEPTED,
+                    List.of());
+        });
+
+        return Objects.requireNonNull(written,
+                "the write transaction returned no response, which its callback cannot do");
+    }
+
+    /**
+     * The account and customer rows one update compares its submission against.
+     *
+     * <p>Assumptions: the pair exists so the read unit of work can hand both rows back to a caller that
+     * then runs outside it. Returning them one at a time would need two transactions and reintroduce the
+     * split snapshot the single read closes.</p>
+     *
+     * @param account the account master row as read; never {@code null}
+     * @param customer the customer master row as read; never {@code null}
+     */
+    private record LoadedPair(Account account, Customer customer) {
     }
 
     /**
@@ -2249,8 +2340,22 @@ public class AccountUpdateService {
      */
     private Account loadAccount(long accountId) {
         return this.accounts.findById(accountId)
+                // WHY : Refactoring Rationale: the message used to end in the account identifier. It no
+                //       longer does, because the sensitive-data contract in
+                //       docs/architecture/observability.md names ACCOUNT AND CUSTOMER IDENTIFIERS
+                //       alongside the primary account number as values a durable diagnostic may not
+                //       carry, and states that a prohibited value is OMITTED rather than abbreviated.
+                //       This message is durable in two places at once: the shared advice writes it to
+                //       the operational record AND returns it in the response body.
+                // WHY : Assumptions: the identifier being present in this route's request line does not
+                //       license repeating it. This write IS keyed in the path -- PUT
+                //       /api/v1/accounts/{accountId} is an end-user route and stays that way, because a
+                //       caller updating one account addresses it -- so the load balancer records the
+                //       value whatever this message says. The contract governs what THIS system writes,
+                //       and an existing disclosure elsewhere is not an argument for adding another; the
+                //       correlation identifier the shared filter stamps already joins the two records.
                 .orElseThrow(() -> new NoSuchElementException(
-                        "no account master row exists for account " + accountId));
+                        "no account master row exists for the requested account"));
     }
 
     /**
@@ -2261,18 +2366,28 @@ public class AccountUpdateService {
      * obtained earlier, at {@code app/cbl/COACTUPC.cbl} L3919, and the by-account index the target reads
      * is the migrated form of the alternate index the online programs read as a file.</p>
      *
+     * <p>Refactoring Rationale: the row is bounded in the STATEMENT. This previously read every
+     * cross-reference row the account holds and then took the first, which is the same answer reached by
+     * the more expensive route: the by-account index is not unique, so the row count is whatever the data
+     * holds, and every row carries a primary account number -- so a question about ONE row pulled all of
+     * an account's cardholder data into this process's heap. The bounded query already existed on the
+     * repository, declared for exactly this call.</p>
+     *
+     * <p>Assumptions: the tie-break is unchanged and is still the lowest card number, which the bounded
+     * query names in its own ordering, so the row this resolves to is identical to the row the wider read
+     * resolved to. That matters because the customer it yields is the row this update writes.</p>
+     *
      * @param accountId the account whose customer is required
      * @return the managed row, never {@code null}
      * @throws NoSuchElementException if the account has no cross-reference row, or the row names a
      *     customer the customer master does not hold
      */
     private Customer loadCustomer(long accountId) {
-        return this.crossReferences.findByAccountIdOrderByCardNumAsc(accountId).stream()
-                .findFirst()
-                .map(row -> row.getCustomerId())
+        return this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId)
+                .map(CardXref::getCustomerId)
                 .flatMap(this.customers::findById)
                 .orElseThrow(() -> new NoSuchElementException(
-                        "no customer could be resolved for account " + accountId));
+                        "no customer could be resolved for the requested account"));
     }
 
     /**

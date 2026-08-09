@@ -214,8 +214,8 @@ document.
 
 | Target queue | Replaces | Type | Key configuration |
 |---|---|---|---|
-| `carddemo-pauth-request-<env>.fifo` + `-dlq` | the pending-authorization request queue | FIFO | `MessageGroupId` is a purpose-scoped opaque HMAC of the card number, never the number itself; `MessageDeduplicationId` is the same purpose-scoped tokenisation of the transaction identifier; DLQ at `maxReceiveCount` 5 |
-| `carddemo-pauth-reply-<env>.fifo` + `-dlq` | the pending-authorization reply queue | FIFO | Short retention, mirroring the original non-persistent reply. The group identity is the same opaque token the request carried, and retention must outlast the whole visibility, receive-count and long-poll budget so a repeatedly failing reply reaches its dead-letter queue before the source can expire it |
+| `carddemo-pauth-request-<env>.fifo` + `-dlq` | the pending-authorization request queue | FIFO | `MessageGroupId` is the card number itself and `MessageDeduplicationId` is the transaction identifier itself, exactly as §0.4.1.8 freezes them; DLQ at `maxReceiveCount` 5 |
+| `carddemo-pauth-reply-<env>.fifo` + `-dlq` | the pending-authorization reply queue | FIFO | Short retention, mirroring the original non-persistent reply. The group identity is the same card number the request carried, and retention must outlast the whole visibility, receive-count and long-poll budget so a repeatedly failing reply reaches its dead-letter queue before the source can expire it |
 | `carddemo-account-inquiry-request-<env>` + `-dlq` | account-detail traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `account-service` |
 | `carddemo-date-inquiry-request-<env>` + `-dlq` | date-conversion traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `reference-service` |
 | `carddemo-inquiry-reply-<env>` + `-dlq` | the two per-flow inquiry reply queues | Standard | Configured shared destination; replies echo the request's correlation attribute |
@@ -225,10 +225,34 @@ document.
 
 **The authorization guarantee is per-card FIFO on the source queue, not an
 unqualified claim of order across dead-letter handling.** The `MessageGroupId`
-is produced by `CsvAuthCodec.AuthRequest.orderGroup(OpaqueIdentifier)`, using
-the purpose `carddemo/pauth/order-group`. Equal card numbers therefore map to
-one stable 22-character URL-safe token, different purposes cannot be joined by
-token equality, and the primary account number never enters SQS metadata.
+is the card number, `PA-RQ-CARD-NUM`, carried through unchanged, and the
+`MessageDeduplicationId` is the transaction identifier, `PA-RQ-TRANSACTION-ID`.
+§0.4.1.8 states both literally and §0.7.6 repeats the grouping rule, so equal
+card numbers map to one group by construction rather than by agreement on a
+derivation.
+
+- Refactoring Rationale: both identities were previously purpose-scoped keyed
+  tokens — 22-character URL-safe HMACs under `carddemo/pauth/order-group` and
+  `carddemo/pauth/deduplication` — so that no primary account number entered SQS
+  metadata. That is withdrawn, because the derivation removed the two guarantees
+  it sat on. A group identity orders one card's messages only while **every**
+  producer on the queue computes the same value for that card, and a
+  deduplication identity suppresses a resend only while the **requester** can
+  predict it; a value keyed from one consumer's secret satisfies neither, so a
+  second producer written to this document would have split one card across two
+  groups and a requester's resend would have been accepted as new.
+- Trade-offs: the primary account number therefore **does** enter SQS metadata,
+  where server-side encryption of the message body does not reach it. The
+  consequence is registered as divergence
+  `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in
+  [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) rather
+  than left implicit, and three provisioned controls bound it: SSE-KMS under a
+  customer-managed key, reachability only through an interface endpoint inside
+  the private network, and read access scoped to the task roles of the consumer
+  and of the requesting producer. What those controls do not cover is queue
+  telemetry and any log line that records a group identity, which is why
+  `OutboxMetadataConfidentialityTest` pins the exposure to that **one** metadata
+  field and asserts every other attribute is free of the number.
 
 SQS dead-lettering creates a real semantic boundary: once a poison message
 exhausts `maxReceiveCount` and leaves the source queue, later messages in the
@@ -237,7 +261,7 @@ never be observed out of sequence was therefore too broad. The target makes the
 following narrower and enforceable commitment:
 
 1. Messages that remain on either authorization source queue are delivered in
-   send order within their opaque per-card group.
+   send order within their per-card group.
 2. A failed message is preserved on a FIFO dead-letter queue whose
    `redrivePermission` is `byQueue` for exactly one source queue and whose
    retention is fourteen days.
@@ -248,9 +272,9 @@ following narrower and enforceable commitment:
 4. Runtime task roles have receive/delete/send capabilities only for their
    assigned queues and no message-move capability. Recovery is a reviewed
    operator action: reconcile the failed authorization first, then replay
-   messages individually with the original opaque group and logical transaction
-   identity. Durable transaction-id idempotency remains the backstop against a
-   duplicate business effect.
+   messages individually with the original group and transaction identity.
+   Durable transaction-id idempotency remains the backstop against a duplicate
+   business effect.
 
 - Trade-offs: this revision chooses availability for later authorizations over
   blocking every future message for one card indefinitely behind an
@@ -312,7 +336,9 @@ constants:
   broker: request/reply is preserved by carrying an explicit reply address per
   message plus a correlation attribute, exactly as the descriptor already does
   (L413–L414 inbound, L745 echoed outbound), and per-card ordering is supplied by
-  FIFO grouping on a keyed opaque token derived from the card number. Second, a
+  FIFO grouping on the card number, which §0.4.1.8 fixes as the `MessageGroupId`
+  and which is what makes the grouping equal for equal cards across every
+  producer. Second, a
   broker is a stateful component with
   its own version lifecycle, storage sizing, queue-depth monitoring and failover
   behaviour to operate, and none of those obligations buys anything for a workload
@@ -361,7 +387,7 @@ repository receives them into a thirteen-character item of its own.
 |---|---|---|---|---|
 | 1 | `PA-RQ-AUTH-DATE` | `X(06)` | 6 | |
 | 2 | `PA-RQ-AUTH-TIME` | `X(06)` | 6 | |
-| 3 | `PA-RQ-CARD-NUM` | `X(16)` | 16 | The FIFO `MessageGroupId` is derived from this field |
+| 3 | `PA-RQ-CARD-NUM` | `X(16)` | 16 | This field **is** the FIFO `MessageGroupId`, per §0.4.1.8 |
 | 4 | `PA-RQ-AUTH-TYPE` | `X(04)` | 4 | |
 | 5 | `PA-RQ-CARD-EXPIRY-DATE` | `X(04)` | 4 | |
 | 6 | `PA-RQ-MESSAGE-TYPE` | `X(06)` | 6 | |
@@ -376,7 +402,7 @@ repository receives them into a thirteen-character item of its own.
 | 15 | `PA-RQ-MERCHANT-CITY` | `X(13)` | 13 | |
 | 16 | `PA-RQ-MERCHANT-STATE` | `X(02)` | 2 | |
 | 17 | `PA-RQ-MERCHANT-ZIP` | `X(09)` | 9 | |
-| 18 | `PA-RQ-TRANSACTION-ID` | `X(15)` | 15 | The FIFO `MessageDeduplicationId` is derived from this field |
+| 18 | `PA-RQ-TRANSACTION-ID` | `X(15)` | 15 | This field **is** the FIFO `MessageDeduplicationId`, per §0.4.1.8 |
 
 > **Measured — eighteen fields, and the parse agrees with the declaration.** The
 > copybook declares eighteen elementary items at L19–L36 inclusive, and the
@@ -779,6 +805,37 @@ declaration at L397 and L751 is mapped rather than dropped as transport trivia.
   receives the discriminator it will need; claiming the dispatch exists would send
   a reader looking for a branch that is not there.
 
+### The inquiry replies declare `text/plain`, not `text/csv`
+
+The `text/csv` value above belongs to the **authorization** flow alone, and the
+distinction is load-bearing rather than pedantic. That flow really is delimited —
+eighteen comma-separated fields on the request and six on the reply — so a
+consumer that split the payload on commas would parse it correctly, and a
+`contentType` of `text/csv` tells it that it may.
+
+The account-inquiry reply is not delimited. `COACCT01.cbl` declares
+`01 REPLY-MESSAGE PIC X(1000).` at L107, blanks it at L391, and fills it with a
+single **group move** — `MOVE WS-ACCT-RESPONSE TO REPLY-MESSAGE` at L426 — so the
+reply is a fixed-width positional record padded to its declared width. The
+program contains no comma literal anywhere, and a consumer that split the payload
+on commas would recover one field holding the whole record.
+`InquiryMessageListener` therefore stamps `text/plain`.
+
+- Refactoring Rationale: this attribute previously carried `text/csv` on the
+  inquiry reply, copied from the authorization flow where it is correct. Nothing
+  consumed it, so the value was inert and the defect was invisible — which is
+  precisely why it was worth correcting rather than leaving: the attribute exists
+  to be the discriminator a future consumer branches on, and a discriminator that
+  names the wrong format is worse than an absent one, because the consumer it
+  misleads will have had every reason to trust it.
+- Trade-offs: `text/plain` rather than a bespoke media type such as
+  `application/vnd.carddemo.acctinfo+fixed`. A registered-looking vendor type
+  would carry more information, at the cost of inventing a name no registry
+  holds and that no consumer could resolve. What matters at this boundary is the
+  negative claim — *this is not delimited* — and `text/plain` makes it in a value
+  every client library already understands. The width and field order remain
+  documented by the payload table rather than by the media type.
+
 ---
 
 ## Correlation identity is carried in the descriptor, not reconstructed
@@ -1003,9 +1060,10 @@ graph LR
 ```
 
 Target mapping follows the two disciplines rather than flattening them. The
-authorization path uses FIFO queues with a purpose-scoped opaque
-`MessageGroupId` and an opaque correlation identity, and closes its reply window
-with the outbox described in the next section. The inquiry path uses standard queues with
+authorization path uses FIFO queues whose `MessageGroupId` is the card number and
+whose `MessageDeduplicationId` is the transaction identifier, echoes the
+requester's own correlation value unchanged, and closes its reply window with the
+outbox described in the next section. The inquiry path uses standard queues with
 delete-on-success, which is the direct analogue of a get under syncpoint: the
 message becomes visible again if the handler fails, and is deleted only once the
 work and the reply have succeeded. Both paths keep a dead-letter queue at
@@ -1200,31 +1258,36 @@ flag. The declaration and the observed behaviour must not be conflated.
 
 | Baseline bound | Location | Target equivalent |
 |---|---|---|
-| **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | **Enforced — exactly 500** handled requests per processing window, the bound being checked before the next receive. `AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT`, overridable by `carddemo.messaging.request-process-limit` |
+| **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | **Reproduced — exactly 501** admitted requests per processing window, intake closing before the next receive. `AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT` = 500 plus its published `BASELINE_COMPARISON_OFFSET` = 1; the declared 500 is what `carddemo.messaging.request-process-limit` configures |
 | A five-second get-with-wait | `MOVE 5000 TO WS-WAIT-INTERVAL` at L242, applied to the get at L393 | A five-second receive wait — `carddemo.messaging.poll-timeout-seconds`, default 5 |
 
-- Refactoring Rationale: **the target preserves the declared business limit rather
-  than the observed count.** Enforcing exactly 500 is an intentional divergence,
-  recorded as one: the name and the literal both state 500, while the 501st message
-  follows from the order of increment and comparison. Preserving 501 would promote an
-  incidental consequence of statement order into a contract the source never
-  declares, which is the reason the declared figure is the one carried across. The
-  five-second wait remains unchanged to isolate this divergence from transport
-  tuning. Both values
-  are configurable so later performance work can change them with measured
-  evidence rather than by editing code.
+- Refactoring Rationale: **the target reproduces the observed count, and the
+  divergence that recorded otherwise has been withdrawn.** An earlier revision
+  enforced exactly 500 and registered the missing message as `D-AUTH-REQUEST-WINDOW`.
+  That is reversed: functional parity with observable behaviour is a stated constraint
+  of this migration, the observable behaviour is 501 requests per run, and a divergence
+  registered against a difference that can simply be removed is a difference that
+  should have been removed. What made the earlier choice attractive was that a constant
+  reading 500 would have to be explained as meaning 501; that is answered by holding
+  the configured value at the declared 500 and the `+1` as a separately named constant
+  beside the citation that derives it, so the two numbers stay distinguishable. The
+  five-second wait remains unchanged, to keep this change isolated from transport
+  tuning. Both values are configurable so later performance work can change them with
+  measured evidence rather than by editing code.
 
 - Refactoring Rationale: this row now describes code rather than an intention. An
   earlier revision of this section stated the enforcement in the future tense while
   no bounded run existed anywhere, so the document committed to a divergence the
   service did not yet implement — the consumer counted nothing and handled an
   unbounded number of requests. `AuthorizationRequestListener` now counts every request it takes off
-  the queue and closes its window on exactly the configured quota.
+  the queue and closes intake on exactly its admission allowance, which is the configured
+  quota plus the baseline comparison offset.
 
 - Assumptions: **closing the window means closing intake, not refusing a message.**
   The bound is enforced by `ContainerCyclingWindowBoundary`, which stops the listener
   container and starts it again, so the request that would have been the 501st of the
-  window is never received and remains on the queue until the next window opens.
+  window is never received and remains on the queue until the next window opens — with
+  the allowance now at 501, that is the 502nd request of the window.
   Refusing it inside the handler was rejected: throwing would send a legitimate
   request toward the dead-letter queue over a bound that has nothing to do with the
   request, and returning without handling would delete a request nobody answered.
@@ -1238,9 +1301,12 @@ flag. The declaration and the observed behaviour must not be conflated.
 - Trade-offs: every failure path in the boundary leaves intake **open**. A window
   that failed to reopen would halt every authorization in the system, which is
   strictly worse than a window that ran long, so the stop and the start are guarded
-  separately and the start is unconditional. The divergence is registered as
-  **D-AUTH-REQUEST-WINDOW** in
-  [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
+  separately and the start is unconditional. Assumptions: no divergence is registered
+  for this bound any longer. The `D-AUTH-REQUEST-WINDOW` entry that once recorded it was
+  withdrawn when the observed 501 was reproduced, and the withdrawal itself is recorded
+  in the section preamble of
+  [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) so a reader
+  following an old citation finds an explanation rather than a missing heading.
 
 **No throughput, latency or ordering figure in this section is a measurement.**
 The declaration, increment, comparison and wait above are quoted from the cited
@@ -1303,12 +1369,22 @@ sentence above can be read as a claim to the contrary:
   authorization consumer as `AuthorizationRequestListener` with its bounded processing
   window, `AuthReplyOutbox` and `OutboxPublisher`; the account inquiry consumer as
   `InquiryMessageListener`; and the reference date consumer as
-  `DateInquiryMessageListener` with `DateConversionMessageListener`, each behind its
-  own `SqsConfig`. **No application message has been sent through these queues.** Every
+  `DateInquiryMessageListener`, each behind its own `SqsConfig` and each the **only**
+  `@SqsListener` bound to its queue. **No application message has been sent through
+  these queues.** Every
   figure in this document is either quoted from a cited baseline line or arithmetic over
   declared widths; none is an observation of a running messaging flow, and no
   throughput, latency or ordering behaviour has been measured.
 
+  - Refactoring Rationale: the reference date flow is listed with ONE consumer, where this
+    bullet previously named two — `DateInquiryMessageListener` "with
+    `DateConversionMessageListener`". Naming two was not a richer description of the same
+    flow; it described a defect. Both classes declared `@SqsListener` on the same request
+    queue, so each request went to whichever bean received it, and the two disagreed about
+    the reply's media type, about whether a requester's `expiresAt` was honoured, and about
+    whether a reply went to the configured queue or to one the sender named. The second
+    consumer is withdrawn. Its one queue-independent member, the date-edit verdict the
+    synchronous endpoint calls, moved to `DateConversionService`, which addresses no queue.
   - Refactoring Rationale: this bullet has now been corrected twice in the same
     direction — first from "all three consumers are unauthored" to "one of three", and
     now to all three — and the pattern is worth naming rather than just fixing. A
@@ -1318,6 +1394,19 @@ sentence above can be read as a claim to the contrary:
     would conclude the outbox, the request window and both inquiry flows described above
     were aspirational, and would not look for the code that implements them. What is
     genuinely still outstanding is narrower and unchanged: nothing has been **run**.
+  - Refactoring Rationale: the "each the **only** `@SqsListener` bound to its queue"
+    clause and the removal of a second reference consumer from this bullet record a real
+    defect rather than a tidy-up. The reference date flow briefly carried TWO active
+    consumers on one request queue — `DateInquiryMessageListener` and a
+    `DateConversionMessageListener` — with different reply widths, different reply
+    routing, different content types and different requester-expiry handling, so which
+    contract a message met depended on which listener container polled it first. That is
+    not redundancy, it is a nondeterministic wire contract, and this document listing both
+    as though authoring two were a completeness milestone is how it survived review. The
+    competing consumer has been removed and
+    `ReferenceQueueConsumerContractTest` now fails the build if a second listener is ever
+    bound to that queue, so the property this clause claims is enforced rather than
+    described.
 * The **external point-of-sale authorizer that produces authorization requests is
   not supplied by the baseline.** Only a test stub exists, and building a real
   producer is not in scope. The practical consequence is asymmetric confidence: the

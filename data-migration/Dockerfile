@@ -167,6 +167,18 @@ COPY requirements.txt requirements-build.txt ./
 #   of starting a source build that dies deep inside a toolchain this image never
 #   provides. It is applied HERE only and not to the package install below,
 #   because that one legitimately builds a local source tree.
+# Assumptions: TWO members of that closure are platform-tagged rather than
+#   pure Python -- `cryptography`, which the protected-column loader needs to write
+#   the AES-GCM envelopes `account.customers` and `card.cards` store, and its own
+#   dependency `cffi`. Each is hash-locked to the artifact THIS base image
+#   installs: cryptography's cp311-abi3 manylinux_2_34 wheel and cffi's cp313
+#   manylinux2014 wheel, both for linux/amd64 with glibc, which the pinned
+#   python:3.13.14-slim-trixie digest above supplies. That is why the base image is
+#   pinned by DIGEST and not merely by tag, and why building this image for another
+#   architecture fails on a hash mismatch rather than resolving a different wheel:
+#   the manifest states the reference platform and the digest is what holds the
+#   image to it. `data-migration/requirements.txt` records why the exception is
+#   accepted at all.
 # Assumptions: the manifest installed here is the RUNTIME closure alone, and the
 #   lint-and-test closure is a separate FILE rather than a parsed section of this
 #   one, because a file boundary cannot be moved by an edit to a comment. What a

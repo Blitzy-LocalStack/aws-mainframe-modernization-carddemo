@@ -2,18 +2,67 @@
 
 Purpose
 -------
-Turn the security user extract into decoded records the Aurora loaders and the verification
-passes can consume, one record at a time. Unlike every sibling reader this record has exactly
-ONE shipped corpus -- the fixed-length EBCDIC dataset -- so
-:func:`read_ebcdic_security_users` is THE dataset path here and the character entry points
-exist only for text a caller already holds. Every entry point yields the same decoded shape,
-so the two can be compared against each other without adapting to a second contract.
+Turn the security user extract into decoded records the Aurora loaders and the verification passes
+can consume, one record at a time. Unlike every sibling reader this record has exactly ONE corpus
+-- the fixed-length EBCDIC dataset -- and this module publishes exactly ONE decode path to match
+it: :func:`decode_ebcdic_security_user`, :func:`iter_ebcdic_security_users` and
+:func:`read_ebcdic_security_users`. There is deliberately NO ``decode_ascii_*`` /
+``iter_ascii_*`` / ``read_ascii_*`` trio here, which makes this reader and
+``carddemo_migration.readers.export_record`` the two byte-only readers in the package.
+
+Refactoring Rationale: the character trio WAS published, and removing it closed a route rather
+than merely tidying an API. This is the credential-bearing record: ``SEC-USR-PWD`` holds an
+eight-character password in cleartext in the baseline. A character entry point can only be fed
+text somebody has already transcoded, and every transcode of this dataset is a copy of the
+plaintext credential written somewhere outside the one REFERENCE-only file that is supposed to
+hold it -- a fixture, a scratch file, a log, a test artifact. The trio therefore normalised
+exactly the handling this migration exists to end, and it did so for the only record where it
+matters most. Keeping it "for a caller that already holds text" was the wrong trade: no caller
+should hold that text, and any that does has already made the copy this reader must not
+legitimise.
+
+Trade-offs: what is lost with the trio is the ability to compare a converted text form against
+the byte form, which every sibling reader offers and which is genuinely useful for the nine
+records that ship both. It costs nothing here, because no ASCII corpus of this record exists to
+compare against -- the comparison had to synthesise its own input, so it verified a transcode
+this module performed rather than a corpus anybody ships. The two masked renderings still take a
+character record, because a diagnostic renders characters by nature, and they are renderings
+rather than decode paths: neither returns a decoded record and neither can produce the password
+(see :data:`SUPPRESSED_FIELD_NAMES` and :func:`render_masked_security_user_record`).
 
 This module follows the contract ``carddemo_migration.readers.account`` established and differs
 from it only in which record descriptor it names. Where the reasoning behind a step is identical
 to that module's it is referenced rather than restated, because two copies of one justification
 drift apart and then one of them is wrong; where this record differs, the difference is recorded
 here at the point it matters.
+
+Parameters
+----------
+None
+    A module takes no argument. Every published callable states its own parameters at its own
+    definition, and this module reads no argument, option or environment variable while being
+    imported.
+
+Returns
+-------
+None
+    Importing binds names only: :data:`LOADED_FIELDS`, :data:`DROPPED_FIELD_NAMES`,
+    :data:`SUPPRESSED_FIELD_NAMES` and :data:`USER_TYPE_DOMAIN` are derived from the record
+    descriptor, and nothing else is computed. No dataset is opened, no database connection is
+    made, no environment variable is read and no network is reached at import time, so importing
+    this module is safe on a bare checkout with no credential configured.
+
+Raises
+------
+LayoutError
+    At import, from ``carddemo_migration.copybook.layouts``, which this module imports for its
+    record descriptor: that module validates every declared layout's geometry and both disclosure
+    allowlists as it loads, and refuses to import if any of them disagree. The failure belongs to
+    that module and is neither caught nor re-worded here. At call time, from the two masked
+    renderings, if ``CARDDEMO_MASK_HMAC_KEY`` is set to material this package refuses -- anything
+    that is not canonical base64 of at least thirty-two distinct-valued bytes -- because a
+    guessable key returns the redaction tag to the confirmable digest it replaced. Leaving the
+    variable unset is supported and is not an error.
 
 What this module reads
 ---------------------
@@ -24,11 +73,11 @@ approximate. ``app/data/ASCII`` holds exactly NINE seeds -- the account, card,
 cross-reference, customer, daily-transaction, disclosure-group, category-balance,
 transaction-category and transaction-type extracts -- and none of them is a security-user
 file, which makes this the only base master with no ASCII twin. ``app/data/EBCDIC`` holds
-``AWS.M2.CARDDEMO.USRSEC.PS`` as the single available source. The character entry points are
-still published rather than omitted, because a caller legitimately holds converted text -- a
-fixture, or an extract somebody transcoded upstream -- and a reader that refused it would push
-that caller into writing its own record cut, which is the one thing this package exists to
-prevent. What is NOT done is inventing a seed: nothing here creates or converts a file, no
+``AWS.M2.CARDDEMO.USRSEC.PS`` as the single available source, and it is the only source this
+module will read: the byte path is the whole dataset surface, for the reason recorded in the
+Purpose above. That path decodes FIELD BY FIELD over :data:`LOADED_FIELDS` and never slices
+the ``SEC-USR-PWD PIC X(08)`` span at all, which is the property a whole-record character
+form cannot offer. What is NOT done is inventing a seed: nothing here creates or converts a file, no
 entry point defaults to a path, and ``app/**`` is REFERENCE-only.
 
 Assumptions: this record's geometry rests on the copybook plus THREE independent
@@ -74,11 +123,13 @@ Security-file exposure control
 Three of this record's four data fields are marked sensitive by the descriptor, and they
 are NOT treated alike:
 
-* The password is **suppressed**. Its bytes are never sliced, so it is never decoded and
-  never a key in a returned mapping, and no representation of it -- plaintext, masked or
-  digested -- is produced by any entry point here. The field's name and geometry may
-  still appear in a diagnostic, because a fault has to be locatable and a refusal has to
-  say what it refused; its content never does.
+* The password is **suppressed**. Its bytes are never sliced on the decode path, so it is never
+  decoded and never a key in a returned mapping; and on the one path that takes a whole record --
+  the whole-record masked rendering -- its span is replaced by a fixed withheld-marker BEFORE the
+  masker runs, so its characters are never an input to a digest either. No representation of it
+  is produced by any entry point here: not plaintext, not masked, not digested, not keyed. The
+  field's name and geometry may still appear in a diagnostic, because a fault has to be locatable
+  and a refusal has to say what it refused; its content never does.
 * Both name parts are **emitted** in the decoded mapping, because the target user table
   stores them, and **redacted** in every diagnostic this module produces.
 * The user identifier and the user type stay verbatim. The identifier is a sign-on name
@@ -93,7 +144,9 @@ one-character type is checked against :data:`USER_TYPE_DOMAIN` and an out-of-dom
 refused rather than passed on. This is the record's only closed value domain, and it is the
 only field whose target column carries a matching constraint, so refusing at the read boundary
 turns what would otherwise surface as a constraint violation naming a table into a diagnostic
-naming the record and the field. Both decode paths funnel through the same check.
+naming the record and the field. The one decode path funnels through the same check, and the
+helper that applies it is shared rather than inlined so that a second path added later cannot
+skip it.
 
 Design decisions (WHY)
 ----------------------
@@ -140,13 +193,12 @@ from carddemo_migration.copybook.ebcdic_codec import decode_field, iter_ebcdic_r
 from carddemo_migration.copybook.layouts import (
     SECUSER_LAYOUT,
     FieldSpec,
-    Kind,
     LayoutError,
     RecordLengthError,
-    iter_ascii_text_records,
     mask_field,
     mask_record,
 )
+from carddemo_migration.readers.source import require_exact_record_width
 
 __all__ = [
     "SECUSER_LAYOUT",
@@ -155,11 +207,8 @@ __all__ = [
     "USER_TYPE_DOMAIN",
     "DecodedSecurityUser",
     "SUPPRESSED_FIELD_NAMES",
-    "decode_ascii_security_user",
     "decode_ebcdic_security_user",
-    "iter_ascii_security_users",
     "iter_ebcdic_security_users",
-    "read_ascii_security_users",
     "read_ebcdic_security_users",
     "record_key",
     "render_masked_security_user_field",
@@ -256,7 +305,17 @@ def _is_padding_field(field: FieldSpec) -> bool:
 #   is emitted. That cost is accepted: a reader that could confirm a credential is a reader that
 #   could disclose one. A caller needing to prove two images agree byte for byte can compare the
 #   raw images without decoding them through this module at all.
-SUPPRESSED_FIELD_NAMES: Final[frozenset[str]] = frozenset({"SEC-USR-PWD"})
+# WHY : Refactoring Rationale: this set is now DERIVED from the descriptor rather than written out
+#   as a literal frozenset of one name. It was a literal while this module was the only reader of
+#   the record, and that was already the weaker arrangement: the generic reader built from the
+#   same descriptor could not see a set declared here, so the two paths decoded the same record
+#   differently and the generic one -- the path the command line actually uses -- published the
+#   credential. The judgement now lives on the descriptor, where both readers read it, and this
+#   name survives as the published view of it so a caller and a verification pass can still assert
+#   the suppression without importing the layouts module to do so.
+SUPPRESSED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    field.name for field in SECUSER_LAYOUT.fields if field.suppressed
+)
 
 
 # WHY : Assumptions: the pad is DROPPED from every decoded record because its 23 trailing
@@ -275,6 +334,38 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in SECUSER_LAYOUT.fields if _is_padding_field(field)
 )
+
+# WHY : Refactoring Rationale: these two constants exist because the whole-record rendering used to
+#   hand the record straight to the shared masker, and the shared masker redacts a sensitive field
+#   by replacing it with an HMAC of its own characters. `SEC-USR-PWD` is marked sensitive, so the
+#   password WAS an input to that HMAC and the resulting tag WAS derived from it -- two different
+#   passwords produced two different tags. That is a digested representation of the credential,
+#   which the exposure-control contract above states this module produces of no kind, and it is a
+#   confirmable one: the value is eight characters from a small realistic space, so anyone holding
+#   the key and the rendering can test a guess by recomputing the tag. The keyed-tag design is
+#   right for a card number or a national identifier, whose target columns store them; it is wrong
+#   for a value with no destination that must never be reproduced in any form.
+# WHY : Assumptions: BOTH constants are needed and they do different jobs. The SUBSTITUTE replaces
+#   the span in the INPUT, so the password's characters are never passed to the masker and no
+#   digest of them is ever computed -- computing one and discarding it would be suppression after
+#   materialisation, which is not suppression. The RENDERING replaces the span in the OUTPUT, so
+#   what a reader sees is an explicit withheld-marker rather than a tag of the substitute that
+#   would be indistinguishable in form from a real keyed tag, and so the rendering is IDENTICAL
+#   under every key -- a property a test can assert and a reader can rely on.
+# WHY : Alternatives Considered: refusing the whole-record rendering outright, which the review
+#   offered as the other option. Rejected: the rendering's purpose is that offsets stay countable
+#   across a full-width record, and this record's remaining three fields are exactly the ones a
+#   failed comparison needs to locate. Withholding one span is a smaller loss than withholding the
+#   only full-width diagnostic the record has.
+# WHY : Trade-offs: the marker is a uniform run of one character rather than a bracketed word,
+#   which costs a little self-description and buys an unmistakable contrast with the shared
+#   masker's `<hex>` tag form -- a run of asterisks reads as "withheld entirely" where a bracketed
+#   code reads as "redacted but comparable", and confusing the two is precisely the mistake the
+#   marker exists to prevent. Both widths come from the DESCRIPTOR, so a copybook change to the
+#   field's width cannot leave either constant the wrong size.
+_SUPPRESSED_FIELD: Final[FieldSpec] = SECUSER_LAYOUT.field(next(iter(SUPPRESSED_FIELD_NAMES)))
+_SUPPRESSED_SPAN_SUBSTITUTE: Final[str] = " " * _SUPPRESSED_FIELD.length
+_SUPPRESSED_SPAN_RENDERING: Final[str] = "*" * _SUPPRESSED_FIELD.length
 
 
 # WHY : Assumptions: the type field is resolved through the descriptor BY NAME, so this module
@@ -298,8 +389,9 @@ def _require_declared_user_type(
     Purpose
     -------
     Enforce the one closed value domain this record carries, at the boundary where the record is
-    read rather than at the boundary where it is written. Both decode paths funnel through here,
-    so the domain cannot be honoured on one entry point and skipped on another.
+    read rather than at the boundary where it is written. Every entry point that yields a decoded
+    record funnels through here, so the domain cannot be honoured on one and skipped on another --
+    a property worth keeping even now that there is one such entry point rather than two.
 
     Parameters
     ----------
@@ -356,143 +448,6 @@ def _require_declared_user_type(
     )
 
 
-def _field_containing(offset: int) -> FieldSpec | None:
-    """Find the declared field whose byte span covers a record offset.
-
-    Purpose
-    -------
-    Let a failure report WHICH field a bad byte falls in, using the layout's own spans, so a
-    diagnostic can be specific about location without quoting any record content.
-
-    Parameters
-    ----------
-    offset : int
-        A zero-based offset into the record.
-
-    Returns
-    -------
-    FieldSpec | None
-        The descriptor whose half-open span contains ``offset``, or ``None`` when the offset lies
-        beyond the declared record; the fields cover the record contiguously, so ``None`` means
-        the offset itself is out of range.
-
-    Raises
-    ------
-    None
-    """
-    for field in SECUSER_LAYOUT.fields:
-        if field.start <= offset < field.end:
-            return field
-    return None
-
-
-def _require_single_byte_record(record: str, number: int) -> str:
-    """Require a record whose character count provably equals its byte count.
-
-    Purpose
-    -------
-    Close the one width failure the shared text-record iterator cannot see. That iterator
-    enforces the declared length in CHARACTERS, which is the right check for text; this one
-    additionally proves every character occupies a single byte, so the character contract also
-    holds at the byte level the field offsets are expressed in.
-
-    Parameters
-    ----------
-    record : str
-        One whole record, already cut to the declared length by the shared iterator.
-    number : int
-        The one-based record number within the source, reported so a rejection names the row
-        that failed.
-
-    Returns
-    -------
-    str
-        ``record`` unchanged, once every character is proven to be single-byte.
-
-    Raises
-    ------
-    RecordLengthError
-        If any character is outside the single-byte range. The record's declared width would
-        then differ from its width in bytes.
-    """
-    # WHY : Assumptions: a multi-byte character satisfies a CHARACTER-count check while occupying
-    #   more than one byte, so it passes the shared iterator's declared-length test and then
-    #   desynchronises every offset after it -- and because a record read one byte out of
-    #   alignment still decodes to plausible characters, nothing later would raise. This check,
-    #   and every other validation in this module, is enforced by an explicit `raise` and never by
-    #   an `assert`: running the interpreter with `-O` strips assert statements outright, so an
-    #   assertion is a validation that disappears in exactly the deployment where a misaligned
-    #   record costs something.
-    if record.isascii():
-        return record
-
-    offset = next(index for index, char in enumerate(record) if not char.isascii())
-    field = _field_containing(offset)
-
-    # WHY : Trade-offs: the message names the record number, the zero-based offset and the
-    #   containing field's geometry, and it quotes NO part of the record -- not the offending
-    #   character and not its code point. That shows exactly WHERE the record failed while
-    #   emitting none of its content, so the diagnostic is safe to log wherever its consumer
-    #   sends it. The reference codec does echo the offending character; the stricter form is
-    #   adopted here because this record's fifty-seven data bytes include
-    #   an eight-character password the baseline stores in CLEAR, so echoing raw content
-    #   would emit a live credential.
-    location = "beyond the declared record" if field is None else f"in field {field.describe()}"
-    raise RecordLengthError(
-        f"record {number} of {SECUSER_LAYOUT.name} holds a character outside the single-byte"
-        f" range at zero-based offset {offset}, {location}; a multi-byte character satisfies"
-        f" the {SECUSER_LAYOUT.reclen}-character width check while occupying more bytes, which"
-        " moves every field offset after it, so the record is rejected rather than decoded"
-    )
-
-
-def _decode_text_field_value(record: str, field: FieldSpec) -> str:
-    """Decode one field of a character record, routing it by its declared storage regime.
-
-    Purpose
-    -------
-    Produce one field's final value from a record that is already characters. Each regime this
-    record declares is named explicitly and routed to the codec that owns it, and anything else
-    is refused.
-
-    Parameters
-    ----------
-    record : str
-        One whole record at its declared character width.
-    field : FieldSpec
-        The descriptor supplying the offset, the width and the regime. Nothing about the field's
-        position is taken from anywhere else.
-
-    Returns
-    -------
-    str
-        The field's characters at full declared width, untrimmed, so trailing pad inside a
-        character field stays data.
-
-    Raises
-    ------
-    LayoutError
-        If the field declares a storage regime that cannot occur in a character record, which is
-        any computational or mixed-regime area.
-    """
-    if field.kind is Kind.TEXT:
-        return record[field.start : field.end]
-
-    # WHY : Assumptions: every regime this record declares is named explicitly above and anything
-    #   else raises, rather than the last branch doubling as a default. A computational or
-    #   mixed-regime area cannot be read from a character record at all: its bytes are packed
-    #   nibbles, machine words or a differently-described overlay, and a character decode of them
-    #   succeeds, keeps the declared width and yields plausible text, so the damage would be
-    #   invisible. Raising here also means a regime added to this record later cannot fall
-    #   silently into whichever branch happens to be last.
-    raise LayoutError(
-        f"field {field.describe()} of record {SECUSER_LAYOUT.name} declares a storage regime"
-        " that cannot be decoded from a character record; only the character and display regimes"
-        " can, and a computational or mixed-regime area must be read from the byte image through"
-        " the EBCDIC record decoder"
-    )
-
-
 def record_key(record: str) -> str:
     """Return the primary key of one character record, sliced by the descriptor.
 
@@ -515,189 +470,24 @@ def record_key(record: str) -> str:
     Raises
     ------
     RecordLengthError
-        If the record is shorter than the declared width, which would make the sliced key short.
+        If the record is not exactly the declared width. Raised by the shared width guard: a short
+        record would yield a short key that collides with a sibling row, and an over-long one means
+        the source was cut on the wrong boundary, so neither is accepted.
     """
     # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
     #   never by a literal. Writing the width here would be a second statement of it, and a key
     #   sliced one character short still looks like a key -- it collides with a sibling record
     #   instead of raising, which a loader would resolve as an upsert onto the wrong row.
-    if len(record) < SECUSER_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"a {SECUSER_LAYOUT.name} record of {len(record)} characters is shorter than the"
-            f" declared {SECUSER_LAYOUT.reclen}, so its"
-            f" {SECUSER_LAYOUT.key_length}-character key cannot be sliced"
-        )
+    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
+    #   now EXACT. This function used to accept any record at least the declared width,
+    #   which its own docstring and every decoder in this module contradict, and the
+    #   over-long case is the more dangerous of the two: the key sliced from it comes from
+    #   the right offsets of the WRONG record -- two rows concatenated, most plausibly --
+    #   so it looks entirely well formed and a loader upserts on it. Delegating also means
+    #   the eight flat readers cannot drift apart on a test they all have to make.
+    require_exact_record_width(record, SECUSER_LAYOUT)
     start = SECUSER_LAYOUT.key_offset
     return record[start : start + SECUSER_LAYOUT.key_length]
-
-
-def decode_ascii_security_user(
-    record: str,
-    *,
-    number: int = 1,
-) -> DecodedSecurityUser:
-    """Decode one security user record from the ASCII seed form.
-
-    Purpose
-    -------
-    Turn a single full-width character record into the published decoded shape: every data field
-    keyed by its copybook name, with the trailing pad dropped.
-
-    Parameters
-    ----------
-    record : str
-        One whole record at exactly the declared record width, with no line terminator. Records
-        at the declared width are what the shared text-record iterator yields.
-    number : int
-        The one-based record number within the source, used only so a rejection names the row
-        that failed. Defaults to 1 for a caller decoding a record in isolation.
-
-    Returns
-    -------
-    DecodedSecurityUser
-        One entry per data field, keyed by the field name exactly as the copybook spells it, in
-        declaration order. The pad is absent.
-
-    Raises
-    ------
-    RecordLengthError
-        If the record is not the declared width, or holds a character outside the single-byte
-        range.
-    LayoutError
-        If a declared field's storage regime cannot be decoded from a character record, or the
-        decoded user type is outside :data:`USER_TYPE_DOMAIN`.
-    """
-    # WHY : Trade-offs: a record of the WRONG width is rejected here rather than padded or cut to
-    #   fit. Truncation would silently discard real data and padding would invent it, and either
-    #   way the row would still decode to well-formed characters, so a wrong-width record would
-    #   load under a misread key with nothing reporting it. The accepted cost is that a genuinely
-    #   malformed source stops the load instead of loading partially.
-    if len(record) != SECUSER_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"record {number} of {SECUSER_LAYOUT.name} is {len(record)} characters against a"
-            f" declared width of {SECUSER_LAYOUT.reclen}; a record of the wrong width means the"
-            " field offsets have moved, so it is rejected rather than padded or truncated"
-        )
-
-    checked = _require_single_byte_record(record, number)
-
-    # WHY : Assumptions: the fields are walked in the descriptor's declaration order, which is the
-    #   record's byte order, so the resulting mapping iterates the record left to right. The pad
-    #   is excluded by iterating the published field tuple rather than by decoding every field and
-    #   filtering afterwards, which also avoids decoding 23 bytes of pad on every record.
-    # WHY : Assumptions: the domain check runs on the assembled mapping rather than inside the
-    #   comprehension, so the two decode paths share ONE statement of the rule despite reaching it
-    #   through different per-field codecs. A check written into each codec would be two rules that
-    #   look like one, and the pair would drift.
-    return _require_declared_user_type(
-        {field.name: _decode_text_field_value(checked, field) for field in LOADED_FIELDS},
-        number,
-    )
-
-
-def iter_ascii_security_users(
-    source: str | Iterable[object],
-) -> Iterator[DecodedSecurityUser]:
-    """Decode the ASCII seed form of the security user file, one record at a time.
-
-    Purpose
-    -------
-    Stream decoded records from character data the caller already holds or is already iterating,
-    delegating every record boundary decision to the shared text-record iterator.
-
-    Parameters
-    ----------
-    source : str | Iterable[object]
-        The seed data as either the whole text, or an iterable whose every element is one LINE,
-        with or without its terminator. An open text stream is such an iterable. A byte object is
-        refused, because no character encoding is guessed here.
-
-    Returns
-    -------
-    Iterator[DecodedSecurityUser]
-        Each record in order, in the published decoded shape. A source with no records yields
-        nothing at all.
-
-    Raises
-    ------
-    LayoutError
-        If the source is a byte object, is neither text nor iterable, or produces an element that
-        is not a line, or if a field declares a regime a character record cannot hold, or a
-        decoded user type is outside :data:`USER_TYPE_DOMAIN`.
-    RecordLengthError
-        If a line is longer than the declared record width, or a record holds a character outside
-        the single-byte range.
-    """
-    # WHY : Assumptions: the record cut is DELEGATED and not written again here. That iterator
-    #   owns one statement of the text-mode contract for the whole package: it splits on the
-    #   separator, removes at most one trailing carriage return and separator per row so trailing
-    #   blanks stay data, drops the single phantom empty piece a text ending in a separator
-    #   produces, right-pads a short line, and REJECTS an over-long one. A second implementation
-    #   here is exactly the drift this dependency edge exists to prevent, and it would be
-    #   invisible: two readers stripping terminators slightly differently both return well-formed
-    #   records.
-    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- right-padding it
-    #   with blanks -- is inherited deliberately. No ASCII seed ships for this record, so
-    #   the tolerance engages only for whatever text a caller supplies, and padding on the
-    #   right cannot move a field that is present.
-    records = iter_ascii_text_records(source, SECUSER_LAYOUT.reclen)
-
-    for number, record in enumerate(records, start=1):
-        yield decode_ascii_security_user(record, number=number)
-
-
-def read_ascii_security_users(path: pathlib.Path) -> Iterator[DecodedSecurityUser]:
-    """Stream the security user file from an ASCII seed file at an explicit path.
-
-    Purpose
-    -------
-    Open one named seed file, stream its records through the shared text-record contract, and
-    close it when the caller stops reading.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        The exact seed file to read. The caller names the file; this function never searches a
-        directory for it.
-
-    Returns
-    -------
-    Iterator[DecodedSecurityUser]
-        Each record in order, in the published decoded shape. A zero-byte file yields nothing and
-        is not an error.
-
-    Raises
-    ------
-    OSError
-        If the path cannot be opened or read.
-    LayoutError
-        If the file produces an element that is not a line, or a field declares a regime a
-        character record cannot hold, or a decoded user type is outside
-        :data:`USER_TYPE_DOMAIN`.
-    RecordLengthError
-        If a line is longer than the declared record width, or a record holds a character outside
-        the single-byte range.
-    """
-    # WHY : Assumptions: the caller supplies an EXPLICIT file and this function never globs a
-    #   directory to find one. The seed directories make that concrete: they hold a zero-byte
-    #   placeholder and, in the EBCDIC tree, names differing by a single character, so a pattern
-    #   match would either sweep the placeholder in or load a dataset twice -- and a doubled image
-    #   still divides by the record length with remainder zero, so nothing downstream would catch
-    #   it and every money total would come out doubled.
-    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that is
-    #   total over all 256 byte values rather than through a strict ASCII decode. Both reject a
-    #   non-conforming file but differ in WHERE: a strict decode fails inside the interpreter's
-    #   reader with an untyped encoding error, which would make the single-byte guard above
-    #   unreachable, whereas a total page maps each byte to one character so the failure surfaces
-    #   as this package's own record-length error naming the offset.
-    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the shared
-    #   iterator's own whole-text scanner, so streaming this handle line by line and passing the
-    #   whole text produce identical records. Leaving the default in place would let the
-    #   interpreter translate and split on a carriage return as well, moving terminator policy out
-    #   of the module that owns it -- which matters for this corpus specifically, because three of
-    #   the nine ASCII seeds carry carriage returns on some rows and not others.
-    with path.open("r", encoding="latin-1", newline="\n") as handle:
-        yield from iter_ascii_security_users(handle)
 
 
 def _require_full_record_image(record: bytes | bytearray | memoryview) -> bytes:
@@ -811,8 +601,9 @@ def decode_ebcdic_security_user(
     -------
     DecodedSecurityUser
         One entry per data field, keyed by the field name exactly as the copybook spells it, in
-        declaration order, with the pad dropped. The shape is identical to the ASCII path's,
-        which is what makes the two corpora comparable.
+        declaration order, with the pad dropped. This is the record's ONLY decoded shape: the
+        character path that once produced an identical one is withdrawn, for the reasons recorded
+        above :func:`record_key`.
 
     Raises
     ------
@@ -965,13 +756,17 @@ def render_masked_security_user_record(record: str) -> str:
     str
         A rendering of exactly the declared width, with each sensitive field replaced by a
         same-width redaction and every other field left verbatim, so offsets can still be counted
-        across it.
+        across it. The SUPPRESSED field's span holds a fixed same-width withheld-marker that is
+        the same under every key and is derived from nothing in the record, so the rendering
+        carries no representation of the password -- not its characters, not a digest of them, not
+        a keyed tag of them.
 
     Raises
     ------
     RecordLengthError
-        If the record is not the declared width. Raised by the shared masking helper, whose width
-        check is the reason this rendering can be relied on to stay byte-aligned.
+        If the record is not the declared width, which is checked here and again by the shared
+        masking helper; either check is the reason this rendering can be relied on to stay
+        byte-aligned.
     LayoutError
         If a field slice comes out the wrong width, which the descriptor's own geometry
         validation makes unreachable.
@@ -987,15 +782,21 @@ def render_masked_security_user_record(record: str) -> str:
     #   what makes a masked diff still able to say WHICH record and WHICH field differ while
     #   emitting no part of the identity. A random or constant filler would preserve the width and
     #   destroy exactly that property, which is the reason the keyed tag is used instead.
-    # WHY : Assumptions: the redaction is delegated to the shared helper rather than applied here,
-    #   so marking a field sensitive in the layout remains the ONLY change ever needed to redact
-    #   it in this rendering. The suppressed field's span is present in this
-    #   rendering as a redaction rather than removed from it: the descriptor marks it
-    #   sensitive so the helper replaces it with a tag holding none of its value, while
-    #   keeping the rendering the declared width. Excising the span instead would shorten
-    #   the record and move every offset after it, defeating the one thing a whole-record
-    #   rendering is for. No part of the password appears in the result.
-    return mask_record(record, SECUSER_LAYOUT)
+    # WHY : Assumptions: the redaction of every OTHER field is delegated to the shared helper rather
+    #   than applied here, so marking a field sensitive in the layout remains the only change ever
+    #   needed to redact it in this rendering. The suppressed field is the one exception and it is
+    #   handled in two steps whose reasons differ; see the constants' own note for why one step
+    #   would not be enough.
+    # WHY : Assumptions: the record's width is checked by the shared masker, so substituting into
+    #   the span before that check could in principle mask a width fault. It cannot here: the
+    #   substitution is a same-width splice, so a record of the wrong length stays the wrong length
+    #   by exactly the same amount and the masker's own refusal still fires with the true width.
+    require_exact_record_width(record, SECUSER_LAYOUT)
+    start = _SUPPRESSED_FIELD.start
+    end = _SUPPRESSED_FIELD.end
+    withheld = record[:start] + _SUPPRESSED_SPAN_SUBSTITUTE + record[end:]
+    masked = mask_record(withheld, SECUSER_LAYOUT)
+    return masked[:start] + _SUPPRESSED_SPAN_RENDERING + masked[end:]
 
 
 def render_masked_security_user_field(record: str, field_name: str) -> str:

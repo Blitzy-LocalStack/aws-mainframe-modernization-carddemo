@@ -11,12 +11,20 @@ import static org.mockito.Mockito.when;
 import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.reference.domain.DisclosureGroup;
 import com.carddemo.reference.domain.DisclosureGroup.DisclosureGroupId;
+import com.carddemo.reference.domain.TransactionCategory;
+import com.carddemo.reference.domain.TransactionCategory.TransactionCategoryId;
 import com.carddemo.reference.domain.TransactionType;
 import com.carddemo.reference.dto.DisclosureGroupRateResponse;
 import com.carddemo.reference.dto.MaintenanceActionBatchRequest;
 import com.carddemo.reference.dto.MaintenanceActionBatchResponse;
 import com.carddemo.reference.dto.MaintenanceActionRequest;
+import com.carddemo.reference.dto.TransactionCategoryCreateRequest;
+import com.carddemo.reference.dto.TransactionCategoryResponse;
+import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
+import com.carddemo.reference.dto.TransactionTypeCreateRequest;
 import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
+import com.carddemo.reference.mapper.TransactionCategoryMapper;
+import com.carddemo.reference.mapper.TransactionTypeMapper;
 import com.carddemo.reference.repository.DisclosureGroupRepository;
 import com.carddemo.reference.repository.TransactionCategoryRepository;
 import com.carddemo.reference.repository.TransactionTypeRepository;
@@ -24,6 +32,7 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import org.springframework.transaction.annotation.Transactional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -56,7 +65,7 @@ class ReferenceWriteBehaviourTest {
     /** The transaction-type table double. */
     private TransactionTypeRepository types;
 
-    /** The category table double, used only where a delete is diagnosed. */
+    /** The category table double, driving the category write cases and the diagnosed delete. */
     private TransactionCategoryRepository categories;
 
     /** The disclosure-group table double. */
@@ -121,6 +130,96 @@ class ReferenceWriteBehaviourTest {
         }
 
         /**
+         * A stale version is refused even when the submission would change nothing.
+         *
+         * <p>Refactoring Rationale: the no-change short circuit used to run BEFORE the revision was
+         * compared, and returning the stored row was defended on the ground that a write altering no column
+         * can lose no update. That was true about the WRITE and false about the ANSWER. The comparison is
+         * made against the row as it stands NOW, so the two tests part company in exactly the case
+         * concurrency control exists for: when another writer has already set the description to the value
+         * this caller is submitting, the submission equals the current row, the old order answered 200, and
+         * the caller was told its edit had been accepted when what it was shown was somebody else's.</p>
+         *
+         * <p>Assumptions: the reference compares against the BEFORE-IMAGE and not against the stored row.
+         * {@code 1205-COMPARE-OLD-NEW} at physical lines 783 to 797 of
+         * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} compares the new screen value against the
+         * value the screen carried across the pseudo-conversation, so a row changed underneath the caller
+         * fails that comparison, reaches the write path and is refused there.</p>
+         *
+         * <p>Assumptions: the submitted description EQUALS the stored one, which is what makes this case
+         * distinct from the stale-version case above. That case submits a changed description, so it would
+         * be refused under either ordering; only an unchanged submission distinguishes them.</p>
+         */
+        @Test
+        @DisplayName("refuse a stale version even when the submission would change nothing")
+        void refuseAStaleVersionEvenWhenNothingWouldChange() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            assertThatThrownBy(() ->
+                    service.replace(TYPE_CD, new TransactionTypeUpdateRequest("Purchase", 7L)))
+                    .isInstanceOf(RecordConflictException.class)
+                    .extracting(failure -> ((RecordConflictException) failure).currentVersion())
+                    .isEqualTo(stored.getVersion());
+
+            verify(types, never()).saveAndFlush(any());
+        }
+
+        /**
+         * An unchanged submission from a CURRENT caller is still accepted without a write.
+         *
+         * <p>Assumptions: this is the other half of the ordering change and it is asserted so the fix
+         * cannot be read as having folded the no-change outcome into the conflict. The baseline keeps the
+         * two apart and answers them differently: physical lines 743 to 750 leave the edit path without
+         * reaching the write at all when nothing differs, displaying the sentence at physical lines 179 and
+         * 180.</p>
+         */
+        @Test
+        @DisplayName("accept an unchanged submission from a current caller without writing")
+        void acceptAnUnchangedSubmissionFromACurrentCaller() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            assertThat(service.replace(TYPE_CD,
+                    new TransactionTypeUpdateRequest("Purchase", stored.getVersion()))
+                    .description())
+                    .isEqualTo("Purchase");
+
+            verify(types, never()).saveAndFlush(any());
+        }
+
+        /**
+         * The write is FLUSHED inside the block whose catches classify its failure.
+         *
+         * <p>Refactoring Rationale: a plain save inside a transaction schedules the statement in the
+         * persistence context and the statement does not reach the database until the unit of work commits,
+         * which happens after the method returns -- so the constraint violation the catches exist for was
+         * raised outside them, every time, and the classification never ran. A caller who hit a unique
+         * violation was answered with the referential sentence by the shared fallback and told to go and
+         * delete child records.</p>
+         *
+         * <p>Assumptions: the flushing form is asserted rather than the classification outcome, because the
+         * outcome is only reachable through a real database and this is a unit case. Asserting which
+         * repository member is called is what pins the property a mock CAN observe; the classification
+         * itself is exercised by the repository integration cases.</p>
+         */
+        @Test
+        @DisplayName("flush the replace inside the classifying block")
+        void flushTheReplaceInsideTheClassifyingBlock() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            when(types.saveAndFlush(stored)).thenReturn(stored);
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            service.replace(TYPE_CD, new TransactionTypeUpdateRequest("Changed", stored.getVersion()));
+
+            verify(types).saveAndFlush(stored);
+            verify(types, never()).save(any());
+        }
+
+        /**
          * A create refuses a code that already exists rather than replacing it.
          *
          * <p>Assumptions: this is the other half of the granularity decision. If a create silently
@@ -137,9 +236,219 @@ class ReferenceWriteBehaviourTest {
             assertThatThrownBy(() -> service.create(
                     new com.carddemo.reference.dto.TransactionTypeCreateRequest(
                             TYPE_CD, "Duplicate")))
-                    .isInstanceOf(RecordConflictException.class);
+                    .isInstanceOf(RecordConflictException.class)
+                    // WHY : Refactoring Rationale: the KIND is asserted where this case previously
+                    //       asserted only the type. It used to be raised as STALE_VERSION, which the
+                    //       shared advice renders with the before-image data-changed sentence -- so a
+                    //       caller creating a code that already existed was told somebody else had
+                    //       edited a row it was trying to create. The published contract says which
+                    //       sentence this answer carries: the referential one, reached "through the same
+                    //       integrity branch as a restricted delete", with the consequence registered as
+                    //       D-REFERENCE-INTEGRITY-SENTENCE. A type-only assertion passed against either
+                    //       kind, which is why it did not catch the contradiction.
+                    .extracting(failure -> ((RecordConflictException) failure).kind())
+                    .isEqualTo(RecordConflictException.Kind.REFERENCED_ROW);
 
             verify(types, never()).save(any());
+            verify(types, never()).saveAndFlush(any());
+        }
+
+        /**
+         * A stale version is refused even when the submitted description differs in nothing.
+         *
+         * <p>Purpose: this is the ordering the version precondition depends on. The published contract
+         * makes the precondition unconditional -- "when the stored row has moved on since that read the
+         * write is refused with 409" -- so a stale token has to be refused whatever the body says.</p>
+         *
+         * <p>Refactoring Rationale: the service evaluated its no-change short-circuit FIRST, so this call
+         * answered 200 carrying the current row. A caller reads that as confirmation that its submission
+         * was applied to the state it had read, and both halves of that reading are false: its token was
+         * stale, and the row it was handed is not the row it based the submission on.</p>
+         *
+         * <p>Assumptions: the description submitted is byte-identical to the stored one, because that is
+         * the ONLY input for which the two orderings differ. Any other description reaches the conflict
+         * under either ordering, so a case using one would pass without testing the ordering at all.</p>
+         */
+        @Test
+        @DisplayName("refuse a stale version even when the description differs in nothing")
+        void refuseAStaleVersionEvenWhenNothingDiffers() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            assertThatThrownBy(() ->
+                    service.replace(TYPE_CD, new TransactionTypeUpdateRequest("Purchase", 7L)))
+                    .isInstanceOf(RecordConflictException.class)
+                    .extracting(failure -> ((RecordConflictException) failure).kind())
+                    .isEqualTo(RecordConflictException.Kind.STALE_VERSION);
+
+            verify(types, never()).save(any());
+            verify(types, never()).saveAndFlush(any());
+        }
+
+        /**
+         * A current version whose description differs in nothing is answered without a write.
+         *
+         * <p>Assumptions: this is the positive control for the case above. Without it, a regression that
+         * refused every same-description submission would satisfy that case completely while breaking the
+         * idempotent no-op the baseline reaches at physical lines 179 and 180 of {@code COTRTUPC.cbl}.</p>
+         */
+        @Test
+        @DisplayName("answer a current version that changes nothing without writing")
+        void answerACurrentVersionThatChangesNothing() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            assertThat(service.replace(TYPE_CD,
+                    new TransactionTypeUpdateRequest("Purchase", stored.getVersion())).description())
+                    .isEqualTo("Purchase");
+
+            verify(types, never()).save(any());
+            verify(types, never()).saveAndFlush(any());
+        }
+
+        /**
+         * A submission differing only in surrounding blanks describes the same state.
+         *
+         * <p>Purpose: this is the equality half of {@code D-REFERENCE-TRIM-TRAILING-ONLY}. Every
+         * description comparison the baseline makes passes its operands through a bare
+         * {@code FUNCTION TRIM}, which strips BOTH ends -- {@code COTRTLIC.cbl} L1065 and L1069,
+         * {@code COTRTUPC.cbl} L791 and L795 -- so the baseline treats surrounding blanks as
+         * insignificant for equality.</p>
+         *
+         * <p>Refactoring Rationale: the comparison previously reused the STORAGE normalisation, which
+         * removes trailing blanks only. A submission differing from the stored value only in LEADING
+         * blanks therefore looked like a change and went to the database as a write the baseline would
+         * not have made.</p>
+         *
+         * <p>Assumptions: leading blanks are used on one side and trailing on the other, so a regression
+         * that stripped only one end would fail rather than pass on the end it still handled.</p>
+         */
+        @Test
+        @DisplayName("treat a submission differing only in surrounding blanks as no change")
+        void treatSurroundingBlanksAsNoChange() {
+            TransactionType stored = new TransactionType(TYPE_CD, "Purchase   ");
+            when(types.findByTypeCd(TYPE_CD)).thenReturn(Optional.of(stored));
+            TransactionTypeService service = new TransactionTypeService(types, categories);
+
+            assertThat(service.replace(TYPE_CD,
+                    new TransactionTypeUpdateRequest("  Purchase", stored.getVersion())).description())
+                    .isNotNull();
+
+            verify(types, never()).save(any());
+            verify(types, never()).saveAndFlush(any());
+        }
+    }
+
+    /**
+     * Cases over the category replace, which must write through the mapper and nothing else.
+     *
+     * <p>Refactoring Rationale: these cases exist because the category service performed its own
+     * description normalisation inline, duplicating the mapper member written for it, and no test reached
+     * this service at all. Two implementations of one storage rule are free to drift and a
+     * {@code VARCHAR} column reports nothing when they do, so the routing is asserted here as behaviour
+     * -- a stored value -- rather than by observing which method was called.</p>
+     */
+    @Nested
+    @DisplayName("on the category replace")
+    class OnTheCategoryReplace {
+
+        /** A description as a client echoing a fixed-width screen field would send it. */
+        private static final String PADDED_DESCRIPTION = "Grocery purchase          ";
+
+        /** The same description as the column stores it and the contract publishes it. */
+        private static final String TRIMMED_DESCRIPTION = "Grocery purchase";
+
+        /**
+         * A replace of a category that does not exist reports the miss and writes nothing.
+         *
+         * <p>Assumptions: the absence of a save is asserted as well as the message, for the same reason it
+         * is on the sibling type replace above -- an upsert would answer this same call successfully, so
+         * only the missing write distinguishes the strict behaviour. The sentence is the service's own
+         * verbatim constant, including its ellipsis.</p>
+         */
+        @Test
+        @DisplayName("report the miss and insert nothing")
+        void reportTheMissAndInsertNothing() {
+            when(categories.findByIdIs(new TransactionCategoryId(TYPE_CD, CAT_CD)))
+                    .thenReturn(Optional.empty());
+            TransactionCategoryService service = new TransactionCategoryService(categories);
+
+            assertThatThrownBy(() -> service.replace(TYPE_CD, CAT_CD,
+                    new TransactionCategoryUpdateRequest(TRIMMED_DESCRIPTION, 0L)))
+                    .isInstanceOf(NoSuchElementException.class)
+                    .hasMessage(TransactionCategoryService.MESSAGE_CATEGORY_NOT_FOUND);
+
+            verify(categories, never()).save(any());
+        }
+
+        /**
+         * A replace carrying a stale revision is refused and carries the stored revision back.
+         *
+         * <p>Assumptions: the stored revision is asserted on the refusal rather than the refusal alone. A
+         * conflict that did not report which revision won would leave a caller with no value to retry
+         * against, so it would have to re-read and could lose the race again.</p>
+         */
+        @Test
+        @DisplayName("refuse a stale revision and report the stored one")
+        void refuseAStaleRevisionAndReportTheStoredOne() {
+            TransactionCategory stored = new TransactionCategory(
+                    new TransactionCategoryId(TYPE_CD, CAT_CD), "Superseded");
+            when(categories.findByIdIs(new TransactionCategoryId(TYPE_CD, CAT_CD)))
+                    .thenReturn(Optional.of(stored));
+            TransactionCategoryService service = new TransactionCategoryService(categories);
+
+            assertThatThrownBy(() -> service.replace(TYPE_CD, CAT_CD,
+                    new TransactionCategoryUpdateRequest(TRIMMED_DESCRIPTION, 7L)))
+                    .isInstanceOf(RecordConflictException.class)
+                    .extracting(failure -> ((RecordConflictException) failure).currentVersion())
+                    .isEqualTo(stored.getVersion());
+
+            verify(categories, never()).save(any());
+            assertThat(stored.getDescription())
+                    .as("a refused replace must not have written the description first")
+                    .isEqualTo("Superseded");
+        }
+
+        /**
+         * An accepted replace stores the normalised description and leaves the key halves alone.
+         *
+         * <p>Assumptions: the value handed to the store is asserted, not merely the value returned, and
+         * the two are asserted separately. The publication trims for the wire and the storage trims for
+         * the column, so a service that stored the padded form and published a trimmed one would satisfy
+         * a response-only assertion while leaving the padding in the database -- where a later caller
+         * comparing two descriptions would find them unequal.</p>
+         *
+         * <p>Assumptions: the row saved is asserted to be the SAME instance that was read. The entity is
+         * managed, so the write the persistence provider flushes is the mutation applied to that
+         * instance; a service that constructed a replacement row would lose the revision the provider
+         * maintains and would insert rather than update.</p>
+         */
+        @Test
+        @DisplayName("store the trimmed description on the loaded row and publish it trimmed")
+        void storeTheTrimmedDescriptionOnTheLoadedRow() {
+            TransactionCategory stored = new TransactionCategory(
+                    new TransactionCategoryId(TYPE_CD, CAT_CD), "Superseded");
+            when(categories.findByIdIs(new TransactionCategoryId(TYPE_CD, CAT_CD)))
+                    .thenReturn(Optional.of(stored));
+            when(categories.save(any(TransactionCategory.class)))
+                    .thenAnswer(call -> call.getArgument(0));
+            TransactionCategoryService service = new TransactionCategoryService(categories);
+
+            TransactionCategoryResponse published = service.replace(TYPE_CD, CAT_CD,
+                    new TransactionCategoryUpdateRequest(PADDED_DESCRIPTION, 0L));
+
+            assertThat(stored.getDescription())
+                    .as("the STORED form is the trimmed one, which is what routing through the mapper"
+                            + " guarantees")
+                    .isEqualTo(TRIMMED_DESCRIPTION);
+            assertThat(published.description()).isEqualTo(TRIMMED_DESCRIPTION);
+            assertThat(published.typeCd()).isEqualTo(TYPE_CD);
+            assertThat(published.catCd()).isEqualTo(CAT_CD);
+            assertThat(stored.getTypeCd()).isEqualTo(TYPE_CD);
+            assertThat(stored.getCatCd()).isEqualTo(CAT_CD);
+            verify(categories).save(stored);
         }
     }
 
@@ -294,6 +603,145 @@ class ReferenceWriteBehaviourTest {
 
             verifyNoInteractions(types);
             verifyNoInteractions(categories);
+        }
+
+        /**
+         * The route-facing lookup declares its own read-only transaction rather than relying on the
+         * delegate's.
+         *
+         * <p>Purpose: the entry point the controller calls is {@code resolveRate}, and it forwards to
+         * {@code findRate}. The framework's transaction advice lives in a proxy AROUND the bean, so a call
+         * from one member to another travels down the {@code this} reference and never traverses the
+         * proxy -- the annotation on the delegate is not consulted. With the annotation only on the
+         * delegate, the route-facing lookup ran with NO transaction: its two reads each took and returned
+         * a connection separately, they could observe different committed states, and the read-only hint
+         * that lets the driver and the database skip write bookkeeping was never applied.</p>
+         *
+         * <p>Assumptions: what is asserted is the DECLARATION on the route-facing method, not the runtime
+         * behaviour of the proxy. The proxy's self-invocation semantics are the framework's and are not
+         * this repository's to re-assert; what can regress here is the annotation, and a case that could
+         * only fail by starting a container would not run on the builds where it matters. The annotation
+         * on the delegate is asserted as well, because removing it in the course of "moving" the boundary
+         * would leave a direct caller of that name uncovered -- a nested call inside an active
+         * transaction joins it rather than starting a second, so keeping both is free.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         *
+         * @throws NoSuchMethodException if either member is renamed without this case being updated,
+         *     which fails the case rather than skipping it
+         */
+        @Test
+        @DisplayName("declare the read-only transaction on the method the route calls")
+        void declareTheReadOnlyTransactionOnTheRouteFacingMethod() throws NoSuchMethodException {
+            Transactional onEntryPoint = DisclosureGroupService.class
+                    .getDeclaredMethod("resolveRate", String.class, String.class, String.class)
+                    .getAnnotation(Transactional.class);
+            Transactional onDelegate = DisclosureGroupService.class
+                    .getDeclaredMethod("findRate", String.class, String.class, String.class)
+                    .getAnnotation(Transactional.class);
+
+            assertThat(onEntryPoint)
+                    .as("the method the controller calls must carry the boundary itself")
+                    .isNotNull();
+            assertThat(onEntryPoint.readOnly())
+                    .as("the boundary the documentation claims is a READ-ONLY one")
+                    .isTrue();
+            assertThat(onDelegate)
+                    .as("the delegate keeps its own boundary so a direct caller stays covered")
+                    .isNotNull();
+            assertThat(onDelegate.readOnly()).isTrue();
+        }
+    }
+
+    /**
+     * Cases over the one normalisation both reference records store their description through.
+     *
+     * <p>Purpose: this is the storage half of {@code D-REFERENCE-TRIM-TRAILING-ONLY}, whose equality half
+     * is asserted in {@code OnTheStrictReplace} above. The divergence registered there is a PACKAGE-scope
+     * ruling rather than a per-record one, so what has to hold is not only that the type path trims one
+     * end -- it is that every record reaching the same member gets the same answer. A rule that held for
+     * types and silently differed for categories would be a second, unregistered divergence.</p>
+     *
+     * <p>Assumptions: the mapper members are exercised directly rather than through a service. The
+     * property under test is the stored form a normalisation produces, and a service call would add a
+     * repository double whose captured argument would have to be unwrapped before the same assertion
+     * could be made -- which would state the same fact about the same member less directly.</p>
+     */
+    @Nested
+    @DisplayName("on the shared trim boundary")
+    class OnTheSharedTrimBoundary {
+
+        /** A description carrying blanks at BOTH ends, so one end being missed cannot pass. */
+        private static final String SUBMITTED = " Purchase  ";
+
+        /** What the registered ruling says is stored: the trailing blanks gone, the leading one kept. */
+        private static final String STORED = " Purchase";
+
+        /**
+         * A created type stores its description with trailing blanks removed and a leading one kept.
+         *
+         * <p>Purpose: this is the create arm the divergence entry is answerable for. The baseline's two
+         * screen programs pass this field through a trim that strips both ends, so the leading blank
+         * surviving here IS the divergence and it is asserted rather than left to the comment that
+         * records it.</p>
+         *
+         * <p>Assumptions: both ends are asserted in one case, because the two halves are what distinguish
+         * this behaviour from the baseline's and from a no-trim implementation. Asserting only that the
+         * trailing blanks went would pass against a full trim, and asserting only that the leading blank
+         * stayed would pass against no trim at all.</p>
+         */
+        @Test
+        @DisplayName("store a created type description trailing-trimmed with its leading blank intact")
+        void storeACreatedTypeDescriptionTrailingTrimmed() {
+            TransactionType created = TransactionTypeMapper.toNewEntity(
+                    new TransactionTypeCreateRequest(TYPE_CD, SUBMITTED));
+
+            assertThat(created.getDescription())
+                    .as("the trailing blanks are removed and the leading blank is content")
+                    .isEqualTo(STORED);
+        }
+
+        /**
+         * A created category stores its description through the SAME normalisation as a type.
+         *
+         * <p>Purpose: this is the reuse the registered entry depends on. {@code TransactionCategoryMapper}
+         * calls the type mapper's member rather than declaring its own, and this case is what would fail
+         * if a later change gave the category record a private copy that drifted.</p>
+         *
+         * <p>Assumptions: the expectation is the same constant the type case above uses, deliberately, so
+         * that a divergence between the two records cannot be introduced by editing one expectation.</p>
+         */
+        @Test
+        @DisplayName("store a created category description through the same normalisation")
+        void storeACreatedCategoryDescriptionThroughTheSameNormalisation() {
+            TransactionCategory created = TransactionCategoryMapper.toNewEntity(
+                    new TransactionCategoryCreateRequest(TYPE_CD, CAT_CD, SUBMITTED));
+
+            assertThat(created.getDescription())
+                    .as("a category is normalised by the same member a type is")
+                    .isEqualTo(STORED);
+        }
+
+        /**
+         * A replaced category stores its description through that same normalisation too.
+         *
+         * <p>Assumptions: the update arm is asserted separately from the create arm because they are two
+         * call sites, and the whole point of the shared member is that they cannot disagree. A row created
+         * with one stored form and replaced into another would compare unequal to itself in every later
+         * filter, and no constraint on a variable-width column would report it.</p>
+         */
+        @Test
+        @DisplayName("store a replaced category description through the same normalisation")
+        void storeAReplacedCategoryDescriptionThroughTheSameNormalisation() {
+            TransactionCategory stored = new TransactionCategory(
+                    new TransactionCategory.TransactionCategoryId(TYPE_CD, CAT_CD), "Purchase");
+
+            TransactionCategoryMapper.applyUpdate(
+                    new TransactionCategoryUpdateRequest(SUBMITTED, stored.getVersion()), stored);
+
+            assertThat(stored.getDescription())
+                    .as("a replace is normalised by the same member a create is")
+                    .isEqualTo(STORED);
         }
     }
 }

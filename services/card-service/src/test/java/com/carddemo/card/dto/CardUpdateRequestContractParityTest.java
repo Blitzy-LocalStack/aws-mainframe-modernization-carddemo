@@ -9,7 +9,6 @@ import jakarta.validation.ValidatorFactory;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -24,20 +23,23 @@ import org.yaml.snakeyaml.Yaml;
  *
  * <h2>Why this test exists</h2>
  *
- * <p>Refactoring Rationale: the review found two disagreements in this one schema, and both were
- * invisible to a compiler because each side of them is a line in a different kind of file. The embossed
- * name published {@code '^[A-Za-z ]+$'}, which admits a value of fifty spaces, while the record carries
- * {@code @NotBlank} beside the same character-set pattern and refuses one -- and a blank-padded field is
- * the ordinary shape of an unfilled 3270 input rather than an exotic case. The expiry date published
- * {@code format: date} alone, which admits 1949 and 2100, while the record encodes the window
- * {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code app/cbl/COCRDUPC.cbl:99} and refuses both. In each
- * case a caller could generate a body this document accepts and the service answers 400.</p>
+ * <p>Refactoring Rationale: this class used to hold the schema's DOMAIN constraints against the record's,
+ * value by value, and both sides have since been withdrawn -- so the subject of the parity changed and the
+ * cases changed with it. The reason for the withdrawal is the one the review named: a declarative
+ * constraint runs BEFORE the service, so whichever of the two layers declares a domain decides the outcome
+ * for it, and the domain logic the service transcribes from {@code app/cbl/COCRDUPC.cbl} distinguishes
+ * states that no schema and no annotation can express -- a BLANK field, which earns the literal asterisk
+ * the reference writes at {@code :1263-1272}, from a merely unacceptable one, which earns the highlight
+ * alone; and all four attributes reported together rather than the first fault only. Keeping the
+ * declarative domains would have kept that transcription unreachable for every caller arriving over
+ * HTTP.</p>
  *
- * <p>Assumptions: parity is asserted by ACCEPTANCE over a value corpus, not by comparing the two
- * expressions as text. They are deliberately not identical -- the schema states as one pattern what the
- * record states as two constraints, because a property carries one pattern -- so a textual comparison would
- * fail on a correct implementation and would say nothing about what either side admits. Comparing what
- * they accept is also the stronger claim: it is the property a caller actually depends on.</p>
+ * <p>Assumptions: what this class now asserts is therefore the LAYERING rather than the domains. Three
+ * claims: the schema and the record agree on every declared WIDTH, which is a transport fact both may
+ * state; neither declares a domain, so the service is reached; and the record still admits every
+ * domain-violating value, which is the positive form of the same claim and the one that would fail if a
+ * constraint were reinstated. The domains themselves are asserted where they are enforced, in
+ * {@code CardUpdateServiceTest}, and over HTTP in {@code CardUpdateHttpValidationTest}.</p>
  *
  * <p>Assumptions: the schema is read from the CLASSPATH so that this asserts against the artifact the
  * service publishes rather than against a source file that may not be the one packaged.</p>
@@ -134,99 +136,134 @@ class CardUpdateRequestContractParityTest {
     }
 
     /**
-     * Reads a property's declared pattern as a compiled expression.
+     * Reads one property's declared mapping from the published schema.
      *
-     * @param property the property name; must be declared and must carry a pattern
-     * @return the compiled pattern, never {@code null}
+     * @param property the property name; must be declared by the schema
+     * @return the declared mapping, never {@code null}
      */
     @SuppressWarnings("unchecked")
-    private static Pattern declaredPattern(String property) {
-        Map<String, Object> declared = (Map<String, Object>) properties.get(property);
-        assertThat(declared)
+    private static Map<String, Object> declared(String property) {
+        Map<String, Object> declaredProperty = (Map<String, Object>) properties.get(property);
+        assertThat(declaredProperty)
                 .as("%s.%s must be declared by the published schema", SCHEMA_NAME, property)
                 .isNotNull();
-        Object declaredPattern = declared.get("pattern");
-        assertThat(declaredPattern)
-                .as("%s.%s must publish its domain as a pattern, because prose is not machine-readable",
-                        SCHEMA_NAME, property)
+        return declaredProperty;
+    }
+
+    /**
+     * Reports whether the record admits a body whose named component carries the given value.
+     *
+     * <p>Assumptions: the other three components are held at conforming values so that a violation, if one
+     * is raised, can only belong to the component under test. Varying one component at a time is what makes
+     * the boolean answer attributable; a case that varied two could not say which constraint fired.</p>
+     *
+     * @param property the component to vary: one of the four attribute names
+     * @param value the value to place in it
+     * @return {@code true} when no declarative constraint is violated
+     * @throws IllegalArgumentException if the property is not one of the four attribute names, which is a
+     *     programming error in the case rather than a fact about the record
+     */
+    private static boolean recordAdmits(String property, String value) {
+        CardUpdateRequest body = switch (property) {
+            case "embossedName" ->
+                new CardUpdateRequest(value, "Y", VALID_MONTH, VALID_YEAR, VALID_VERSION);
+            case "activeStatus" ->
+                new CardUpdateRequest(VALID_NAME, value, VALID_MONTH, VALID_YEAR, VALID_VERSION);
+            case "expirationMonth" ->
+                new CardUpdateRequest(VALID_NAME, "Y", value, VALID_YEAR, VALID_VERSION);
+            case "expirationYear" ->
+                new CardUpdateRequest(VALID_NAME, "Y", VALID_MONTH, value, VALID_VERSION);
+            default -> throw new IllegalArgumentException("not an attribute of this body: " + property);
+        };
+        return validator.validate(body).isEmpty();
+    }
+
+    /**
+     * Confirms each attribute publishes its declared width and publishes no domain constraint.
+     *
+     * <p>Assumptions: the four constraint keywords named here are the complete set a domain could be
+     * expressed with for a string property of this shape -- a pattern, an enumeration, a minimum length or
+     * a format -- so asserting the absence of all four is what makes the claim exhaustive rather than a
+     * check on whichever one happened to be there before. A property that reinstated any one of them would
+     * decide the outcome for some value before the service saw it, which is the defect this whole
+     * arrangement exists to prevent.</p>
+     *
+     * @param property the schema property to inspect
+     */
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"embossedName", "activeStatus", "expirationMonth", "expirationYear"})
+    @DisplayName("the schema declares a width for each attribute and no domain")
+    void theSchemaDeclaresAWidthAndNoDomainForEachAttribute(String property) {
+        Map<String, Object> declaredProperty = declared(property);
+
+        assertThat(declaredProperty.get("maxLength"))
+                .as("%s.%s must still publish its declared width, which is a transport fact", SCHEMA_NAME,
+                        property)
                 .isNotNull();
-        return Pattern.compile(String.valueOf(declaredPattern));
+        assertThat(declaredProperty)
+                .as("%s.%s must publish no domain constraint, because the service owns the domain and a"
+                        + " declarative one would decide the outcome before the service is reached",
+                        SCHEMA_NAME, property)
+                .doesNotContainKeys("pattern", "enum", "minLength", "format");
     }
 
     /**
-     * Reports whether the record admits a body carrying the given embossed name.
+     * Confirms the schema's declared width and the record's declared width agree, attribute by attribute.
      *
-     * @param embossedName the value to submit
-     * @return {@code true} when no constraint is violated
+     * <p>Assumptions: the width is the one constraint both layers may legitimately state, because it is a
+     * property of the field the reference terminal could hold rather than a rule about the value: the 3270
+     * input physically could not carry more characters, so the reference has no sentence for an over-long
+     * value and neither does the service. A caller that sends one therefore gets the declarative refusal,
+     * and this case is what keeps the two declarations of that single width from drifting.</p>
+     *
+     * @param property the schema property name
+     * @param width the width both sides must declare
      */
-    private static boolean recordAdmitsName(String embossedName) {
-        return validator.validate(new CardUpdateRequest(
-                embossedName, "Y", VALID_MONTH, VALID_YEAR, VALID_VERSION)).isEmpty();
+    @ParameterizedTest(name = "{0} is bounded at {1}")
+    @CsvSource({"embossedName,50", "activeStatus,1", "expirationMonth,2", "expirationYear,4"})
+    @DisplayName("schema and record declare the same width for every attribute")
+    void schemaAndRecordDeclareTheSameWidth(String property, int width) {
+        assertThat((Integer) declared(property).get("maxLength")).isEqualTo(width);
+        assertThat(recordAdmits(property, "A".repeat(width))).isTrue();
+        assertThat(recordAdmits(property, "A".repeat(width + 1)))
+                .as("one character past the declared width must be refused declaratively")
+                .isFalse();
     }
 
     /**
-     * Reports whether the record admits a body carrying the given expiry year.
+     * Confirms the record admits every value the four reference domains refuse, so the service classifies
+     * it rather than the validator.
      *
-     * @param expirationYear the value to submit
-     * @return {@code true} when no constraint is violated
+     * <p>Assumptions: these are exactly the values that used to be refused declaratively, listed as the
+     * positive form of the claim above. A blank name and an all-zeros month are the two that matter most,
+     * because the reference classifies both as BLANK rather than as unacceptable and answers them with a
+     * different sentence and with the asterisk marker; a validator that refused them first would make that
+     * distinction unobservable. The year bounds and the status domain are included so that reinstating any
+     * one constraint fails a case rather than passing silently.</p>
+     *
+     * @param property the schema property name the value belongs to
+     * @param value the domain-violating value the record must nonetheless admit
      */
-    private static boolean recordAdmitsYear(String expirationYear) {
-        return validator.validate(new CardUpdateRequest(
-                VALID_NAME, "Y", VALID_MONTH, expirationYear, VALID_VERSION)).isEmpty();
-    }
-
-    /**
-     * Reports whether the record admits a body carrying the given expiry month.
-     *
-     * @param expirationMonth the value to submit
-     * @return {@code true} when no constraint is violated
-     */
-    private static boolean recordAdmitsMonth(String expirationMonth) {
-        return validator.validate(new CardUpdateRequest(
-                VALID_NAME, "Y", expirationMonth, VALID_YEAR, VALID_VERSION)).isEmpty();
-    }
-
-    /**
-     * Confirms the schema and the record agree on the four boundary years the review named.
-     *
-     * <p>Assumptions: 1949 and 2100 are the two values that were schema-valid and service-invalid before
-     * the correction, and 1950 and 2099 are the two the window includes; asserting all four in one case
-     * keeps the pair of bounds from drifting apart, because a window narrowed at one end alone would still
-     * pass a test that checked only the other.</p>
-     *
-     * @param year the year to submit
-     * @param admitted whether both sides must admit it
-     */
-    @ParameterizedTest(name = "year {0} admitted={1}")
-    @CsvSource({"1949,false", "1950,true", "2099,true", "2100,false"})
-    @DisplayName("schema and record agree at 1949, 1950, 2099 and 2100")
-    void schemaAndRecordAgreeAtEveryYearBoundary(String year, boolean admitted) {
-        assertThat(declaredPattern("expirationYear").matcher(year).matches())
-                .as("the published pattern must %s %s", admitted ? "admit" : "refuse", year)
-                .isEqualTo(admitted);
-        assertThat(recordAdmitsYear(year))
-                .as("the record must %s %s", admitted ? "admit" : "refuse", year)
-                .isEqualTo(admitted);
-    }
-
-    /**
-     * Confirms the schema and the record agree on the month domain at both of its edges.
-     *
-     * <p>Assumptions: 00 and 13 are the values outside the domain and 01 and 12 the values on it, and the
-     * unpadded form 1 is asserted refused as well. The baseline's month test is a class condition over a
-     * two-character field, so a single digit followed by nothing does not satisfy it; a contract that
-     * admitted the unpadded form would produce a value the service refuses for a reason the caller could
-     * not read from the document.</p>
-     *
-     * @param month the month component to submit
-     * @param admitted whether both sides must admit it
-     */
-    @ParameterizedTest(name = "month {0} admitted={1}")
-    @CsvSource({"00,false", "01,true", "12,true", "13,false", "1,false"})
-    @DisplayName("schema and record agree on the month domain")
-    void schemaAndRecordAgreeOnTheMonthDomain(String month, boolean admitted) {
-        assertThat(declaredPattern("expirationMonth").matcher(month).matches()).isEqualTo(admitted);
-        assertThat(recordAdmitsMonth(month)).isEqualTo(admitted);
+    @ParameterizedTest(name = "{0}=[{1}] reaches the service")
+    @CsvSource({
+        "embossedName,' '",
+        "embossedName,JOHN-PAUL",
+        "embossedName,'0000'",
+        "activeStatus,X",
+        "activeStatus,''",
+        "expirationMonth,00",
+        "expirationMonth,13",
+        "expirationMonth,1",
+        "expirationYear,1949",
+        "expirationYear,2100",
+        "expirationYear,0000",
+    })
+    @DisplayName("every domain-violating value passes the declarative layer and reaches the service")
+    void everyDomainViolatingValueReachesTheService(String property, String value) {
+        assertThat(recordAdmits(property, value))
+                .as("%s carrying [%s] must reach CardUpdateService, which owns the reference domain and"
+                        + " the sentence that refuses it", property, value)
+                .isTrue();
     }
 
     /**
@@ -255,54 +292,6 @@ class CardUpdateRequestContractParityTest {
     }
 
     /**
-     * Confirms the schema and the record agree that a whitespace-only embossed name is refused.
-     *
-     * <p>Assumptions: three widths of blank are submitted, including the full declared width, because the
-     * value the schema used to admit was specifically a blank-padded screen field and the widest form is
-     * the one a terminal would actually send.</p>
-     *
-     * @param blank the whitespace-only value to submit
-     */
-    @ParameterizedTest(name = "blank name of {0} characters")
-    @ValueSource(strings = {" ", "     ", "                                                  "})
-    @DisplayName("schema and record agree that an all-whitespace embossed name is refused")
-    void schemaAndRecordAgreeThatABlankNameIsRefused(String blank) {
-        assertThat(declaredPattern("embossedName").matcher(blank).matches())
-                .as("the published pattern must refuse a name of only spaces")
-                .isFalse();
-        assertThat(recordAdmitsName(blank))
-                .as("the record must refuse a name of only spaces")
-                .isFalse();
-    }
-
-    /**
-     * Confirms the schema and the record agree on names that carry blanks alongside letters.
-     *
-     * <p>Assumptions: this is the negative half of the whitespace rule and the half a careless tightening
-     * breaks. The rule is presence of a letter, not absence of a blank, so a leading or trailing blank must
-     * still be admitted -- the reference field is blank-padded and the baseline never trims it before its
-     * letter test at {@code app/cbl/COCRDUPC.cbl:824-828}.</p>
-     *
-     * @param name the value to submit
-     * @param admitted whether both sides must admit it
-     */
-    @ParameterizedTest(name = "name [{0}] admitted={1}")
-    @CsvSource({
-        "'JOHN Q PUBLIC',true",
-        "'  JOHN',true",
-        "'JOHN  ',true",
-        "'A',true",
-        "'JOHN O''NEILL',false",
-        "'JOHN-PAUL',false",
-        "'JOHN2',false",
-    })
-    @DisplayName("schema and record agree on every mixed name form")
-    void schemaAndRecordAgreeOnMixedNameForms(String name, boolean admitted) {
-        assertThat(declaredPattern("embossedName").matcher(name).matches()).isEqualTo(admitted);
-        assertThat(recordAdmitsName(name)).isEqualTo(admitted);
-    }
-
-    /**
      * Confirms the declared width bounds the name on both sides and the schema publishes the same bound.
      *
      * <p>Assumptions: the width is the copybook's, {@code CARD-EMBOSSED-NAME PIC X(50)} at
@@ -312,8 +301,8 @@ class CardUpdateRequestContractParityTest {
     @Test
     @DisplayName("fifty characters are accepted and fifty-one refused, on both sides")
     void theDeclaredNameWidthBoundsBothSides() {
-        assertThat(recordAdmitsName("A".repeat(50))).isTrue();
-        assertThat(recordAdmitsName("A".repeat(51))).isFalse();
+        assertThat(recordAdmits("embossedName", "A".repeat(50))).isTrue();
+        assertThat(recordAdmits("embossedName", "A".repeat(51))).isFalse();
 
         @SuppressWarnings("unchecked")
         Map<String, Object> declared = (Map<String, Object>) properties.get("embossedName");
@@ -321,21 +310,34 @@ class CardUpdateRequestContractParityTest {
     }
 
     /**
-     * Confirms the refusal sentences are the reference's own, character for character.
+     * Confirms the declarative layer carries NO sentence for any attribute fault, because it raises none.
      *
-     * <p>Assumptions: the two faults of the name are answered by two different sentences in the baseline,
-     * at {@code app/cbl/COCRDUPC.cbl:181-182} for absence and at :183-184 for the character set, so a
-     * single sentence covering both would tell a caller that supplied a hyphen that it supplied nothing.
-     * A whitespace-only value raises the ABSENCE sentence, which is the behaviour the schema correction
-     * publishes.</p>
+     * <p>Refactoring Rationale: this case used to assert that the record's own violation messages were the
+     * reference sentences -- {@code 'Card name not provided'} for an absent value and
+     * {@code 'Card name can only contain alphabets and spaces'} for a bad character set, from
+     * {@code app/cbl/COCRDUPC.cbl:181-182} and {@code :183-184}. Both sentences are still carried
+     * verbatim and both are still asserted, but by the layer that now reports them: they are declared as
+     * public constants on {@code CardUpdateService} and are asserted in that service's own tests and over
+     * HTTP. Asserting them here would mean the record still refused these values, which is exactly what it
+     * must no longer do.</p>
+     *
+     * <p>Assumptions: an EMPTY violation list is the assertion, and the two sentences are named in the
+     * message so that a reader who reinstates a constraint sees which behaviour they have taken away.</p>
      */
     @Test
-    @DisplayName("the name refusals carry the reference sentences verbatim")
-    void theNameRefusalsCarryTheReferenceSentences() {
-        assertThat(messagesFor("   ")).containsExactly("Card name not provided");
+    @DisplayName("no attribute fault raises a declarative violation, so no sentence is emitted here")
+    void noAttributeFaultRaisesADeclarativeViolation() {
+        assertThat(messagesFor("   "))
+                .as("an absent name must reach the service, which answers 'Card name not provided'")
+                .isEmpty();
         assertThat(messagesFor("JOHN-PAUL"))
-                .containsExactly("Card name can only contain alphabets and spaces");
-        assertThat(messagesFor(null)).containsExactly("Card name not provided");
+                .as("a bad character set must reach the service, which answers 'Card name can only"
+                        + " contain alphabets and spaces'")
+                .isEmpty();
+        assertThat(messagesFor(null))
+                .as("an omitted name is the same BLANK state as a whitespace one and is classified by the"
+                        + " service, not refused here")
+                .isEmpty();
     }
 
     /**

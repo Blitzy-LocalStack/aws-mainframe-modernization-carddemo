@@ -178,9 +178,18 @@ public class CategoryBalanceService {
      *
      * <p>This is the read and the branch of {@code 2700-UPDATE-TCATBAL}, at
      * {@code app/cbl/CBTRN02C.cbl} lines 474 to 499: the keyed read at line 474, and the choice of
-     * arm at lines 495 to 499. It is kept separately callable from the entry point above so that a
-     * caller already holding a composite key does not have to synthesise a record and a
-     * cross-reference to reach the branch.</p>
+     * arm at lines 495 to 499.</p>
+     *
+     * <p>Refactoring Rationale: this was described as "kept separately callable from the entry point
+     * above so that a caller already holding a composite key does not have to synthesise a record and
+     * a cross-reference to reach the branch", and that sentence described a caller which did not
+     * exist. Worse, it was the sentence the posting job followed: the job composed the key itself and
+     * called this method, so the key composition existed in two places and the entry point above --
+     * documented as the one the job calls -- was called by nothing. The job now calls the entry point.
+     * This method remains public and separately callable for the SAME reason its two arms below give,
+     * which is the honest one: the parity suite drives the read-and-branch with a key made for the
+     * case under test. That is a test affordance, and it is stated as one rather than dressed as a
+     * convenience for a production caller that was never written.</p>
      *
      * <p>Assumptions: no transaction is opened here, and that omission is deliberate rather than an
      * oversight. See the note on the absence of a boundary inside the method.</p>

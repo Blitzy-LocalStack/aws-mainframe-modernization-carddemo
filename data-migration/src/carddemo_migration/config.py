@@ -212,7 +212,10 @@ __all__ = [
     "resolve_migration_settings",
     "resolve_environment_name",
     "resolve_master_settings",
+    "resolve_card_verification_value_key_id",
+    "resolve_customer_identifier_key_id",
     "resolve_parameter_prefix",
+    "resolve_seed_user_subjects",
     "resolve_ssl_root_cert",
     "role_for_schema",
 ]
@@ -3190,6 +3193,82 @@ def resolve_dataset_staging_settings() -> DatasetStagingSettings:
     # not so this module can invent it.
     bucket = _ssm_parameter(parameter_path(_DATASETS_SEGMENT, "bucket"))
     return DatasetStagingSettings(bucket=bucket, environment=resolve_environment_name())
+
+
+# Assumptions: these two parameter paths are the SAME ones the account and card workloads read
+#   at start-up, and they are written out here rather than derived so that the agreement is
+#   checkable by reading. `infra/envs/{dev,prod}/main.tf` publishes each runtime value at
+#   `<prefix>/<environment>/<service>/<ENVIRONMENT_NAME>`, and both entries resolve to
+#   `module.kms.aurora_key_alias_name` -- ONE key, with the two purposes kept
+#   apart by their encryption context rather than by separate keys. That key is the AURORA
+#   key: the values these envelopes protect are columns in that cluster, and the specified
+#   model is four customer-managed keys, one per data-at-rest domain, so there is no separate
+#   application key for them to draw from. Reading the published
+#   parameters is what makes this module use the key the services use: a separate ETL-only
+#   parameter would be a second authority, and an envelope written under the wrong key is not a
+#   recoverable mistake -- it is readable only through the key that produced its data key.
+_CUSTOMER_IDENTIFIER_KEY_PARAMETER = (
+    "account",
+    "CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID",
+)
+_CARD_VERIFICATION_VALUE_KEY_PARAMETER = (
+    "card",
+    "CARDDEMO_SECURITY_CVV_KEY_ID",
+)
+
+
+@lru_cache(maxsize=1)
+def resolve_customer_identifier_key_id() -> str:
+    """Resolve the key the customer identifier envelopes are written under.
+
+    Purpose
+    -------
+    Supply the customer-managed key identifier that
+    :class:`carddemo_migration.loaders.protected_columns.CustomerIdentifierCipher` wraps its data
+    keys with, taken from the parameter ``account-service`` reads for the same purpose.
+
+    Returns
+    -------
+    str
+        The key alias or identifier, whitespace-trimmed and guaranteed non-empty. Infrastructure
+        publishes an ALIAS, which is the form to prefer: an alias survives replacement of the key
+        behind it, so a rotation does not require every reader of this value to be revised.
+
+    Raises
+    ------
+    ConfigurationError
+        If the parameter does not exist, cannot be read, or is blank. A blank value is refused
+        rather than defaulted for the reason the consuming service refuses it too -- a default
+        would let a load run against a key nobody chose, and every identifier written under it
+        would then be unreadable by the service that owns the column.
+    """
+    return _ssm_parameter(parameter_path(*_CUSTOMER_IDENTIFIER_KEY_PARAMETER))
+
+
+@lru_cache(maxsize=1)
+def resolve_card_verification_value_key_id() -> str:
+    """Resolve the key the card verification value envelopes are written under.
+
+    Purpose
+    -------
+    Supply the customer-managed key identifier that
+    :class:`carddemo_migration.loaders.protected_columns.CardVerificationValueCipher` wraps its
+    data keys with, taken from the parameter ``card-service`` reads for the same purpose.
+
+    Returns
+    -------
+    str
+        The key alias or identifier, whitespace-trimmed and guaranteed non-empty. It resolves to
+        the same application key as :func:`resolve_customer_identifier_key_id`; the two are read
+        through separate parameters because each service publishes its own, and reading both is
+        what keeps this module correct if the two are ever separated.
+
+    Raises
+    ------
+    ConfigurationError
+        If the parameter does not exist, cannot be read, or is blank.
+    """
+    return _ssm_parameter(parameter_path(*_CARD_VERIFICATION_VALUE_KEY_PARAMETER))
 
 
 @lru_cache(maxsize=1)

@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import com.carddemo.common.money.Money;
 import com.carddemo.reporting.domain.StatementTransactionView.StatementTransactionKey;
 import java.lang.reflect.Field;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.Test;
 
@@ -71,6 +72,26 @@ class DiagnosticRenderingTest {
      * to be weakened until it asserted nothing.</p>
      */
     private static final Long MERCHANT_ID = 748_113_902L;
+
+    /**
+     * An eleven-digit account identifier at the declared width of {@code ACCT-ID}.
+     *
+     * <p>Alternatives Considered: reusing a seed account identifier from
+     * {@code app/data/ASCII/acctdata.txt}. Rejected on measurement rather than on principle: the seed
+     * identifiers are zero-padded, and a run of zeros collides with the zero-padded transaction
+     * identifier and with the {@code 0001} category code these cases also carry, so an absence
+     * assertion over one would have to be weakened until it asserted nothing.</p>
+     */
+    private static final Long SEED_ACCOUNT_ID = 47_193_820_615L;
+
+    /**
+     * A nine-digit customer identifier at the declared width of {@code CUST-ID}.
+     *
+     * <p>Assumptions: distinct from {@link #SEED_ACCOUNT_ID} in every digit position that matters, so a
+     * rendering that emitted one and withheld the other cannot pass both absence assertions by
+     * accident.</p>
+     */
+    private static final Long SEED_CUSTOMER_ID = 356_812_477L;
 
     /**
      * Confirms the projection renders no amount and no merchant identifier.
@@ -147,6 +168,104 @@ class DiagnosticRenderingTest {
     }
 
     /**
+     * Confirms the account projection renders no account identifier and no monetary figure.
+     *
+     * <p>Assumptions: the account identifier is asserted absent by its VALUE and by its MEMBER NAME,
+     * for the reason this class states for every withheld value -- a rendering emitting
+     * {@code accountId=null} would pass a value-only assertion while announcing that the component is
+     * rendered, and the next hydrated row would disclose.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because the rendering carried the account identifier
+     * and argued for it from a baseline statement print. A rendering defended in its own Javadoc is
+     * exactly the one a reader stops re-examining, so the rule is pinned here where an argument cannot
+     * reach it.</p>
+     */
+    @Test
+    void theAccountProjectionRendersNeitherTheIdentifierNorAnyMoney() {
+        AccountView row = new AccountView();
+        set(AccountView.class, row, "accountId", SEED_ACCOUNT_ID);
+        set(AccountView.class, row, "activeStatus", "Y");
+
+        String rendered = row.toString();
+
+        assertThat(rendered).doesNotContain(String.valueOf(SEED_ACCOUNT_ID));
+        assertThat(rendered).doesNotContain("accountId");
+        assertThat(rendered).doesNotContain("Balance");
+        assertThat(rendered).doesNotContain("creditLimit");
+        assertThat(rendered).startsWith("AccountView[");
+        assertThat(rendered).contains("activeStatus=Y");
+    }
+
+    /**
+     * Confirms the customer projection renders no identifier and no personal data.
+     *
+     * <p>Assumptions: the rendering is expected to name its type and nothing else, which is what the
+     * observability authority prescribes for a type left with no member it may disclose. The exact
+     * string is asserted rather than a set of absences alone, because for this type the complete
+     * absence IS the contract and an assertion listing eleven absences would silently tolerate a
+     * twelfth member being added and rendered.</p>
+     */
+    @Test
+    void theCustomerProjectionRendersNoIdentifierAndNoPersonalData() {
+        CustomerView row = new CustomerView();
+        set(CustomerView.class, row, "customerId", SEED_CUSTOMER_ID);
+        set(CustomerView.class, row, "firstName", "SPECIMEN");
+        set(CustomerView.class, row, "lastName", "HOLDER");
+        set(CustomerView.class, row, "addressLine1", "1 SPECIMEN WAY");
+        set(CustomerView.class, row, "dateOfBirth", LocalDate.of(1970, 3, 4));
+
+        String rendered = row.toString();
+
+        assertThat(rendered).isEqualTo("CustomerView[]");
+        assertThat(rendered).doesNotContain(String.valueOf(SEED_CUSTOMER_ID));
+        assertThat(rendered).doesNotContain("customerId");
+        assertThat(rendered).doesNotContain("SPECIMEN");
+        assertThat(rendered).doesNotContain("HOLDER");
+        assertThat(rendered).doesNotContain("1970");
+    }
+
+    /**
+     * Confirms the cross-reference projection renders neither identifier nor any part of the card.
+     *
+     * <p>Assumptions: the forbidden card prefix and the last four digits are BOTH asserted absent on
+     * this type, unlike on the statement projection above where the last four are permitted. The
+     * difference is not an inconsistency: the statement key has no other way to say which row it
+     * describes, which is the narrow condition under which the observability authority sanctions the
+     * masked form, whereas this projection is permitted to disclose nothing at all.</p>
+     */
+    @Test
+    void theCrossReferenceProjectionRendersNoIdentifierAndNoCardFragment() {
+        CardXrefView row = new CardXrefView();
+        set(CardXrefView.class, row, "cardNum", SEED_CARD_NUMBER);
+        set(CardXrefView.class, row, "customerId", SEED_CUSTOMER_ID);
+        set(CardXrefView.class, row, "accountId", SEED_ACCOUNT_ID);
+
+        String rendered = row.toString();
+
+        assertThat(rendered).isEqualTo("CardXrefView[]");
+        assertThat(rendered).doesNotContain(FORBIDDEN_PREFIX);
+        assertThat(rendered).doesNotContain(PERMITTED_SUFFIX);
+        assertThat(rendered).doesNotContain(String.valueOf(SEED_CUSTOMER_ID));
+        assertThat(rendered).doesNotContain(String.valueOf(SEED_ACCOUNT_ID));
+        assertThat(rendered).doesNotContain("accountId");
+        assertThat(rendered).doesNotContain("customerId");
+    }
+
+    /**
+     * Confirms an unhydrated instance of each cross-context projection renders without raising.
+     *
+     * <p>Assumptions: a diagnostic method must not throw, because it is reached from a failure path
+     * where an instance may be partly populated. The three types are checked together because they
+     * share the rule and would fail it for the same reason.</p>
+     */
+    @Test
+    void anUnhydratedCrossContextProjectionRendersWithoutRaising() {
+        assertThatCode(() -> new AccountView().toString()).doesNotThrowAnyException();
+        assertThatCode(() -> new CustomerView().toString()).doesNotThrowAnyException();
+        assertThatCode(() -> new CardXrefView().toString()).doesNotThrowAnyException();
+    }
+
+    /**
      * Builds a fully hydrated projection carrying every value this class asserts absent.
      *
      * <p>Assumptions: the members are set through field access rather than through a constructor because
@@ -187,13 +306,37 @@ class DiagnosticRenderingTest {
      *     assigned
      */
     private static void set(StatementTransactionView row, String memberName, Object value) {
+        set(StatementTransactionView.class, row, memberName, value);
+    }
+
+    /**
+     * Assigns one declared member of any projection in this package by field access.
+     *
+     * <p>Refactoring Rationale: the single-type helper above delegates here rather than the two
+     * existing side by side. Four projections are populated by this class and they share no supertype
+     * that declares their members, so one generic assignment is the alternative to four near-identical
+     * ones -- and four copies of a reflective setter is four places for the "member is not assignable"
+     * diagnostic to drift out of step.</p>
+     *
+     * <p>Assumptions: a failure to reach a member is rethrown as an unchecked failure rather than
+     * reported as a test assertion, for the same reason the single-type helper gives: a missing or
+     * renamed member is a fault in the fixture and not a disclosure the cases above are measuring.</p>
+     *
+     * @param type the projection class declaring the member
+     * @param row the projection instance to populate
+     * @param memberName the declared field name to assign
+     * @param value the value to assign to that field
+     * @throws IllegalStateException if the projection declares no such member, or if it cannot be
+     *     assigned
+     */
+    private static void set(Class<?> type, Object row, String memberName, Object value) {
         try {
-            Field member = StatementTransactionView.class.getDeclaredField(memberName);
+            Field member = type.getDeclaredField(memberName);
             member.setAccessible(true);
             member.set(row, value);
         } catch (NoSuchFieldException | IllegalAccessException failure) {
             throw new IllegalStateException(
-                    "StatementTransactionView member " + memberName + " is not assignable", failure);
+                    type.getSimpleName() + " member " + memberName + " is not assignable", failure);
         }
     }
 }

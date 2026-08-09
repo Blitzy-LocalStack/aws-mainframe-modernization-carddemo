@@ -1,13 +1,5 @@
 package com.carddemo.authorization.api;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
@@ -33,10 +25,18 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -51,6 +51,17 @@ import tools.jackson.databind.json.JsonMapper;
  * material this migration reads and never modifies.</p>
  */
 class PendingAuthControllerTest {
+
+    /**
+     * The clock the screen representation's rendered instant is read from.
+     *
+     * <p>Assumptions: it is FIXED, so the instant the screen response carries is an assertable value rather
+     * than whatever the run happened to observe. The controller reads the instant server-side by design --
+     * it is evidence of when the response was produced -- so a test of that response needs the instant to
+     * be pinned.</p>
+     */
+    private static final Clock FIXED_CLOCK =
+            Clock.fixed(Instant.parse("2026-08-05T10:45:35Z"), ZoneOffset.UTC);
 
     /**
      * The authenticated principal the controller reads the sealed values' binding subject from.
@@ -145,7 +156,7 @@ class PendingAuthControllerTest {
         Arrays.fill(keyMaterial, (byte) 0x3C);
         this.mapper = new PendingAuthViewMapper(new CursorToken(keyMaterial, Duration.ofMinutes(5)));
         this.mockMvc = MockMvcBuilders
-                .standaloneSetup(new PendingAuthController(this.summaries, this.detail))
+                .standaloneSetup(new PendingAuthController(this.summaries, this.detail, FIXED_CLOCK))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter(
                         JsonMapper.builder().addModule(new MoneyModule()).build()))
                 .setControllerAdvice(new GlobalExceptionHandler(
@@ -366,7 +377,7 @@ class PendingAuthControllerTest {
         PendingAuthSummary summary = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
         summary.refreshLimits(new BigDecimal("5000.00"), new BigDecimal("1000.00"));
         summary.recordApproved(new BigDecimal("250.00"));
-        return this.mapper.toListView(summary, List.of(row()), false, null, SUBJECT);
+        return this.mapper.toListView(summary, List.of(row()), false, false, null, SUBJECT, null);
     }
 
     /**
@@ -380,8 +391,8 @@ class PendingAuthControllerTest {
      * @return a mapped list view carrying a zeroed summary block, no rows and no boundary cursors
      */
     private PendingAuthListView zeroedListView() {
-        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, 0L), List.of(), false, null,
-                SUBJECT);
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, 0L), List.of(), false, false,
+                null, SUBJECT, null);
     }
 
     /**

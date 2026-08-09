@@ -54,20 +54,29 @@ class PageResponseTest {
     }
 
     /**
-     * Confirms the envelope carries exactly four components and none of them is an offset.
+     * Confirms the envelope carries exactly five components and none of them is an offset.
      *
      * <p>Assumptions: this is asserted reflectively over the record's components rather than by reading
-     * the source, so a fifth component added later fails here regardless of what it is named. The four
+     * the source, so a sixth component added later fails here regardless of what it is named. The five
      * permitted names are listed explicitly because the point is the closed set, not the count.</p>
+     *
+     * <p>Refactoring Rationale: the closed set gained {@code hasPrevious} and the reason is recorded
+     * here as well as on the type, because a reader arriving at this assertion is entitled to know why
+     * the number moved. Backward availability was previously read off {@code firstKey}, which every page
+     * carrying rows supplies, so the opening page advertised an earlier page that did not exist and a
+     * client following the advertisement replaced its rows with an empty page. The three names this test
+     * still forbids -- offset, total and page -- are unchanged, because none of them was ever the
+     * problem: the fix is one more key-derived fact, not a positional one.</p>
      */
     @Test
-    @DisplayName("carries exactly four components, none of them an offset or a page number")
-    void carriesExactlyFourComponents() {
+    @DisplayName("carries exactly five components, none of them an offset or a page number")
+    void carriesExactlyFiveComponents() {
         List<String> components = Arrays.stream(PageResponse.class.getRecordComponents())
             .map(component -> component.getName())
             .toList();
 
-        assertThat(components).containsExactly("items", "firstKey", "lastKey", "hasNext");
+        assertThat(components)
+            .containsExactly("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
         assertThat(components).noneSatisfy(name -> assertThat(name.toLowerCase())
             .contains("offset"));
         assertThat(components).noneSatisfy(name -> assertThat(name.toLowerCase())
@@ -100,12 +109,13 @@ class PageResponseTest {
         String last = cursor("4111111111111199" + "00000000099");
 
         PageResponse<String> page =
-            PageResponse.ofRows(List.of("row-1", "row-2", "row-3"), first, last, true);
+            PageResponse.ofRows(List.of("row-1", "row-2", "row-3"), first, last, true, true);
 
         assertThat(page.items()).containsExactly("row-1", "row-2", "row-3");
         assertThat(page.firstKey()).isEqualTo(first);
         assertThat(page.lastKey()).isEqualTo(last);
         assertThat(page.hasNext()).isTrue();
+        assertThat(page.hasPrevious()).isTrue();
     }
 
     /**
@@ -121,9 +131,9 @@ class PageResponseTest {
         String sealed = cursor("4111111111111111" + "00000000001");
         List<String> rows = List.of("row-1");
 
-        assertThatThrownBy(() -> PageResponse.ofRows(rows, null, sealed, false))
+        assertThatThrownBy(() -> PageResponse.ofRows(rows, null, sealed, false, false))
             .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> PageResponse.ofRows(rows, sealed, null, false))
+        assertThatThrownBy(() -> PageResponse.ofRows(rows, sealed, null, false, false))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -137,8 +147,47 @@ class PageResponseTest {
     @Test
     @DisplayName("reporting a further page without a forward cursor is refused")
     void furtherPageWithoutAForwardCursorIsRefused() {
-        assertThatThrownBy(() -> PageResponse.ofRows(List.of(), null, null, true))
+        assertThatThrownBy(() -> PageResponse.ofRows(List.of(), null, null, true, false))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Confirms reporting an earlier page without the position to request it from is refused.
+     *
+     * <p>Assumptions: this is the backward mirror of the forbidden forward combination, and it is
+     * forbidden for the same reason: a caller told it may step back with nowhere to step back from has
+     * been given an instruction it cannot carry out.</p>
+     */
+    @Test
+    @DisplayName("reporting an earlier page without a backward cursor is refused")
+    void earlierPageWithoutABackwardCursorIsRefused() {
+        assertThatThrownBy(() -> PageResponse.ofRows(List.of(), null, null, false, true))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PageResponse.ofFilteredEmpty(null, null, true))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Confirms the opening page names its leading boundary while reporting no earlier page.
+     *
+     * <p>Refactoring Rationale: this is the exact state the earlier four-component envelope could not
+     * express, and it is asserted directly so that no future revision reinstates the derivation. The page
+     * names its own first row -- which a later backward request needs -- and simultaneously reports that
+     * nothing precedes it, which is what the reference does at lines 1301 and 1302 of
+     * {@code app/cbl/COCRDLIC.cbl} when a backward request arrives on the first page.</p>
+     */
+    @Test
+    @DisplayName("the opening page names its leading boundary and still reports no earlier page")
+    void openingPageNamesItsLeadingBoundaryAndReportsNoEarlierPage() {
+        String first = cursor("4111111111111111" + "00000000001");
+        String last = cursor("4111111111111150" + "00000000050");
+
+        PageResponse<String> opening =
+            PageResponse.ofRows(List.of("row-1", "row-2"), first, last, true, false);
+
+        assertThat(opening.firstKey()).isEqualTo(first);
+        assertThat(opening.hasPrevious()).isFalse();
+        assertThat(opening.hasNext()).isTrue();
     }
 
     /**
@@ -155,10 +204,11 @@ class PageResponseTest {
         String first = cursor("4111111111111111" + "00000000001");
         String last = cursor("4111111111111150" + "00000000050");
 
-        PageResponse<String> page = PageResponse.ofRows(List.of("row-1"), first, last, false);
+        PageResponse<String> page = PageResponse.ofRows(List.of("row-1"), first, last, false, true);
 
         assertThat(page.hasNext()).isFalse();
         assertThat(page.lastKey()).isEqualTo(last);
+        assertThat(page.hasPrevious()).isTrue();
     }
 
     /**
@@ -175,12 +225,13 @@ class PageResponseTest {
         String forward = cursor("4111111111111199" + "00000000099");
         String backward = cursor("4111111111111100" + "00000000001");
 
-        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(forward, backward);
+        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(forward, backward, true);
 
         assertThat(filtered.items()).isEmpty();
         assertThat(filtered.lastKey()).isEqualTo(forward);
         assertThat(filtered.firstKey()).isEqualTo(backward);
         assertThat(filtered.hasNext()).isTrue();
+        assertThat(filtered.hasPrevious()).isTrue();
     }
 
     /**
@@ -189,10 +240,11 @@ class PageResponseTest {
     @Test
     @DisplayName("a filtered-empty page with no forward position reports no further page")
     void filteredEmptyWithoutForwardPositionReportsNoFurtherPage() {
-        PageResponse<String> exhausted = PageResponse.ofFilteredEmpty(null, null);
+        PageResponse<String> exhausted = PageResponse.ofFilteredEmpty(null, null, false);
 
         assertThat(exhausted.items()).isEmpty();
         assertThat(exhausted.hasNext()).isFalse();
+        assertThat(exhausted.hasPrevious()).isFalse();
         assertThat(exhausted.lastKey()).isNull();
     }
 
@@ -206,7 +258,7 @@ class PageResponseTest {
     @Test
     @DisplayName("a null row list is refused rather than read as an empty page")
     void nullRowListIsRefused() {
-        assertThatThrownBy(() -> PageResponse.ofRows(null, null, null, false))
+        assertThatThrownBy(() -> PageResponse.ofRows(null, null, null, false, false))
             .isInstanceOf(NullPointerException.class);
     }
 
@@ -224,7 +276,7 @@ class PageResponseTest {
         String first = cursor("4111111111111111" + "00000000001");
         String last = cursor("4111111111111111" + "00000000001");
 
-        PageResponse<String> page = PageResponse.ofRows(mutable, first, last, false);
+        PageResponse<String> page = PageResponse.ofRows(mutable, first, last, false, false);
         mutable.add("row-2-added-after-construction");
 
         assertThat(page.items()).containsExactly("row-1");
@@ -246,7 +298,7 @@ class PageResponseTest {
     @DisplayName("a blank boundary is normalised to the single absent spelling")
     void blankBoundaryIsNormalised(String blankBoundary) {
         PageResponse<String> page =
-            PageResponse.ofRows(List.of(), blankBoundary, blankBoundary, false);
+            PageResponse.ofRows(List.of(), blankBoundary, blankBoundary, false, false);
 
         assertThat(page.firstKey()).isNull();
         assertThat(page.lastKey()).isNull();
@@ -266,7 +318,8 @@ class PageResponseTest {
         String rawCursor = "4111111111111111" + "00000000001";
 
         assertThat(CursorToken.hasSealedShape(rawCursor)).isFalse();
-        assertThatThrownBy(() -> PageResponse.ofRows(List.of("row-1"), rawCursor, rawCursor, false))
+        assertThatThrownBy(
+            () -> PageResponse.ofRows(List.of("row-1"), rawCursor, rawCursor, false, false))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -285,7 +338,7 @@ class PageResponseTest {
         String accountId = "00000000001";
         String sealed = cursor(cardNumber + accountId);
 
-        PageResponse<String> page = PageResponse.ofRows(List.of("row-1"), sealed, sealed, false);
+        PageResponse<String> page = PageResponse.ofRows(List.of("row-1"), sealed, sealed, false, false);
 
         assertThat(page.firstKey()).doesNotContain(cardNumber).doesNotContain(accountId);
         assertThat(page.lastKey()).doesNotContain(cardNumber).doesNotContain(accountId);

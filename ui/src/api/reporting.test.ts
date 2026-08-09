@@ -1,3 +1,16 @@
+/**
+ * @file Unit tests for the reporting client in `ui/src/api/reporting.ts`.
+ *
+ * Purpose
+ * -------
+ * Assert that each published reporting operation addresses the target its manifest entry declares
+ * and shapes its request as the service contract requires, so a target edited at one of the two
+ * places cannot diverge unnoticed from the other.
+ *
+ * Assumptions: the axios instance is stubbed, so these cases measure this package's request
+ * construction and nothing about a running service.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract: ambient test globals are
 // declared per PROJECT, so admitting them here would make `expect` and `vi` visible to production
@@ -209,7 +222,7 @@ async function readsADeclinedConfirmationFromTheOkStatus(): Promise<void> {
  * a direction alone would describe a position relative to nothing.
  */
 async function sendsTheRangeAndOmitsTheDirectionWithoutACursor(): Promise<void> {
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
   await listTransactionReportLines({ startDate: '2022-07-01', endDate: '2022-07-31' });
   const request = onlyRequest();
   expect(request.method).toBe('get');
@@ -219,7 +232,7 @@ async function sendsTheRangeAndOmitsTheDirectionWithoutACursor(): Promise<void> 
 
 /** Asserts a supplied cursor is sent under the published parameter name with its direction. */
 async function sendsTheCursorUnderThePublishedParameterName(): Promise<void> {
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
   await listTransactionReportLines({
     startDate: '2022-07-01',
     endDate: '2022-07-31',
@@ -349,7 +362,7 @@ async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
   await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
 
   nextStatus = HTTP_OK;
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
   await listTransactionReportLines({ startDate: '2022-07-01', endDate: '2022-07-31' });
 
   nextBody = { bands: [] };

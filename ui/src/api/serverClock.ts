@@ -1,5 +1,5 @@
 /**
- * Server-anchored clock for the paint-time date and time in the screen header band.
+ * @file Server-anchored clock for the paint-time date and time in the screen header band.
  *
  * WHY this module exists — Refactoring Rationale: `ScreenHeader` accepts a `now` instant and states
  * in its own contract that the composing shell must pass a SERVER-derived one, because the baseline

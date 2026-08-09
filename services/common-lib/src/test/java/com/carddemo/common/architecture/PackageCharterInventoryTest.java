@@ -16,7 +16,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Holds every package charter's stated file count to the directory the charter lives in.
+ * Holds every measured claim a package charter publishes to the directory the charter lives in.
  *
  * <p><b>Purpose.</b> Package charters across the service tree publish closed inventories of their own
  * directory -- "exactly four classes", "three source files and no more", "five Java files, four of
@@ -24,6 +24,12 @@ import org.junit.jupiter.api.Test;
  * reason rather than through carelessness: the figure lives in a different file from the thing it
  * counts, so the change that falsifies it never touches it. This test reads the figure and counts the
  * directory, so the next such change fails the build instead of publishing a false document.</p>
+ *
+ * <p>Two kinds of measured claim are checked, on the same argument. The first is the count of files in
+ * the directory, published as the marker line described below. The second is the count of cases an
+ * enumerated member covers, published as a per-member figure in the charter's inventory: it is a
+ * measurement of a file in the same directory and drifts for the same structural reason. Both are
+ * re-measured here, and each check separately refuses to be vacuous.</p>
  *
  * <p>A charter opts in by carrying one line in a canonical shape:</p>
  *
@@ -60,7 +66,7 @@ import org.junit.jupiter.api.Test;
  * silence a failure has to also lower that floor, which is a visible act in review rather than an
  * invisible omission.</p>
  */
-@DisplayName("Every package charter's stated file count matches the directory it describes")
+@DisplayName("Every measured claim a package charter states matches the directory it describes")
 final class PackageCharterInventoryTest {
 
     /** Marker used to locate the repository root, being a file this test also reads. */
@@ -91,6 +97,21 @@ final class PackageCharterInventoryTest {
 
     /** Separator between names inside a marker line's planned clause. */
     private static final String PLANNED_SEPARATOR = ", ";
+
+    /** Matches one enumerated member and the body of its entry, over a flattened charter. */
+    private static final Pattern ENUMERATED_MEMBER =
+            Pattern.compile("<li>\\{@code ([A-Z][A-Za-z0-9]*)}(.*?)</li>", Pattern.DOTALL);
+
+    /** Matches the case count an enumerated member's entry declares. */
+    private static final Pattern DECLARED_CASE_COUNT = Pattern.compile("across (\\d+) cases");
+
+    /** Matches one declared case, being a test annotation that begins its own line. */
+    private static final Pattern TEST_ANNOTATION = Pattern.compile(
+            "^\\s*@(?:Test|ParameterizedTest|RepeatedTest)\\b", Pattern.MULTILINE);
+
+    /** Matches the leading asterisk of a Javadoc continuation line. */
+    private static final Pattern JAVADOC_LINE_PREFIX =
+            Pattern.compile("^\\s*\\*[ \\t]?", Pattern.MULTILINE);
 
     /**
      * Locates the repository root by walking up from the working directory.
@@ -263,4 +284,208 @@ final class PackageCharterInventoryTest {
                         + " check vacuous")
                 .isPositive();
     }
+
+    /**
+     * Holds every declared case count a charter states against the class it names.
+     *
+     * <p><b>Purpose.</b> A charter that enumerates its members often states how many cases each one
+     * covers, and that figure is a measurement of a file sitting in the same directory. This check
+     * re-measures it. The metric is the one the charters name: cases DECLARED, being methods annotated
+     * as a test, a parameterised test or a repeated test, rather than the larger number of cases a run
+     * reports having executed once a parameterised method expands.</p>
+     *
+     * <p>Refactoring Rationale: this check was added because a stated count drifted from its directory
+     * in a way that naming the metric had not prevented. The count was re-measured by someone who
+     * counted the plain test annotations and did not add the parameterised ones, which produced a
+     * figure lower than the truth and a note recording it as a correction -- so the charter then
+     * asserted a wrong number and explained why it was right. Prose cannot defend against that; a
+     * measurement can, and this is the same argument the marker line above rests on.</p>
+     *
+     * <p>Assumptions: a named member whose file is absent is skipped rather than failed here, because
+     * the check above already owns member existence and reports it against the enumeration with a
+     * message shaped for that failure. Duplicating it here would report one defect twice and would
+     * report it second in a weaker form. A planned member, which by definition has no file yet, is
+     * skipped by the same rule without needing the planned clause to be parsed again.</p>
+     *
+     * @throws UncheckedIOException if a charter or an enumerated class cannot be read, which fails the
+     *     test rather than skipping it, for the same reason as the cases above
+     */
+    @Test
+    @DisplayName("every case count a charter declares matches the class it names")
+    void everyDeclaredCaseCountMatchesTheClassItNames() {
+        int checked = 0;
+        for (Path charter : charters()) {
+            Path directory = charter.getParent();
+            Matcher entries = ENUMERATED_MEMBER.matcher(flatten(read(charter)));
+            while (entries.find()) {
+                Matcher declared = DECLARED_CASE_COUNT.matcher(entries.group(2));
+                if (!declared.find()) {
+                    continue;
+                }
+                Path member = directory.resolve(entries.group(1) + ".java");
+                if (!Files.isRegularFile(member)) {
+                    continue;
+                }
+                checked++;
+                assertThat(declaredCases(member))
+                        .as("%s states %s covers %s cases; that is a count of methods annotated as a"
+                                + " test, a parameterised test or a repeated test in %s",
+                                charter, entries.group(1), declared.group(1), member.getFileName())
+                        .isEqualTo(Integer.parseInt(declared.group(1)));
+            }
+        }
+        assertThat(checked)
+                .as("declared case counts found across the charters; none would make this check"
+                        + " vacuous")
+                .isPositive();
+    }
+
+    /**
+     * Counts the cases one test class declares.
+     *
+     * @param member the test class to measure; must not be {@code null}
+     * @return the number of methods annotated as a test, a parameterised test or a repeated test
+     * @throws UncheckedIOException if the class cannot be read
+     */
+    private static int declaredCases(Path member) {
+        // WHY : Assumptions: the annotations are counted on the raw source rather than on the
+        //       flattened form used for the charter, because the pattern anchors each one to the start
+        //       of its own line. That anchor is what keeps the count to real annotations: the same
+        //       token appears inside prose and inside an import, and neither begins a line of its own.
+        //       The word boundary keeps sibling annotations whose names merely start with Test out of
+        //       the count.
+        Matcher cases = TEST_ANNOTATION.matcher(read(member));
+        int declared = 0;
+        while (cases.find()) {
+            declared++;
+        }
+        return declared;
+    }
+
+    /**
+     * Reads one source file as text.
+     *
+     * @param file the file to read; must not be {@code null}
+     * @return the file's full contents; never {@code null}
+     * @throws UncheckedIOException if the file cannot be read
+     */
+    private static String read(Path file) {
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot read " + file, unreadable);
+        }
+    }
+
+    /**
+     * Reduces one Javadoc comment to a single line so a claim that wraps can be matched.
+     *
+     * @param source the file's full contents; must not be {@code null}
+     * @return the same text with Javadoc line prefixes removed and runs of whitespace collapsed to one
+     *     space; never {@code null}
+     */
+    private static String flatten(String source) {
+        // WHY : Assumptions: the continuation prefix is stripped and whitespace collapsed before a
+        //       claim is matched, because a claim in a charter wraps wherever the line ran out and the
+        //       wrap point is not part of the claim. A pattern written against the wrapped form would
+        //       match a count today and stop matching it the moment a word was inserted earlier in the
+        //       same sentence -- which is a check that silently stops checking, the failure this whole
+        //       class exists to make impossible.
+        return JAVADOC_LINE_PREFIX.matcher(source).replaceAll("").replaceAll("\\s+", " ");
+    }
+
+    /** Matches the canonical subpackage-roster marker, whose figure must equal the child directories. */
+    private static final Pattern SUBPACKAGE_MARKER =
+            Pattern.compile("^ \\* this package: (\\d+) subpackages$", Pattern.MULTILINE);
+
+    /** Matches one subpackage entry of a roster, which is written with the leading dot the tree uses. */
+    private static final Pattern SUBPACKAGE_ENTRY =
+            Pattern.compile("\\* {3}<li>\\{@code \\.([a-z][A-Za-z0-9]*)}");
+
+    /**
+     * Fewest subpackage-roster markers this test must find for its verdict to mean anything.
+     *
+     * <p>Assumptions: the floor is one because exactly one charter in the tree publishes a closed roster
+     * of the packages beneath it today, and stating the real number rather than an aspirational one is
+     * what keeps the floor meaningful. It is a floor for the same reason as the file-count floor above:
+     * adopting the marker in a further charter needs no ceremony, while removing it from the charter that
+     * has it becomes a visible act in review rather than an invisible omission.</p>
+     */
+    private static final int MINIMUM_MARKED_ROSTERS = 1;
+
+    /**
+     * Lists the names of the directories immediately inside one directory.
+     *
+     * @param directory the directory whose children are listed
+     * @return the child directory names, sorted, so a comparison reads the same on every platform
+     * @throws UncheckedIOException if the directory cannot be listed
+     */
+    private static List<String> childDirectoryNames(Path directory) {
+        try (Stream<Path> children = Files.list(directory)) {
+            return children.filter(Files::isDirectory)
+                    .map(child -> child.getFileName().toString())
+                    .sorted()
+                    .toList();
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot list " + directory, unreadable);
+        }
+    }
+
+    /**
+     * Confirms every published subpackage roster matches the directories beneath its charter.
+     *
+     * <p>Assumptions: both directions are asserted, because the two failures a roster can carry are
+     * different and neither implies the other. A roster can UNDERCOUNT, which is what makes a reader
+     * believe a directory they can see is not part of the tree; and it can NAME a package that is not
+     * there, which sends a reader looking for it. The count catches the first and the name check catches
+     * the second, so a roster that named nine packages of which one was absent while a tenth existed
+     * unnamed -- which would keep the total correct -- still fails.</p>
+     *
+     * <p>Assumptions: the entries are read with the leading dot the tree writes them with, so a mention
+     * of a package elsewhere in the charter's prose is not swept in. Charters name sibling and production
+     * packages constantly, and holding every mention to a child directory would fail on all of them.</p>
+     *
+     * @throws UncheckedIOException if a charter or its directory cannot be read, which fails the test
+     *     rather than skipping it: an unreadable charter is exactly the case in which its claims would
+     *     otherwise go unchecked
+     */
+    @Test
+    @DisplayName("each subpackage-roster marker's count and named packages match the directories present")
+    void everyMarkedSubpackageRosterMatchesItsDirectory() {
+        int marked = 0;
+        for (Path charter : charters()) {
+            Path directory = charter.getParent();
+            String text;
+            try {
+                text = Files.readString(charter, StandardCharsets.UTF_8);
+            } catch (IOException unreadable) {
+                throw new UncheckedIOException("cannot read " + charter, unreadable);
+            }
+            Matcher marker = SUBPACKAGE_MARKER.matcher(text);
+            if (!marker.find()) {
+                continue;
+            }
+            marked++;
+            List<String> present = childDirectoryNames(directory);
+            assertThat(Integer.parseInt(marker.group(1)))
+                    .as("subpackages claimed by %s, against the directories present: %s", charter,
+                            present)
+                    .isEqualTo(present.size());
+            List<String> named = new ArrayList<>();
+            Matcher entry = SUBPACKAGE_ENTRY.matcher(text);
+            while (entry.find()) {
+                named.add(entry.group(1));
+            }
+            assertThat(named)
+                    .as("%s publishes a closed roster, so every directory present must be named in it"
+                            + " and every name must be a directory", charter)
+                    .containsExactlyInAnyOrderElementsOf(present);
+        }
+        assertThat(marked)
+                .as("charters carrying the canonical '%s' marker line; the floor exists so that"
+                        + " deleting a marker to silence a failure is a visible act",
+                        "this package: N subpackages")
+                .isGreaterThanOrEqualTo(MINIMUM_MARKED_ROSTERS);
+    }
+
 }

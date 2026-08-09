@@ -367,15 +367,22 @@ module already pins the neighbouring `1582-10-14` outcome.
 it and are where record geometry is obtained from, rather than from an offset copied
 out of the table in section 4.1.1.
 
-**Not present in this module, and planned in this same change.**
-`services/reference-service/src/main/java/com/carddemo/reference/service/DateConversionMessageListener.java`
-is the decoding consumer: its queue entry point decodes the 1000-byte request buffer
-through a locally built `CopybookLayout.RecordSpec` at offsets 0, 4 and 15 with widths
-4, 11 and 985 -- identical to section 4.1.1 -- and shares its conversion method with
-`DateConversionController`, also not present in this module, so that the HTTP and queue
-transports produce byte-identical replies. It delegates every date-edit rule to
-`DateEditValidator` and re-implements none of them, which is precisely why this
-scenario's assertion is made at the parameter level.
+**Present in this module, and it is the HTTP route rather than the queue route.**
+`services/reference-service/src/main/java/com/carddemo/reference/service/DateConversionService.java`
+holds the evaluation this scenario exercises, and
+`services/reference-service/src/main/java/com/carddemo/reference/api/DateConversionController.java`
+is the only caller of it. It delegates every date-edit rule to `DateEditValidator` and
+re-implements none of them, which is precisely why this scenario's assertion is made at
+the parameter level.
+
+Refactoring Rationale: this entry named `DateConversionMessageListener` as "the decoding
+consumer" and said it "shares its conversion method with `DateConversionController` ...
+so that the HTTP and queue transports produce byte-identical replies". That type has
+been removed: it carried a second `@SqsListener` competing with
+`DateInquiryMessageListener` for one request queue, and its evaluation was never on the
+queue path. The queue route emits the current system date and time and reads no field of
+its request, so it cannot reject a date at all — which is why **this** scenario is an
+HTTP-route scenario and names the HTTP route's own types.
 
 **Not present in this module.** No `*ServiceTest`, `*ControllerTest` or `*RepositoryIT`
 class exists under `services/reference-service/src/test/java`; the count measured on

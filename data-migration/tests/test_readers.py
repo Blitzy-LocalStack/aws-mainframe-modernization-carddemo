@@ -29,7 +29,9 @@ for all of them, which is the only way a shared contract stays shared as readers
 
 from __future__ import annotations
 
+import base64
 import importlib
+import os
 import pathlib
 import re
 from decimal import Decimal
@@ -37,7 +39,7 @@ from typing import TYPE_CHECKING, Final, NamedTuple
 
 import pytest
 
-from carddemo_migration.copybook import layouts
+from carddemo_migration.copybook import ebcdic_codec, layouts
 from carddemo_migration.copybook.layouts import Kind, LayoutError, RecordSpec
 from carddemo_migration.readers import (
     account,
@@ -46,6 +48,7 @@ from carddemo_migration.readers import (
     dalytran,
     discgrp,
     export_record,
+    factory,
     tcatbal,
     trancatg,
     transaction,
@@ -80,6 +83,14 @@ class FlatReaderCase(NamedTuple):
     entry point is a ``getattr`` that FAILS when a reader does not publish it. That is
     deliberate: the inventory assertion and the behaviour tests then share one mechanism, and a
     reader cannot pass the behaviour tests while quietly omitting an entry point.
+
+    Assumptions: ``character_path`` records whether the reader publishes the ``decode_ascii_*`` /
+    ``iter_ascii_*`` / ``read_ascii_*`` trio at all, as DATA rather than as a module-name
+    comparison inside each test. Ten of the eleven do. The security-user reader deliberately does
+    not: its record is the credential-bearing one and every character form of it is a transcode of
+    a plaintext password written somewhere outside the single REFERENCE-only dataset, so the trio
+    was removed rather than kept for callers holding such text. Expressing that as a flag means a
+    test asserts the ABSENCE where it matters instead of silently skipping a reader.
     """
 
     module_name: str
@@ -89,6 +100,7 @@ class FlatReaderCase(NamedTuple):
     plural: str
     ascii_dataset: str | None
     ebcdic_dataset: str | None
+    character_path: bool = True
 
 
 # WHY : Assumptions: the table names the ELEVEN flat readers. The export reader is absent
@@ -198,6 +210,7 @@ _FLAT_READERS: Final[tuple[FlatReaderCase, ...]] = (
         "security_users",
         None,
         "AWS.M2.CARDDEMO.USRSEC.PS",
+        character_path=False,
     ),
 )
 
@@ -411,6 +424,25 @@ def _decoded_records(
 
 _FLAT_IDS: Final[tuple[str, ...]] = tuple(case.module_name for case in _FLAT_READERS)
 
+# WHY : Assumptions: ONE of the eleven flat readers publishes no character decode path at all,
+#   and it is named here rather than tested for by `hasattr`, so a reader that lost its character
+#   trio by accident fails instead of being quietly excused. `usrsec` is that reader: the baseline
+#   ships `USRSEC` in EBCDIC only -- there is no `app/data/ASCII/usrsec.txt` among the nine ASCII
+#   seeds -- and its 80-byte record carries `SEC-USR-PWD PIC X(08)` in CLEAR, so a whole-record
+#   character form of it is a Python `str` holding a live credential. The reader's byte path
+#   decodes field by field over `LOADED_FIELDS` and never slices that span, which is the property
+#   the character trio could not offer, so the trio was withdrawn rather than tolerated.
+_BYTE_ONLY_READERS: Final[frozenset[str]] = frozenset({"usrsec"})
+
+# WHY : Assumptions: the three withdrawn names are listed explicitly so their ABSENCE is asserted
+#   rather than assumed. A reader re-acquiring any one of them would restore a whole-record
+#   credential surface, and nothing else in this suite would notice.
+_WITHDRAWN_CHARACTER_ENTRY_POINTS: Final[tuple[str, ...]] = (
+    "decode_ascii_security_user",
+    "iter_ascii_security_users",
+    "read_ascii_security_users",
+)
+
 
 def test_every_reader_module_the_plan_requires_is_importable() -> None:
     """Prove all twelve reader modules exist and are reachable as package attributes."""
@@ -420,11 +452,13 @@ def test_every_reader_module_the_plan_requires_is_importable() -> None:
     #   states the requirement explicitly, so the failure names the inventory rather than an
     #   import somewhere near the top of a file.
     # WHY : Alternatives Considered: each module is imported BY NAME here rather than read off
-    #   the package as an attribute. Reading an attribute would have been shorter and would have
-    #   asserted nothing: the package deliberately re-exports no reader, so a reader is an
-    #   attribute of it only once something has already imported that submodule -- which this
-    #   file does at its top. The assertion would then have passed because of its own imports
-    #   rather than because the modules exist.
+    #   the package as an attribute. The package now resolves a reader lazily on attribute access,
+    #   so reading an attribute WOULD work -- and it would assert less: an attribute lookup finds a
+    #   module this file has already imported at its top, so the assertion would pass because of
+    #   its own imports rather than because the modules exist. Importing by name reaches the
+    #   filesystem every time the interpreter has not already cached the module, which is the
+    #   property being asserted. The registry-to-directory agreement that the lazy surface makes
+    #   checkable is asserted separately, in test_package_surfaces.py.
     for name in _REQUIRED_READER_MODULES:
         module = importlib.import_module(f"carddemo_migration.readers.{name}")
         assert module.__doc__, f"reader module {name!r} carries no module docstring"
@@ -451,9 +485,24 @@ def test_every_flat_reader_publishes_the_shared_entry_points(case: FlatReaderCas
     :param case: the flat reader under test, from the module-level table.
     :returns: nothing; a reader missing any published name is reported as an ``AttributeError``.
     """
+    # WHY : Assumptions: the encodings a reader must publish are derived from
+    #   `_BYTE_ONLY_READERS` rather than fixed at both, and the byte-only reader's character names
+    #   are then asserted ABSENT. Loosening this to "publishes at least the byte trio" would let
+    #   any reader drop its character path silently; naming the one exception keeps the shared
+    #   contract at six entry points for the other ten and turns a re-added character entry point
+    #   on the security-user record into a failure rather than an unnoticed API widening.
+    encodings = ("ebcdic",) if case.module_name in _BYTE_ONLY_READERS else ("ascii", "ebcdic")
     for verb in ("decode", "iter", "read"):
-        for encoding in ("ascii", "ebcdic"):
+        for encoding in encodings:
             assert callable(_entry(case, verb, encoding))
+    if case.module_name in _BYTE_ONLY_READERS:
+        published = set(case.module.__all__)
+        for withdrawn in _WITHDRAWN_CHARACTER_ENTRY_POINTS:
+            assert not hasattr(case.module, withdrawn), (
+                f"{case.module_name} re-published {withdrawn}, which takes a whole record as"
+                " characters and therefore takes the baseline's cleartext password with it"
+            )
+            assert withdrawn not in published
     for scope in ("record", "field"):
         assert callable(_rendering(case, scope))
 
@@ -504,6 +553,15 @@ def test_the_key_accessor_returns_the_descriptor_declared_span(
     #   on it.
     with pytest.raises(layouts.RecordLengthError):
         accessor("0" * (case.layout.reclen - 1))
+
+    # WHY : Refactoring Rationale: the OVER-LONG case is asserted too, and its absence was a real
+    #   gap rather than an omission of symmetry. Every one of these accessors tested only for a
+    #   record SHORTER than the declared width, so each accepted a record longer than its own
+    #   decoders will parse -- and an over-long record is the more dangerous of the two, because the
+    #   key sliced from it comes from the right offsets of the WRONG record, two rows concatenated
+    #   most plausibly, so it looks entirely well formed and a loader upserts on it.
+    with pytest.raises(layouts.RecordLengthError):
+        accessor("0" * (case.layout.reclen + 1))
 
 
 @pytest.mark.parametrize("case", _FLAT_READERS, ids=_FLAT_IDS)
@@ -673,6 +731,13 @@ def test_a_character_outside_the_single_byte_range_is_refused_naming_its_field(
     #   image keeps its declared character width and the width check cannot be what refuses it.
     #   Appending would only re-prove that an over-long row is rejected -- which a separate test
     #   already covers -- and would leave this branch unentered, which is the whole point here.
+    # WHY : Assumptions: the byte-only reader is skipped here rather than exempted with an
+    #   alternative assertion, because this refusal is a property of a CHARACTER decode path and
+    #   that reader publishes none: its equivalent guard is the codec's decode-and-re-encode proof
+    #   on the byte path, which `test_a_span_that_does_not_round_trip_is_refused` covers. The skip
+    #   names the reason so it cannot be read as an untested reader.
+    if not case.character_path:
+        pytest.skip(f"{case.module_name} publishes no character decode path to corrupt")
     offset = 5
     record = "0" * case.layout.reclen
     corrupted = record[:offset] + "\u00e9" + record[offset + 1 :]
@@ -1029,6 +1094,57 @@ def test_the_export_key_orders_records_by_their_sequence_number(
     ]
 
 
+def test_the_export_verification_value_is_never_handed_to_a_decoder(
+    seed_corpus: SeedCorpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read the whole export extract and require the suppressed span to reach no codec.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :param monkeypatch: pytest fixture used to observe the per-field decode.
+    :returns: nothing; a decode of the suppressed field is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: the reader used to build its result from the published field
+    #   tuple AFTER decoding every field the selected branch declares, so `EXP-CARD-CVV-CD` was
+    #   absent from the returned mapping and present as a decoded value in the payload mapping the
+    #   decode produced. Asserting only on the returned keys -- which an earlier test did -- could
+    #   not tell the two apart, and that is precisely the gap: a traceback raised anywhere below the
+    #   decode carried the value. This test observes the CODEC instead of the result, so it fails if
+    #   the span is decoded at all, whatever happens to the value afterwards.
+    # WHY : Trade-offs: the observation wraps the codec's private per-field entry point rather than
+    #   a public hook, which couples this test to an internal name. That is accepted
+    #   because it is the only place every field decode funnels through, and a public hook existing
+    #   solely for a test would be a worse trade; if the name changes, this test fails loudly on the
+    #   attribute rather than passing vacuously.
+    decoded_names: list[str] = []
+    original = ebcdic_codec._decode_one_field
+
+    def _observed(image: bytes, field: object, code_page: str) -> object:
+        """Record the field name, then delegate to the real per-field decoder.
+
+        :param image: the whole record image being decoded.
+        :param field: the field descriptor under decode.
+        :param code_page: the character set in force.
+        :returns: whatever the real decoder returns.
+        """
+        decoded_names.append(field.name)  # type: ignore[attr-defined]
+        return original(image, field, code_page)
+
+    monkeypatch.setattr(ebcdic_codec, "_decode_one_field", _observed)
+    rows = list(
+        export_record.read_ebcdic_export_records(
+            seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.EXPORT.DATA.PS")
+        )
+    )
+
+    assert rows, "the shipped export extract must not be empty"
+    assert decoded_names, "the observation must have seen the decode it is asserting about"
+    assert export_record.SUPPRESSED_FIELD_NAMES == frozenset({"EXP-CARD-CVV-CD"})
+    for suppressed in export_record.SUPPRESSED_FIELD_NAMES:
+        assert suppressed not in set(decoded_names)
+        assert all(suppressed not in row for row in rows)
+
+
 def test_an_unknown_export_record_type_is_refused(seed_corpus: SeedCorpus) -> None:
     """Replace the discriminator with an undeclared value and require a refusal.
 
@@ -1078,40 +1194,210 @@ def test_a_dropped_or_foreign_export_field_has_no_masked_rendering(
     assert repr(carried) in message
 
 
-def test_the_security_user_ascii_path_agrees_with_the_shipped_ebcdic_extract(
+def test_the_security_user_reader_publishes_no_character_decode_path() -> None:
+    """Require the credential-bearing reader to expose the byte path and nothing else.
+
+    :returns: nothing; any published character decode entry point is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: this reader USED to publish the character trio, and a test here
+    #   used to drive it by transcoding the shipped EBCDIC extract per record and rejoining the
+    #   images as lines. That test is gone with the API, and its replacement asserts the opposite
+    #   property, because the trio was itself the defect: a character entry point can only be fed
+    #   text somebody transcoded, and every transcode of THIS dataset is a copy of an
+    #   eight-character plaintext password written outside the one REFERENCE-only file meant to
+    #   hold it. The old test had to synthesise its own input for exactly that reason -- no ASCII
+    #   corpus of this record exists -- so it verified a transcode the test itself performed.
+    # WHY : Assumptions: both `dir` and `__all__` are checked. A name removed from `__all__` but
+    #   left defined is still reachable by attribute access, and a name left in `__all__` but not
+    #   defined breaks a star import; the contract here is that neither holds.
+    for absent in (
+        "decode_ascii_security_user",
+        "iter_ascii_security_users",
+        "read_ascii_security_users",
+    ):
+        assert not hasattr(usrsec, absent), f"{absent} must not be published"
+        assert absent not in usrsec.__all__
+    assert callable(usrsec.decode_ebcdic_security_user)
+    assert callable(usrsec.iter_ebcdic_security_users)
+    assert callable(usrsec.read_ebcdic_security_users)
+
+
+def test_the_withheld_character_path_set_matches_the_readers_that_publish_none() -> None:
+    """Require the factory's policy set and the readers' published surfaces to agree exactly.
+
+    :returns: nothing; a disagreement in either direction is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: removing the security-user reader's character trio closed one
+    #   door and left another open. The generic reader this package's factory builds is reachable
+    #   from the command line for ANY registered layout with `--encoding ascii`, and that record is
+    #   character data end to end, so it passed the factory's technical text-decodability test
+    #   perfectly well. A suppression honoured on one entry point and not another is not a
+    #   suppression, so the factory now refuses it by policy -- and the policy is stated in the
+    #   factory as data, because a factory cannot ask a reader it is used to build without inverting
+    #   the dependency.
+    # WHY : Assumptions: the audit runs in BOTH directions, which is what makes the duplication safe
+    #   rather than merely brief. A layout named in the set whose reader still publishes a character
+    #   path would mean the two disagree; a text-decodable layout whose reader publishes none while
+    #   being absent from the set would mean the generic route stayed open. Either alone would pass
+    #   a one-way check.
+    withheld = factory.CHARACTER_PATH_WITHHELD_RECORDS
+    published: set[str] = set()
+    unpublished: set[str] = set()
+    for case in _FLAT_READERS:
+        stem = f"read_ascii_{case.plural}"
+        (published if hasattr(case.module, stem) else unpublished).add(case.layout.name)
+
+    assert withheld == unpublished, (
+        "the factory's withheld set must name exactly the text-decodable records whose readers"
+        f" publish no character path; withheld={sorted(withheld)},"
+        f" unpublished={sorted(unpublished)}"
+    )
+    assert not (withheld & published), "a withheld record must publish no character path"
+    for name in withheld:
+        reader = factory.RecordReader(layouts.layout(name))
+        with pytest.raises(LayoutError, match="by policy"):
+            list(reader.iter_ascii(""))
+
+
+def test_the_security_user_password_is_absent_from_every_decoded_record(
     seed_corpus: SeedCorpus,
 ) -> None:
-    """Drive the security-user character entry points and require them to match the byte path.
+    """Read the shipped extract and require the suppressed field to appear in no record.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; a disagreement between the two paths is reported as a failure.
+    :returns: nothing; a decoded record carrying the password field is reported as a failure.
     """
-    # WHY : Alternatives Considered: this reader publishes the character trio but the baseline
-    #   ships ``USRSEC`` in EBCDIC ONLY, so the shared cross-encoding case skips it and the whole
-    #   ASCII path was published API with no coverage. Rather than invent a fixture, the shipped
-    #   EBCDIC extract is transcoded per record and rejoined as lines -- which is precisely what
-    #   the conversion that produced every other ASCII seed did -- so the expected values are the
-    #   corpus's own and the two paths are compared against each other rather than against a
-    #   literal. Writing a synthetic seed would have tested the seed, not the reader.
-    layout = layouts.layout("SECUSER")
-    raw = seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.USRSEC.PS").read_bytes()
-    count = len(raw) // layout.reclen
-    text = raw.decode("cp037")
-    images = [text[index * layout.reclen : (index + 1) * layout.reclen] for index in range(count)]
-    # WHY : Assumptions: the character iterators are LINE-oriented, matching the committed seeds,
-    #   so the records are rejoined with newlines. Handing them over as one flat string is
-    #   rejected as an over-long line, which is the correct behaviour and not what is under test.
-    expected = list(
+    # WHY : Assumptions: the assertion is over the SHIPPED extract rather than a fixture, because
+    #   the suppression has to hold for the corpus that actually carries credentials. The field
+    #   name is taken from the reader's published suppression set rather than written here, so a
+    #   change to that set is a failure rather than a silently narrowed test.
+    records = list(
         usrsec.read_ebcdic_security_users(seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.USRSEC.PS"))
     )
-    assert len(expected) == count
-    assert [
-        usrsec.decode_ascii_security_user(image, number=n) for n, image in enumerate(images, 1)
-    ] == expected
-    assert list(usrsec.iter_ascii_security_users("\n".join(images) + "\n")) == expected
-    # The plaintext password the baseline stores must stay suppressed on this path too; a
-    # suppression honoured on one entry point and not the other is not a suppression.
-    assert all("SEC-USR-PWD" not in record for record in expected)
+    assert records, "the shipped security-user extract must not be empty"
+    assert usrsec.SUPPRESSED_FIELD_NAMES == frozenset({"SEC-USR-PWD"})
+    for suppressed in usrsec.SUPPRESSED_FIELD_NAMES:
+        assert all(suppressed not in record for record in records)
+        assert suppressed not in {field.name for field in usrsec.LOADED_FIELDS}
+
+
+def test_the_security_user_masked_record_withholds_the_password_under_every_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require the whole-record rendering to carry no key-dependent form of the password.
+
+    :param monkeypatch: pytest fixture used to vary the masking key.
+    :returns: nothing; a password-dependent or key-dependent span is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: the whole-record rendering used to hand the record straight to
+    #   the shared masker, which redacts a sensitive field by HMAC-ing its own characters -- so the
+    #   password WAS an input to a digest and two different passwords produced two different tags.
+    #   For an eight-character credential that tag is a confirmable oracle to anyone holding the
+    #   key, and the reader's own contract states it produces no digested form. The rendering now
+    #   substitutes a fixed marker into the span before masking, and this test is the proof: the
+    #   span must be identical across two different passwords AND across two different keys, which
+    #   no keyed tag of any input can be.
+    # WHY : Assumptions: the key is varied through the environment variable alone, with no module
+    #   reload, because the masker resolves the key at CALL time -- which is the pattern
+    #   `test_corpus_disclosure.py` already relies on. Reloading the layouts module would replace
+    #   its class and enum objects and break identity for every module that already imported them.
+    layout = usrsec.SECUSER_LAYOUT
+    field = layout.field("SEC-USR-PWD")
+
+    def _record(password: str) -> str:
+        """Assemble one full-width record carrying the given password in its declared span.
+
+        :param password: exactly the declared width of the suppressed field.
+        :returns: one record of exactly the declared record length.
+        """
+        assert len(password) == field.length
+        head = "USER0001" + "Ann".ljust(20) + "Smith".ljust(20)
+        return (head.ljust(field.start) + password + "A").ljust(layout.reclen)
+
+    def _rendered(password: str, key: bytes) -> str:
+        """Render one record under one masking key.
+
+        :param password: the password to place in the suppressed span.
+        :param key: raw key material, base64-encoded into the masking-key variable.
+        :returns: the masked whole-record rendering.
+        """
+        monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, base64.b64encode(key).decode())
+        return usrsec.render_masked_security_user_record(_record(password))
+
+    key_one = bytes(range(32))
+    key_two = bytes(range(32, 64))
+    first = _rendered("PASSWD01", key_one)
+    second = _rendered("PASSWD02", key_one)
+    third = _rendered("PASSWD01", key_two)
+
+    span = slice(field.start, field.end)
+    assert len(first) == layout.reclen
+    assert first[span] == second[span], "the span must not depend on the password"
+    assert first[span] == third[span], "the span must not depend on the masking key"
+    assert set(first[span]) == {"*"}
+    for rendering, password in ((first, "PASSWD01"), (second, "PASSWD02"), (third, "PASSWD01")):
+        assert password not in rendering
+
+    # WHY : Assumptions: a NON-suppressed sensitive field is asserted to remain key-dependent, so
+    #   this test cannot pass by the masking having been disabled altogether. The name fields are
+    #   redacted to keyed tags by design, and that design is what makes a masked diff useful.
+    assert first[8:28] != third[8:28]
+
+
+def test_the_security_user_reader_offers_no_whole_record_character_surface(
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Prove the security-user reader offers no whole-record character surface, and needs none.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :returns: nothing; a re-published character entry point, or a password reaching a decoded
+        record or a masked rendering, is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: this test replaces one that DROVE the character trio -- it
+    #   transcoded the shipped EBCDIC extract per record and required the character path to agree
+    #   with the byte path. The agreement held, and that was the problem: what it proved was that a
+    #   published entry point accepted a whole 80-byte record as a `str`, and those 80 bytes include
+    #   `SEC-USR-PWD PIC X(08)` which the baseline stores in CLEAR. The test's own comment noted the
+    #   transcode "is precisely what the conversion that produced every other ASCII seed did" --
+    #   true, and the reason this record has no such seed. The trio is withdrawn, so this test now
+    #   pins the ABSENCE and the two properties that make the absence safe.
+    layout = layouts.layout("SECUSER")
+    for withdrawn in _WITHDRAWN_CHARACTER_ENTRY_POINTS:
+        assert not hasattr(usrsec, withdrawn)
+        assert withdrawn not in usrsec.__all__
+
+    # WHY : Assumptions: absence alone would be satisfied by a reader that simply could not read
+    #   this record, so the byte path is exercised against the SHIPPED extract in the same test.
+    #   Ten records is the corroborated count -- 800 bytes over an 80-byte record, and the ten
+    #   in-stream users of `app/jcl/DUSRSECJ.jcl` L35-L44 -- so a path that returned nothing would
+    #   fail here rather than pass by vacuity.
+    decoded = list(
+        usrsec.read_ebcdic_security_users(seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.USRSEC.PS"))
+    )
+    assert len(decoded) == 10
+    assert {record["SEC-USR-TYPE"] for record in decoded} == usrsec.USER_TYPE_DOMAIN
+
+    # WHY : Assumptions: the suppression is asserted over the PUBLISHED FIELD SET and over every
+    #   decoded record, not just over one. The span is excluded by iterating `LOADED_FIELDS`, so a
+    #   descriptor edited to publish it would reintroduce the credential on the byte path with the
+    #   character path already gone -- which is the failure this pair of assertions catches.
+    assert "SEC-USR-PWD" in usrsec.SUPPRESSED_FIELD_NAMES
+    assert all(field.name != "SEC-USR-PWD" for field in usrsec.LOADED_FIELDS)
+    assert all("SEC-USR-PWD" not in record for record in decoded)
+
+    # WHY : Assumptions: the two surviving character-taking members are diagnostics and are proven
+    #   to stay diagnostics. `record_key` yields the declared eight-character key and nothing more,
+    #   and the whole-record rendering keeps the declared width while emitting no part of the
+    #   password span -- so neither is a decode path readmitted under another name.
+    raw = seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.USRSEC.PS").read_bytes()
+    image = raw[: layout.reclen].decode("cp037")
+    assert usrsec.record_key(image) == image[: layout.key_length]
+    password = layout.field("SEC-USR-PWD")
+    rendered = usrsec.render_masked_security_user_record(image)
+    assert len(rendered) == layout.reclen
+    assert image[password.start : password.end] not in rendered
+    with pytest.raises(LayoutError):
+        usrsec.render_masked_security_user_field(image, "SEC-USR-PWD")
 
 
 def test_the_export_money_total_agrees_with_the_transaction_corpus(
@@ -1236,3 +1522,189 @@ def test_every_money_and_identifier_field_is_classified_sensitive() -> None:
     #   held against a group of accounts and not against any one cardholder, and the
     #   command-line decode of that record is the one case an operator has to be able to read.
     assert "DIS-INT-RATE" not in _sensitive_names(layouts.DISGROUP_LAYOUT)
+
+
+def test_an_absent_transaction_source_yields_no_records_and_no_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Report a missing transaction extract as absent, yielding nothing from either entry point.
+
+    :param tmp_path: pytest-supplied empty directory.
+    :returns: nothing; an exception, or any record yielded, is reported as a failure.
+    """
+    # WHY : Assumptions: this is the one reader whose input may legitimately not exist, because no
+    #   TRANSACT extract ships in either encoding and `sql/verify/row_counts.sql` gives
+    #   `ledger.transactions` a NULL baseline rather than zero for exactly that reason. A reader
+    #   that raised here would report a correct fresh load as a failed one.
+    missing = tmp_path / "no-such-extract.txt"
+    assert transaction.seed_dataset_is_present(missing) is False
+    assert list(transaction.read_ascii_transactions(missing)) == []
+    assert list(transaction.read_ebcdic_transactions(missing)) == []
+
+
+def test_a_directory_where_a_transaction_extract_belongs_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Refuse a directory at the extract path instead of reporting it absent.
+
+    :param tmp_path: pytest-supplied empty directory.
+    :returns: nothing; reporting a directory as absent is a failure.
+    """
+    # WHY : Refactoring Rationale: this used to report `False`. The guard was `path.is_file()`, and
+    #   its comment argued a directory "resembles" absence and that the open would report it
+    #   anyway -- both halves wrong. It resembles absence only in what the caller sees, which is
+    #   nothing at all, and the open is never reached because the guard returns first. An operator
+    #   who pointed `--source` at the containing directory therefore got a clean run that migrated
+    #   no transactions, and the NULL baseline meant no verification pass could contradict it.
+    directory = tmp_path / "extracts"
+    directory.mkdir()
+    with pytest.raises(IsADirectoryError) as refused:
+        transaction.seed_dataset_is_present(directory)
+    assert str(directory) in str(refused.value)
+    # WHY : Assumptions: the PREDICATE and the READ paths refuse with different types, and the
+    #   difference is the contract rather than an inconsistency. The predicate answers a question
+    #   about the filesystem, so its refusals are the standard filesystem exceptions a caller would
+    #   already be guarding an open with. A read is decoding a dataset against a declared layout,
+    #   and its guard exists precisely to replace an errno that "names neither the record nor the
+    #   policy" with a refusal naming both -- so it raises the package's own error, as every other
+    #   non-regular-kind case on the read paths asserts.
+    # WHY : Refactoring Rationale: these two expected IsADirectoryError, which the read paths have
+    #   never raised: the guard they reach reports the kind and the policy. Asserting the type the
+    #   read paths actually use puts this case in step with the eight sibling assertions in
+    #   test_reader_hardening and test_source_hardening instead of contradicting all of them.
+    for reader in (transaction.read_ascii_transactions, transaction.read_ebcdic_transactions):
+        with pytest.raises(LayoutError, match="directory"):
+            list(reader(directory))
+
+
+def test_an_uninspectable_transaction_path_propagates_rather_than_reading_as_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Propagate an inspection failure instead of reporting the extract absent.
+
+    :param tmp_path: pytest-supplied empty directory.
+    :returns: nothing; an inspection failure swallowed into `False` is reported as a failure.
+    """
+    # WHY : Assumptions: `pathlib` implements `is_file` by calling `stat` inside its own
+    #   `except OSError: return False`, so a permission fault on the path or any parent, a broken
+    #   mount and a symlink loop ALL reported "absent" -- and absent is the one state whose
+    #   documented consequence is to load nothing and raise nothing. A migration run against an
+    #   unmounted volume therefore reported success having written zero rows. The docstring already
+    #   promised that an inspection failure propagates; only the code did not.
+    # WHY : Alternatives Considered: the fault is produced by naming a child of a FILE rather than
+    #   by revoking a permission. A permission test is skipped when the suite runs as root, which
+    #   is how this suite runs in the container, so it would have proved nothing there; a path
+    #   component that is not a directory raises `NotADirectoryError` for every user.
+    blocker = tmp_path / "not-a-directory.txt"
+    blocker.write_text("x", encoding="ascii")
+    with pytest.raises(NotADirectoryError):
+        transaction.seed_dataset_is_present(blocker / "child.txt")
+
+
+def test_a_non_file_entry_at_the_transaction_path_is_refused(tmp_path: pathlib.Path) -> None:
+    """Refuse an entry that is neither absent, a directory, nor a regular file.
+
+    :param tmp_path: pytest-supplied empty directory.
+    :returns: nothing; accepting a non-file entry is reported as a failure.
+    """
+    # WHY : Assumptions: a fifo is the case that matters most and is why the mode is tested
+    #   POSITIVELY for a regular file rather than negatively against a list. Reading a fifo would
+    #   BLOCK rather than fail, so a load pointed at one would hang with no diagnostic at all --
+    #   and a kind this package has never seen is refused rather than admitted by omission.
+    fifo = tmp_path / "a-fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError) as refused:
+        transaction.seed_dataset_is_present(fifo)
+    assert not isinstance(refused.value, IsADirectoryError)
+    assert "regular file" in str(refused.value)
+
+
+def test_a_zero_byte_transaction_extract_is_present_and_yields_nothing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Report an empty extract as present, and yield no records from it.
+
+    :param tmp_path: pytest-supplied empty directory.
+    :returns: nothing; an empty file read as absent, or as an error, is reported as a failure.
+    """
+    # WHY : Assumptions: an empty file is present rather than filtered out, because both iterators
+    #   already yield nothing for one -- the text path produces no line and the fixed-length path
+    #   divides zero bytes into zero records. A second statement of "no records" here is how the
+    #   two would come to disagree about, for instance, a file holding a single stray separator.
+    empty = tmp_path / "empty.txt"
+    empty.write_bytes(b"")
+    assert transaction.seed_dataset_is_present(empty) is True
+    assert list(transaction.read_ascii_transactions(empty)) == []
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["dalytran", "transaction", "export_record"],
+)
+def test_every_stamp_bearing_reader_delegates_to_the_shared_timestamp_authority(
+    module_name: str,
+) -> None:
+    """Prove each stamp-bearing reader imports the shared authority and keeps no rule of its own.
+
+    :param module_name: one of the three readers that validate a 26-character stamp.
+    :returns: nothing; a reader carrying its own copy of the rule is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: the shape rule existed as forty byte-identical lines in each of
+    #   these three modules -- two pad constants, a uniformity helper, a per-position helper and
+    #   two frozen sets of admitted separators and digits. Three copies meant a correction had to
+    #   be made three times or the three would disagree about what a timestamp is while all three
+    #   continued to look right. This test pins the single source rather than the deletion, because
+    #   a copy re-introduced later would pass every behavioural test in this file.
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src/carddemo_migration/readers"
+        / f"{module_name}.py"
+    ).read_text(encoding="utf-8")
+    assert "from carddemo_migration.copybook import timestamp" in source
+    assert "timestamp.is_unwritten(" in source
+    assert "timestamp.is_admitted(" in source
+    for withdrawn in (
+        "_TIMESTAMP_SEPARATOR_OFFSETS",
+        "_TIMESTAMP_SEPARATOR_CHARACTERS",
+        "_TIMESTAMP_DIGITS",
+        "def _is_timestamp_position",
+        "def _is_uniformly",
+    ):
+        assert withdrawn not in source, (
+            f"{module_name} carries its own copy of the timestamp shape rule ({withdrawn});"
+            " the rule belongs to carddemo_migration.copybook.timestamp alone"
+        )
+
+
+def test_a_corrupt_stamp_is_refused_by_the_reader_that_carries_it(
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Drive a well-formed-looking but impossible stamp through a reader and require a refusal.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :returns: nothing; acceptance of an impossible stamp is reported as a failure.
+    """
+    # WHY : Assumptions: the corruption is a spelling the OLD rule admitted -- an impossible
+    #   calendar date whose every character sits in an admitted position -- so this case fails
+    #   against the rule that was replaced and passes only against the one that parses. It is
+    #   applied to a REAL committed record rather than a synthesised one, so every other field
+    #   stays exactly as the baseline wrote it and the refusal can only be about the stamp.
+    # WHY : Assumptions: the PROCESSING stamp is the field corrupted, not the originating one,
+    #   because the reader validates only the fields its descriptor marks run-generated -- the
+    #   originating stamp is deterministic business data and is carried through unexamined. Where
+    #   the originating stamp is checked is the LOAD boundary, which has to render both of them
+    #   into a castable form and refuses a value it cannot; `test_aurora_loader.py` pins that half.
+    layout = layouts.layout("DALYTRAN")
+    field = layout.field("DALYTRAN-PROC-TS")
+    assert field.normalize_ts, "the corrupted field must be one the reader validates"
+    record = seed_corpus.ascii_records("dailytran.txt")[0]
+    corrupted = record[: field.start] + "2022-13-45 10:30:00.123456" + record[field.end :]
+    assert len(corrupted) == layout.reclen, "the corruption must not change the width"
+    with pytest.raises(layouts.LayoutError) as refused:
+        dalytran.decode_ascii_daily_transaction(corrupted)
+    message = str(refused.value)
+    assert field.describe() in message
+    # WHY : no part of the offending value may reach the diagnostic. This record carries a primary
+    #   account number, and a message shape that quotes its input is the shape that later gets
+    #   copied to a field where the input is not safe to quote.
+    assert "2022-13-45" not in message

@@ -4,10 +4,16 @@
  *
  * Purpose
  * -------
- * Covers the three operations that contract publishes: the summary-plus-page list replacing
- * `app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl`, the detail read replacing `COPAUS1C.cbl`, and
- * the fraud marking replacing `COPAUS2C.cbl`. Every target is derived from the operation manifest
- * below rather than written as a literal, for the reason recorded in `ui/src/api/types.ts`.
+ * Covers the five operations that contract publishes: the summary-plus-page list replacing
+ * `app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl`, the detail read replacing `COPAUS1C.cbl`, that
+ * detail's screen-shaped second representation and its forward paging move, and the fraud marking
+ * replacing `COPAUS2C.cbl`. Every target is derived from the operation manifest below rather than
+ * written as a literal, for the reason recorded in `ui/src/api/types.ts`.
+ *
+ * Refactoring Rationale: the screen and next-authorization operations were absent here while the
+ * service implemented them, because the contract did not publish them either -- the service methods
+ * had no caller anywhere. Publishing them without adding them here would leave this module claiming
+ * parity with a document it no longer mirrors, which is what `contracts.test.ts` refuses.
  *
  * Why the list response is not a bare page
  * ----------------------------------------
@@ -59,6 +65,36 @@ const GET_PENDING_AUTHORIZATION: ContractOperation = {
   operationId: 'getPendingAuthorization',
 };
 
+/**
+ * The screen-shaped reading of one authorization.
+ *
+ * Refactoring Rationale: this operation is added because the service method behind it had no caller
+ * anywhere — not in a controller, not in the published contract and not here — while its own
+ * documentation described it as published. That left the detail route with no source for the title
+ * band, transaction name, program name and rendered instant the 3270 screen carried, so the chrome
+ * had to be invented client-side or omitted. It is a SECOND representation of the member resource
+ * rather than a replacement: the member path returns the record, this one the record plus the chrome.
+ */
+const GET_PENDING_AUTHORIZATION_SCREEN: ContractOperation = {
+  method: 'GET',
+  path: '/api/v1/authorizations/{key}/screen',
+  operationId: 'getPendingAuthorizationScreen',
+};
+
+/**
+ * The forward paging move of the detail screen.
+ *
+ * Assumptions: reaching the oldest authorization is a SUCCESSFUL answer carrying an end-of-data
+ * indicator, not a 404. A 404 would be indistinguishable from a selector naming nothing at all,
+ * leaving this client unable to tell a boundary from a tampered key — and the reference reports the
+ * boundary on the screen rather than refusing the request.
+ */
+const GET_NEXT_PENDING_AUTHORIZATION: ContractOperation = {
+  method: 'GET',
+  path: '/api/v1/authorizations/{key}/next',
+  operationId: 'getNextPendingAuthorization',
+};
+
 const SET_AUTHORIZATION_FRAUD_STATE: ContractOperation = {
   method: 'PUT',
   path: '/api/v1/authorizations/{key}/fraud',
@@ -74,6 +110,8 @@ const SET_AUTHORIZATION_FRAUD_STATE: ContractOperation = {
 export const AUTHORIZATION_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   LIST_PENDING_AUTHORIZATIONS,
   GET_PENDING_AUTHORIZATION,
+  GET_PENDING_AUTHORIZATION_SCREEN,
+  GET_NEXT_PENDING_AUTHORIZATION,
   SET_AUTHORIZATION_FRAUD_STATE,
 ];
 
@@ -206,6 +244,66 @@ export interface PendingAuthDetail {
 }
 
 /**
+ * One authorization projected onto the shape the 3270 detail screen rendered.
+ *
+ * Assumptions: this is a DIFFERENT shape from {@link PendingAuthDetail} rather than that shape with
+ * extra members, and the difference is the contract's. The record reading answers the segment's own
+ * fields; this reading answers what the terminal displayed, so its amounts and codes are already
+ * rendered -- `authResponse` carries the approval word rather than the two-character code, `authTime`
+ * carries the rendered time rather than the packed millisecond-of-day, and the card number arrives
+ * masked under the member name `cardNumber`. Reusing one interface for both would let a component read
+ * a rendered value as a raw one.
+ *
+ * Assumptions: the six chrome members are non-nullable because the service derives every one of them
+ * from its own constants and clock and accepts none from the caller. The authorizer-supplied members
+ * stay nullable for the reason recorded on {@link PendingAuthDetail}: the segments behind them are
+ * populated from an external message, and a field that message omitted is absent rather than blank.
+ */
+export interface PendingAuthDetailScreen {
+  readonly transactionName: string;
+  readonly title01: string;
+  readonly currentDate: string;
+  readonly programName: string;
+  readonly title02: string;
+  readonly currentTime: string;
+  readonly cardNumber: string;
+  readonly authDate: string;
+  readonly authTime: string;
+  readonly authResponse: string;
+  readonly authResponseReason: string;
+  readonly processingCode: string | null;
+  readonly approvedAmount: string;
+  readonly posEntryMode: string;
+  readonly messageSource: string | null;
+  readonly merchantCategoryCode: string | null;
+  readonly cardExpiry: string;
+  readonly authType: string | null;
+  readonly transactionId: string;
+  readonly matchStatus: MatchStatus;
+  readonly fraudMark: string;
+  readonly merchantName: string | null;
+  readonly merchantId: string | null;
+  readonly merchantCity: string | null;
+  readonly merchantState: string | null;
+  readonly merchantZip: string | null;
+  readonly message: string | null;
+}
+
+/**
+ * The outcome of the detail screen's forward paging move.
+ *
+ * Assumptions: exactly one of `authorization` and `message` is populated, discriminated by
+ * `endOfData`. That mirrors the reference program's forward step, which either sets its end-of-data
+ * condition and the message the screen shows or replaces the current authorization, never both -- so a
+ * caller must read `endOfData` before reading either.
+ */
+export interface NextPendingAuthorization {
+  readonly authorization: PendingAuthDetail | null;
+  readonly endOfData: boolean;
+  readonly message: string | null;
+}
+
+/**
  * The fraud transition a reviewer submits.
  *
  * Assumptions: the four identifying members are echoed from the detail the reviewer is looking at,
@@ -290,6 +388,50 @@ export async function getPendingAuthorization(key: string): Promise<PendingAuthD
     requestPath(GET_PENDING_AUTHORIZATION, { key }),
   );
   requireMaskedCardNumber(response.data.cardNum);
+  return response.data;
+}
+
+/**
+ * Reads one authorization in the screen shape, with the chrome the terminal carried.
+ *
+ * Assumptions: the card number is checked for masking exactly as the member reading is. The screen
+ * projection carries the same account number the record does, so a projection that leaked an unmasked
+ * value would bypass the guard the member path applies — and a second representation of one resource
+ * with a weaker exposure rule is precisely how such a leak reaches production unnoticed.
+ * @param {string} key - The row's opaque sealed selector, taken from a list row.
+ * @returns {Promise<PendingAuthDetailScreen>} The screen-shaped projection.
+ * @throws {RangeError} If the response carries an unmasked card number.
+ * @throws {Error} If the request fails, including HTTP 400 for a tampered selector and 404 for a row
+ *   that no longer exists.
+ */
+export async function getPendingAuthorizationScreen(key: string): Promise<PendingAuthDetailScreen> {
+  const response = await getApiClient().get<PendingAuthDetailScreen>(
+    requestPath(GET_PENDING_AUTHORIZATION_SCREEN, { key }),
+  );
+  requireMaskedCardNumber(response.data.cardNumber);
+  return response.data;
+}
+
+/**
+ * Reads the authorization immediately following the one named, which is the forward paging move.
+ *
+ * Assumptions: the masking guard is applied only when an authorization is PRESENT, because the
+ * end-of-data response carries none. Applying it unconditionally would refuse the boundary response
+ * for having no card number to check, turning a successful answer into an error.
+ * @param {string} key - The sealed selector of the authorization currently displayed.
+ * @returns {Promise<NextPendingAuthorization>} The following authorization, or the end-of-data
+ *   indicator when the one named is the oldest beneath its account.
+ * @throws {RangeError} If a returned authorization carries an unmasked card number.
+ * @throws {Error} If the request fails, including HTTP 400 for a tampered selector and 404 for a row
+ *   that no longer exists.
+ */
+export async function getNextPendingAuthorization(key: string): Promise<NextPendingAuthorization> {
+  const response = await getApiClient().get<NextPendingAuthorization>(
+    requestPath(GET_NEXT_PENDING_AUTHORIZATION, { key }),
+  );
+  if (response.data.authorization) {
+    requireMaskedCardNumber(response.data.authorization.cardNum);
+  }
   return response.data;
 }
 

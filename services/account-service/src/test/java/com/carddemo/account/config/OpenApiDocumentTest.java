@@ -40,8 +40,30 @@ class OpenApiDocumentTest {
     /** The scheme name both the generated document and the committed contract declare. */
     private static final String SCHEME_NAME = "internalServiceToken";
 
-    /** The vendor-extension member that carries the required scope on the scheme. */
+    /** The vendor-extension member that carries the default required scope on the scheme. */
     private static final String SCOPE_EXTENSION = "x-carddemo-required-scope";
+
+    /**
+     * The vendor-extension member that carries the customer-record scope on the scheme.
+     *
+     * <p>Assumptions: asserted separately from the member above rather than folded into one case, because
+     * the property worth holding is that the two are DIFFERENT values -- a document publishing the same
+     * scope twice under two names would describe the separation this test exists to pin while granting
+     * nothing by it.</p>
+     */
+    private static final String CUSTOMER_MASTER_SCOPE_EXTENSION =
+            "x-carddemo-customer-master-scope";
+
+    /**
+     * The operation identifiers the committed contract must gate on the customer-record scope.
+     *
+     * <p>Assumptions: named as a closed set rather than derived from the tag, because deriving it would
+     * make the assertion agree with whatever the document said. These two are the operations that
+     * disclose a whole customer record, and the finding this case answers was that they shared one scope
+     * with the decision-path reads.</p>
+     */
+    private static final List<String> CUSTOMER_RECORD_OPERATIONS =
+            List.of("listCustomers", "readCustomerRecord");
 
     /**
      * Confirms the document declares 3.1 in both places that carry a version.
@@ -174,12 +196,20 @@ class OpenApiDocumentTest {
      * Confirms the scope the filter chain enforces is published, and published from that same constant.
      *
      * <p>Assumptions: the assertion compares the extension's value to
-     * {@link InternalServiceToken#SCOPE_ACCOUNT_CONTEXT_READ} rather than to a literal, because the
-     * property worth holding is that the document and the enforcing chain cannot disagree. A literal
-     * here would keep passing while the enforced authority changed.</p>
+     * the four scope constants the chain enforces rather than to literals, because the
+     * property worth holding is that the document and the enforcing chain cannot disagree. Literals
+     * here would keep passing while the enforced authorities changed.</p>
+     *
+     * <p>Refactoring Rationale: this case asserted ONE scope, and the extension now carries four. The
+     * chain requires one authority per operation family -- the cross-reference, account and customer
+     * decision reads each take their own, and the two whole-customer-record reads take the
+     * customer-master scope -- so a document naming fewer would state that one token reaches every
+     * internal operation, which is the escalation the split removed. Asserting all four in the order
+     * the bean composes them is what keeps a later narrowing of the chain from leaving the document
+     * behind.</p>
      */
     @Test
-    @DisplayName("the scheme publishes the scope the enforcing chain demands")
+    @DisplayName("the scheme publishes every scope the enforcing chain demands")
     void schemePublishesTheScopeTheEnforcingChainDemands() {
         OpenAPI published = new OpenApiConfig().accountServiceOpenApi();
         SecurityScheme scheme = published.getComponents().getSecuritySchemes().get(SCHEME_NAME);
@@ -187,7 +217,11 @@ class OpenApiDocumentTest {
         assertThat(scheme.getType()).isEqualTo(SecurityScheme.Type.HTTP);
         assertThat(scheme.getExtensions())
                 .as("dropping the scope from the requirement is only safe if it is published elsewhere")
-                .containsEntry(SCOPE_EXTENSION, InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                .containsEntry(SCOPE_EXTENSION,
+                        List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                                InternalServiceToken.SCOPE_ACCOUNT_READ,
+                                InternalServiceToken.SCOPE_CUSTOMER_READ,
+                                InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));
     }
 
     /**
@@ -198,15 +232,24 @@ class OpenApiDocumentTest {
      * alone would leave the file describing a requirement no caller has to satisfy in that form.</p>
      */
     @Test
-    @DisplayName("the committed contract agrees on the empty list and on the published scope")
+    @DisplayName("the committed contract agrees on the empty list and on the published scopes")
     void committedContractAgreesOnTheEmptyListAndOnThePublishedScope() {
         Map<String, Object> contract = contract();
         Map<String, Object> schemes = nested(nested(contract, "components"), "securitySchemes");
         Map<String, Object> scheme = nested(schemes, SCHEME_NAME);
 
         assertThat(scheme).containsEntry("type", "http");
+        // WHY : Refactoring Rationale: the committed file must carry ALL FOUR scopes, in the same order the
+        //       bean composes them. The two are maintained separately -- this module generates one
+        //       document and ships another -- so asserting the shipped file against the same two
+        //       constants is what keeps a consumer reading the file from being told that one credential
+        //       reaches every internal operation.
         assertThat(scheme)
-                .containsEntry(SCOPE_EXTENSION, InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                .containsEntry(SCOPE_EXTENSION,
+                        List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                                InternalServiceToken.SCOPE_ACCOUNT_READ,
+                                InternalServiceToken.SCOPE_CUSTOMER_READ,
+                                InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));
 
         List<?> requirements = operationRequirements(contract);
         assertThat(requirements)

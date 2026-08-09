@@ -12,12 +12,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Bulk-loads pending-authorization summary and detail images from two extract files into the schema.
@@ -87,7 +90,8 @@ import org.springframework.transaction.annotation.Transactional;
  * are not equally recoverable. Passing over the record loses an authorization with no trace of which one:
  * the detail extract has rows the summary extract does not account for, and after the run neither the
  * target nor the log names them, so the only way to find out what was lost is to re-derive it from the
- * two files by hand. Refusing names the account on the first such record, which is the difference between
+ * two files by hand. Refusing names the first such record, and carries its account in typed form on the
+ * refusal for a caller entitled to read it, which is the difference between
  * one corrective pass -- load the missing summaries, re-run, and let the duplicate tolerance below skip
  * everything already in place -- and a silent shortfall discovered later from a balance that does not
  * agree. The refusal is safe to make loud precisely because the re-run is safe.
@@ -98,12 +102,15 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code account_id} a foreign key onto {@code pending_auth_summary}. Leaving the check to the constraint
  * was considered and rejected: a constraint violation surfaces from a flush, names the constraint rather
  * than the extract record, and arrives at whatever point the provider chose to flush at, so it identifies
- * neither which record nor which account. The explicit check is what lets the failure carry the key.
+ * neither which record nor which account. The explicit check is what lets the failure carry both -- the
+ * record ordinal in its message and the account on the refusal itself, the latter deliberately not written
+ * to the log.
  *
  * <h2>Two adjacent conditions the reference source also passes over</h2>
  *
  * <p>Refactoring Rationale: <strong>D-LOAD-PREFIX-REFUSED.</strong> A child record whose six-byte prefix
- * does not decode is refused here, naming its ordinal position in the file. {@code 3000-READ-CHILD-SEG-FILE} guards the insert with
+ * does not decode is refused here, naming its ordinal position in the file.
+ * {@code 3000-READ-CHILD-SEG-FILE} guards the insert with
  * {@code IF ROOT-SEG-KEY IS NUMERIC} at <strong>L275</strong> and supplies no {@code ELSE}, so a prefix
  * that fails that test takes the record out of the run with no message. Refusing instead is the same
  * argument as D-C with less to work with: an undecodable prefix cannot be attributed to any account at
@@ -217,18 +224,24 @@ import org.springframework.transaction.annotation.Transactional;
  * cannot be split, which the extract this reads does not approach: it is one file pair per unload of one
  * database.
  *
- * <p>Trade-offs: the stream is drained whole and divided by the stride before any record is decoded,
- * rather than being read one record at a time. Reading one at a time would hold only one record in memory;
- * draining holds the whole extract. Draining is chosen for a diagnostic reason that record-at-a-time
- * reading cannot match. A length remainder is the symptom of one of these two files being handed to the
- * other's reader, and the strides are a hundred and two hundred and six -- so the child file divided by
- * the root stride leaves two whole records and a six-byte remainder. Read one at a time, those two records
- * would be DECODED first, and a child record's bytes read against the summary layout fail somewhere in the
- * middle of a packed money field: the run would then report a malformed field rather than the mismatched
- * file that actually caused it. Resolving the length first means the stride mismatch is what gets reported,
- * before a single row is written. The memory cost is bounded by the same transaction that already holds
- * every entity the load produces, and the entities are the larger half: a hundred or two hundred and six
- * bytes of image against a persistent object.
+ * <p>Trade-offs: every record of a file is resolved before any record is decoded, rather than each being
+ * decoded as it is read. That costs memory proportional to the file, and it is chosen for a diagnostic
+ * reason record-at-a-time decoding cannot match. A length remainder is the symptom of one of these two
+ * files being handed to the other's reader, and the strides are a hundred and two hundred and six -- so
+ * the child file divided by the root stride leaves two whole records and a six-byte remainder. Decoded as
+ * read, those two records would be written first, and a child record's bytes read against the summary
+ * layout fail somewhere in the middle of a packed money field: the run would then report a malformed field
+ * rather than the mismatched file that actually caused it. Resolving the length first means the stride
+ * mismatch is what gets reported, before a single row is written.
+ *
+ * <p>Refactoring Rationale: that memory cost is now BOUNDED by a stated ceiling, {@link
+ * #MAX_RECORDS_PROPERTY}, and the file is read one stride at a time rather than drained into a single
+ * array. The rationale that stood here claimed the cost was bounded by the transaction that holds the
+ * entities, which was false in two ways: the bytes are read before any entity exists, so the transaction
+ * bounds nothing about them, and the two costs are additive rather than one standing in for the other.
+ * With no ceiling at all, a stream that is not an extract -- an object-storage key pointing at the wrong
+ * file -- was read until the heap ended, reporting an allocation failure naming a byte count instead of a
+ * refusal naming the file.
  */
 @Service
 public class LoadService {
@@ -249,6 +262,29 @@ public class LoadService {
     private static final Logger LOG = LoggerFactory.getLogger(LoadService.class);
 
     /**
+     * The property that states the largest number of records one extract file may hold.
+     *
+     * <p>Assumptions: the name is published as a constant so that the refusal message can name the
+     * property an operator must raise, and so that the binding below and that message cannot name
+     * different properties. It is a compile-time constant expression, which is what lets it appear inside
+     * the annotation.</p>
+     */
+    public static final String MAX_RECORDS_PROPERTY = "carddemo.extract.max-records";
+
+    /**
+     * The default ceiling on records in one extract file.
+     *
+     * <p>Assumptions: two hundred thousand is a deliberate over-estimate of a real unload rather than a
+     * measured limit, and it is a ceiling on a MISTAKE rather than a capacity plan. The extract is one
+     * file pair per unload of one database, so a genuine file is far below this; what the ceiling exists to
+     * stop is a stream that is not an extract at all -- an object-storage key pointing at the wrong file --
+     * being read until the heap ends. At the child stride of two hundred and six bytes this bounds the read
+     * at roughly forty megabytes, which the container's heap holds while leaving the transaction its own
+     * room.</p>
+     */
+    public static final int DEFAULT_MAX_RECORDS = 200_000;
+
+    /**
      * The summary rows, probed for an existing row and inserted when absent.
      */
     private final PendingAuthSummaryRepository summaries;
@@ -259,17 +295,69 @@ public class LoadService {
     private final PendingAuthDetailRepository details;
 
     /**
+     * The template each bounded chunk's unit of work is opened through.
+     *
+     * <p>Refactoring Rationale: the load is a SEQUENCE of bounded transactions rather than one, and the
+     * template is what makes the boundary visible in the code. A single declarative transaction over the
+     * whole load accumulated every entity of every record in one persistence context, so the memory the
+     * load needed grew with the extract rather than staying flat -- on top of an extract that had itself
+     * been read into memory entirely. Ending the transaction per chunk also ends the persistence context
+     * per chunk, which is why no explicit clear is needed.</p>
+     *
+     * <p>Trade-offs: the load is no longer atomic across chunks, so a failure part-way leaves earlier
+     * chunks committed. That is acceptable precisely because both halves of this loader are idempotent --
+     * a record whose row is already present is counted and skipped -- so a re-run after a failure
+     * completes the load rather than duplicating it, which is a stronger operational property than
+     * all-or-nothing over an extract large enough for the difference to matter.</p>
+     */
+    private final TransactionTemplate transactions;
+
+    /**
+     * How many extract records one chunk holds.
+     *
+     * <p>Assumptions: the figure bounds three things at once and so is chosen for the tightest of them --
+     * the records held in memory, the entities in one persistence context, and the bind parameters in the
+     * presence queries issued per chunk. Five hundred is comfortably inside every engine's bind ceiling
+     * while still amortising the round trip across a useful number of records.</p>
+     */
+    private static final int CHUNK_SIZE = 500;
+
+    /**
+     * The greatest number of records one extract file may hold, from {@link #MAX_RECORDS_PROPERTY}.
+     *
+     * <p>Assumptions: this bound and the chunking above answer DIFFERENT questions and neither replaces
+     * the other. Chunking keeps the working set flat however long the extract is; this ceiling refuses a
+     * stream that is not an extract at all -- an object-storage key pointing at the wrong file -- which
+     * chunking would otherwise read forever without ever exhausting anything.</p>
+     */
+    private final int maxRecords;
+
+    /**
      * Builds the loader over the two repositories it writes.
      *
      * @param summaries the summary repository the root images are loaded into; must not be {@code null}
      * @param details the authorization repository the child records are loaded into; must not be
      *     {@code null}
-     * @throws NullPointerException if either argument is {@code null}
+     * @param transactions the template each bounded chunk's unit of work is opened through; must not be
+     *     {@code null}
+     * @param maxRecords the greatest number of records one extract file may hold, which must be positive
+     * @throws NullPointerException if any repository or the template is {@code null}
+     * @throws IllegalArgumentException if {@code maxRecords} is not positive, which is refused HERE rather
+     *     than on the first load so that a container configured that way fails at startup, where the cause
+     *     is legible, instead of hours later
      */
     public LoadService(PendingAuthSummaryRepository summaries,
-            PendingAuthDetailRepository details) {
+            PendingAuthDetailRepository details, TransactionTemplate transactions,
+            @Value("${" + MAX_RECORDS_PROPERTY + ":" + DEFAULT_MAX_RECORDS + "}") int maxRecords) {
         this.summaries = Objects.requireNonNull(summaries, "summaries must not be null");
         this.details = Objects.requireNonNull(details, "details must not be null");
+        this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
+        if (maxRecords <= 0) {
+            throw new IllegalArgumentException(MAX_RECORDS_PROPERTY + " must be positive but was "
+                    + maxRecords + "; a ceiling admitting no records would refuse every extract,"
+                    + " including an empty one");
+        }
+        this.maxRecords = maxRecords;
     }
 
     /**
@@ -305,7 +393,6 @@ public class LoadService {
      * @throws MalformedParentKeyException if a child record's six-byte prefix does not decode
      * @throws UnresolvedParentException if a child record names an account with no summary row
      */
-    @Transactional
     public LoadOutcome load(InputStream rootImages, InputStream childRecords) {
         Objects.requireNonNull(rootImages, "rootImages must not be null");
         Objects.requireNonNull(childRecords, "childRecords must not be null");
@@ -355,36 +442,92 @@ public class LoadService {
      * @throws IllegalArgumentException if the stream does not hold a whole number of segment images, or
      *     if an image is malformed for the summary layout
      */
-    @Transactional
     public LoadOutcome loadSummaries(InputStream rootImages) {
         Objects.requireNonNull(rootImages, "rootImages must not be null");
+        RecordStream stream =
+                new RecordStream(rootImages, PendingAuthSummaryMapper.unloadRecordLength(), "summary",
+                        this.maxRecords);
+        LoadOutcome total = new LoadOutcome(0, 0, 0);
+        int ordinalBase = 0;
+        while (true) {
+            List<byte[]> chunk = stream.nextChunk(CHUNK_SIZE);
+            if (chunk.isEmpty()) {
+                return total;
+            }
+            int base = ordinalBase;
+            LoadOutcome outcome = this.transactions.execute(status -> insertSummaries(chunk, base));
+            total = total.combinedWith(Objects.requireNonNull(outcome));
+            ordinalBase += chunk.size();
+        }
+    }
 
-        int read = 0;
+    /**
+     * Inserts one bounded chunk of summary records inside its own transaction.
+     *
+     * <p>Assumptions: presence is settled for the WHOLE chunk in one statement before anything is
+     * written, and the resulting set is then consulted in memory. Refactoring Rationale: this replaces an
+     * identity probe issued once per record, so a chunk of five hundred records now issues one presence
+     * query rather than five hundred, and the load's cost stops growing with the record count
+     * independently of the work each record represents.</p>
+     *
+     * <p>Assumptions: a duplicate WITHIN the chunk is caught by the same set, because each accepted
+     * account is added to it as it is accepted. That preserves the behaviour the probe had for free -- it
+     * read the transaction's own pending inserts -- which a batched pre-read would otherwise lose, and
+     * without it a chunk naming one account twice would violate the primary key and turn a counted skip
+     * into a failed transaction.</p>
+     *
+     * @param chunk the extract records to insert; must not be {@code null}
+     * @param ordinalBase how many records preceded this chunk, so logged ordinals count from the start of
+     *     the extract rather than from the start of the chunk
+     * @return what this chunk read, inserted and skipped; never {@code null}
+     */
+    private LoadOutcome insertSummaries(List<byte[]> chunk, int ordinalBase) {
+        List<PendingAuthSummary> decoded = new ArrayList<>(chunk.size());
+        for (byte[] image : chunk) {
+            decoded.add(PendingAuthSummaryMapper.fromExtractRecord(image));
+        }
+        Set<Long> present = new HashSet<>(this.summaries.findExistingAccountIds(
+                decoded.stream().map(PendingAuthSummary::getAccountId).toList()));
         int inserted = 0;
         int alreadyPresent = 0;
-
-        for (byte[] image : records(rootImages, PendingAuthSummaryMapper.unloadRecordLength(),
-                "summary")) {
-            read++;
-            PendingAuthSummary summary = PendingAuthSummaryMapper.fromExtractRecord(image);
-            Long accountId = summary.getAccountId();
-
-            // WHY : Assumptions: an existing row is skipped rather than replaced, transcribing the
-            //       duplicate-status arm at L256 to L258, and the probe runs before the save rather than
-            //       the save being attempted and its failure inspected. The probe reads correctly inside
-            //       this transaction because an existence query flushes the transaction's own pending
-            //       inserts first, so a root repeated within one file is recognised on its second
-            //       occurrence and not only on a later run.
-            if (this.summaries.existsById(accountId)) {
+        // WHY : Assumptions: presence is settled TWICE, by two mechanisms answering two different
+        //       questions, and neither makes the other redundant. The chunk-wide query catches the
+        //       duplicate this chunk carries within itself -- two records for one account in the same
+        //       extract, which the reference counts as already present -- in one round trip rather than
+        //       one per record. The conflict-tolerant insert catches the row that appeared BETWEEN that
+        //       query and this write, which no read can catch by construction: the online decision path
+        //       inserts a summary for an account that has none, and a second run over the same extract
+        //       writes the same keys. Keeping only the query leaves that gap, and a save through the
+        //       persistence context closes it by REPLACING the newer row in every column, silently
+        //       resetting counters a live decision had already moved.
+        // WHY : Assumptions: the short circuit is load-bearing rather than stylistic. A record the
+        //       chunk-wide query already accounted for issues no statement at all, so the second
+        //       mechanism costs a round trip only for records that are actually about to be written.
+        for (int index = 0; index < decoded.size(); index++) {
+            PendingAuthSummary summary = decoded.get(index);
+            if (!present.add(summary.getAccountId())
+                    || this.summaries.insertSummaryIfAbsent(summary) == 0) {
                 alreadyPresent++;
-                LOG.info("summary already present, skipped accountId={} recordOrdinal={}",
-                        accountId, read);
+                // WHY : Assumptions: the skip is logged by RECORD ORDINAL and never by account. A load
+                //       log is read by more people than the table is, so an eleven-digit account number
+                //       in it is a durable copy of a customer identifier outside the store that protects
+                //       it. The ordinal is what an operator needs anyway, because it locates the record
+                //       in the extract they are holding.
+                // WHY : Assumptions: ONE diagnostic covers both arms rather than one apiece. The
+                //       operator's question is which record of the extract was not written, and that is
+                //       answered identically either way; a second message would also raise the count of
+                //       skip diagnostics this class emits, which its disclosure test asserts.
+                LOG.info("summary already present, skipped recordOrdinal={}", ordinalBase + index + 1);
                 continue;
             }
-            this.summaries.save(summary);
             inserted++;
         }
-        return new LoadOutcome(read, inserted, alreadyPresent);
+        // WHY : Refactoring Rationale: the explicit flush that stood here is gone with the batched save
+        //       it belonged to. It existed so a constraint this chunk violated was raised inside the
+        //       chunk that caused it rather than at a commit whose diagnostics no longer name the record;
+        //       a statement executed at its own call site raises there by construction, so the property
+        //       now holds without a call to arrange it.
+        return new LoadOutcome(chunk.size(), inserted, alreadyPresent);
     }
 
     /**
@@ -413,42 +556,90 @@ public class LoadService {
      * @throws NullPointerException if {@code childRecords} is {@code null}
      * @throws UncheckedIOException if the stream cannot be read
      * @throws IllegalArgumentException if the stream does not hold a whole number of prefixed records, or
-     *     if a record is malformed for the detail layout
+     *     if a record is malformed for the detail layout, in which case the refusal is the
+     *     {@link MalformedSegmentException} subtype naming the record's ordinal
      * @throws ArithmeticException if a decoded key component or amount exceeds the range its column holds
      * @throws MalformedParentKeyException if a record's six-byte prefix does not decode
      * @throws UnresolvedParentException if a record names an account with no summary row
      */
-    @Transactional
     public LoadOutcome loadDetails(InputStream childRecords) {
         Objects.requireNonNull(childRecords, "childRecords must not be null");
+        RecordStream stream = new RecordStream(childRecords,
+                PendingAuthDetailMapper.unloadRecordLength(), "prefixed detail", this.maxRecords);
+        LoadOutcome total = new LoadOutcome(0, 0, 0);
+        int ordinalBase = 0;
+        while (true) {
+            List<byte[]> chunk = stream.nextChunk(CHUNK_SIZE);
+            if (chunk.isEmpty()) {
+                return total;
+            }
+            int base = ordinalBase;
+            LoadOutcome outcome = this.transactions.execute(status -> insertDetails(chunk, base));
+            total = total.combinedWith(Objects.requireNonNull(outcome));
+            ordinalBase += chunk.size();
+        }
+    }
 
-        int read = 0;
+    /**
+     * Inserts one bounded chunk of authorization records inside its own transaction.
+     *
+     * <p>Assumptions: parent presence and row presence are each settled for the WHOLE chunk in one
+     * statement before anything is written. Refactoring Rationale: this replaces TWO probes per record --
+     * one for the parent and one for the row -- so a chunk of five hundred records now issues two queries
+     * where it previously issued a thousand.</p>
+     *
+     * <p>Assumptions: a parent inserted by an EARLIER chunk of the same run counts as present, because
+     * the presence query reads the table and earlier chunks have committed. That is the ordering both
+     * halves of the load already require -- summaries before authorizations -- so chunking does not
+     * weaken it.</p>
+     *
+     * @param chunk the extract records to insert; must not be {@code null}
+     * @param ordinalBase how many records preceded this chunk, so logged and refused ordinals count from
+     *     the start of the extract rather than from the start of the chunk
+     * @return what this chunk read, inserted and skipped; never {@code null}
+     * @throws UnresolvedParentException if a record names an account with no summary row
+     * @throws MalformedParentKeyException if a record's parent-key prefix cannot be decoded
+     */
+    private LoadOutcome insertDetails(List<byte[]> chunk, int ordinalBase) {
+        List<PendingAuthDetail> decoded = new ArrayList<>(chunk.size());
+        for (int index = 0; index < chunk.size(); index++) {
+            decoded.add(decodeChild(chunk.get(index), ordinalBase + index + 1));
+        }
+        Set<Long> parents = new HashSet<>(this.summaries.findExistingAccountIds(
+                decoded.stream().map(detail -> detail.getId().getAccountId()).distinct().toList()));
+        // WHY : Assumptions: EVERY parent in the chunk is validated before the child presence query is
+        //       issued, in its own pass. That ordering is deliberate and is the one the per-record
+        //       version had for free: a chunk naming an account with no summary row is refused without
+        //       the loader ever having read the child table, so a malformed extract costs one query
+        //       rather than two and the refusal cannot be preceded by a read it did not need.
+        for (int index = 0; index < decoded.size(); index++) {
+            requireParent(parents, decoded.get(index).getId().getAccountId(),
+                    ordinalBase + index + 1);
+        }
+        Set<PendingAuthDetailKey> present = new HashSet<>(this.details.findExistingIds(
+                decoded.stream().map(PendingAuthDetail::getId).toList()));
         int inserted = 0;
         int alreadyPresent = 0;
-
-        for (byte[] record : records(childRecords, PendingAuthDetailMapper.unloadRecordLength(),
-                "prefixed detail")) {
-            read++;
-            PendingAuthDetail detail = decodeChild(record, read);
-            PendingAuthDetailKey key = detail.getId();
-            requireParent(key.getAccountId(), read);
-
-            // WHY : Assumptions: an existing row is skipped rather than replaced, transcribing the child
-            //       duplicate arm at L329 to L331, and the whole key is probed rather than the account
-            //       alone. The key is the account together with the two stored complements, so an account
-            //       that already has authorizations still admits a new one; probing by account would
-            //       report every child of a loaded parent as a duplicate.
-            if (this.details.existsById(key)) {
+        // WHY : Assumptions: the two mechanisms above the summary loop apply here for the same reasons
+        //       and against the same two failures -- the chunk-wide query for a duplicate the extract
+        //       carries within itself, the conflict-tolerant insert for a key committed between that
+        //       query and this write. The child key is a composite of account, date and time, so the
+        //       conflict target names all three and a collision on any other constraint raises rather
+        //       than being counted as the duplicate this arm exists to tolerate.
+        for (int index = 0; index < decoded.size(); index++) {
+            PendingAuthDetail detail = decoded.get(index);
+            int ordinal = ordinalBase + index + 1;
+            if (!present.add(detail.getId())
+                    || this.details.insertDetailIfAbsent(detail) == 0) {
                 alreadyPresent++;
-                LOG.info("authorization already present, skipped accountId={} authDate={} authTime={}"
-                        + " recordOrdinal={}", key.getAccountId(), key.getAuthDate(),
-                        key.getAuthTime(), read);
+                LOG.info("authorization already present, skipped recordOrdinal={} authDate={}"
+                        + " authTime={}", ordinal, detail.getId().getAuthDate(),
+                        detail.getId().getAuthTime());
                 continue;
             }
-            this.details.save(detail);
             inserted++;
         }
-        return new LoadOutcome(read, inserted, alreadyPresent);
+        return new LoadOutcome(chunk.size(), inserted, alreadyPresent);
     }
 
     /**
@@ -488,8 +679,9 @@ public class LoadService {
      *     {@code null}
      * @throws MalformedParentKeyException if the six-byte prefix is not well-formed packed decimal, or
      *     holds a value the account identifier cannot represent
-     * @throws IllegalArgumentException if the embedded segment is malformed for the detail layout, which
-     *     includes a stored complement out of range and a match status an insert cannot originate
+     * @throws MalformedSegmentException if the embedded segment is malformed for the detail layout, which
+     *     includes a stored complement out of range, a match status an insert cannot originate, and a
+     *     fraud position outside the domain the column admits
      * @throws ArithmeticException if a key component or amount inside the SEGMENT exceeds the range its
      *     column holds. Assumptions: this is deliberately NOT folded into the prefix refusal above, for
      *     the reason that refusal's own scoping records -- an arithmetic overflow in the segment is a
@@ -502,12 +694,41 @@ public class LoadService {
         } catch (PackedDecimalCodec.PackedDecimalException | ArithmeticException undecodable) {
             throw new MalformedParentKeyException(ordinal, undecodable);
         }
-        return PendingAuthDetailMapper.toEntity(PendingAuthDetailMapper.unloadedSegment(record),
-                accountId);
+        // WHY : Refactoring Rationale: the segment decode's own refusal is now re-raised with the
+        //       record's ordinal, for exactly the reason the prefix refusal above is. The mapper is
+        //       handed one array and cannot know which record of the extract it came from, so its message
+        //       named the offending FIELD and left an operator holding a file of five hundred thousand
+        //       records with no way to find the one at fault. The refusal type is a subtype of the one
+        //       this method already raised, so every caller's contract is unchanged.
+        try {
+            return PendingAuthDetailMapper.toEntity(PendingAuthDetailMapper.unloadedSegment(record),
+                    accountId);
+        } catch (MalformedSegmentException alreadyIdentified) {
+            throw alreadyIdentified;
+        } catch (IllegalArgumentException malformed) {
+            throw new MalformedSegmentException(ordinal, malformed);
+        }
     }
 
     /**
-     * Refuses a child record whose parent summary is absent, naming the account it could not resolve.
+     * Refuses a child record whose parent summary is absent, naming the record rather than the account.
+     *
+     * <p>Refactoring Rationale: this method's summary line said it names "the account it could not
+     * resolve", and both the log line and the raised message did. Neither does now. This migration's
+     * observability contract names account identifiers among the values a durable diagnostic may not hold
+     * and requires them omitted rather than abbreviated, and a thrown message is a durable diagnostic in
+     * the same sense a log line is: it is written to the job log by whatever catches it, and it is
+     * attached to the failure an orchestrator surfaces. The record ordinal takes its place at both sites,
+     * and it identifies the refused record within the extract the operator is reconciling -- which is
+     * closer to the artifact in hand than a database key was.</p>
+     *
+     * <p>Assumptions: the account identifier is still carried on the exception as a typed accessor, and
+     * that is not a contradiction. The prohibition is on what a diagnostic RENDERS for an operator to
+     * read; a caller that catches this type and needs the unresolved key to decide something reads it
+     * through the accessor, in memory, without it passing through a log. Alternatives Considered: dropping
+     * the field as well, so the value could not be reached at all. Rejected because it would remove a
+     * caller's ability to act on the refusal in order to protect a rendering that no longer includes
+     * it.</p>
      *
      * <p>Purpose. This is divergence D-C, recorded on this class and registered in
      * {@code docs/architecture/cobol-to-service-traceability.md}. It stands where the reference
@@ -519,21 +740,21 @@ public class LoadService {
      * the reference positioning call qualifies on, which moves the prefix into a single key value at L277
      * for a search argument whose key field is the account.
      *
+     * @param parents the accounts this chunk's single presence query found summary rows for; never
+     *     {@code null}
      * @param accountId the account the record's prefix named; never {@code null}
      * @param ordinal the one-based position of the record in the extract, used to identify it
      * @throws UnresolvedParentException if no summary row exists for that account
      */
-    private void requireParent(Long accountId, int ordinal) {
-        if (this.summaries.existsById(accountId)) {
+    private static void requireParent(Set<Long> parents, Long accountId, int ordinal) {
+        if (parents.contains(accountId)) {
             return;
         }
-        // WHY : Assumptions: the refusal is LOGGED as well as raised, and the two are not redundant. The
-        //       raise ends this transaction, so an orchestrator sees a failed task; the log line is what
-        //       survives in the job log alongside the records that loaded before it, which is the record
-        //       an operator reconciles the two extract files against. The reference program's own
-        //       intended diagnostic at L311 to L312 was a pair of writes for the same reason.
-        LOG.error("authorization refused, its account has no summary row accountId={}"
-                + " recordOrdinal={}", accountId, ordinal);
+        // WHY : Assumptions: the refusal is LOGGED by ordinal only, while the exception still carries the
+        //       account on an accessor. The two are different exposures: a log line is durable, widely
+        //       readable and outlives the run, whereas the accessor is read by the caller that is already
+        //       holding the extract. The message this raises names the ordinal alone for the same reason.
+        LOG.error("authorization refused, its account has no summary row recordOrdinal={}", ordinal);
         throw new UnresolvedParentException(accountId, ordinal);
     }
 
@@ -546,13 +767,34 @@ public class LoadService {
      *
      * <p>Refactoring Rationale: this is divergence <strong>D-LOAD-READ-BOUNDED</strong>, registered in
      * {@code docs/architecture/cobol-to-service-traceability.md}. The third outcome is removed rather
-     * than transcribed, and this is where the non-termination hazard described on this class is closed. The reference status tests each have a
-     * branch that neither sets an end flag nor abends -- <strong>L235</strong> for the root file and
-     * <strong>L287</strong> for the child file -- reached from any status that is neither success nor
-     * end-of-file, and returning from it leaves the enclosing {@code PERFORM ... UNTIL} at L178 or L181
-     * with an unchanged flag and an unchanged file position. Resolving the whole stream once removes the
-     * possibility: after this method returns the element count is settled, and a caller's walk of it
-     * cannot be extended by anything a record contains.
+     * than transcribed, and this is where the non-termination hazard described on this class is closed.
+     * The reference status tests each have a branch that neither sets an end flag nor abends --
+     * <strong>L235</strong> for the root file and <strong>L287</strong> for the child file -- reached from
+     * any status that is neither success nor end-of-file, and returning from it leaves the enclosing
+     * {@code PERFORM ... UNTIL} at L178 or L181 with an unchanged flag and an unchanged file position.
+     * Resolving the whole stream once removes the possibility: after this method returns the element count
+     * is settled, and a caller's walk of it cannot be extended by anything a record contains.
+     *
+     * <p>Refactoring Rationale: the stream is read ONE STRIDE AT A TIME and the record count is capped,
+     * where the whole stream was previously drained into a single array with no ceiling of any kind. Two
+     * things were wrong with the drain. It allocates a contiguous array the size of the input, so an
+     * extract larger than the heap fails as an allocation error naming a byte count rather than as a
+     * refusal naming the file -- and it fails before any of this method's own diagnostics can run.
+     * The rationale that stood here claimed the cost was "bounded by the same transaction that already
+     * holds every entity the load produces", and that was simply false: the transaction bounds nothing
+     * about a byte array read before any entity exists, and the two are additive rather than alternative.
+     * A stride-sized read plus an explicit ceiling makes the bound a stated number an operator can raise
+     * deliberately, instead of an unstated one the heap discovers.
+     *
+     * <p>Assumptions: the diagnostic ORDER that the drain was chosen for is preserved exactly, and that is
+     * why this still resolves every record before returning rather than yielding them one at a time to the
+     * caller. A length remainder is the symptom of one of these two files being handed to the other's
+     * reader, and the strides are a hundred and two hundred and six -- so the child file divided by the
+     * root stride leaves two whole records and a six-byte remainder. Yielded one at a time, those two
+     * records would be DECODED and written first, and a child record's bytes read against the summary
+     * layout fail somewhere in the middle of a packed money field: the run would report a malformed field
+     * rather than the mismatched file that actually caused it. Resolving the length first means the stride
+     * mismatch is what gets reported, before a single row is written.
      *
      * <p>Assumptions: a remainder is a refusal rather than a partial last record. It means the file was
      * produced against a different layout, or was truncated in transit, and either way every field offset
@@ -560,37 +802,97 @@ public class LoadService {
      * instead of reporting a fault. The message names the stride, because the likeliest cause is one of
      * the two files being handed to the other's reader.
      *
-     * @param stream the extract to read; never {@code null}
-     * @param stride the declared record length in bytes
-     * @param description the record kind, used to identify the layout in a refusal
-     * @return each record in file order, as a newly allocated array of exactly {@code stride} bytes;
-     *     never {@code null}
-     * @throws UncheckedIOException if the stream cannot be read
-     * @throws IllegalArgumentException if the stream length is not a whole multiple of {@code stride}
+     * <p>Refactoring Rationale: this is a READER rather than a splitter, which is the substance of the
+     * change. What it replaces returned every record of the extract in one list, having first read the
+     * whole stream into a second array, so the loader held two complete copies before it wrote a single
+     * row and no way of looping over the result could make that bounded.</p>
      */
-    private static List<byte[]> records(InputStream stream, int stride, String description) {
-        byte[] all;
-        try {
-            // WHY : Assumptions: the whole stream is drained with one call that is specified to read
-            //       until the end rather than with a single read into a buffer. A stream may return fewer
-            //       bytes than asked for without having ended, so treating one short return as the end
-            //       would silently truncate a load whose source is a network or a compressed file.
-            all = stream.readAllBytes();
-        } catch (IOException unreadable) {
-            throw new UncheckedIOException(
-                    "the " + description + " extract could not be read", unreadable);
+    private static final class RecordStream {
+
+        /** The stream the records are read from. */
+        private final InputStream stream;
+
+        /** How many bytes one record occupies. */
+        private final int stride;
+
+        /** What the extract is called in a refusal. */
+        private final String description;
+
+        /** The greatest number of records this extract may hold before it is refused. */
+        private final int ceiling;
+
+        /** How many records have been handed out so far, which the ceiling is measured against. */
+        private int taken;
+
+        /**
+         * Wraps one extract stream as a source of fixed-width records.
+         *
+         * @param stream the stream to read; must not be {@code null}
+         * @param stride how many bytes one record occupies; must be positive
+         * @param description what the extract is called in a refusal; must not be {@code null}
+         * @param ceiling the greatest number of records the extract may hold; must be positive
+         */
+        RecordStream(InputStream stream, int stride, String description, int ceiling) {
+            this.stream = stream;
+            this.stride = stride;
+            this.description = description;
+            this.ceiling = ceiling;
         }
-        if (all.length % stride != 0) {
-            throw new IllegalArgumentException("a " + description + " extract must hold a whole number"
-                    + " of " + stride + "-byte records but held " + all.length + " bytes");
+
+        /**
+         * Reads up to a stated number of whole records, or fewer at the end of the extract.
+         *
+         * <p>Refactoring Rationale: the stream is read a CHUNK AT A TIME rather than in full. An earlier
+         * revision read the entire extract into one array and then copied every record out of it into a
+         * second list, so the load held two complete copies of the extract in memory before it wrote a
+         * single row, and nothing about either the extract or the caller bounded that. Reading
+         * incrementally holds one chunk, and the caller's transaction ends per chunk, so the memory the
+         * load needs is flat in the size of the extract.</p>
+         *
+         * <p>Assumptions: the whole-record check is applied at the END of the stream rather than by
+         * dividing a known total, because a stream's total is exactly what is no longer read. A trailing
+         * partial record is still refused as a malformed extract, so the contract is unchanged even
+         * though the mechanism is.</p>
+         *
+         * @param records the greatest number of records to return
+         * @return up to {@code records} whole records, and an empty list at the end of the extract
+         * @throws UncheckedIOException if the extract cannot be read
+         * @throws IllegalArgumentException if the extract ends part-way through a record
+         */
+        List<byte[]> nextChunk(int records) {
+            List<byte[]> chunk = new ArrayList<>(records);
+            for (int index = 0; index < records; index++) {
+                // WHY : Assumptions: the ceiling is tested BEFORE the read that would exceed it, so the
+                //       refusal names the file rather than arriving as a heap failure naming a byte
+                //       count. It is tested per record rather than per chunk because a chunk boundary
+                //       need not fall on the ceiling, and a per-chunk test would admit up to a chunk
+                //       beyond the stated bound.
+                if (this.taken >= this.ceiling) {
+                    throw new IllegalArgumentException("a " + this.description + " extract must hold at"
+                            + " most " + this.ceiling + " records; raise " + MAX_RECORDS_PROPERTY
+                            + " deliberately if this file is genuinely larger, and check first that it"
+                            + " is the extract this loader was given");
+                }
+                byte[] record;
+                try {
+                    record = this.stream.readNBytes(this.stride);
+                } catch (IOException unreadable) {
+                    throw new UncheckedIOException(
+                            "the " + this.description + " extract could not be read", unreadable);
+                }
+                if (record.length == 0) {
+                    break;
+                }
+                if (record.length != this.stride) {
+                    throw new IllegalArgumentException("a " + this.description + " extract must hold a"
+                            + " whole number of " + this.stride + "-byte records but ended with "
+                            + record.length + " trailing bytes");
+                }
+                chunk.add(record);
+                this.taken++;
+            }
+            return chunk;
         }
-        List<byte[]> split = new ArrayList<>(all.length / stride);
-        for (int offset = 0; offset < all.length; offset += stride) {
-            byte[] record = new byte[stride];
-            System.arraycopy(all, offset, record, 0, stride);
-            split.add(record);
-        }
-        return split;
     }
 
     /**
@@ -634,9 +936,16 @@ public class LoadService {
      * Raised when a child record names an account that has no summary row.
      *
      * <p>Purpose. This is the reported form of divergence D-C, described on {@link LoadService} and
-     * registered in {@code docs/architecture/cobol-to-service-traceability.md}. It carries the account it
-     * could not resolve and the record's position in the extract, so the failure names the data rather
-     * than only the fact of failing.
+     * registered in {@code docs/architecture/cobol-to-service-traceability.md}. Its MESSAGE names the
+     * record's position in the extract and the remedy; the account it could not resolve is carried on the
+     * type as a typed accessor and appears in no rendering.
+     *
+     * <p>Refactoring Rationale: the account identifier was formatted INTO the message, and that made this
+     * exception a carrier for a prohibited value. A throwable's message is a durable diagnostic in the same
+     * sense a log line is -- whatever catches it writes it, an orchestrator surfaces it with the failed
+     * task, and this migration's observability contract requires an account identifier to be omitted from
+     * such a rendering rather than shortened. What the message loses in specificity the ordinal restores:
+     * it names the exact record in the extract file the operator is holding.</p>
      *
      * <p>Assumptions: it extends the platform's illegal-state exception because the refusal is about the
      * STATE the load is running against -- the summary the record depends on is not there -- and not
@@ -657,8 +966,11 @@ public class LoadService {
         /**
          * The account the refused record named.
          *
-         * <p>Assumptions: retained as a field and not only formatted into the message, so a caller can
-         * act on it -- reporting which summaries an operator has to load -- without parsing text.
+         * <p>Assumptions: retained as a field and DELIBERATELY not formatted into the message, so a caller
+         * can act on it -- reporting which summaries an operator has to load -- while no rendering of this
+         * exception discloses it. It was previously both, which is what made the message a carrier for a
+         * value the observability contract prohibits. Reading it now requires calling the accessor, which
+         * is an in-memory decision rather than a diagnostic.</p>
          */
         private final Long accountId;
 
@@ -675,11 +987,15 @@ public class LoadService {
          * @throws NullPointerException if {@code accountId} is {@code null}
          */
         UnresolvedParentException(Long accountId, int recordOrdinal) {
-            super("record " + recordOrdinal + " of the prefixed detail extract names account "
-                    + Objects.requireNonNull(accountId, "accountId must not be null")
-                    + ", which has no pending-authorization summary row; load the summary extract for"
-                    + " that account and re-run");
-            this.accountId = accountId;
+            // WHY : Assumptions: the message names the record and the remedy and NOT the account, and the
+            //   null check stays on the argument rather than moving into the message expression it used to
+            //   sit inside. A caller reads the value through the accessor, so the field must still be
+            //   non-null; removing the check with the interpolation would have let a null reach a caller
+            //   that the message previously guaranteed against.
+            super("record " + recordOrdinal + " of the prefixed detail extract names an account with no"
+                    + " pending-authorization summary row; load the summary extract for that account and"
+                    + " re-run");
+            this.accountId = Objects.requireNonNull(accountId, "accountId must not be null");
             this.recordOrdinal = recordOrdinal;
         }
 
@@ -739,6 +1055,61 @@ public class LoadService {
         MalformedParentKeyException(int recordOrdinal, Throwable cause) {
             super("record " + recordOrdinal + " of the prefixed detail extract carries a six-byte parent"
                     + " key that is not a decodable packed eleven-digit account identifier",
+                    Objects.requireNonNull(cause, "cause must not be null"));
+            this.recordOrdinal = recordOrdinal;
+        }
+
+        /**
+         * Returns the one-based position of the refused record in the extract.
+         *
+         * @return the record's ordinal position
+         */
+        public int getRecordOrdinal() {
+            return this.recordOrdinal;
+        }
+    }
+
+    /**
+     * Refuses one child record whose embedded segment is malformed for the detail layout.
+     *
+     * <p>Purpose. This names WHICH record of the extract was refused, which the mapper cannot: it is
+     * handed one array and knows nothing of the file it came from. The wrapped refusal carries what was
+     * wrong with the record; this type carries where it is.
+     *
+     * <p>Assumptions: it extends {@code IllegalArgumentException} for the same reason its sibling does --
+     * the load operations documented that type for a malformed record before this type existed, and a
+     * subtype keeps every caller's contract intact while letting a caller that wants the ordinal ask for
+     * it.
+     *
+     * <p>Trade-offs: the message names the ordinal and not the account. An operator fixing an extract
+     * works from record positions, and this service's logging rules keep account identifiers out of
+     * diagnostics; the caller that supplied the record already holds the account.
+     */
+    public static class MalformedSegmentException extends IllegalArgumentException {
+
+        /**
+         * The serialization identity of this exception type.
+         *
+         * <p>Assumptions: declared for the same reason as its sibling's -- the throwable hierarchy is
+         * serializable, and an undeclared identity is a computed one.
+         */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * The one-based position of the refused record in the extract.
+         */
+        private final int recordOrdinal;
+
+        /**
+         * Builds the refusal for one record, retaining the mapper's own account of what was wrong.
+         *
+         * @param recordOrdinal the one-based position of the record in the extract
+         * @param cause the mapper's refusal this wraps; must not be {@code null}
+         * @throws NullPointerException if {@code cause} is {@code null}
+         */
+        MalformedSegmentException(int recordOrdinal, Throwable cause) {
+            super("record " + recordOrdinal + " of the prefixed detail extract carries a segment that is"
+                    + " malformed for the authorization-detail layout",
                     Objects.requireNonNull(cause, "cause must not be null"));
             this.recordOrdinal = recordOrdinal;
         }

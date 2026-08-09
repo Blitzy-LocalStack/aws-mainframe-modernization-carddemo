@@ -460,7 +460,7 @@ public class TransactionListService {
                         ? processPf7Key(cursorKey)
                         : processPf8Key(request, cursorKey);
 
-        return assemblePage(scanned, direction, cursorToken, binding);
+        return assemblePage(scanned, direction, cursorToken, binding, cursorKey != null);
     }
 
     /**
@@ -823,18 +823,23 @@ public class TransactionListService {
      * @param binding the binding the two boundary tokens are sealed under, of type {@code String},
      *     as composed by {@link #cursorBinding(String)} from this listing and the authenticated
      *     principal; must not be {@code null} or blank
+     * @param resumed whether the request carried a cursor, of type {@code boolean}, which settles
+     *     backward availability on a forward page: the cursor names a row the caller was already shown
+     *     and the forward predicate is strictly greater than it, so a page lies behind exactly when one
+     *     was supplied
      * @return the assembled page envelope, carrying at most the page size in rows
      * @throws NullPointerException if a returned row carries no identifier, which the envelope's own
      *     conversion refuses because such a row could not be paged away from
      */
     private PageResponse<TransactionListItemResponse> assemblePage(List<Transaction> scanned,
-            TransactionListRequest.Direction direction, CursorToken cursorToken, String binding) {
+            TransactionListRequest.Direction direction, CursorToken cursorToken, String binding,
+            boolean resumed) {
         boolean probeRowFound = hasProbeRow(scanned);
         List<Transaction> displayOrderedRows =
                 transactionMapper.orderForDisplay(retainedRows(scanned), direction);
 
         if (displayOrderedRows.isEmpty()) {
-            return transactionMapper.toListPage(displayOrderedRows, null, null, false);
+            return transactionMapper.toListPage(displayOrderedRows, null, null, false, false);
         }
 
         String firstKeyToken =
@@ -842,8 +847,15 @@ public class TransactionListService {
         String lastKeyToken = sealBoundaryKey(cursorToken,
                 displayOrderedRows.get(displayOrderedRows.size() - 1).getTranId(), binding);
 
+        // WHY : Assumptions: backward availability mirrors forward availability rather than being read
+        //       off the leading boundary token, which every page that returned rows carries. On a
+        //       backward scan the surplus row IS a row lying further back; on a forward scan the answer
+        //       is whether a cursor was supplied, so the opening page reports nothing behind it.
+        boolean backwardAvailability =
+                direction == TransactionListRequest.Direction.PREVIOUS ? probeRowFound : resumed;
+
         return transactionMapper.toListPage(displayOrderedRows, firstKeyToken, lastKeyToken,
-                forwardAvailability(direction, probeRowFound));
+                forwardAvailability(direction, probeRowFound), backwardAvailability);
     }
 
     /**

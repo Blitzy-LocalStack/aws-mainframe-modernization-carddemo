@@ -111,8 +111,18 @@
  * rather than assembled from two.</p>
  *
  * <p>There is no queue configuration and no batch-job configuration. This context neither consumes
- * nor produces a message and runs no scheduled job, and this module declares neither a messaging
- * client nor the batch starter, so neither would have anything to configure.</p>
+ * nor produces a message, and this module declares neither a messaging client nor the batch starter, so
+ * neither would have anything to configure.</p>
+ *
+ * <p>Refactoring Rationale: the sentence above previously also read "and runs no scheduled job", and that
+ * clause is withdrawn because it is no longer true. {@code CognitoIdentityConfig} now carries
+ * {@code @EnableScheduling}, and {@code com.carddemo.auth.service.IdentitySyncService} declares one fixed
+ * delay job: the reconciliation pass that applies the changes {@code auth.users} owes the managed user pool
+ * when the request that recorded them did not survive to apply them. Assumptions: the job is enabled on the
+ * provider client's own configuration rather than on a configuration of its own, because converging that
+ * provider is the only reason it exists; the rationale is recorded at the annotation. Trade-offs: a reader
+ * looking for scheduling in a file named for it finds nothing, which is why this paragraph names the file
+ * that carries it.</p>
  *
  * <p>There is no web-layer or serialization configuration in this package, and the framework's own
  * defaults for content negotiation are accepted unchanged rather than restated.</p>

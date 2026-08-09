@@ -362,6 +362,39 @@
  * read another record belongs in {@code com.carddemo.card.service}, where the transcribed baseline
  * rules live and can be tested without a web layer.</p>
  *
+ * <p><b>One record is a deliberate exception, and restoring the constraints would reintroduce a
+ * defect.</b> {@code CardUpdateRequest} carries a WIDTH on each of its four editable attributes and a
+ * lower bound on its concurrency token, and NOTHING else -- no digit pattern, no presence constraint
+ * and no two-value domain. Refactoring Rationale: the review found that a declarative gate ahead of
+ * the service decided the outcome for exactly the two inputs the service transcribes most carefully.
+ * The reference classifies an attribute into three states, not two: acceptable, unacceptable, and
+ * never-supplied -- and it folds spaces, low values and ALL ZEROS into that third arm, at
+ * {@code app/cbl/COCRDUPC.cbl:811-813} for the name and at the matching arms for the status and the
+ * two expiry parts. A blank or all-zeros submission therefore has to reach
+ * {@code CardUpdateService}, because only that classification distinguishes the state that earns the
+ * literal asterisk the reference writes into an empty field from the state that earns the highlight
+ * alone. A presence or pattern constraint answered both as one undifferentiated refusal, discarded
+ * the reference sentence that names the specific fault, and stopped four faults accumulating into one
+ * response -- three properties the published contract states and no response could then produce.</p>
+ *
+ * <p>Assumptions: the width is retained rather than withdrawn with the rest, because the reference
+ * field physically could not hold more characters and therefore has no wording for an over-long
+ * value. There is nothing for the service to say about it, so refusing it at the boundary loses no
+ * behaviour, and the contract declares the same bound as {@code maxLength}. Trade-offs: the two
+ * layers are then split by KIND rather than uniformly, which is one more rule for a reader to hold
+ * than "constraints go on the record"; what it buys is that every reference sentence, every field
+ * state and the accumulation across four attributes all remain observable at the boundary a client
+ * reads, which {@code CardUpdateHttpValidationTest} asserts through the request-mapping layer rather
+ * than by calling the service directly.</p>
+ *
+ * <p>Assumptions: this exception is confined to that one record and does NOT extend to the search
+ * and response shapes. {@code CardPageQuery} and {@code CardLookupRequest} keep their digit patterns
+ * because their values are search keys the reference itself format-checked before any read, at
+ * {@code app/cbl/COCRDUPC.cbl:721-756} and {@code :762-800}, and a malformed key has no field state
+ * to report; {@code CardDetail}, {@code AdminCardDetail} and {@code CardSummary} keep theirs because
+ * an outbound constraint states an invariant this service must not violate rather than a gate a
+ * caller is held to.</p>
+ *
  * <p><b>Not the owner of user-visible message text.</b> Message strings and their catalog belong
  * with the error model in {@code com.carddemo.common.error} and with the user interface. No record
  * here declares a message component, and none truncates or clamps one.</p>

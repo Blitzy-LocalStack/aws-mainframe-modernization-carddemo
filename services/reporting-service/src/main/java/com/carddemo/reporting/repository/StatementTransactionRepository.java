@@ -2,6 +2,7 @@ package com.carddemo.reporting.repository;
 
 import com.carddemo.reporting.domain.StatementTransactionView;
 import jakarta.persistence.QueryHint;
+import java.util.List;
 import java.util.stream.Stream;
 import org.hibernate.jpa.AvailableHints;
 import org.springframework.data.jpa.repository.Query;
@@ -239,34 +240,34 @@ public interface StatementTransactionRepository
      */
 
     /**
-     * Opens a forward-only cursor over one card number's rows in transaction-identifier order.
+     * Opens a forward-only cursor over exactly one card's rows in transaction-identifier order.
      *
      * <p>This is the equivalent of the control break the reference performs in working storage at
      * L819 through L825 of {@code app/cbl/CBSTM03A.CBL}, where a change of card number closes one
      * card's run and begins the next. Selecting the run in the query instead means a caller
      * composing a single card's statement reads that card's rows and no others. </p>
      *
-     * <p>Assumptions: the argument is the card number as this projection exposes it, which
-     * {@code data-migration/sql/V1__reporting_views.sql} L298 has already narrowed to twelve
-     * asterisks and the last four digits. It therefore selects a rendering, and two distinct cards
-     * that share their last four digits are both selected by one call. Every row returned carries the
-     * keyed digest projected at L310 of the same file, so a caller establishes from the rows
-     * themselves whether one card or several were selected and refuses rather than attributing two
-     * cardholders' activity to one document. That obligation is left with the caller deliberately,
-     * because this cursor cannot resolve it: the digest is derived inside the relation from the
-     * unnarrowed number mixed with a secret whose read privilege L225 withdraws from this
-     * module. </p>
+     * <p>Refactoring Rationale: the argument is the card FINGERPRINT and no longer the narrowed card
+     * number, and the reasoning that settled on the narrowed number is withdrawn rather than adjusted.
+     * That reasoning was sound about one thing and wrong about its conclusion. It was right that this
+     * cursor could not resolve a collision -- selecting on twelve constant asterisks and four digits
+     * selects a rendering, so two cards sharing a tail were both returned -- and it was right that the
+     * caller could detect the collision from the digest on the rows. What it got wrong was to treat
+     * detection as an acceptable substitute for selection. Detection can only end one way: the caller
+     * refuses a request naming a real card, because a DIFFERENT cardholder happens to share four
+     * digits with it. In a portfolio of any size that is not an edge case, so the request-edge
+     * statement path was refusing legitimate requests by construction. </p>
      *
-     * <p>Alternatives Considered: taking the digest as the argument instead, which would identify
-     * exactly one card and remove the collision entirely. Rejected because a caller cannot produce
-     * one: it is computed inside the relation at L310 of
-     * {@code data-migration/sql/V1__reporting_views.sql} from a value whose read privilege L225 of
-     * that same file withdraws from this module, so the digest is only ever available as a value read
-     * back on a row and never as one a request can supply. Narrowing a card number, by contrast, is
-     * something a caller can do to a value it already holds -- L298 of that file shows the narrowing
-     * is idempotent, being twelve literal asterisks and the last four digits -- which is what makes this
-     * the only argument a request-time lookup can actually present. The collision is therefore
-     * detected on the rows rather than prevented at the argument. </p>
+     * <p>Refactoring Rationale: the objection that closed off the digest -- that "a caller cannot
+     * produce one", because it is derived inside the relation from a secret this module may not read --
+     * was true when it was written and is no longer true. {@code data-migration/sql/V1__reporting_views.sql}
+     * now declares {@code reporting.resolve_card}, a definer-rights lookup that takes one whole card
+     * number and returns the fingerprint belonging to it, with EXECUTE granted to this module's login
+     * role and to no one else. So a request-time caller CAN present the digest: it resolves the card it
+     * was given, once, and then names the card exactly for every read that follows. The secret is still
+     * unreadable from here -- the function returns a token, never the key -- and the lookup answers
+     * nothing for a card that does not exist, so it hands a fingerprint only to a caller that already
+     * held the whole number it belongs to. </p>
      *
      * <p>Assumptions: the transaction and batching contracts are the ones the whole-projection cursor
      * above documents -- mandatory propagation so the cursor outlives this call, and the
@@ -274,13 +275,14 @@ public interface StatementTransactionRepository
      * identically here because the annotations below are identical. They are cross-referenced rather
      * than restated so that a change to either is made in one place. </p>
      *
-     * @param cardNumber the card number as this projection exposes it, being the narrowed rendering
-     *     of sixteen characters; must not be {@code null}
-     * @return an open, forward-only cursor over the rows carrying that rendering, ordered by
-     *     transaction identifier ascending, which is the second of the two keys
-     *     {@code app/jcl/CREASTMT.JCL} L53 declares; empty when the rendering matches no row; never
-     *     {@code null}. The caller owns the cursor and must close it, for which try-with-resources is
-     *     the intended form, and must consume it inside the read-only transaction it requires
+     * @param cardFingerprint the keyed per-card fingerprint the relation publishes, being sixty-four
+     *     hexadecimal characters, as obtained from {@code reporting.resolve_card} for a request-time
+     *     card or read from a row for a whole-run traversal; must not be {@code null}
+     * @return an open, forward-only cursor over that one card's rows, ordered by transaction identifier
+     *     ascending, which is the second of the two keys {@code app/jcl/CREASTMT.JCL} L53 declares;
+     *     empty when the card has no transaction; never {@code null}. The caller owns the cursor and
+     *     must close it, for which try-with-resources is the intended form, and must consume it inside
+     *     the read-only transaction it requires
      * @throws org.springframework.transaction.IllegalTransactionStateException if no transaction is
      *     in progress when this method is called, for the reason the cursor above records
      * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
@@ -290,7 +292,7 @@ public interface StatementTransactionRepository
     @Query("""
             select t
             from StatementTransactionView t
-            where t.key.cardNumber = :cardNumber
+            where t.cardFingerprint = :cardFingerprint
             order by t.key.transactionId asc
             """)
     @QueryHints({
@@ -298,5 +300,128 @@ public interface StatementTransactionRepository
         @QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true")
     })
     @Transactional(readOnly = true, propagation = Propagation.MANDATORY)
-    Stream<StatementTransactionView> streamByCardNumber(@Param("cardNumber") String cardNumber);
+    Stream<StatementTransactionView> streamByCardFingerprint(
+            @Param("cardFingerprint") String cardFingerprint);
+
+    /**
+     * Sums and counts one card's transactions without returning any of them.
+     *
+     * <p>Purpose: answers the aggregate half of a statement -- the trailer total and the line count --
+     * from the database, so a caller that needs only those two numbers does not have to receive every
+     * row to add them up.</p>
+     *
+     * <p>Refactoring Rationale: this method exists because the request-edge statement path had no way
+     * to ask for a summary. It materialised every transaction of the card into a list, summed the list
+     * and counted it, and then discarded the list when the caller had asked for heading data only. On a
+     * card with a long history that is an unbounded allocation performed to produce two scalars, and it
+     * is performed inside the request thread. The aggregate is what the database is for.</p>
+     *
+     * <p>Assumptions: the aggregate is expressed with {@code coalesce} over the sum so that a card with
+     * no transaction at all answers zero rather than null. The reference reaches the same state through
+     * {@code MOVE ZERO TO WS-TOTAL-AMT} at L325 of {@code app/cbl/CBSTM03A.CBL} immediately before its
+     * traversal, so a card with no activity carries a zero trailer rather than a blank one, and a null
+     * arriving here would have to be corrected by every caller instead of once.</p>
+     *
+     * <p>Assumptions: the sum is taken over the mapped money member, so it is computed and returned as
+     * an exact decimal and never as binary floating point. The column is {@code NUMERIC(11,2)}, the
+     * mapped member converts through the shared money type, and the aggregate of a numeric column in
+     * PostgreSQL is itself numeric -- so no stage of this computation passes through a double.</p>
+     *
+     * <p>Trade-offs: this returns a two-component projection rather than two separate queries. Two
+     * queries would read the same rows twice and could straddle a concurrent insert, reporting a total
+     * that does not correspond to the count beside it.</p>
+     *
+     * @param cardFingerprint the keyed per-card fingerprint the relation publishes; must not be
+     *     {@code null}
+     * @return the total and the count for that card, with a zero total and a zero count when the card
+     *     has no transaction; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
+     *     includes the relation being absent -- a defect to report against the data-migration
+     *     package, as register entry <b>R11</b> records, and never one to work around from here
+     */
+    @Query("""
+            select coalesce(sum(t.amount), 0) as total, count(t) as lineCount
+            from StatementTransactionView t
+            where t.cardFingerprint = :cardFingerprint
+            """)
+    @Transactional(readOnly = true)
+    StatementAggregate aggregateByCardFingerprint(
+            @Param("cardFingerprint") String cardFingerprint);
+
+    /**
+     * Reads one bounded window of a card's transactions, ordered by transaction identifier.
+     *
+     * <p>Purpose: serves the request-edge statement path, which answers over HTTP and must therefore
+     * return a bounded body whatever the card's history holds.</p>
+     *
+     * <p>Assumptions: the window is expressed as a strict keyset continuation on the transaction
+     * identifier rather than as an offset. The identifier is the ordering key and is unique, so a
+     * continuation from the last identifier returned cannot skip a row or return one twice when a
+     * concurrent posting inserts into a window already read -- which an offset does both of. This is
+     * the same discipline every browse in the migration uses and the reason the plan states it as a
+     * rule rather than a preference.</p>
+     *
+     * <p>Assumptions: {@code :after} is compared with a strict greater-than and the first page is
+     * requested by passing the empty string, which sorts below every sixteen-character identifier the
+     * baseline produces because those are digits. A nullable parameter was rejected: it would make the
+     * predicate two predicates and force either two queries or a null-tolerant comparison that no
+     * index serves.</p>
+     *
+     * <p>Trade-offs: the caller passes the limit, so this method does not decide how large a page is.
+     * The page size belongs to the boundary that publishes it, and a limit hard-coded here would have
+     * to agree with the published contract by coincidence rather than by construction.</p>
+     *
+     * @param cardFingerprint the keyed per-card fingerprint the relation publishes; must not be
+     *     {@code null}
+     * @param after the transaction identifier to continue strictly after, or the empty string to start
+     *     from the beginning; must not be {@code null}
+     * @param limit the greatest number of rows to return, which a caller sets to one more than its page
+     *     size when it needs to know whether a further page exists
+     * @return the rows in ascending transaction-identifier order, at most {@code limit} of them; empty
+     *     when the card has no further transaction; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
+     *     includes the relation being absent -- a defect to report against the data-migration
+     *     package, as register entry <b>R11</b> records, and never one to work around from here
+     */
+    @Query("""
+            select t
+            from StatementTransactionView t
+            where t.cardFingerprint = :cardFingerprint
+              and t.key.transactionId > :after
+            order by t.key.transactionId asc
+            limit :limit
+            """)
+    @QueryHints(@QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true"))
+    @Transactional(readOnly = true)
+    List<StatementTransactionView> findWindowByCardFingerprint(
+            @Param("cardFingerprint") String cardFingerprint,
+            @Param("after") String after,
+            @Param("limit") int limit);
+
+    /**
+     * The two scalars a statement trailer needs, returned without any transaction row.
+     *
+     * <p>Assumptions: this is a closed interface projection, so the provider builds an implementation
+     * from the aliases the query above declares and no constructor has to agree with the column order.
+     * A record was considered and rejected for the reason the sibling report projection records: a
+     * constructor expression binds by position, so reordering the select list would compile and return
+     * the wrong component in the wrong slot.</p>
+     */
+    interface StatementAggregate {
+
+        /**
+         * Returns the exact sum of the card's transaction amounts.
+         *
+         * @return the total as an exact decimal, zero when the card has no transaction; never
+         *     {@code null}
+         */
+        java.math.BigDecimal getTotal();
+
+        /**
+         * Returns how many transactions the card has.
+         *
+         * @return the count, zero when the card has none
+         */
+        long getLineCount();
+    }
 }

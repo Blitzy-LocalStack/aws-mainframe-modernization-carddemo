@@ -170,24 +170,30 @@ output "alb_dns_name" {
   value       = aws_lb.this.dns_name
 }
 
-# WHY : Assumptions: NO aws_route53_record exists at any layer of this package,
-#       and that absence is deliberate rather than pending. api-gateway-http
-#       reaches this load balancer through a VPC Link private integration which
-#       targets the listener by ARN and resolves no name at all, so a record
-#       would serve no consumer that exists. The zone id is published
-#       regardless, so that a caller which later wants a friendly internal
-#       name can build the alias itself without this module acquiring ownership
-#       of DNS for a record it does not need.
-#       Alternatives Considered: (a) omitting the output until something needs
-#       it -- rejected because it makes adding an alias a change to the module
-#       every environment shares, rather than a change in the one root that
-#       wants it; (b) creating the record here -- rejected because it would put
-#       DNS ownership inside a load-balancer module, leaving the record and the
-#       service it names owned by different layers. Publishing the id and
-#       creating nothing leaves both decisions with the caller, which is the
-#       environment root.
+# WHY : Assumptions: THIS MODULE creates no aws_route53_record, and the CALLING
+#       ROOT does. Both halves are deliberate and together they are the design:
+#       DNS ownership sits with the layer that names the service. This output
+#       exists precisely so the root can build that alias, and it is consumed --
+#       each of infra/envs/dev and infra/envs/prod aliases a VPC-private apex A
+#       record at `module.alb.alb_dns_name` with this value as the alias-target
+#       zone and evaluate_target_health enabled.
+#       Refactoring Rationale: this note previously asserted that "NO
+#       aws_route53_record exists at any layer of this package" and that one
+#       "would serve no consumer that exists", describing the output as published
+#       for a hypothetical future caller. The record exists in both roots and has
+#       a live consumer: the internal base URLs the authorization, transaction
+#       and account services resolve are built from that name, so
+#       service-to-service traffic depends on it. Describing a load-bearing
+#       integration as speculative invites a reader to treat this output as
+#       unused and remove it -- which would break both roots at plan time.
+#       Alternatives Considered: (a) omitting the output -- rejected, and now
+#       moot, because a root does consume it; (b) creating the record here --
+#       rejected because it would put DNS ownership inside a load-balancer
+#       module, leaving the record and the service it names owned by different
+#       layers. Publishing the id and creating nothing leaves both decisions with
+#       the caller, which is the environment root, and that is what happened.
 output "alb_zone_id" {
-  description = "Canonical hosted-zone id of the load balancer, required as the alias-target zone of a Route 53 alias record; this module creates no such record."
+  description = "Canonical hosted-zone id of the load balancer, required as the alias-target zone of a Route 53 alias record. This module creates no such record by design; each environment root uses this value as the alias-target zone of the VPC-private apex A record that service-to-service calls resolve."
   value       = aws_lb.this.zone_id
 }
 

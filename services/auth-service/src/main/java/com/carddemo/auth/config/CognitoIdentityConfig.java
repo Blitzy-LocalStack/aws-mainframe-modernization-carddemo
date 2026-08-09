@@ -3,6 +3,7 @@ package com.carddemo.auth.config;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 
 /**
@@ -36,6 +37,14 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
  * path holds none of those permissions.</p>
  */
 @Configuration
+// WHY : Refactoring Rationale: scheduling is enabled HERE, on the configuration that owns the provider
+//       client, because the only scheduled job this service runs exists solely to converge that provider:
+//       IdentitySyncService's reconciliation pass applies the changes auth.users owes the user pool after a
+//       process death left them pending. Alternatives Considered: a configuration class of its own, which
+//       would have been one more file whose whole content is one annotation, and the application class,
+//       where a reader looking for what is scheduled would find no clue as to why. The authorization
+//       context makes the same choice, enabling scheduling on the configuration that owns its queue client.
+@EnableScheduling
 public class CognitoIdentityConfig {
 
     /**

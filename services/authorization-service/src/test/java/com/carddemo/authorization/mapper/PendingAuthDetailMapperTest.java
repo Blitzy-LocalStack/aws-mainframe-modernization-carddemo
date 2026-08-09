@@ -27,38 +27,36 @@ import org.junit.jupiter.api.Test;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Holds the unreached helper contract of {@link PendingAuthDetailMapper} to its committed byte images.
+ * Holds the single-value rules and projection boundaries of {@link PendingAuthDetailMapper} to the
+ * committed detail images.
  *
  * <h2>Purpose</h2>
  *
- * <p>Refactoring Rationale: this class exists for one reason, and it is narrower than its name suggests.
- * Ten members of {@link PendingAuthDetailMapper} had NO caller in this module's test tree at all --
- * {@code decodeAuthDate}, {@code encodeAuthDate}, {@code decodeAuthTime}, {@code encodeAuthTime},
- * {@code paddedTimeDigits}, {@code renderPosEntryMode}, {@code renderProcessingCode},
- * {@code renderFraudMark}, {@code parseFraudReportDate} and this class's own
- * {@code maskedCardNumber} -- and four boundary behaviours of its public projections were likewise
- * unasserted: that {@link PendingAuthDetailResponse} crosses to JSON with its amount as a STRING, that
- * the projection publishes the APPROVED amount rather than the requested one, that the prefixed and
- * bare unload shapes are not interchangeable, and that the timestamp composition draws its two halves
- * from two DIFFERENT stored fields. Each of those is a place where a wrong answer is a plausible one,
- * so an absent assertion reads as coverage while proving nothing.
+ * <p>This class owns the part of the mapper's contract that whole-record conversion does not reach: the
+ * single-value RULES applied to one field at a time -- a nines complement, a zero fill, a component
+ * re-order, a mask -- and four boundary behaviours of the public projections. Those four are that
+ * {@link PendingAuthDetailResponse} crosses to JSON with its amount as a STRING, that the projection
+ * publishes the APPROVED amount rather than the requested one, that the prefixed and bare unload shapes
+ * are not interchangeable, and that the composed timestamp draws its two halves from two DIFFERENT stored
+ * fields. Each is a place where a wrong answer is a plausible one, so an unasserted rule reads as
+ * coverage while proving nothing.</p>
  *
  * <p>Alternatives Considered: folding these cases into {@code SegmentConversionContractTest}, which
  * already drives the public conversions of both segment mappers. Rejected because that class is
  * organised around whole-record conversion held against a fixture, whereas everything here is a
- * single-value RULE -- a complement, a zero-fill, a re-order, a mask -- exercised at its own entry point
- * rather than through a record. Mixing the two would mean a failing zero-fill reported itself as a
- * failing record conversion, and the class that owns record conversion would grow a second subject with
- * no name for it. This package's charter permits an additional class for exactly this case and requires
- * that it name a contract no sibling holds; the ten unreached members are that contract.
+ * single-value rule exercised at its own entry point. Mixing the two would mean a failing zero-fill
+ * reported itself as a failing record conversion, and the class that owns record conversion would grow a
+ * second subject with no name for it. This package's charter permits an additional class for exactly this
+ * case and requires that it name a contract no sibling holds.</p>
  *
  * <p>Refactoring Rationale: five readings this class was briefed with are superseded by the charters and
  * by {@code docs/architecture/cobol-to-service-traceability.md}, and each is corrected here rather than
  * acted on, because acting on any one of them would have produced an assertion that is wrong or a
- * duplicate that hides its own authority. FIRST, there is no {@code .repository} TEST package in this
- * module and none is to be created; the single test that exercises persistence is
- * {@code fixtures.PendingAuthFraudDomainRepositoryIT}, filed with the fixture tests that supply its
- * rows, and that is the class named below wherever a database constraint is deferred to. SECOND, the
+ * duplicate that hides its own authority. FIRST, a {@code .repository} TEST package DOES exist in this
+ * module and it holds one {@code RepositoryIT} per table, so a database constraint deferred to below is
+ * asserted there; the briefing said no such package existed and that
+ * {@code fixtures.PendingAuthFraudDomainRepositoryIT} was the single persistence test, which is now the
+ * one that remains in {@code fixtures} because its subject is the recorded rows rather than the schema. SECOND, the
  * architecture rule forbidding a binary floating-point member IS inherited by this package -- it selects
  * classes under the analysed {@code com.carddemo} root, and the money package identifier an earlier
  * reading mistook for its scope is only that rule's own emptiness anchor -- so this class asserts NO
@@ -73,54 +71,62 @@ import tools.jackson.databind.json.JsonMapper;
  * carrier for those images -- but the per-test statement of the layout invariant each case depends upon
  * is still mandatory, because a README cannot say which invariant a particular test rests on.
  *
- * <p>Assumptions: one image this class was briefed to consume is deliberately NOT consumed here.
- * {@code pautdtl1-match-status-invalid.bin} is already exhausted by
- * {@code fixtures.PendingAuthDetailDomainRefusalFixtureTest}, which asserts both halves of its
- * contract -- that the field projection carries its out-of-domain status byte unrepaired, and that the
- * entity conversion refuses it with the first-stage domain message -- and by
- * {@code SegmentConversionContractTest}, which asserts the refusal at the record level. Adding either
- * half here would leave two suites asserting one contract with nothing to say which is the authority.
- * What this class asserts about that domain instead is the value the PROJECTION publishes, which nothing
- * else reads.
+ * <p>Assumptions: three neighbouring contracts are owned elsewhere, and each is named so that a reader
+ * does not read their absence here as a gap.</p>
+ * <ul>
+ *   <li>The field-by-field decode of the canonical image belongs to
+ *       {@code SegmentConversionContractTest} and to the fixtures package's own contract test. What this
+ *       class reads from that image instead is the 23-character timestamp COMPOSED from it, the complete
+ *       27-component PROJECTION of it, and the values its render helpers produce.</li>
+ *   <li>The out-of-domain match status in {@code pautdtl1-match-status-invalid.bin} is asserted by
+ *       {@code fixtures.PendingAuthDetailDomainRefusalFixtureTest} at the field and entity level and by
+ *       {@code SegmentConversionContractTest} at the record level. What this class asserts about that
+ *       domain is the value the PROJECTION publishes, which nothing else reads.</li>
+ *   <li>The prohibition on a binary floating-point member is an architecture rule inherited by this
+ *       package, so no declaration-level assertion is made here. What remains this class's own is
+ *       behaviour an import graph cannot see: a scale of two, half-up rounding, and an amount crossing
+ *       the boundary as a string.</li>
+ * </ul>
  *
- * <p>Assumptions: the field-by-field decode of the canonical image is owned elsewhere too, by
- * {@code SegmentConversionContractTest} and by the fixtures package's own contract test, so this class
- * does not restate it. What it asserts about that image instead is the 23-character timestamp COMPOSED
- * from it, the complete 27-component PROJECTION of it, and the values its render helpers produce -- three
- * things no other case in the module reads.
+ * <p>Assumptions: persistence is exercised by {@code fixtures.PendingAuthFraudDomainRepositoryIT}, filed
+ * with the fixture tests that supply its rows, and that is the class named below wherever a database
+ * constraint is deferred to. This module declares no {@code .repository} test package.</p>
  *
- * <p>Assumptions: every case works from a committed byte image or from a value read out of one, never
- * from a hand-built object, because a hand-built object cannot disagree with the mapper about where a
- * field lives. Where a case needs two stored fields to DISAGREE -- which no committed image does, every
- * one of them holding an originating time that matches its key -- the disagreement is produced by
- * copying an image and overwriting one field's bytes in the copy. The fixture on disk is never written
- * to, and the patch is applied at the offset the layout declares rather than at a searched position, so
- * a layout change moves the patch with it.
+ * <h2>Where every asserted value comes from</h2>
  *
- * <p>Assumptions: the 200-byte detail segment's geometry is the one {@link CopybookLayout} registers
- * under {@code PAUTDTL}, and this class reads offsets off that registration rather than asserting it --
- * every layout assertion belongs to the shared kernel's fixed-width codec tests, and there is
- * deliberately no separate test for the layout descriptor itself. The offsets this class patches or
- * inspects are, zero-based: the three-byte packed date complement
- * at 0, the five-byte packed time complement at 3, the six-character originating date at 8, the
- * six-character originating time at 14, the sixteen-character account number at 20, the four-character
- * card expiry at 40, the two-character response code at 62, the six-digit processing code at 68, the
- * seven-byte packed requested amount at 74, the seven-byte packed approved amount at 81, the two-digit
- * entry mode at 95, the one-character match status at 173, the one-character fraud position at 174, the
- * eight-character fraud report date at 175, and seventeen bytes of padding at 183. The record's closure
- * at 200 is the shared kernel's subject and is not re-derived here.
+ * <p>Assumptions: every DECODE-side case works from a committed byte image or from a value read out of
+ * one, because a hand-built object cannot disagree with the mapper about where a field lives. Where a
+ * case needs two stored fields to DISAGREE -- which no committed image does, every one of them holding an
+ * originating time that matches its key -- the disagreement is produced by copying an image and
+ * overwriting one field's bytes in the copy at the offset the layout declares. The fixture on disk is
+ * never written to.</p>
+ *
+ * <p>Trade-offs: the ENCODE-side refusal cases are the one exception, and they are synthetic by
+ * necessity rather than by preference. An amount too wide for its picture cannot be carried by any
+ * committed image, because the picture is what fixes that image's width, so
+ * {@link #canonicalWithAmounts(BigDecimal, BigDecimal)} reconstitutes the canonical row through the
+ * rehydration factory with literal over-wide amounts and every other member copied from the image. The
+ * cost is that those cases trust the factory rather than the decoder; what they buy is the only reachable
+ * proof that the encoder refuses a value the schema cannot hold.</p>
+ *
+ * <p>Assumptions: the 200-byte detail segment's geometry is read from the {@code PAUTDTL} registration
+ * in {@link CopybookLayout} rather than written here as literals, so a layout change moves every offset
+ * this class patches or inspects with it. The record length, each field's start and each packed money
+ * width come from that registration; the two constants this class still declares in its own terms are
+ * the unload record's stride and its packed key prefix, which belong to the unload RECORD rather than to
+ * the segment. Every layout assertion belongs to the shared kernel's codec tests, so nothing here
+ * asserts the registration -- it consumes it.</p>
  *
  * <p>Assumptions: the two nines-complement bases are 99999 for the five-digit Julian date and 999999999
- * for the nine-digit millisecond time, and each was recomputed against the fixture bytes before being
- * written into a case rather than copied from a brief. Both directions use the same base, so the
- * operation is its own inverse and the round trip is an identity.
+ * for the nine-digit millisecond time. Both directions use the same base, so the operation is its own
+ * inverse and the round trip is an identity.</p>
  *
  * <p>Trade-offs: the render helpers are package-private statics and this class is in their package, so
  * they are called directly. Reaching them reflectively, or widening them to public, were both available
  * and both rejected: reflection would turn a signature change into a run-time failure with no compiler
  * warning, and widening production visibility to suit a test would publish an internal rule as an API
  * that some other context could then depend upon. The cost accepted is that this class cannot move to
- * another package, which is the correct constraint rather than an inconvenience.
+ * another package, which is the correct constraint rather than an inconvenience.</p>
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception section.</p>
@@ -147,23 +153,45 @@ class PendingAuthDetailMapperTest {
     private static final Long SECOND_ACCOUNT_ID = 10_000_000_002L;
 
     /**
-     * The declared byte length of one detail segment image.
+     * The registered geometry of the detail segment, and the single source of every offset below.
+     *
+     * <p>Assumptions: the offsets and widths this class patches and inspects are READ from this
+     * registration rather than written as literals, so a layout correction moves them all together. A
+     * duplicated offset is the one drift this class could not detect on its own: a record read one byte
+     * out of alignment still decodes to plausible characters, so nothing raises and no case fails.</p>
      */
-    private static final int SEGMENT_LENGTH = 200;
+    private static final CopybookLayout.RecordSpec SEGMENT_LAYOUT = CopybookLayout.layout("PAUTDTL");
+
+    private static final int SEGMENT_LENGTH = SEGMENT_LAYOUT.reclen();
+
+    private static final int ORIGINATING_DATE_OFFSET = startOf("PA-AUTH-ORIG-DATE");
+
+    private static final int ORIGINATING_TIME_OFFSET = startOf("PA-AUTH-ORIG-TIME");
+
+    private static final int RESPONSE_CODE_OFFSET = startOf("PA-AUTH-RESP-CODE");
+
+    private static final int RESPONSE_REASON_OFFSET = startOf("PA-AUTH-RESP-REASON");
+
+    private static final int RESPONSE_REASON_WIDTH = widthOf("PA-AUTH-RESP-REASON");
+
+    private static final int APPROVED_AMOUNT_OFFSET = startOf("PA-APPROVED-AMT");
+
+    private static final int MONEY_SPAN_WIDTH = widthOf("PA-APPROVED-AMT");
+
+    private static final int PADDING_OFFSET = startOf("FILLER");
 
     /**
      * The declared byte length of one prefixed unload record.
+     *
+     * <p>Assumptions: this and the prefix width below are the two geometries this class still states in
+     * its own terms, because they belong to the unload RECORD rather than to the segment and the segment
+     * registration therefore does not carry them. The prefix is six bytes, the packed form of the
+     * eleven-digit signed parent key the reference unload record writes ahead of its segment, which is
+     * what makes the difference between the two strides a named quantity rather than an unexplained gap
+     * between 200 and 206.</p>
      */
     private static final int UNLOAD_RECORD_LENGTH = 206;
 
-    /**
-     * The byte width of the packed parent key that prefixes one unload record.
-     *
-     * <p>Assumptions: six, being the packed form of the eleven-digit signed parent key the reference
-     * unload record declares ahead of its segment. The derivation of that width from the digit count
-     * belongs to the shared kernel; the constant exists here so the difference between the two strides is
-     * named once rather than being the unexplained gap between 200 and 206.</p>
-     */
     private static final int UNLOAD_PREFIX_WIDTH = 6;
 
     /**
@@ -176,57 +204,54 @@ class PendingAuthDetailMapperTest {
     private static final int TIMESTAMP_HOST_VARIABLE_LENGTH = 26;
 
     /**
-     * The zero-based offset of the six-character originating date within a detail segment.
-     */
-    private static final int ORIGINATING_DATE_OFFSET = 8;
-
-    /**
-     * The zero-based offset of the six-character originating time within a detail segment.
-     */
-    private static final int ORIGINATING_TIME_OFFSET = 14;
-
-    /**
-     * The zero-based offset of the two-character authorization response code within a detail segment.
-     */
-    private static final int RESPONSE_CODE_OFFSET = 62;
-
-    /**
-     * The zero-based offset of the four-character authorization response reason within a detail segment.
-     */
-    private static final int RESPONSE_REASON_OFFSET = 64;
-
-    /**
-     * The declared character width of the authorization response reason.
-     */
-    private static final int RESPONSE_REASON_WIDTH = 4;
-
-    /**
-     * The zero-based offset of the seven-byte packed approved amount within a detail segment.
-     */
-    private static final int APPROVED_AMOUNT_OFFSET = 81;
-
-    /**
-     * The declared byte width of one packed money component of this segment.
-     *
-     * <p>Assumptions: seven, the width a picture of ten integer digits and two decimal places occupies in
-     * packed form. The derivation of that width from the picture is the shared kernel's subject and is
-     * not re-derived here; the constant exists so the money spans this class inspects are cut at one
-     * declared width rather than at a literal repeated per case.</p>
-     */
-    private static final int MONEY_SPAN_WIDTH = 7;
-
-    /**
-     * The zero-based offset at which a detail segment's trailing padding begins.
-     */
-    private static final int PADDING_OFFSET = 183;
-
-    /**
      * The number of components the detail response projection declares.
      *
      * <p>Assumptions: 27, and the count is asserted rather than assumed so that a twenty-eighth
      * component added without a rendering rule fails here instead of reaching a client as a null.</p>
+     *
+     * <p>Assumptions: this constant describes the RESPONSE RECORD and nothing else. It is used only by
+     * the reflection over {@link PendingAuthDetailResponse}, never to size a segment field map, because
+     * the two counts are equal by coincidence rather than by correspondence -- the projection omits six
+     * segment fields the reference screen never displayed and adds six components of screen chrome no
+     * segment holds. The segment side has its own constant below.</p>
      */
     private static final int RESPONSE_COMPONENT_COUNT = 27;
+
+    /**
+     * The registered name of the detail segment's layout in the shared kernel.
+     */
+    // WHY : Assumptions: the name is the copybook's own, PAUTDTL, and it is named once here so the
+    //       derivation below and any future reader reach the same registration. The shared kernel is
+    //       where the geometry lives; this class asserts the projection over it and does not restate it.
+    private static final String SEGMENT_LAYOUT_NAME = "PAUTDTL";
+
+    /**
+     * The name the layout gives the segment's trailing padding descriptor.
+     */
+    // WHY : Assumptions: written once and used both by the derivation below and by the two assertions
+    //       that name the descriptor, so a rename in the layout cannot leave one of the three behind.
+    //       CIPAUDTY L54 declares it FILLER PIC X(17) at offset 183.
+    private static final String PADDING_FIELD_NAME = "FILLER";
+
+    /**
+     * The number of descriptors of the detail segment that carry meaning, padding excluded.
+     */
+    // WHY : Refactoring Rationale: DERIVED from the registered layout rather than written as a literal,
+    //       and declared separately from the response count above rather than borrowing it. The two
+    //       figures are both 27 today and that is a coincidence this class states in prose; an
+    //       assertion that borrowed one for the other would keep passing if the segment gained a field
+    //       and the response did not -- and would then fail in a place that names the response while
+    //       the segment is what changed. Deriving it also means a descriptor added to the layout is
+    //       reflected here automatically, so the segment assertions test the projection rather than a
+    //       number somebody remembered to update.
+    // WHY : Assumptions: the padding descriptor is EXCLUDED by name rather than by subtracting one from
+    //       the total. Subtracting encodes an assumption about how many padding runs the segment has,
+    //       which is true of this layout and is not a property of layouts in general; filtering states
+    //       exactly what is meant and stays correct if the layout ever declared a second run.
+    private static final int SEGMENT_MEANINGFUL_FIELD_COUNT = (int) CopybookLayout
+            .layout(SEGMENT_LAYOUT_NAME).fields().stream()
+            .filter(field -> !PADDING_FIELD_NAME.equals(field.name()))
+            .count();
 
     /**
      * The account number every detail image in this module presents, unmasked.
@@ -248,6 +273,33 @@ class PendingAuthDetailMapperTest {
             JsonMapper.builder().addModule(new MoneyModule()).build();
 
     /**
+     * Reads one field's zero-based start offset off the registered segment geometry.
+     *
+     * @param field the copybook field name, spelled exactly as the registration declares it; must not be
+     *     {@code null}
+     * @return the field's zero-based start offset within a detail segment
+     * @throws IllegalArgumentException if the registration declares no field of that name, which means
+     *     the name here is misspelled or the layout renamed the field
+     * @throws NullPointerException if {@code field} is {@code null}
+     */
+    private static int startOf(String field) {
+        return SEGMENT_LAYOUT.field(field).start();
+    }
+
+    /**
+     * Reads one field's declared byte width off the registered segment geometry.
+     *
+     * @param field the copybook field name, spelled exactly as the registration declares it; must not be
+     *     {@code null}
+     * @return the field's declared width in bytes, which for a packed field is its packed width
+     * @throws IllegalArgumentException if the registration declares no field of that name
+     * @throws NullPointerException if {@code field} is {@code null}
+     */
+    private static int widthOf(String field) {
+        return SEGMENT_LAYOUT.field(field).length();
+    }
+
+    /**
      * Reads one committed image off the test classpath as bytes.
      *
      * <p>Assumptions: the resource is read whole and is never trimmed or decoded. A recorded byte image
@@ -260,6 +312,7 @@ class PendingAuthDetailMapperTest {
      * @throws AssertionError if the resource does not resolve on the test classpath, which means the
      *     image was renamed or removed rather than that any rule under test is wrong
      * @throws UncheckedIOException if the resource resolves but cannot be read
+     * @throws NullPointerException if {@code name} is {@code null}, raised by the resource lookup
      */
     private static byte[] bytesOf(String name) {
         try (InputStream stream = PendingAuthDetailMapperTest.class.getClassLoader()
@@ -285,6 +338,9 @@ class PendingAuthDetailMapperTest {
      * @param ordinal the zero-based record number to cut
      * @param stride the declared length of one record in this image
      * @return a newly allocated copy of exactly {@code stride} bytes
+     * @throws ArrayIndexOutOfBoundsException if {@code ordinal} or {@code stride} is negative
+     * @throws IllegalArgumentException if the computed start exceeds the computed end
+     * @throws NullPointerException if {@code image} is {@code null}
      */
     private static byte[] recordAt(byte[] image, int ordinal, int stride) {
         return Arrays.copyOfRange(image, ordinal * stride, (ordinal + 1) * stride);
@@ -302,13 +358,25 @@ class PendingAuthDetailMapperTest {
      *
      * @param source the image to copy; must not be {@code null}
      * @param offset the zero-based offset of the field to overwrite
-     * @param replacement the characters to write, of exactly the field's declared width; must not be
-     *     {@code null}
+     * @param replacement the characters to write, which must not run past the end of the record; must
+     *     not be {@code null}
      * @return a newly allocated copy of {@code source} carrying {@code replacement} at {@code offset}
+     * @throws IllegalArgumentException if the replacement would run past the end of the record, so a
+     *     silently truncated patch cannot produce a case that passes for the wrong reason
+     * @throws NullPointerException if {@code source} or {@code replacement} is {@code null}
      */
     private static byte[] patchedText(byte[] source, int offset, String replacement) {
         byte[] patched = source.clone();
         byte[] written = replacement.getBytes(StandardCharsets.US_ASCII);
+
+        // WHY : Assumptions: the bound is CHECKED rather than documented, because the failure it guards
+        //   is silent. An over-long replacement would throw from the copy, but an over-long OFFSET plus a
+        //   short replacement lands inside the record and patches the wrong field, and the case would
+        //   then pass or fail for a reason unrelated to the rule it names.
+        if (offset < 0 || offset + written.length > patched.length) {
+            throw new IllegalArgumentException("a patch of " + written.length + " bytes at offset "
+                    + offset + " does not fit a record of " + patched.length + " bytes");
+        }
         System.arraycopy(written, 0, patched, offset, written.length);
         return patched;
     }
@@ -378,6 +446,8 @@ class PendingAuthDetailMapperTest {
      *     {@code null}
      * @throws AssertionError if a component accessor cannot be invoked, which can only mean the record's
      *     accessors are no longer reachable from this package
+     * @throws NullPointerException if {@code response} is {@code null}, raised by the first accessor
+     *     invocation
      */
     private static String[] componentTextOf(PendingAuthDetailResponse response) {
         RecordComponent[] components = PendingAuthDetailResponse.class.getRecordComponents();
@@ -412,9 +482,6 @@ class PendingAuthDetailMapperTest {
      * routes to it. Asserting only the public path would leave the four helpers unreachable from any
      * test, which is the state that made this group necessary; asserting only the helpers would leave the
      * public path free to compute the same answer some other way and drift.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the nines-complement key arithmetic")
@@ -434,8 +501,6 @@ class PendingAuthDetailMapperTest {
          * decode to the Julian date 23180 and the millisecond time 143025123. The image's separately
          * stored originating date of {@code 230629} corroborates the first independently, day 180 of
          * 2023 being the twenty-ninth of June.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("both components decode at the bases the reference application subtracts from")
@@ -469,8 +534,6 @@ class PendingAuthDetailMapperTest {
          * images, recomputed against their bytes: 76819, 76634, 75998, 75904, 75899, 75889, 75888,
          * 75879, 75878 and 634. Sweeping the whole set rather than one value is what makes the leading
          * zero case part of the identity rather than a separate concession.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the complement is its own inverse in both directions")
@@ -507,8 +570,6 @@ class PendingAuthDetailMapperTest {
          * <p>Assumptions: the impossibility is asserted on the digits rather than by parsing a date,
          * because the point is that the RAW value is not a date at all. Parsing it would raise, and a
          * raise is indistinguishable from the many other reasons a parse can fail.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the trap image's stored complements are impossible until they are decoded")
@@ -576,8 +637,6 @@ class PendingAuthDetailMapperTest {
          * <p>Assumptions: the zero byte is asserted to be present in the image before the decode is
          * asserted, so a fixture regenerated without it would fail here rather than leaving this case
          * passing over bytes that no longer exercise it.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a complement whose leading byte is zero decodes without truncation")
@@ -611,8 +670,6 @@ class PendingAuthDetailMapperTest {
          * migration's own column constraints answer it at the database, and composing an instant answers
          * it by refusing one that names no day. Folding both into this guard would refuse reference data
          * on grounds the reference application never applied.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a component outside its complement base is refused")
@@ -649,9 +706,6 @@ class PendingAuthDetailMapperTest {
      * redefinition, then slices that overlay at constant positions; a display numeric is stored
      * zero-filled to its declared width, so the overlay always presents nine characters. This is the
      * only test in the module that reaches the padding operation at all.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the nine-digit time padding")
@@ -666,8 +720,6 @@ class PendingAuthDetailMapperTest {
          * the string cannot supply. Both readings are well formed and only one of them is the stored
          * time, which is why the unpadded width is asserted alongside the padded one rather than the
          * padded one being asserted alone.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a time before ten in the morning pads to nine digits before it is sliced")
@@ -700,8 +752,6 @@ class PendingAuthDetailMapperTest {
          * fixed-width format rather than as a loop, so a width taken from the value instead of from the
          * declaration would show up at one end and not in the middle. The widest admissible value is the
          * complement base itself, which is the largest number the nine declared positions hold.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the narrowest and widest admissible times both render nine digits")
@@ -719,8 +769,6 @@ class PendingAuthDetailMapperTest {
          * base would render ten characters and shift every slice by one, so each would produce a
          * well-formed clock reading of the wrong time rather than a failure. Refusing at the render is
          * what keeps that from reaching a composed timestamp.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a time outside the nine declared positions is refused")
@@ -762,9 +810,6 @@ class PendingAuthDetailMapperTest {
      * provenance patch a COPY of an image and assert what does and does not move as a result. That is
      * the only construction that can distinguish "reads this field" from "reads a field that happens to
      * agree".</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the twenty-three character authorization timestamp")
@@ -780,8 +825,6 @@ class PendingAuthDetailMapperTest {
          * composition rather than of the field being ignored everywhere. An implementation that composed
          * from the originating time would produce {@code 23-06-29 00.00.00000000} here, which is a
          * perfectly well-formed timestamp naming an instant fourteen and a half hours earlier.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the clock half comes from the packed key, not from the stored originating time")
@@ -831,8 +874,6 @@ class PendingAuthDetailMapperTest {
          * two consumers differ in exactly that way -- one binds the characters and lets the database
          * convert them, the other takes a value. A disagreement between them would put one instant on a
          * screen and a different one in a fraud row's key.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the calendar half comes from the originating characters, not from the packed key")
@@ -867,8 +908,6 @@ class PendingAuthDetailMapperTest {
          * the value's only consumer is a conversion mask written that way. A colon-separated value of
          * the same width would be refused by that mask as a data exception naming neither the field nor
          * the record it came from, so the absence of a colon is asserted directly.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the boundary separator is a space and the clock separators are full stops")
@@ -899,8 +938,6 @@ class PendingAuthDetailMapperTest {
          * zero, so its data positions and its literal positions are indistinguishable. Asserting only
          * that record would establish nothing; asserting the pair whose milliseconds are 500 and 750
          * against the literal that stays at zeros is what separates the two.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the trailing three positions are a literal while the milliseconds are data")
@@ -936,8 +973,6 @@ class PendingAuthDetailMapperTest {
          * conversion mask reads; a right-aligned one would put three blanks in front of the year and the
          * mask would refuse it. The composed value carries no leading or trailing blank of its own, so
          * the padding cannot be confused with content in either direction.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the composed value is left-justified and blank-padded into its host variable")
@@ -970,8 +1005,6 @@ class PendingAuthDetailMapperTest {
          * would slice without complaint and compose a well-formed timestamp out of the wrong characters.
          * The width is therefore checked before the first slice rather than left to the slice to
          * discover.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("an originating date of the wrong width is refused")
@@ -1001,9 +1034,6 @@ class PendingAuthDetailMapperTest {
      * {@code 5} where the segment holds {@code 05}, and both satisfy a digits-only constraint -- so the
      * defect would pass validation and reach a consumer that reads the field positionally. Neither of
      * these renderings had a caller in any test before this group.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the zero-filled display renderings")
@@ -1022,8 +1052,6 @@ class PendingAuthDetailMapperTest {
          * one shared width, which is why both are asserted. A shared rendering parameterised by width
          * would take that width from its caller, and a caller is exactly where a wrong width would then
          * come from.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("both renderings restore the leading zeros the integral decode discarded")
@@ -1063,8 +1091,6 @@ class PendingAuthDetailMapperTest {
          * direction collapses them, and the asymmetry is deliberate. A segment has no representation for
          * absent, so an encode substitutes zeros; a response component does have one, so publishing
          * {@code 00} for a column an extract left unset would assert an entry mode nobody recorded.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("both renderings answer an absent value with no value")
@@ -1081,8 +1107,6 @@ class PendingAuthDetailMapperTest {
          * count would render one character too many and shift every positional read of the response by
          * one. The refusal names the digit positions rather than the value's magnitude, because the
          * constraint is the picture and not a business range.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a value wider than its picture, or negative, is refused")
@@ -1124,9 +1148,6 @@ class PendingAuthDetailMapperTest {
      * writes a bare hyphen over the whole field otherwise, so the unmarked shape is not an error shape.
      * Neither the display composition nor the report-date parse had a caller in any test before this
      * group.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the fraud position rendering")
@@ -1141,8 +1162,6 @@ class PendingAuthDetailMapperTest {
          * whose remaining nine bytes the terminal rendered as blanks. Publishing nine blanks that mean
          * nothing was the alternative, and the trade the mapper makes is recorded at its own
          * declaration.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a marked position renders ten characters and an unmarked one a bare hyphen")
@@ -1175,26 +1194,22 @@ class PendingAuthDetailMapperTest {
         }
 
         /**
-         * Confirms an out-of-domain fraud position renders unmarked while the field map keeps it verbatim.
+         * Confirms an out-of-domain fraud position is refused rather than normalised into unmarked.
          *
-         * <p>Assumptions: the mapper does NOT normalise the stored character. The field map is the
-         * record's projection, so it carries the {@code Y} exactly as stored, and the entity's fraud
-         * position is left at the never-examined state rather than being written as {@code Y} -- because
-         * the entity's marking operation admits only the two condition-named values and is called only
-         * for them. A mapper that silently corrected the character would hide a data defect from the
-         * constraint that exists to catch it, and that constraint's assertion belongs to
-         * {@code fixtures.PendingAuthFraudDomainRepositoryIT}, which loads this same image. This case is
-         * deliberately not a duplicate of that one: it asserts what the MAPPER does with the character,
-         * not what the database does with the row.</p>
+         * <p>Refactoring Rationale: this case asserted the OPPOSITE -- that {@code toEntity} left the
+         * entity unmarked and carried on. That behaviour lost audit state without reporting anything: the
+         * column admits the two marking characters, a blank and null, so an entity presenting null loaded
+         * clean, the check constraint never saw the offending byte, and an authorization the extract said
+         * had been marked arrived in the target unmarked. The conversion now REFUSES the record, and this
+         * case asserts the refusal names the character and the domain so an operator can find the records
+         * at fault in the extract.
          *
          * <p>Assumptions: the record's report date is valid, so the unmarked rendering here cannot be
          * explained by a missing date. The rendering branches on the position alone.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
-        @DisplayName("an out-of-domain fraud position renders unmarked and is not normalised away")
-        void anOutOfDomainFraudPositionRendersUnmarkedAndIsNotNormalised() {
+        @DisplayName("an out-of-domain fraud position is refused rather than normalised into unmarked")
+        void anOutOfDomainFraudPositionIsRefusedRatherThanNormalised() {
             byte[] invalid = bytesOf("pautdtl1-auth-fraud-invalid.bin");
             assertThat(invalid).hasSize(SEGMENT_LENGTH);
 
@@ -1210,11 +1225,11 @@ class PendingAuthDetailMapperTest {
                     .as("the rendering branches on the position and answers with the unmarked shape")
                     .isEqualTo(PendingAuthDetailMapper.FRAUD_MARK_ABSENT);
 
-            PendingAuthDetail stored = PendingAuthDetailMapper.toEntity(invalid, FIXTURE_ACCOUNT_ID);
-            assertThat(stored.getAuthFraud())
-                    .as("the entity is left at the never-examined state rather than carrying Y")
-                    .isNull();
-            assertThat(stored.getFraudReportDate()).isNull();
+            assertThatThrownBy(() -> PendingAuthDetailMapper.toEntity(invalid, FIXTURE_ACCOUNT_ID))
+                    .as("the conversion refuses the record instead of discarding the character")
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("'Y'")
+                    .hasMessageContaining("outside the domain");
         }
 
         /**
@@ -1227,8 +1242,6 @@ class PendingAuthDetailMapperTest {
          * significant characters and drops the eight blanks that carry nothing. A blank date and an
          * absent one are treated alike because the two arise from different sources -- an insert path
          * writes spaces, an extract leaves a column unset -- and mean the same thing here.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a marked position with no report date renders the flag and its separator alone")
@@ -1247,8 +1260,6 @@ class PendingAuthDetailMapperTest {
          * declared would render a field the terminal padded silently, so neither can be allowed to
          * compose. The width is the copybook's and not the parse's, which is why this refusal is
          * separate from the parse refusals below.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a marked position whose report date is the wrong width is refused")
@@ -1274,8 +1285,6 @@ class PendingAuthDetailMapperTest {
          * date. The mapping to no date is therefore a requirement rather than a convenience: the
          * relational fraud row's report-date column is a nullable date for exactly this reason, while the
          * detail row keeps the eight characters themselves.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the report date parses month-first on both sides of the century pivot")
@@ -1312,8 +1321,6 @@ class PendingAuthDetailMapperTest {
          * the right digits; a non-digit month has the right width and the right separators; the
          * thirtieth of February has all three and names no day; and a seven-character value is refused on
          * width before any of the rest is examined.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the report date refuses misplaced separators, non-digits and an impossible day")
@@ -1337,19 +1344,18 @@ class PendingAuthDetailMapperTest {
      * The one disclosure narrowing this bounded context adds, asserted as an absence.
      *
      * <p>Assumptions: the image this group reads is {@code pautdtl1-canonical.bin}, one 200-byte record
-     * whose sixteen-character account number at offset 20 holds {@code 4000123456789010}. Every detail
-     * image in this module presents that same card, which is what lets a sweep look for one value rather
-     * than for a per-image one.</p>
+     * whose sixteen-character account number is the value {@link #UNMASKED_CARD_NUMBER} names. Every
+     * detail image in this module presents that same card, which is what lets a sweep look for one value
+     * rather than for a per-image one. The value itself is referred to by constant rather than written
+     * out here, so this file states an account-number-shaped literal in exactly one place.</p>
      *
-     * <p>Assumptions: the narrowing has NO reference antecedent and is added by the migration. The
-     * reference resource definitions enable tracing and dumping without classifying the payload as
-     * confidential, the reference detail screen displayed all sixteen digits, and no resource-level or
-     * command-level check stood in front of either. Nothing is removed here; a control is added, and it
-     * is asserted as the absence of the unmasked value rather than as the presence of the masked one --
-     * because a component that carried both would satisfy a presence assertion.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
+     * <p>Assumptions: the masking is a target control with no reference antecedent, and it is a
+     * registered divergence rather than parity. The reference resource definitions enable tracing and
+     * dumping without classifying the payload as confidential, the reference detail screen presents all
+     * sixteen digits, and no resource-level or command-level check stands in front of either. Nothing of
+     * the reference is removed; a control is added on the target side. It is asserted as the ABSENCE of
+     * the unmasked value rather than as the presence of the masked one, because a component that carried
+     * both would satisfy a presence assertion.</p>
      */
     @Nested
     @DisplayName("the account-number narrowing")
@@ -1368,8 +1374,6 @@ class PendingAuthDetailMapperTest {
          * whose own rendering hides the value could still serialise it -- a nested type, or a custom
          * serialiser, would do exactly that. The two sweeps together are what make the claim about the
          * payload and not only about the object.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("no component and no serialised byte carries the unmasked account number")
@@ -1404,8 +1408,6 @@ class PendingAuthDetailMapperTest {
          * reader of the response -- a masked run of characters asserts that a card was presented, and a
          * column an extract left unset asserts nothing. Masking a null would manufacture the first claim
          * out of the second.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the mask answers an absent account number with no value")
@@ -1427,6 +1429,13 @@ class PendingAuthDetailMapperTest {
      * reference screen never displayed and adds six components of screen chrome no segment holds, so
      * mapping the two sets onto each other one for one would put the wrong value in most positions.</p>
      *
+     * <p>Refactoring Rationale: the two counts are therefore carried by two INDEPENDENT constants, and
+     * the cases below use each only for its own side -- the response count for the reflection over the
+     * record, and the layout-derived segment count for the field map. They previously shared one
+     * constant, which made the coincidence load-bearing: a segment that gained a descriptor would have
+     * failed an assertion named after the response, pointing a reader at the shape that had not
+     * changed.</p>
+     *
      * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
      * parameter, return or exception section.</p>
      */
@@ -1442,8 +1451,6 @@ class PendingAuthDetailMapperTest {
          * padding-derived component is asserted by name because padding is the one field a positional
          * reader is most likely to carry through -- it decodes cleanly, it is the widest run of blanks in
          * the record, and nothing about it looks wrong.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the projection declares twenty-seven components and none is padding-derived")
@@ -1462,8 +1469,8 @@ class PendingAuthDetailMapperTest {
                     PendingAuthDetailMapper.toSegmentFields(bytesOf("pautdtl1-canonical.bin"));
             assertThat(fields)
                     .as("the blank padding descriptor is dropped from the field projection")
-                    .doesNotContainKey("FILLER")
-                    .hasSize(RESPONSE_COMPONENT_COUNT);
+                    .doesNotContainKey(PADDING_FIELD_NAME)
+                    .hasSize(SEGMENT_MEANINGFUL_FIELD_COUNT);
         }
 
         /**
@@ -1478,8 +1485,6 @@ class PendingAuthDetailMapperTest {
          * <p>Assumptions: the copy is made by overwriting the seventeen padding bytes with a non-blank
          * character in a clone of the committed image. The image on disk carries blanks and is never
          * written to; nobody may make a byte image tidy in either direction.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a record whose padding is not blank maps to the same entity and projection")
@@ -1491,8 +1496,8 @@ class PendingAuthDetailMapperTest {
             assertThat(scribbled).hasSize(SEGMENT_LENGTH).isNotEqualTo(canonical);
             assertThat(PendingAuthDetailMapper.toSegmentFields(scribbled))
                     .as("a non-blank padding descriptor is retained, so the two records do differ")
-                    .containsEntry("FILLER", "X".repeat(SEGMENT_LENGTH - PADDING_OFFSET))
-                    .hasSize(RESPONSE_COMPONENT_COUNT + 1);
+                    .containsEntry(PADDING_FIELD_NAME, "X".repeat(SEGMENT_LENGTH - PADDING_OFFSET))
+                    .hasSize(SEGMENT_MEANINGFUL_FIELD_COUNT + 1);
 
             PendingAuthDetail fromCanonical =
                     PendingAuthDetailMapper.toEntity(canonical, FIXTURE_ACCOUNT_ID);
@@ -1547,8 +1552,6 @@ class PendingAuthDetailMapperTest {
          * the same two characters as this record's response code, so a value sweep would report the entry
          * mode as a leak of the response code and fail on a projection that is entirely correct. A width
          * of one excludes a two-character code without depending on which two characters it is.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the projection publishes the derived approval character for every outcome")
@@ -1600,8 +1603,6 @@ class PendingAuthDetailMapperTest {
          * and its out-of-domain sibling elsewhere in the module. The projection's own component is the one
          * nothing else reads, and a mapper that normalised a later-transition status into the pending one
          * on the way out would show a matched authorization as still pending.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("every admitted match status reaches the projection unchanged")
@@ -1636,18 +1637,13 @@ class PendingAuthDetailMapperTest {
      * two decimal places admit; and {@code unload-prefixed-detail-206.bin}, whose FOURTH 206-byte record
      * is the declined authorization that requests 125.00 and approves nothing.</p>
      *
-     * <p>Refactoring Rationale: this group asserts no declaration-level prohibition on binary
-     * floating-point members, and an earlier reading of this module's brief required exactly that. The
-     * architecture rule carrying that prohibition selects classes under the analysed {@code com.carddemo}
-     * root and therefore already reaches this package; the money package identifier that reading mistook
-     * for its scope is only the rule's own emptiness anchor. Writing the scan here would have left two
-     * suites asserting one contract with no way to tell which was the authority, and would have told a
-     * reader this package was unprotected while it was protected. What is left to this group is
-     * behaviour the rule cannot see: a scale, a rounding mode, and the form an amount takes on the
-     * wire.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
+     * <p>Alternatives Considered: asserting the declaration-level prohibition on binary floating-point
+     * members here as well. It is not asserted, because the architecture rule carrying that prohibition
+     * selects classes under the analysed {@code com.carddemo} root and so already reaches this package --
+     * the money package identifier in that rule is its emptiness anchor and not its scope. Repeating the
+     * scan here would leave two suites asserting one contract with no way to tell which is the authority.
+     * What belongs to this group is the behaviour the rule cannot see: a scale, a rounding mode, and the
+     * form an amount takes on the wire.</p>
      */
     @Nested
     @DisplayName("the money contract at the projection boundary")
@@ -1666,8 +1662,6 @@ class PendingAuthDetailMapperTest {
          * money contract rather than being restated as literals. That is what keeps this context's
          * bound at the copybook's ten integer digits and its scale at the kernel's two, so a change to
          * either side fails here instead of producing two silently different bounds.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("both amounts reach the entity at scale two and agree with the shared contract")
@@ -1704,8 +1698,6 @@ class PendingAuthDetailMapperTest {
          * case would mean nothing anywhere held its payload form. The negative half of the assertion --
          * that the unquoted form is absent -- is what makes it fail if a future change emits a
          * number.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the published amount crosses to JSON as a string, not as a bare number")
@@ -1734,8 +1726,6 @@ class PendingAuthDetailMapperTest {
          * <p>Assumptions: an absent approved amount becomes an explicit zero rather than no value,
          * because the reference display field was an edited numeric that always rendered digits and had
          * no blank state.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the projection publishes the approved amount and never the requested one")
@@ -1762,28 +1752,26 @@ class PendingAuthDetailMapperTest {
         /**
          * Confirms the stored amount has no textual width, so a receiver truncation cannot arise here.
          *
-         * <p>Refactoring Rationale: this is the storage-side NEIGHBOUR of divergence D-H, registered as
+         * <p>Assumptions: this is the storage-side NEIGHBOUR of the wire-side divergence registered as
          * {@code D-AUTH-AMOUNT-TOLERANT-READ} in {@code docs/architecture/cobol-to-service-traceability.md}
          * and asserted by {@code AuthRequestWireFixtureTest} against the second record of the request
-         * amount-variants image. D-H is a WIDTH defect on the wire: the request copybook declares a
+         * amount-variants image. On the wire the widths differ: the request copybook declares a
          * fourteen-character money token and the reference consumer receives it into a thirteen-character
-         * item, so the fourteenth character is dropped and a numeric conversion then reads one fraction
-         * digit as happily as two -- a declared-width token is acted on as a value ten times smaller in
-         * the hundredths position, with nothing raised anywhere. What was wrong with that approach is
-         * exactly what this case establishes cannot happen on the storage side: the stored form has no
-         * textual width at all. Its width is fixed in BYTES by the picture, its leading nibble is a
-         * mandatory zero pad that is a structural artefact of an odd digit count rather than data, and a
-         * value the picture cannot hold is REFUSED at the encode instead of losing a digit. The wire-side
-         * assertion and this one therefore cannot be merged: one is about characters a receiver drops and
-         * the other about a value an encoder refuses.</p>
+         * item, so the fourteenth character does not arrive and a numeric conversion reads one fraction
+         * digit as readily as two, which places a declared-width token one decimal position out with
+         * nothing raised. The storage side cannot express that condition at all, and establishing why is
+         * this case's subject: the stored form has no textual width. Its width is fixed in BYTES by the
+         * picture, its leading nibble is a mandatory zero pad that is a structural artefact of an odd
+         * digit count rather than data, and a value the picture cannot hold is REFUSED at the encode
+         * rather than losing a digit. The wire-side assertion and this one therefore cannot be merged:
+         * one is about characters a receiver does not read, the other about a value an encoder
+         * refuses.</p>
          *
          * <p>Assumptions: the refusal raises {@link IllegalArgumentException}, which is the type both the
          * shared codec's field exception and its packed exception extend, so the case does not depend on
          * which of the two layers notices first. The over-wide value is reconstituted through the entity
          * rather than patched into an image, because no committed image can carry an amount wider than
          * its own picture.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the stored amount has no textual width, so a receiver truncation cannot arise")
@@ -1819,24 +1807,22 @@ class PendingAuthDetailMapperTest {
         /**
          * Confirms the stored amount is a third representation whose sign occupies a nibble.
          *
-         * <p>Refactoring Rationale: this is the storage-side NEIGHBOUR of divergence D-I, which the parent
-         * charter registers as one logical amount having two textual forms -- the wire carrying the
+         * <p>Assumptions: this is the storage-side NEIGHBOUR of divergence D-I, which the parent charter
+         * registers as one logical amount having two textual forms -- the wire carrying the
          * zero-SUPPRESSED edited rendering and the database carrying the zero-FILLED one -- and requires
-         * both to be asserted because asserting either alone would let the other drift. What was wrong
-         * with treating them as one form is what this case establishes: the segment's own form is neither
-         * of the two. It zero-FILLS in nibbles, so its leading bytes are zero bytes and never the blank
-         * byte a suppressed rendering would leave; and its SIGN is the low nibble of the final byte while
-         * the high nibble of that same byte is a significant digit, whereas both textual forms carry the
-         * sign as a whole character in a position of its own. No single assertion can validate a sign
-         * that is half a byte here and a whole character there, which is precisely why the wire-side and
-         * storage-side claims are separate cases in separate classes.</p>
+         * both to be asserted because asserting either alone would let the other drift. This case
+         * establishes that the segment's own form is a THIRD representation and neither of those two. It
+         * zero-FILLS in nibbles, so its leading bytes are zero bytes and never the blank byte a
+         * suppressed rendering leaves; and its SIGN is the low nibble of the final byte while the high
+         * nibble of that same byte is a significant digit, whereas both textual forms carry the sign as a
+         * whole character in a position of its own. No single assertion can validate a sign that is half
+         * a byte here and a whole character there, which is why the wire-side and storage-side claims are
+         * separate cases in separate classes.</p>
          *
          * <p>Assumptions: the canonical amount 1234.56 is the one used because it has leading positions
          * to fill. The widest amount fills every position with a nine, so on that record a zero-filled
          * and a zero-suppressed rendering would be indistinguishable and the case would prove
          * nothing.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the stored amount zero-fills in nibbles and carries its sign in a nibble")
@@ -1892,9 +1878,6 @@ class PendingAuthDetailMapperTest {
      * a record. That is what makes this the most damaging silent failure available here: a six-byte
      * misalignment shifts every field of a 200-byte read without changing its length, so the length check
      * that guards the prefixed path cannot catch it and the content check has to.</p>
-     *
-     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
-     * parameter, return or exception section.</p>
      */
     @Nested
     @DisplayName("the two unload record shapes")
@@ -1913,8 +1896,6 @@ class PendingAuthDetailMapperTest {
          * rather than against a written expectation, so the case establishes WHERE the segment begins
          * instead of restating what it contains. The whole-record decode is then asserted to carry the
          * prefix's identifier into the key, which is what an unload-then-reload cycle depends upon.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("each prefix names the parent its own segment hangs under")
@@ -1967,8 +1948,6 @@ class PendingAuthDetailMapperTest {
          * across all four would be simply false, and a case that skipped the fourth record would leave
          * the corpus free to drift further apart unnoticed. Every other byte of that record, its key, its
          * amounts and its match status included, is identical.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the bare shape carries no owning account and cannot be loaded without one")
@@ -2030,8 +2009,6 @@ class PendingAuthDetailMapperTest {
          * date complement belongs and every subsequent field six bytes early. It is caught by the content
          * of the packed spans rather than by their extent, which is why the assertion here is on the
          * refusal and not on the length.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the two shapes are not interchangeable in either direction")

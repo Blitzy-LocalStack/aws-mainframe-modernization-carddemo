@@ -1,9 +1,7 @@
 package com.carddemo.card.dto;
 
 import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
@@ -302,9 +300,7 @@ public record CardUpdateRequest(
         //       constraints are needed rather than one, because the pattern alone admits a value made
         //       only of spaces, which lines 811 to 813 refuse; the width is stated separately again
         //       because the pattern bounds the character set and not the length.
-        @NotBlank(message = NAME_NOT_PROVIDED)
         @Size(max = EMBOSSED_NAME_WIDTH)
-        @Pattern(regexp = LETTERS_AND_SPACES, message = NAME_MUST_BE_ALPHA)
         String embossedName,
 
         // WHY : Assumptions: the domain is the two upper case values and nothing else, and one
@@ -315,9 +311,7 @@ public record CardUpdateRequest(
         //       message is latched on both arms of that paragraph, at lines 855 to 856 for the blank
         //       case and at 868 to 869 for a value outside the set, so carrying one constant on both
         //       constraints reproduces the baseline exactly rather than approximating it.
-        @NotBlank(message = STATUS_MUST_BE_YES_NO)
-        @Size(min = ACTIVE_STATUS_WIDTH, max = ACTIVE_STATUS_WIDTH)
-        @Pattern(regexp = ACTIVE_STATUS_DOMAIN, message = STATUS_MUST_BE_YES_NO)
+        @Size(max = ACTIVE_STATUS_WIDTH)
         String activeStatus,
 
         // WHY : Assumptions: the month is two digits with its leading zero present, and the year is
@@ -353,9 +347,7 @@ public record CardUpdateRequest(
         //       rewording user-visible text to match an implementation detail.
         // WHY : Assumptions: the width is taken from the shared date type rather than written again
         //       here, so that the separated form has one definition across the migration.
-        @NotBlank
-        @Size(min = EXPIRATION_MONTH_WIDTH, max = EXPIRATION_MONTH_WIDTH)
-        @Pattern(regexp = EXPIRATION_MONTH_DOMAIN)
+        @Size(max = EXPIRATION_MONTH_WIDTH)
         String expirationMonth,
 
         // WHY : Assumptions: the year is a separate member from the month rather than the two being one
@@ -365,9 +357,7 @@ public record CardUpdateRequest(
         //       them, misreporting the other half of the faults. Two members let each fault be answered
         //       with a per-field entry naming the part that was wrong, which is what the baseline's two
         //       separate edit paragraphs do.
-        @NotBlank
-        @Size(min = EXPIRATION_YEAR_WIDTH, max = EXPIRATION_YEAR_WIDTH)
-        @Pattern(regexp = EXPIRATION_YEAR_DOMAIN)
+        @Size(max = EXPIRATION_YEAR_WIDTH)
         String expirationYear,
 
         // WHY : Assumptions: the token is boxed rather than primitive so that an omitted token is
@@ -407,24 +397,6 @@ public record CardUpdateRequest(
     private static final long MINIMUM_VERSION = 0L;
 
     /**
-     * The character set the embossed name is held to, being letters of either case and the space.
-     *
-     * <p>Assumptions: this is the set {@code app/cbl/COCRDUPC.cbl:824-826} removes before concluding at
-     * line 828 that whatever is left was not a letter, its alphabet declared over both cases at lines
-     * 255 to 257 and the space arriving as the replacement character from lines 258 to 259.</p>
-     */
-    private static final String LETTERS_AND_SPACES = "^[A-Za-z ]+$";
-
-    /**
-     * The two values the active status is held to.
-     *
-     * <p>Assumptions: the set is written out rather than case-folded because
-     * {@code 88 FLG-YES-NO-VALID VALUES 'Y', 'N'} at {@code app/cbl/COCRDUPC.cbl:91} admits no lower
-     * case member, so accepting one would widen the domain the baseline enforced.</p>
-     */
-    private static final String ACTIVE_STATUS_DOMAIN = "^[YN]$";
-
-    /**
      * Declared width of the expiry month, from the two-character field
      * {@code app/cbl/COCRDUPC.cbl:93-94} declares and its screen input at
      * {@code app/cpy-bms/COCRDUP.CPY:84}.
@@ -442,61 +414,6 @@ public record CardUpdateRequest(
      * {@code app/cpy-bms/COCRDUP.CPY:90}.
      */
     private static final int EXPIRATION_YEAR_WIDTH = 4;
-
-    /**
-     * The set the expiry month is held to.
-     *
-     * <p>Assumptions: the alternation admits 01 through 12 and nothing else, from
-     * {@code 88 VALID-MONTH VALUES 1 THRU 12} at {@code app/cbl/COCRDUPC.cbl:95} read over the
-     * two-character field it redefines and applied at line 898. Zero-zero is excluded by the alternation
-     * itself as well as by the zeros sentinel of the blank test at lines 883 to 885.</p>
-     *
-     * <p>Assumptions: month LENGTH and the leap year are not decided here. They are properties of a
-     * whole date, so they belong to {@code com.carddemo.common.validation.DateEditValidator}, which owns
-     * those rules for every context; this constraint bounds the month alone, which is all this member
-     * carries.</p>
-     */
-    private static final String EXPIRATION_MONTH_DOMAIN = "^(0[1-9]|1[0-2])$";
-
-    /**
-     * The window the expiry year is held to.
-     *
-     * <p>Assumptions: the alternation admits 1950 through 2099 and no other value, from
-     * {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code app/cbl/COCRDUPC.cbl:99} over the
-     * {@code PIC 9(4)} redefinition at lines 97 to 98, applied at line 934. It is written as an
-     * alternation of two ranges rather than as a numeric comparison because a constraint pattern is a
-     * character test, and expressing the window as characters is what keeps the check identical to the
-     * baseline's class condition over a zero-padded field.</p>
-     */
-    private static final String EXPIRATION_YEAR_DOMAIN = "^(19[5-9][0-9]|20[0-9]{2})$";
-
-    /**
-     * The refusal carried verbatim when the embossed name is absent or blank, from
-     * {@code app/cbl/COCRDUPC.cbl:181-182}, latched at lines 816 to 817.
-     *
-     * <p>Assumptions: this constant is not visible outside the record and is not a catalog. The
-     * authoritative catalog of user-visible text belongs with the error model in
-     * {@code com.carddemo.common.error} and with the user interface, and this is the constraint's own
-     * text, carried character for character under transformation rule T8 so that the sentence a caller
-     * receives is the sentence the operator saw.</p>
-     */
-    private static final String NAME_NOT_PROVIDED = "Card name not provided";
-
-    /**
-     * The refusal carried verbatim when the embossed name holds anything outside the permitted set,
-     * from {@code app/cbl/COCRDUPC.cbl:183-184}, latched at lines 833 to 834.
-     */
-    private static final String NAME_MUST_BE_ALPHA = "Card name can only contain alphabets and spaces";
-
-    /**
-     * The refusal carried verbatim when the active status is absent, blank or outside its two values,
-     * from {@code app/cbl/COCRDUPC.cbl:195-196}.
-     *
-     * <p>Assumptions: one constant serves both faults because the baseline latches this same condition
-     * on both arms of {@code 1240-EDIT-CARDSTATUS}, at lines 855 to 856 for the blank case and at 868
-     * to 869 for a value outside the set.</p>
-     */
-    private static final String STATUS_MUST_BE_YES_NO = "Card Active Status must be Y or N";
 
     /**
      * The placeholder that stands in for a component this record refuses to render.

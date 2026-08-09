@@ -5,8 +5,9 @@ import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.time.TimestampFormatter;
-import com.carddemo.reporting.domain.ReportTransactionView;
+import com.carddemo.common.web.PageResponse;
 import com.carddemo.reporting.dto.ReportTotalsResponse;
 import com.carddemo.reporting.dto.TransactionReportLineResponse;
 import com.carddemo.reporting.mapper.CobolEditMask;
@@ -560,19 +561,45 @@ public class TransactionReportService {
                 //       anything with it, to the job log and never to the report. The equivalent is a
                 //       trace record whose content is sanitised, because a value read from a relation
                 //       reaching a log line verbatim is how a control character forges a log entry.
+                // WHY : Assumptions: the transaction identifier is reported and the card is NOT. The
+                //       identifier is named in docs/architecture/observability.md among the identity a
+                //       diagnostic may keep, and it already identifies the row uniquely -- it is the
+                //       primary key of the record this line reads -- so the card rendering added no
+                //       diagnostic power it did not already have.
+                //       Refactoring Rationale: this line also rendered the card through
+                //       LogSafeText.sanitize. That was the wrong function for the value twice over: the
+                //       sanitiser exists to neutralise control characters and says nothing about
+                //       disclosure, and the one sanctioned abbreviation of a card number is
+                //       com.carddemo.common.security.CardNumberMasker, applied "only where a rendering
+                //       has no other way to say which row it describes". This rendering had another way,
+                //       so neither function was the right answer and the card is omitted instead.
+                //       Trade-offs: a reader following a control break can no longer see the group's key
+                //       in the trace line. The break itself is still observable -- the surviving
+                //       identifiers change at the boundary -- and the report body carries the masked
+                //       card where the reference prints it, so nothing an operator needs is lost from
+                //       the artifact that is meant to carry it.
                 if (LOG.isTraceEnabled()) {
-                    LOG.trace("read transaction {} on card group {}",
-                            LogSafeText.sanitize(line.getTransactionId()),
-                            LogSafeText.sanitize(line.getCardNum()));
+                    // WHY : Refactoring Rationale: the card fragment is REMOVED from this record. It
+                    //       carried the masked rendering, which is four digits of a primary account
+                    //       number, beside the transaction identifier -- and the two together link a
+                    //       cardholder to a transaction in a stream the sensitive-data logging contract
+                    //       in docs/architecture/observability.md covers by name. The fragment was also
+                    //       unnecessary: the identifier already locates the row, and the card the row
+                    //       belongs to is recoverable from it deliberately rather than published to
+                    //       every reader of a trace stream. The fingerprint is not substituted either --
+                    //       it is a stable per-card correlator, so emitting it would reintroduce the
+                    //       same linkability by another route.
+                    LOG.trace("read transaction {}",
+                            LogSafeText.sanitize(line.getTransactionId()));
                 }
 
-                if (breakOnGroupChange(acc, line.getCardNum(), sink)) {
+                if (breakOnGroupChange(acc, line.getCardFingerprint(), sink)) {
                     // Assumptions: the resolution sits here, conditional on the break, because the
                     //       reference's cross-reference lookup sits inside its own break block at L187.
                     //       One resolution serves every detail line of the card, which is what L364
                     //       prints from.
                     acc.currentAccountId = requireResolvedAccount(
-                            line.getAccountId(), line.getCardNum());
+                            line.getAccountId(), line.getCardFingerprint());
                 }
 
                 writeTransactionReport(acc, sink, rangeStart, rangeEnd, line.getAmount(), line);
@@ -1045,75 +1072,161 @@ public class TransactionReportService {
             //       a caller could ignore, and an unchecked failure carrying the abend detail is the
             //       target equivalent that the shared handler already renders. Declaring the checked
             //       type on every step above would put the same handling decision at each of them.
-            LOG.error("{} while emitting report record {}", WRITE_FAILURE_REASON,
-                    acc.recordsWritten + 1, refusal);
+            // WHY : Refactoring Rationale: the refusal is logged as a DIGEST and its message no longer
+            //       reaches the abend text. Both channels were unbounded by construction: the message
+            //       of an object-store or file failure is composed by a driver or an SDK, not by this
+            //       project, so it can carry a request URI -- and an artifact key is derived from a
+            //       cardholder's identity -- a bucket name, a set of request headers or a whole
+            //       response body. Passing the throwable to the logger additionally renders every
+            //       cause's message under the default appender chain, which
+            //       docs/architecture/observability.md records as the exact gap ThrowableDigest exists
+            //       to close. The digest carries the chain of type names and the frame each link was
+            //       raised at, which is what identifies a failure mode, and drops every message.
+            // WHY : Assumptions: the abend reason becomes a CONSTANT rather than a narrowed rendering of
+            //       the failure. The reference's own text is a constant -- 'ERROR WRITING REPTFILE' at
+            //       L389 of app/cbl/CBTRN03C.cbl -- so a constant is the reference's behaviour as well
+            //       as the safe choice, and the digest in the log is where a maintainer looks for which
+            //       failure it was.
+            LOG.error("event=report.record.refused reason={} recordOrdinal={} failure={}",
+                    WRITE_FAILURE_REASON, acc.recordsWritten + 1, ThrowableDigest.of(refusal));
             throw new IllegalStateException(
-                    renderedAbend(abendDetail(WRITE_FAILURE_REASON, refusal.getMessage())), refusal);
+                    renderedAbend(abendDetail(WRITE_FAILURE_REASON, WRITE_FAILURE_REASON)), refusal);
         }
 
         acc.recordsWritten++;
     }
 
     /**
-     * Composes the report's detail lines for one inclusive business-date range, as response values.
+     * Reads one bounded page of the report's detail lines, positioned by an opened cursor key.
      *
-     * <p>Assumptions: this surface returns values and never bands. It is what the published listing
-     * operation reads, and the same eight items the reference moves into its detail band at L363 to L370
-     * of {@code app/cbl/CBTRN03C.cbl} are the eight components of each value returned, in that order.
-     * The two descriptions are narrowed to the widths their band items declare, and the account
-     * identifier is rendered at the digit count its band item declares, because the response type
-     * publishes those widths as its own contract; the widths themselves are read from the band
-     * descriptor so this class states none of them.</p>
+     * <p>Refactoring Rationale: this replaces {@code composeDetailLines(LocalDate, LocalDate)}, which
+     * assembled the whole range into a list -- up to {@value #MAX_REPORT_LINES} rows -- and left the
+     * caller to slice it. Two defects came out of that. The caller sliced ORDINALLY, carrying an integer
+     * offset in its cursor token, so under a concurrent posting a page could repeat a line it had already
+     * shown or skip one it had not; the migration plan states keyset positioning as a rule for exactly
+     * that reason and offset positioning is not an available option. And the whole range was read for
+     * every page, so the twentieth page cost twenty full scans of the range and the response time of the
+     * first page was a function of the range's width rather than of the page's.</p>
      *
-     * <p>Assumptions: the reconciliation runs before anything is returned, and the read is bounded. Both
-     * are recorded where they are implemented, against {@link #reconcileDimensionIntegrity} and
-     * {@link #MAX_REPORT_LINES}.</p>
+     * <p>Assumptions: the page is read by the query surface's own keyset methods, which order by the
+     * per-card fingerprint and then the transaction identifier and continue strictly beyond an anchor row.
+     * The look-ahead row those methods request is what makes the further-page answer a fact about the
+     * relation rather than an estimate -- the same device the reference uses at
+     * {@code app/cbl/COCRDLIC.cbl} L1197.</p>
      *
-     * @param rangeStart the first business date of the range, inclusive, a {@link LocalDate}; must not be
+     * <p>Assumptions: the dimension reconciliation runs before the page is read, on every page rather
+     * than on the first. It is two bounded aggregate queries and it is what stands in for the three
+     * reference lookup paragraphs that abend on a miss; running it once would let a load that broke a
+     * dimension between two pages go unreported, and the reference has no notion of a first page to
+     * privilege.</p>
+     *
+     * <p>Assumptions: the range bound is still enforced, because a caller may page through a range and
+     * the bound is a statement about how much of a range this class is willing to serve at all rather
+     * than about one page.</p>
+     *
+     * @param rangeStart the first business date to cover, inclusive, a {@link LocalDate}; must not be
      *     {@code null}
-     * @param rangeEnd the last business date of the range, inclusive, a {@link LocalDate}; must not be
-     *     {@code null} and must not precede {@code rangeStart}
-     * @return the report's detail lines in card-then-identifier order, possibly empty; never
+     * @param rangeEnd the last business date to cover, inclusive, a {@link LocalDate}; must not be
      *     {@code null}
+     * @param openedCursorKey the opened cursor key naming the boundary row to continue from, or
+     *     {@code null} to read the leading page
+     * @param backward {@code true} to read the page preceding the key, {@code false} to read the page
+     *     following it; {@code true} with a {@code null} key is refused, because a backward step is taken
+     *     from a row the caller holds and names nothing without it
+     * @param sealer seals each boundary key this page reports into a client-facing token; must not be
+     *     {@code null}
+     * @return one bounded page of detail lines with its two sealed boundaries; never {@code null}
+     * @throws NullPointerException if either bound or {@code sealer} is {@code null}
      * @throws ClientInputException if either bound is absent, if the range is inverted, or if the range
-     *     holds more transactions than {@link #MAX_REPORT_LINES}
-     * @throws IllegalStateException if a transaction resolves fewer or more than one of each dimension,
-     *     naming the first driving transaction of the range
+     *     holds more transactions than this class is willing to serve
+     * @throws IllegalArgumentException if a backward page is requested with no cursor key
+     * @throws IllegalStateException if a transaction in the range does not resolve to exactly one of each
+     *     dimension, which is the target's equivalent of the reference abending on an unresolved lookup
      * @throws org.springframework.dao.DataAccessException if the reporting views cannot be read
      */
     @Transactional(readOnly = true)
-    public List<TransactionReportLineResponse> composeDetailLines(
-            LocalDate rangeStart, LocalDate rangeEnd) {
+    public PageResponse<TransactionReportLineResponse> readDetailLinePage(
+            LocalDate rangeStart,
+            LocalDate rangeEnd,
+            String openedCursorKey,
+            boolean backward,
+            TransactionReportRepository.CursorSealer sealer) {
 
         requirePresentRange(rangeStart, rangeEnd);
         requireOrderedRange(rangeStart, rangeEnd);
+        Objects.requireNonNull(sealer, "sealer must not be null");
+        if (backward && openedCursorKey == null) {
+            throw new IllegalArgumentException(
+                    "a backward page is taken from the first row of the window the caller holds, so it"
+                            + " cannot be requested without a cursor");
+        }
+        requireAssemblableRange(rangeStart, rangeEnd);
 
+        PageResponse<TransactionReportRepository.ReportLine> page = backward
+                ? reports.readPreviousReportLines(
+                        rangeStart, rangeEnd, openedCursorKey, LINE_COUNTER_MODULUS, sealer)
+                : reports.readNextReportLines(
+                        rangeStart, rangeEnd, openedCursorKey, LINE_COUNTER_MODULUS, sealer);
+
+        List<TransactionReportLineResponse> rendered = new ArrayList<>(page.items().size());
+        for (TransactionReportRepository.ReportLine row : page.items()) {
+            rendered.add(renderLine(row));
+        }
+        if (rendered.isEmpty()) {
+            return PageResponse.ofFilteredEmpty(page.firstKey(), page.lastKey(), page.hasNext());
+        }
+        return PageResponse.ofRows(rendered, page.firstKey(), page.lastKey(),
+                page.hasNext(), page.hasPrevious());
+    }
+
+    /**
+     * Renders one resolved report line as the response value the listing operation publishes.
+     *
+     * <p>Assumptions: the two description fields are narrowed to the widths their bands declare, because
+     * the response reports what the report prints and a band truncates on the right. The card is not
+     * rendered at all: the eight components are the eight the detail band prints, and a card number is
+     * none of them.</p>
+     *
+     * @param row one resolved report line from the query surface; must not be {@code null}
+     * @return the response value for that line, never {@code null}
+     */
+    private static TransactionReportLineResponse renderLine(
+            TransactionReportRepository.ReportLine row) {
+        return new TransactionReportLineResponse(
+                row.getTransactionId(),
+                renderAccountId(row.getAccountId()),
+                row.getTypeCd(),
+                narrowToBandWidth(row.getTypeDescription(),
+                        ReportBandLayouts.FIELD_TRAN_REPORT_TYPE_DESC),
+                row.getCategoryCd(),
+                narrowToBandWidth(row.getCategoryDescription(),
+                        ReportBandLayouts.FIELD_TRAN_REPORT_CAT_DESC),
+                row.getSource(),
+                row.getAmount());
+    }
+
+    /**
+     * Refuses a range holding more transactions than this class is willing to serve.
+     *
+     * <p>Assumptions: the reconciliation runs as part of this guard rather than beside it, because the
+     * count it returns is the count the bound is tested against and reading it twice could straddle a
+     * concurrent load. The reconciliation is also the migrated form of the three lookup paragraphs of
+     * {@code app/cbl/CBTRN03C.cbl}, each of which abends on a miss, so a range that fails it must not be
+     * served at all.</p>
+     *
+     * @param rangeStart the first business date, inclusive; must not be {@code null}
+     * @param rangeEnd the last business date, inclusive; must not be {@code null}
+     * @throws ClientInputException if the range holds more than {@value #MAX_REPORT_LINES} transactions
+     * @throws IllegalStateException if a transaction in the range does not resolve to exactly one of each
+     *     dimension
+     */
+    private void requireAssemblableRange(LocalDate rangeStart, LocalDate rangeEnd) {
         long driving = reconcileDimensionIntegrity(rangeStart, rangeEnd);
         if (driving > MAX_REPORT_LINES) {
             throw new ClientInputException(ApiError.CODE_VALIDATION, "endDate",
                     "the requested range holds " + driving
                             + " transactions, above the composable maximum of " + MAX_REPORT_LINES);
         }
-
-        List<TransactionReportRepository.ReportLine> rows = reports.findReportLines(
-                firstInstantOf(rangeStart), firstInstantAfter(rangeEnd),
-                Limit.of(MAX_REPORT_LINES));
-
-        List<TransactionReportLineResponse> composed = new ArrayList<>(rows.size());
-        for (TransactionReportRepository.ReportLine row : rows) {
-            composed.add(new TransactionReportLineResponse(
-                    row.getTransactionId(),
-                    renderAccountId(row.getAccountId()),
-                    row.getTypeCd(),
-                    narrowToBandWidth(row.getTypeDescription(),
-                            ReportBandLayouts.FIELD_TRAN_REPORT_TYPE_DESC),
-                    row.getCategoryCd(),
-                    narrowToBandWidth(row.getCategoryDescription(),
-                            ReportBandLayouts.FIELD_TRAN_REPORT_CAT_DESC),
-                    row.getSource(),
-                    row.getAmount()));
-        }
-        return composed;
     }
 
     /**
@@ -1130,15 +1243,30 @@ public class TransactionReportService {
      * engines would have reported different page figures for the same range while each looked internally
      * consistent. One engine cannot disagree with itself.</p>
      *
-     * <p>Assumptions: the grouping key on this path is the account identifier, because the response type
-     * this surface consumes carries no card rendering at all -- deliberately, its components being the
-     * eight the detail band prints and a card number being none of them. The reference groups on the
-     * card, at L181 of {@code app/cbl/CBTRN03C.cbl} against the {@code PIC X(16)} key its L137 declares.
-     * The two agree for every account holding one card and differ for an account holding several, where
-     * this surface reports one closing group figure and the emitted report closes one group per card.
-     * {@link #generateReport} is the surface whose grouping is the reference's, and it is the one a byte
-     * comparison runs against; this one is a value view over an intentionally card-free projection, and
-     * saying so is better than reporting a figure whose grouping a reader would have to guess.</p>
+     * <p>Refactoring Rationale: the grouping key on this path is now the CARD, matching
+     * {@link #generateReport}, where it was the account identifier. The prose that defended the account
+     * key was candid about the divergence -- it said the two "differ for an account holding several"
+     * cards, where "this surface reports one closing group figure and the emitted report closes one group
+     * per card" -- and then accepted it on the ground that the response type it consumed carried no card
+     * component. That is a reason the divergence existed, not a reason to keep it. A caller reading the
+     * totals endpoint beside the listing endpoint is reading two views of one report run, and a group
+     * subtotal that groups differently from the report is a wrong number rather than a differently-scoped
+     * one. The fix removes the constraint instead of accepting it: this method reads the range itself and
+     * groups on the per-card fingerprint the query surface projects, so both surfaces run the same engine
+     * over the same grouping and the response type stays card-free.</p>
+     *
+     * <p>Assumptions: the fingerprint is the grouping key rather than a card rendering, for the reason
+     * recorded on {@link #generateReport} -- the masked rendering is four digits behind a constant filler,
+     * so grouping on it merges two cardholders whose cards share a tail. The reference groups on the whole
+     * card number at L181 of {@code app/cbl/CBTRN03C.cbl} against the {@code PIC X(16)} key its L137
+     * declares, and the fingerprint is the only column of the reporting relation that is a function of the
+     * whole of it.</p>
+     *
+     * <p>Assumptions: the range is read again here rather than being derived from a list of lines a
+     * caller already holds. That is one extra pass over the range, which is the cost, and it buys two
+     * things a caller-supplied list could not: the totals cover the WHOLE range rather than whichever
+     * page the caller happens to hold, and they are grouped by a key the response type does not
+     * publish.</p>
      *
      * <p>Assumptions: the three figures reported are the last page figure emitted, the last group figure
      * emitted and the grand figure, in the emission order of L202, L203 and the card break -- not the
@@ -1146,21 +1274,33 @@ public class TransactionReportService {
      * closes no group and reports three zero figures, and a zero figure is a legitimate value that the
      * total mask renders as blanks rather than as zero-bearing text.</p>
      *
-     * @param lines the composed detail lines in emission order, a {@link List} of
-     *     {@link TransactionReportLineResponse}; must not be {@code null} and may be empty
+     * @param rangeStart the first business date to cover, inclusive, a {@link LocalDate}; must not be
+     *     {@code null}
+     * @param rangeEnd the last business date to cover, inclusive, a {@link LocalDate}; must not be
+     *     {@code null}
      * @return the three bands in the reference's emission order -- page, then card break, then grand --
      *     each carrying the verbatim label its declaration group states; never {@code null}
-     * @throws NullPointerException if {@code lines} is {@code null}
+     * @throws NullPointerException if either bound is {@code null}
+     * @throws ClientInputException if the range is inverted or selects more rows than this class is
+     *     willing to assemble
+     * @throws IllegalStateException if a transaction in the range does not resolve to exactly one of each
+     *     dimension, which is the target's equivalent of the reference abending on an unresolved lookup
      * @throws ArithmeticException if one of the three figures needs more than the nine integer positions
      *     the total masks at L54, L60 and L66 of {@code app/cpy/CVTRA07Y.cpy} provide
      */
-    public List<ReportTotalsResponse> composeTotals(List<TransactionReportLineResponse> lines) {
-        Objects.requireNonNull(lines, "lines must not be null");
+    @Transactional(readOnly = true)
+    public List<ReportTotalsResponse> composeTotals(LocalDate rangeStart, LocalDate rangeEnd) {
+        requirePresentRange(rangeStart, rangeEnd);
+        requireOrderedRange(rangeStart, rangeEnd);
+        requireAssemblableRange(rangeStart, rangeEnd);
 
         ReportAccumulators acc = new ReportAccumulators();
-        for (TransactionReportLineResponse line : lines) {
-            breakOnGroupChange(acc, line.accountId(), null);
-            writeTransactionReport(acc, null, null, null, line.amount(), null);
+        try (Stream<TransactionReportRepository.ReportLine> lines =
+                reports.streamReportLines(rangeStart, rangeEnd)) {
+            lines.forEach(line -> {
+                breakOnGroupChange(acc, line.getCardFingerprint(), null);
+                writeTransactionReport(acc, null, null, null, line.getAmount(), null);
+            });
         }
         closeReport(acc, null);
 
@@ -1215,62 +1355,57 @@ public class TransactionReportService {
         LocalDateTime from = firstInstantOf(rangeStart);
         LocalDateTime until = firstInstantAfter(rangeEnd);
 
-        long driving = reports.countDrivingRows(from, until);
-        long joined = reports.countJoinedRows(from, until);
-        if (driving != joined) {
-            reportUnresolvedDimension(from, until, driving, joined);
+        // WHY : Refactoring Rationale: the test is a per-transaction cardinality probe and no longer a
+        //       comparison of two aggregate counts. The comparison could be satisfied by a broken range
+        //       -- one transaction resolving to no cross-reference row subtracts one from the joined
+        //       count while a second matching two adds one, and the two cancel exactly -- so the run
+        //       reported success over a report missing one line and carrying a duplicate. The probe
+        //       tests each transaction on its own, so nothing cancels, and it returns the offending
+        //       identifier rather than leaving the refusal to name a sample row that may not be the one
+        //       at fault.
+        List<String> unresolved = reports.findTransactionsWithUnresolvedDimensions(
+                from, until, Limit.of(MAX_DIAGNOSTIC_ROWS));
+        if (!unresolved.isEmpty()) {
+            reportUnresolvedDimension(unresolved.get(0));
         }
-        return driving;
+        return reports.countDrivingRows(from, until);
     }
 
     /**
-     * Refuses the run and names the first transaction whose dimensions the joins could not resolve.
+     * Refuses the run and names the transaction whose dimensions the joins could not resolve.
      *
      * <p>This is the shared tail of the three lookup paragraphs: {@code 9910-DISPLAY-IO-STATUS} at L633
      * of {@code app/cbl/CBTRN03C.cbl} followed by {@code 9999-ABEND-PROGRAM} at its L626, which moves
      * 999 into its abend code at L629 and calls the abend service at L630.</p>
      *
-     * <p>Assumptions: the refusal names the transaction identifier and the two counts, and no card
-     * number of any form. The identifier locates the row exactly and carries nothing about a cardholder;
-     * the reference's own displays quote the offending key because a job log was the only channel it
-     * had, and here the identifier is both sufficient and narrower. The three reference texts are
-     * carried into the reason component so that the refusal names the same three conditions the
-     * reference names, without asserting which of the three occurred -- a count comparison establishes
-     * that one did and not which.</p>
+     * <p>Refactoring Rationale: the identifier this names is now the OFFENDING transaction rather than
+     * the first transaction of the range. The previous version read one driving row to have something to
+     * quote, and that row was the range's first -- which is the offender only by coincidence. A
+     * maintainer following it would inspect a transaction that resolves perfectly well. The cardinality
+     * probe returns the identifier of a row that actually failed, so the diagnostic points at the defect.
+     * </p>
      *
-     * <p>Assumptions: one driving row is read rather than the range, which is what
-     * {@link #MAX_DIAGNOSTIC_ROWS} bounds it to, because this path runs only when the counts already
-     * disagree and its whole purpose is to give a maintainer a place to start. One row is also what each
-     * of the three reference paragraphs quotes -- one key apiece, at L487, L497 and L507 of
-     * {@code app/cbl/CBTRN03C.cbl} -- so a single row is the reference's own diagnostic breadth. Reading
-     * the range again to name its first row would turn a diagnostic into a second complete scan.</p>
+     * <p>Assumptions: the refusal names the transaction identifier and no card number of any form. The
+     * identifier locates the row exactly and carries nothing about a cardholder; the reference's own
+     * displays quote the offending key because a job log was the only channel it had, and here the
+     * identifier is both sufficient and narrower. The three reference texts are carried into the reason
+     * component so that the refusal names the same three conditions the reference names, without
+     * asserting which of the three occurred -- a cardinality probe establishes that one did and not
+     * which, because a multiple on one dimension inflates the counts of the other two.</p>
      *
-     * @param from the first instant the range admits, a {@link LocalDateTime}; must not be {@code null}
-     * @param until the first instant the range excludes, a {@link LocalDateTime}; must not be
-     *     {@code null}
-     * @param driving a {@code long} count of the transactions the date predicate admitted
-     * @param joined a {@code long} count of the report lines the three joins yielded
+     * @param offendingIdentifier the transaction identifier the probe returned; must not be {@code null}
      * @throws IllegalStateException always, which is the purpose of this method
-     * @throws org.springframework.dao.DataAccessException if the driving relation cannot be read
      */
-    private void reportUnresolvedDimension(
-            LocalDateTime from, LocalDateTime until, long driving, long joined) {
-
-        List<ReportTransactionView> sample =
-                reports.findDrivingRows(from, until, Limit.of(MAX_DIAGNOSTIC_ROWS));
-        String firstIdentifier = sample.isEmpty()
-                ? "none" : LogSafeText.sanitize(sample.get(0).transactionId());
-
+    private void reportUnresolvedDimension(String offendingIdentifier) {
+        String identifier = LogSafeText.sanitize(offendingIdentifier);
         String reason = INVALID_CARD_MESSAGE + " / " + INVALID_TYPE_MESSAGE
                 + " / " + INVALID_CATEGORY_MESSAGE;
-        LOG.error("report range admits {} transactions but {} resolve every dimension; first"
-                + " driving transaction is {}", driving, joined, firstIdentifier);
+        LOG.error("report range holds a transaction whose dimensions do not resolve to exactly one row"
+                + " each; transaction is {}", identifier);
 
         throw new IllegalStateException(renderedAbend(abendDetail(reason,
-                "the report range admits " + driving + " transactions but only " + joined
-                        + " resolve a card cross-reference, a transaction type and a transaction"
-                        + " category; the first driving transaction in the range is "
-                        + firstIdentifier)));
+                "transaction " + identifier + " does not resolve to exactly one card cross-reference"
+                        + " row, one transaction type and one transaction category")));
     }
 
     /**

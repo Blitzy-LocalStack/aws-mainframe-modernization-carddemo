@@ -1,5 +1,5 @@
 /**
- * The persistent CardDemo screen title band - the browser replacement for the
+ * @file The persistent CardDemo screen title band - the browser replacement for the
  * status header that every 3270 mapset paints above its content.
  *
  * Purpose

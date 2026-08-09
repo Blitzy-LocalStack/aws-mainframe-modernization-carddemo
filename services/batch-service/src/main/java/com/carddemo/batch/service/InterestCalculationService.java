@@ -49,14 +49,25 @@ public class InterestCalculationService {
     /**
      * The rounding mode the reference's own arithmetic applies, named rather than defaulted.
      *
-     * <p>Assumptions: this constant is DOCUMENTATION and not a parameter. The accrual rounds through
-     * {@code Money.monthlyInterest}, which fixes the mode at {@code Money.GENERAL_ROUNDING} for every
-     * money value in the system, so naming it here records the reference's mode where a reader of this
-     * service looks for it without giving this service the ability to apply a different one. The two are
-     * asserted equal by this service's own tests, so a divergence between the name and the behaviour
-     * fails the build rather than misleading a reader.</p>
+     * <p>Assumptions: this constant is DOCUMENTATION and not a parameter. The accrual reduces through
+     * {@code Money.monthlyInterest}, which fixes the mode at {@code Money.BASELINE_INTEREST_ROUNDING},
+     * so naming it here records the reference's mode where a reader of this service looks for it
+     * without giving this service the ability to apply a different one. The two are asserted equal by
+     * this service's own tests, so a divergence between the name and the behaviour fails the build
+     * rather than misleading a reader.</p>
+     *
+     * <p>Assumptions: the mode is truncation toward zero because the reference statement at
+     * {@code app/cbl/CBACT04C.cbl} lines 464 and 465 carries no {@code ROUNDED} phrase -- and no
+     * statement anywhere in that program's 652 lines carries one -- so it discards the surplus digits
+     * of its result rather than rounding them.</p>
+     *
+     * <p>Refactoring Rationale: this constant held {@code RoundingMode.HALF_UP} while its own summary
+     * called it "the rounding mode the reference's own arithmetic applies". Those two statements
+     * contradicted each other, and the summary was the accurate one: the reference truncates. The
+     * value is corrected rather than the summary, because the accrual now truncates as well and the
+     * documented divergence that used to explain the gap has been withdrawn.</p>
      */
-    public static final RoundingMode ACCRUAL_ROUNDING = RoundingMode.HALF_UP;
+    public static final RoundingMode ACCRUAL_ROUNDING = RoundingMode.DOWN;
 
     /** The read-only rates this service looks up. */
     private final DisclosureGroupRepository disclosureGroups;
@@ -120,13 +131,18 @@ public class InterestCalculationService {
 
         // WHY : Refactoring Rationale: the rounding mode is NOT passed at this call site, and an earlier
         //       revision passed it so that the mode this service applies was visible here. The shared
-        //       helper fixes the mode instead, at Money.GENERAL_ROUNDING, and a per-caller mode is the
-        //       thing that must not exist: transformation rule T3 makes half-up at scale two a property
-        //       of every money value in the system, so a signature admitting a mode would admit a caller
-        //       that rounded a payment differently from the balance it was applied to, and no test of
-        //       either would fail. ACCRUAL_ROUNDING is retained beside this method and asserted equal to
-        //       the shared constant, which keeps the reference's own mode named where a reader of this
-        //       service looks for it while leaving exactly one place that can change it.
+        //       helper fixes the mode instead, at Money.BASELINE_INTEREST_ROUNDING, and a per-caller
+        //       mode is the thing that must not exist: a signature admitting a mode would admit a
+        //       caller that reduced one accrual differently from the balance it is applied to, and no
+        //       test of either would fail. ACCRUAL_ROUNDING is retained beside this method and asserted
+        //       equal to the shared constant, which keeps the reference's own mode named where a reader
+        //       of this service looks for it while leaving exactly one place that can change it.
+        // WHY : Assumptions: the shared constant this one mirrors is the ACCRUAL mode and not the
+        //       general one. Money fixes half up for reducing a supplied amount and for general
+        //       multiplication and division -- three operations with no reference statement to be
+        //       faithful to -- and truncation for this quotient alone, which is the one monetary
+        //       computation the baseline performs. Mirroring the general constant here is what made
+        //       this service's named mode disagree with its own summary.
         // WHY : Assumptions: the helper multiplies before dividing, which is the order transformation
         //       rule T4 requires and the one the reference's single COMPUTE statement performs.
         return categoryBalance.monthlyInterest(lookup.resolvedRate());

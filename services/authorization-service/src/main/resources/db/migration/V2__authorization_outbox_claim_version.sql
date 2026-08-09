@@ -1,0 +1,82 @@
+-- =====================================================================
+-- V2__authorization_outbox_claim_version.sql
+--
+-- Purpose: separate the outbox row's CLAIM counter from its SEND-ATTEMPT
+--          counter, and widen the attempt counter so it cannot overflow.
+--
+-- WHY : Refactoring Rationale: V1 gave auth_reply_outbox ONE small-integer
+--       column, attempts, and made it carry two unrelated jobs. The
+--       publisher's claiming statement in OutboxRepository used it as an
+--       optimistic-transition token -- it compared the observed value and
+--       set the successor, which is what makes a claim single-delivery
+--       without a lock -- while OutboxPublisher ALSO incremented it to
+--       report publication attempts, and again when it retired an expired
+--       row that was never sent at all. Three unrelated events therefore
+--       advanced one column, so its value answered no question: it was not
+--       the number of claims, not the number of sends and not the number of
+--       failures. A permanently failing row advanced it twice per drain
+--       pass, and at the default one-second poll interval a SMALLINT's
+--       32767 positions are exhausted in under five hours, after which the
+--       increment overflows. On PostgreSQL that overflow is an error rather
+--       than a wrap, so the drain transaction would abort on the claiming
+--       statement and every reply behind that row would stop being
+--       published -- the outage this table exists to prevent, arriving from
+--       a counter rather than from a queue.
+-- WHY : Alternatives Considered: keeping one column and simply widening it
+--       to INTEGER. Rejected because width was the smaller half of the
+--       defect: with one column, a send attempt and a claim remain
+--       indistinguishable, so an operator cannot tell a row that has been
+--       claimed forty times and never sent from one that has been sent
+--       forty times and always failed -- and those two call for opposite
+--       responses. Widening alone would also leave the transition token
+--       moving for reasons unrelated to claiming, which is what let a
+--       concurrent claim of an unchanged row be refused for a reason that
+--       is not a concurrent claim.
+-- WHY : Alternatives Considered: adding a JPA @Version attribute to the
+--       entity and letting the provider manage the transition. Rejected
+--       because the claim is a NATIVE statement that must both test and set
+--       the token in one round trip and return the rows it changed; a
+--       provider-managed version is written by the provider on flush, so
+--       the claim could not participate in it, and the two would then
+--       compete for the same column.
+-- WHY : Assumptions: this migration is additive and non-destructive. The
+--       new column defaults to zero for every existing row, which is
+--       exactly the state a never-claimed row is in, and the type change on
+--       attempts widens the domain without losing a value, so no row has to
+--       be rewritten by hand and no data is discarded.
+-- =====================================================================
+
+-- WHY : Assumptions: the claim token is INTEGER rather than BIGINT. A claim
+--       advances it once per drain pass, so at the default one-second
+--       interval a single row would need over sixty-eight years of
+--       continuous claiming to exhaust the range -- far beyond the
+--       retention this table is swept on -- while BIGINT would double the
+--       column's width in two indexes' worth of heap rows for no reachable
+--       benefit.
+-- WHY : Assumptions: NOT NULL with a zero default rather than nullable. The
+--       claiming statement compares the observed value to the stored one,
+--       and a null would make that comparison neither true nor false, so
+--       the row could never be claimed at all -- a reply that is silently
+--       unpublishable, which is the one outcome this table must not have.
+ALTER TABLE auth_reply_outbox
+    ADD COLUMN claim_version INTEGER NOT NULL DEFAULT 0;
+
+-- WHY : Refactoring Rationale: attempts now counts CLAIM PASSES only --
+--       one increment per claim, made by the claiming statement itself --
+--       and is no longer touched by the retirement of an expired row or by
+--       a recorded send failure. Assumptions: the counter advances per PASS
+--       and not per transport call, which is what makes the configured
+--       ceiling mean the number of times a reply will be re-attempted: the
+--       transport retries inside a single pass, so a per-call counter would
+--       spend a permanently unreachable queue's whole ceiling in a handful
+--       of passes and abandon replies that were never given the tries the
+--       configuration promised. Alternatives Considered: counting per call,
+--       which is the reading a reader of the transport code would expect;
+--       rejected for that reason, and the division of labour is asserted
+--       both by the lifecycle tests and by the concurrency case that claims
+--       one row twice. Its width is raised to INTEGER because it is the
+--       counter a stuck row advances, and because the two counters are read
+--       side by side: leaving one narrow would invite a reader to assume
+--       they have different ceilings for a reason.
+ALTER TABLE auth_reply_outbox
+    ALTER COLUMN attempts TYPE INTEGER;

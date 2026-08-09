@@ -1,10 +1,17 @@
 /**
- * Tests that hold this context's enforced authorization rules to the contract they are meant to carry.
+ * Tests that hold this context's enforced configuration to the contract it is meant to carry.
  *
  * <p>Assumptions: this package tests CONFIGURATION rather than behaviour, so its assertions are about
  * agreement between two artifacts rather than about the outcome of a request. A path pattern is a string
  * on one side and a string on the other, and an authority name is a string in both the rule table and the
- * token claim; no compiler and no linter compares them. The class here is that comparison.</p>
+ * token claim; no compiler and no linter compares them. The classes here are those comparisons.</p>
+ *
+ * <p>Assumptions: two kinds of configuration are held here and they fail differently, which is why they
+ * are separate classes rather than cases on one. An authorization rule that is wrong admits a request it
+ * should refuse, and the wrong value is a string nothing compares. A queue-client TIME bound that is wrong
+ * -- {@code SqsConfigTest} -- lets one message be handled twice, and the wrong value is a number nothing
+ * adds up. Both are invisible to every other gate in the build, and neither is observable in a log after
+ * the fact: the first looks like an authorised request and the second looks like ordinary redelivery.</p>
  *
  * <p>Refactoring Rationale: this package exists because a review found the catch-all rule of
  * {@code com.carddemo.account.config.SecurityConfig} written as {@code anyRequest().authenticated()}, which

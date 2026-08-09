@@ -388,9 +388,17 @@ class RestAccountContextClientTest {
     /**
      * Verifies the customer probe reports presence, absence and failure as three different things.
      *
-     * <p>Assumptions: the probe is a HEAD, and the method is asserted. A GET would carry a name, an
-     * address and a national identifier across the context boundary in order to discard all of them,
-     * which is the reason the port declares a presence question rather than a read.</p>
+     * <p>Assumptions: the probe is a {@code POST} and the method is asserted, because the server publishes
+     * this operation under that method alone -- a client issuing any other reaches no handler and reports the
+     * refusal as a dependency failure. Refactoring Rationale: this paragraph said the probe is a
+     * {@code HEAD}, which the assertion below has not matched since the identifier moved into a body; the
+     * body-carrying reason is recorded at the assertion itself and the stale sentence is withdrawn
+     * here.</p>
+     *
+     * <p>Assumptions: the answer carries no body on either outcome, which is what the port's boolean return
+     * rests on. A read returning the record would carry a name, an address and a national identifier across
+     * the context boundary in order to discard all of them, which is why the port declares a presence
+     * question rather than a read.</p>
      */
     @Test
     @DisplayName("the customer probe distinguishes present, absent and unavailable")

@@ -25,16 +25,20 @@
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
  * so a sixth class arriving without an entry here now fails the build.</p>
  *
- * <p>Refactoring Rationale: this section was headed "the three configuration
- * classes" and closed the set at three, which omitted {@code KmsConfig} after it
- * landed, and was then headed "four" while omitting {@code CardSelectorConfig}. An omission is the worst kind of error for a closed-set claim to carry:
- * the sentence a reader takes from "exactly three, and here they are" is that
- * anything else in the directory does not belong, so a reader could reasonably
- * have concluded the key-management wiring had been added in the wrong place and
- * moved or deleted it -- and deleting it would leave
+ * <p>Refactoring Rationale: this paragraph used to close by saying "the count is
+ * corrected to four", three paragraphs after the heading and the marker above it both
+ * said five. That is a worse defect than either original undercount, because the two
+ * numbers sat in one file and a reader had no way to tell which of them the author
+ * meant -- so the corrected figure read as the doubtful one. Only the reasoning is kept
+ * here, and the count is stated in exactly one place, the marker above, which is
+ * measured against the directory on every build. An omission is the worst kind of error
+ * for a closed-set claim to carry: the sentence a reader takes from "exactly three, and
+ * here they are" is that anything else in the directory does not belong, so a reader
+ * could reasonably have concluded the key-management wiring had been added in the wrong
+ * place and moved or deleted it -- and deleting it would leave
  * {@code com.carddemo.card.service.CardVerificationValueCipher} with no client to
- * inject. The count is corrected to four and the class is described below with its
- * own responsibility, rather than the count being softened into a range.</p>
+ * inject. Every class is therefore described below with its own responsibility, rather
+ * than the count being softened into a range.</p>
  *
  * <p>Refactoring Rationale: the preamble also said all three classes were "authored
  * at later indexes of the same plan", which was the planned-versus-delivered

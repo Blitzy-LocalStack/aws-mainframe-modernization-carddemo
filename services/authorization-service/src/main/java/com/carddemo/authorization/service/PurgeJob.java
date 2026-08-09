@@ -10,6 +10,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Limit;
@@ -237,6 +238,26 @@ public class PurgeJob {
     public static final int DEFAULT_PROGRESS_LOG_FREQUENCY = 10;
 
     /**
+     * The largest expiry threshold the reference parameter card's two-digit field can express.
+     *
+     * <p>Assumptions: this is the WIDTH of {@code PRM-EXPIRY-DAYS} on the positional card recorded on
+     * {@link PurgeParameters}, not a retention policy. Ninety-nine days is what two digits hold; no
+     * retention period is stated anywhere in the reference material, so the width is the only bound that
+     * is a fact about the reference rather than an invention of this migration.
+     */
+    public static final int MAX_EXPIRY_DAYS = 99;
+
+    /**
+     * The largest value either frequency's five-character card field can express.
+     *
+     * <p>Assumptions: both frequencies occupy five characters on the same card, so they share one ceiling
+     * rather than each carrying its own copy of the same number. They are otherwise independent controls
+     * -- one gates commits and the other gates a message -- and sharing the ceiling says only that they
+     * are written in fields of equal width, which they are.
+     */
+    public static final int MAX_CARD_FREQUENCY = 99_999;
+
+    /**
      * The process exit status a failed run reports.
      *
      * <p>Assumptions: sixteen, from {@code MOVE 16 TO RETURN-CODE} at {@code cbl/CBPAUP0C.cbl} L382. The
@@ -248,6 +269,17 @@ public class PurgeJob {
      * and must not end one.
      */
     public static final int ABEND_EXIT_STATUS = 16;
+
+    /**
+     * How many of one account's authorizations are read in a single keyset chunk.
+     *
+     * <p>Assumptions: the chunk is independent of the window cap above, because the two bound different
+     * things -- the window caps how many SUMMARIES a transaction commits, matching the reference's
+     * checkpoint frequency, while this caps how many CHILDREN are read at once beneath any one of them.
+     * A single figure could not serve both: the reference's checkpoint frequency is a handful, and
+     * reading an account's history a handful of rows at a time would issue a query per few rows.</p>
+     */
+    private static final int CHILD_CHUNK_SIZE = 500;
 
     /**
      * The response code that marks an authorization approved.
@@ -394,11 +426,10 @@ public class PurgeJob {
         int committedWindows = 0;
 
         while (true) {
-            long windowStart = position;
-            PurgeWindow window = commitWindow(windowStart, parameters);
+            PurgeWindow window = commitWindow(position, committedWindows + 1, parameters);
             total = total.combinedWith(window.outcome());
             committedWindows++;
-            logProgress(committedWindows, window.lastAccountId(), parameters);
+            logProgress(committedWindows, total.summariesRead(), total.summariesDeleted(), parameters);
 
             if (window.exhausted()) {
                 // WHY : Assumptions: the four counts are emitted as ONE structured event rather than as
@@ -437,6 +468,8 @@ public class PurgeJob {
      * site, because this is the single point at which the reference's five failure arms converge.
      *
      * @param startAfterAccountId the account identifier this window seeks strictly above
+     * @param windowOrdinal the one-based position of this window in the run, used to identify it in a
+     *     failure without naming the account it reached
      * @param parameters the run parameters, supplying the window size and the expiry threshold; never
      *     {@code null}
      * @return what this window read and removed, where it stopped, and whether the walk is finished; never
@@ -444,7 +477,8 @@ public class PurgeJob {
      * @throws PurgeAbendException if the window's reads, deletes or commit fail, carrying
      *     {@link #ABEND_EXIT_STATUS}
      */
-    private PurgeWindow commitWindow(long startAfterAccountId, PurgeParameters parameters) {
+    private PurgeWindow commitWindow(long startAfterAccountId, int windowOrdinal,
+            PurgeParameters parameters) {
         try {
             return this.transactions.execute(status -> purgeWindow(startAfterAccountId, parameters));
         } catch (RuntimeException failure) {
@@ -454,8 +488,14 @@ public class PurgeJob {
             //       the log; the reference displays its status code and its position at L366 to L368 and
             //       keeps nothing else. What is deliberately not included is any row content, because a
             //       failure message is the one place authorization data reaches a log by accident.
+            // WHY : Assumptions: the refusal locates the failure by the WINDOW rather than by the account
+            //       it stopped above. An exception message reaches a log, a monitor and often a ticket,
+            //       so an eleven-digit account number in it is a copy of a customer identifier in three
+            //       places that do not protect it; the window's start is recoverable from the run's own
+            //       progress lines, which name windows, so nothing diagnostic is lost.
             throw new PurgeAbendException("purge ended at exit status " + ABEND_EXIT_STATUS
-                    + " while processing summaries above account " + startAfterAccountId, failure);
+                    + " while processing window " + windowOrdinal + " of summaries; see the run's"
+                    + " progress lines for the last window it committed", failure);
         }
     }
 
@@ -478,6 +518,26 @@ public class PurgeJob {
      * position, which is the same signal the reference takes from its end-of-database status, and it costs
      * no additional statement.
      *
+     * <p>Purpose of the two reads: the walk returns KEYS and each summary is then loaded by its own read,
+     * so a page this run is deleting from never carries entities whose state predates the window. The
+     * lost update this arrangement once used a pessimistic lock for is closed elsewhere and differently:
+     * the four counters are reversed by ONE statement computed in the database rather than by mutating a
+     * loaded entity, which is why {@code PendingAuthSummaryRepository} holds no locking read at all and
+     * records why taking one would be concurrency machinery the reference system does not have.
+     *
+     * <p>Alternatives Considered: keeping the walk's own entity page and reversing those instances
+     * directly, which is one read fewer. Rejected because it makes the deletion decision depend on
+     * counters read before the window began, and the row is being deleted from underneath that snapshot
+     * by this very run.
+     *
+     * <p>Assumptions: a key the walk returned whose summary the locking read cannot find is SKIPPED and
+     * contributes nothing, rather than ending the window or being counted as read. The row was removed
+     * between the two reads, by a concurrent purge of the same window or by an operator, and the
+     * reference walk would simply never have returned it; counting a summary this run did not process
+     * would overstate the statistics the run reports. The position still advances past the missing key,
+     * because a window that refused to advance past it would re-seek the same key on the next call and
+     * the walk would not terminate.
+     *
      * @param startAfterAccountId the account identifier this window seeks strictly above
      * @param parameters the run parameters, supplying the window size and the expiry threshold; never
      *     {@code null}
@@ -485,7 +545,7 @@ public class PurgeJob {
      *     {@code null}
      */
     private PurgeWindow purgeWindow(long startAfterAccountId, PurgeParameters parameters) {
-        List<PendingAuthSummary> page = this.summaries.findByAccountIdGreaterThanOrderByAccountIdAsc(
+        List<Long> page = this.summaries.findAccountIdsAboveOrderByAccountIdAsc(
                 Long.valueOf(startAfterAccountId), Limit.of(parameters.checkpointFrequency()));
         if (page.isEmpty()) {
             return new PurgeWindow(PurgeOutcome.nothing(), startAfterAccountId, true);
@@ -493,9 +553,22 @@ public class PurgeJob {
 
         PurgeOutcome outcome = PurgeOutcome.nothing();
         long lastAccountId = startAfterAccountId;
-        for (PendingAuthSummary summary : page) {
-            lastAccountId = summary.getAccountId().longValue();
-            outcome = outcome.combinedWith(purgeSummary(summary, parameters));
+        int accountOrdinal = 0;
+        for (Long accountId : page) {
+            // WHY : Assumptions: the position advances past every key the walk returned, INCLUDING one
+            //       whose row the second read cannot find. The row was removed between the two reads --
+            //       by a concurrent run or by an operator -- and a window that declined to advance past
+            //       it would re-seek the same key on the next call and never terminate. It contributes
+            //       nothing to the statistics, because this run did not process a summary there.
+            lastAccountId = accountId.longValue();
+            accountOrdinal++;
+            Optional<PendingAuthSummary> summary = this.summaries.findByAccountId(accountId);
+            if (summary.isEmpty()) {
+                LOG.debug("summary vanished between the walk and its read accountOrdinal={}",
+                        accountOrdinal);
+                continue;
+            }
+            outcome = outcome.combinedWith(purgeSummary(summary.get(), parameters, accountOrdinal));
         }
         return new PurgeWindow(outcome, lastAccountId, page.size() < parameters.checkpointFrequency());
     }
@@ -530,25 +603,73 @@ public class PurgeJob {
      * @param summary the summary to process; never {@code null}
      * @param parameters the run parameters, supplying the business date and the expiry threshold; never
      *     {@code null}
+     * @param accountOrdinal this account's one-based position within the current window, which is what
+     *     every line this method logs names the account by instead of its identifier
      * @return what this summary read and removed; never {@code null}
      */
-    private PurgeOutcome purgeSummary(PendingAuthSummary summary, PurgeParameters parameters) {
+    private PurgeOutcome purgeSummary(PendingAuthSummary summary, PurgeParameters parameters,
+            int accountOrdinal) {
         Long accountId = summary.getAccountId();
-        List<PendingAuthDetail> children =
-                this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId);
-        LOG.debug("authorizations read beneath summary accountId={} count={}", accountId,
-                children.size());
-
+        Reversal reversal = new Reversal();
+        int childrenRead = 0;
         int detailsDeleted = 0;
-        for (PendingAuthDetail child : children) {
-            if (!hasExpired(child, parameters.businessDate(), parameters.expiryDays())) {
-                continue;
+        Integer afterDate = null;
+        Integer afterTime = null;
+        // WHY : Refactoring Rationale: the children are traversed in STRICT KEYSET CHUNKS rather than
+        //       materialised in one list. An earlier revision read every authorization beneath one
+        //       account in a single unbounded query, which meant the window cap on the enclosing loop
+        //       bounded only how many SUMMARIES a transaction touched and not how much it read: one
+        //       account with a large history loaded its whole history into the persistence context
+        //       inside a transaction whose size nothing limited. Chunking bounds the read while leaving
+        //       the ORDER untouched, because each chunk continues from the last key of the one before.
+        // WHY : Assumptions: the order stays newest-first, matching the reference's own reverse-ordered
+        //       traversal, and every child is deleted before the summary is considered. That is the
+        //       child-before-parent order the foreign key requires, and chunking cannot disturb it
+        //       because the chunk boundary falls between children, never between the last child and
+        //       the parent.
+        while (true) {
+            List<PendingAuthDetail> chunk = afterDate == null
+                    ? this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId,
+                            Limit.of(CHILD_CHUNK_SIZE))
+                    : this.details.findOlderThan(accountId, afterDate, afterTime,
+                            Limit.of(CHILD_CHUNK_SIZE));
+            if (chunk.isEmpty()) {
+                break;
             }
-            reverse(summary, child);
-            this.details.delete(child);
-            detailsDeleted++;
-            LOG.debug("authorization deleted accountId={} authDate={} authTime={}", accountId,
-                    child.getId().getAuthDate(), child.getId().getAuthTime());
+            childrenRead += chunk.size();
+            for (PendingAuthDetail child : chunk) {
+                afterDate = child.getId().getAuthDate();
+                afterTime = child.getId().getAuthTime();
+                if (!hasExpired(child, parameters.businessDate(), parameters.expiryDays())) {
+                    continue;
+                }
+                reversal.accumulate(child);
+                this.details.delete(child);
+                detailsDeleted++;
+                // WHY : Assumptions: the account is named by its per-run ORDINAL and never by its
+                //       identifier, here and in every other line this class emits. A maintenance log is
+                //       read by more people than the data is, and an eleven-digit account number in it
+                //       is a durable copy of a customer identifier outside the store that protects it.
+                //       The ordinal locates the record within this run, which is what a diagnostic
+                //       needs, and correlates with nothing outside it.
+                LOG.debug("authorization deleted accountOrdinal={} authDate={} authTime={}",
+                        accountOrdinal, child.getId().getAuthDate(), child.getId().getAuthTime());
+            }
+            if (chunk.size() < CHILD_CHUNK_SIZE) {
+                break;
+            }
+        }
+        LOG.debug("authorizations read beneath summary accountOrdinal={} count={}", accountOrdinal,
+                childrenRead);
+        // WHY : Refactoring Rationale: the reversal is applied ONCE per account through an arithmetic
+        //       statement, rather than per child through the loaded summary entity. Mutating the entity
+        //       per child made the write a read-modify-write over a row this walk holds no lock on, so
+        //       two purges -- or a purge and a live authorization -- could each apply a reversal to the
+        //       same starting value and lose one of them. Reversing all four figures in one statement
+        //       computed in the database removes the lost update without taking a lock, which is the
+        //       same non-locking discipline this service's charter requires of every other write.
+        if (reversal.isPresent()) {
+            reversal.applyTo(this.summaries, accountId);
         }
 
         // WHY : Refactoring Rationale: BOTH counters are tested, which is divergence D-F recorded on this
@@ -559,8 +680,21 @@ public class PurgeJob {
         //       fields whose negative half the schema's own check constraint admits, and the domain type
         //       floors a decrement at -9999 rather than at zero, so a summary loaded from an extract whose
         //       counters understated its children can be driven below zero and must still qualify.
-        boolean summaryDeleted = summary.getApprovedAuthCount() <= 0
-                && summary.getDeclinedAuthCount() <= 0;
+        // WHY : Assumptions: the post-reversal counters are COMPUTED from the loaded values and the
+        //       reversal just applied, rather than re-read from the row. Alternatives Considered: reading
+        //       the summary back after the statement; rejected because a modifying query bypasses the
+        //       persistence context, so a re-read inside the same transaction can be answered from the
+        //       cached instance and silently return the pre-reversal counters -- a stale-read hazard that
+        //       would make the deletion decision depend on cache state. Subtracting is exact, needs no
+        //       round trip, and is the same arithmetic the statement performed.
+        //       Assumptions: the comparison is <= rather than == because these counters are SIGNED
+        //       four-digit fields whose negative half the schema's check constraint admits, so a summary
+        //       loaded from an extract that understated its children can be driven below zero and must
+        //       still qualify. That is also why the floor the domain type applies does not matter here:
+        //       flooring a negative number cannot change the outcome of a test for at-most-zero.
+        int remainingApproved = summary.getApprovedAuthCount() - reversal.approvedCount();
+        int remainingDeclined = summary.getDeclinedAuthCount() - reversal.declinedCount();
+        boolean summaryDeleted = remainingApproved <= 0 && remainingDeclined <= 0;
         if (summaryDeleted) {
             // WHY : Assumptions: any authorization still beneath this summary goes with it, which is what
             //       the reference hierarchical delete does -- removing a root removes its dependents -- and
@@ -568,9 +702,94 @@ public class PurgeJob {
             //       only from an extract whose counters understated its children, and leaving those rows
             //       behind would strand them with no parent for the key to satisfy.
             this.summaries.delete(summary);
-            LOG.debug("summary deleted, nothing pending beneath it accountId={}", accountId);
+            LOG.debug("summary deleted, nothing pending beneath it accountOrdinal={}",
+                    accountOrdinal);
         }
-        return new PurgeOutcome(1, summaryDeleted ? 1 : 0, children.size(), detailsDeleted);
+        return new PurgeOutcome(1, summaryDeleted ? 1 : 0, childrenRead, detailsDeleted);
+    }
+
+    /**
+     * Accumulates the four figures one account's expiring authorizations reverse.
+     *
+     * <p>Assumptions: the counts and the amounts are accumulated separately for the approved and the
+     * declined side, because the reference reverses them through two different fields and the summary
+     * row carries two independent counters. Collapsing them would make the reversal unable to restore
+     * either side exactly.</p>
+     */
+    private static final class Reversal {
+
+        /** How many approved authorizations are being reversed. */
+        private int approvedCount;
+
+        /** The approved amount being reversed. */
+        private BigDecimal approvedAmount = Money.ZERO.amount();
+
+        /** How many declined authorizations are being reversed. */
+        private int declinedCount;
+
+        /** The declined amount being reversed. */
+        private BigDecimal declinedAmount = Money.ZERO.amount();
+
+        /**
+         * Adds one expiring authorization to the reversal.
+         *
+         * <p>Assumptions: the approved side is selected by the response code and the amount taken is the
+         * APPROVED amount, while the declined side takes the TRANSACTION amount. That asymmetry is the
+         * reference's, not a simplification: a declined authorization has no approved amount to restore.
+         * </p>
+         *
+         * @param child the expiring authorization; must not be {@code null}
+         */
+        void accumulate(PendingAuthDetail child) {
+            if (RESPONSE_CODE_APPROVED.equals(child.getAuthRespCode())) {
+                this.approvedCount++;
+                this.approvedAmount =
+                        this.approvedAmount.add(reversalAmount(child.getApprovedAmount()));
+            } else {
+                this.declinedCount++;
+                this.declinedAmount =
+                        this.declinedAmount.add(reversalAmount(child.getTransactionAmount()));
+            }
+        }
+
+        /**
+         * Reports whether anything was accumulated.
+         *
+         * @return {@code true} when at least one authorization was added
+         */
+        boolean isPresent() {
+            return this.approvedCount > 0 || this.declinedCount > 0;
+        }
+
+        /**
+         * Returns how many approved authorizations are being reversed.
+         *
+         * @return the approved count
+         */
+        int approvedCount() {
+            return this.approvedCount;
+        }
+
+        /**
+         * Returns how many declined authorizations are being reversed.
+         *
+         * @return the declined count
+         */
+        int declinedCount() {
+            return this.declinedCount;
+        }
+
+        /**
+         * Applies the whole accumulated reversal to one summary row in a single statement.
+         *
+         * @param summaries the boundary the arithmetic statement is issued through; must not be
+         *     {@code null}
+         * @param accountId the account whose summary is reversed; must not be {@code null}
+         */
+        void applyTo(PendingAuthSummaryRepository summaries, Long accountId) {
+            summaries.reverseExpiredAuthorizations(accountId, this.approvedCount, this.approvedAmount,
+                    this.declinedCount, this.declinedAmount);
+        }
     }
 
     /**
@@ -590,35 +809,11 @@ public class PurgeJob {
      * <p>Assumptions: only the four counters and totals move. Neither balance is released here, which is
      * the preserved asymmetry D-PURGE-BALANCE recorded on this class.
      *
-     * @param summary the parent whose counters and totals are reversed; never {@code null}
-     * @param child the expiring authorization supplying the amount and the response code; never
-     *     {@code null}
-     */
-    private static void reverse(PendingAuthSummary summary, PendingAuthDetail child) {
-        if (RESPONSE_CODE_APPROVED.equals(child.getAuthRespCode())) {
-            summary.reverseApproved(reversalAmount(child.getApprovedAmount()));
-        } else {
-            summary.reverseDeclined(reversalAmount(child.getTransactionAmount()));
-        }
-    }
-
-    /**
-     * Decides whether an authorization has aged to or past the expiry threshold.
-     *
-     * <p>Purpose: this is the qualification half of {@code 4000-CHECK-IF-EXPIRED} at
-     * {@code cbl/CBPAUP0C.cbl} L280 to L284 and L295.
-     *
-     * <p>Assumptions: the key's date component is the DECODED ordinal date and never the nines complement
-     * the segment stores. The reference decodes it at L280 because its copy of the segment still holds the
-     * complement; this key type holds the decoded value and its own constructor refuses anything outside
-     * the ordinal-date domain, so repeating the complement arithmetic here would decode a value that was
-     * already decoded.
-     *
-     * @param child the authorization to test; never {@code null}
-     * @param businessDate the date elapsed days are measured to; never {@code null}
-     * @param expiryDays the inclusive threshold in days at which an authorization expires
-     * @return {@code true} when at least {@code expiryDays} calendar days have elapsed since the
-     *     authorization, so that a row exactly at the threshold qualifies
+     * @param child the authorization whose age is judged; must not be {@code null}
+     * @param businessDate the run's business date, which is a parameter rather than a clock read so a
+     *     rerun produces the same result; must not be {@code null}
+     * @param expiryDays how many days old an authorization must be to have expired
+     * @return {@code true} when the authorization is at or past the expiry threshold
      */
     private static boolean hasExpired(PendingAuthDetail child, LocalDate businessDate, int expiryDays) {
         LocalDate authorizedOn = calendarDateOf(child.getId().getAuthDate().intValue());
@@ -647,8 +842,9 @@ public class PurgeJob {
      * Supplies an amount for the reversal at the one scale every money column stores.
      *
      * <p>Assumptions: the amount is routed through {@link Money} rather than used as it arrives, so the
-     * subtraction happens at exactly two decimal places under one rounding contract for the whole money
-     * path. The two detail columns are {@code PIC S9(10)V99 COMP-3} at {@code cpy/CIPAUDTY.cpy} L34 and
+     * subtraction happens at exactly two decimal places under the general rounding contract,
+     * {@code Money.GENERAL_ROUNDING}. Truncation applies to the interest accrual alone and no
+     * authorization path performs one. The two detail columns are {@code PIC S9(10)V99 COMP-3} at {@code cpy/CIPAUDTY.cpy} L34 and
      * L35, which is precisely the domain {@link Money} bounds, while the summary totals they are
      * subtracted from are the narrower {@code PIC S9(09)V99 COMP-3} of {@code cpy/CIPAUSMY.cpy} L29 and
      * L30 - so the scales agree and the magnitudes do not, and it is the summary type that refuses an
@@ -672,7 +868,17 @@ public class PurgeJob {
      * <p>Purpose: this is the throttled display of {@code 9000-TAKE-CHECKPOINT} at
      * {@code cbl/CBPAUP0C.cbl} L358 to L364, which counts successful checkpoints at L359, compares that
      * count with the display frequency at L360, resets it at L361 and only then reports the summaries read
-     * so far and the account it had reached at L362 to L363.
+     * so far and the account it had reached at L362 to L363. Refactoring Rationale: the account half of
+     * that report is deliberately NOT reproduced -- see the rationale at the emission site below.
+     *
+     * <p>Refactoring Rationale: this reports the SUMMARIES READ so far and not the account most recently
+     * reached, where it reported the account. Of the two values the reference displays, the account
+     * identifier is one this migration's observability contract names among the values a durable diagnostic
+     * may not hold, and the contract requires such a value omitted rather than abbreviated. The other --
+     * a running count -- is carried across unchanged, so what a progress line is for survives: an operator
+     * watching a long run sees it advancing. Assumptions: the position the next window resumes from is
+     * unaffected, because that is read from the window's own record at the loop rather than from anything
+     * logged here; withdrawing the value from the message does not withdraw it from the walk.</p>
      *
      * <p>Assumptions: this frequency counts COMMITTED WINDOWS and gates nothing but a message, so it can
      * never cause or suppress a commit. It is the second of two independent controls, and conflating it
@@ -680,32 +886,68 @@ public class PurgeJob {
      * declared separately at L51 and L52, incremented at different sites, and compared against different
      * parameters with different operators.
      *
+     * <p>Refactoring Rationale: the reference reports the account it had reached at L363 and this member
+     * deliberately does NOT, which is the one respect in which it departs from the paragraph it
+     * transcribes. {@code docs/architecture/observability.md} names account identifiers among the values
+     * a diagnostic must omit rather than abbreviate, and the reference wrote to a job log read by one
+     * operator at a terminal while this writes to a retained, queryable log store. Reporting a resume
+     * point every few windows would put a stream of account identifiers into that store for the life of
+     * its retention, which is the disclosure the omission rule exists to prevent. Trade-offs: an operator
+     * loses the ability to read the resume point out of the log and see how far a killed run had reached.
+     * That is accepted because the resume point is not lost, only relocated: the window boundary is held
+     * in the caller's own loop variable and the run's outcome counts are reported in full when the walk
+     * ends, so what the log gives up is a convenience rather than the only copy.
+     *
      * @param committedWindows the number of windows committed so far, counting from one
-     * @param lastAccountId the highest account identifier the most recent window reached
+     * @param summariesSoFar how many summaries the run has read across every committed window, which
+     *     locates progress without naming any account
+     * @param summariesDeletedSoFar how many summaries the run has removed across every committed window,
+     *     reported beside the read count because the two together say whether the run is finding work or
+     *     merely walking past it
      * @param parameters the run parameters, supplying the progress frequency; never {@code null}
      */
-    private void logProgress(int committedWindows, long lastAccountId, PurgeParameters parameters) {
+    private void logProgress(int committedWindows, long summariesSoFar, long summariesDeletedSoFar,
+            PurgeParameters parameters) {
         // WHY : Assumptions: the modulo expresses the reference's count-and-reset without keeping a second
         //       piece of mutable state. Its L359 increments a counter and its L361 zeroes it on the same
         //       comparison, which is a remainder test written as an accumulator; a field here would have to
         //       be reset on exactly that boundary to mean the same thing, and it would be reachable from
         //       two windows at once if a caller ever ran two purges against one bean.
+        // WHY : Assumptions: progress is reported as a COUNT of summaries read, never as the account the
+        //       last window reached. The keyset position is still carried internally -- it has to be, it
+        //       is the cursor -- but writing it to a log turns a run's ordinary progress line into a
+        //       durable record of customer account numbers in a place read far more widely than the
+        //       table is. A running count answers the operational question, which is whether the run is
+        //       advancing and how far through it is.
+        // WHY : Assumptions: BOTH running counts are reported and not just the read count. A read count
+        //       alone rises identically whether the run is deleting everything it walks or nothing at
+        //       all, so it answers that the run is advancing while leaving unanswered whether it is doing
+        //       any work -- which is the question an operator watching a long purge actually has. The two
+        //       counts are the same pair the completion event reports, so a progress line and the final
+        //       line are read the same way.
         if (committedWindows % parameters.progressLogFrequency() == 0) {
-            LOG.info("purge progress committedWindows={} lastAccountId={}", committedWindows,
-                    lastAccountId);
+            LOG.info("purge progress committedWindows={} summariesRead={} summariesDeleted={}",
+                    committedWindows, summariesSoFar, summariesDeletedSoFar);
         }
     }
 
     /**
-     * Refuses a run parameter that is not positive.
+     * Refuses a run parameter that is not positive or that exceeds what its card position can express.
+     *
+     * <p>Assumptions: both halves are one check and one message, because a caller that supplied an
+     * out-of-range value needs the range and not the half of it that was violated. The message names the
+     * parameter, the bound and the value, which is what lets an operator correct a job definition without
+     * reading this source.
      *
      * @param value the parameter value being checked
      * @param name the parameter name, used to identify it in the refusal
-     * @throws IllegalArgumentException if {@code value} is not positive
+     * @param ceiling the largest value the parameter's position on the reference card can express
+     * @throws IllegalArgumentException if {@code value} is not positive or exceeds {@code ceiling}
      */
-    private static void requirePositive(int value, String name) {
-        if (value <= 0) {
-            throw new IllegalArgumentException(name + " must be positive but was " + value);
+    private static void requireInRange(int value, String name, int ceiling) {
+        if (value <= 0 || value > ceiling) {
+            throw new IllegalArgumentException(name + " must be between 1 and " + ceiling + " but was "
+                    + value);
         }
     }
 
@@ -757,8 +999,8 @@ public class PurgeJob {
             int progressLogFrequency) {
 
         /**
-         * Validates the four components, refusing a business date that is absent and any count that is not
-         * positive.
+         * Validates the four components, refusing a business date that is absent and any count outside
+         * the range its position on the reference parameter card can express.
          *
          * <p>Refactoring Rationale: the expiry threshold is refused at zero, which is divergence
          * D-PURGE-EXPIRY-FLOOR recorded on the enclosing class. Assumptions: the two frequencies are
@@ -768,20 +1010,47 @@ public class PurgeJob {
          * at the entry point so that a parameter set cannot exist in an unusable state, which is what lets
          * the entry point treat a refusal as a caller defect rather than as a run that failed.
          *
+         * <p>Refactoring Rationale: each count is now refused ABOVE its position's width as well as at
+         * zero, and the widths are the card's own. Only the lower half was checked, so this type accepted
+         * values the reference card cannot express at all - an expiry of a thousand days against a
+         * two-digit field, a window of a million summaries against a five-character one. That is not a
+         * pedantic bound: an unbounded expiry silently turns the run into a no-op, because no
+         * authorization is old enough to qualify, and a completed purge that deleted nothing is
+         * indistinguishable from a correct one that had nothing to delete. An unbounded window is the
+         * opposite failure - it asks for one page holding every summary in the schema and one transaction
+         * holding every row of it, which is the commit cadence the parameter exists to control being
+         * removed by setting it.
+         *
+         * <p>Assumptions: the ceilings are read off the positional layout recorded on the enclosing class -
+         * {@code PRM-INFO} at {@code cbl/CBPAUP0C.cbl} L98 to L108 in the shape {@code NN,NNNNN,NNNNN,X} -
+         * so the expiry admits two digits and each frequency five characters. They are stated as named
+         * constants rather than as literals here because the same widths are what a future card reader
+         * would parse by, and a bound that agrees with the layout by coincidence is one a later edit can
+         * separate from it.
+         *
+         * <p>Alternatives Considered: bounding the expiry by a business rule instead - the retention period
+         * an authorization is actually held for. Rejected because no such period is stated anywhere in the
+         * reference material, so any figure would be this migration's invention presented as a
+         * transcription; the field width is a fact about the reference and is the defensible bound. The
+         * consequence is recorded plainly: a deployment wanting a longer expiry than the card can express
+         * has to widen this bound deliberately, which is the intended way to change it.
+         *
          * @param businessDate the date elapsed days are measured to; must not be {@code null}
-         * @param expiryDays the inclusive expiry threshold in days; must be positive
-         * @param checkpointFrequency the number of summaries per committed window; must be positive
+         * @param expiryDays the inclusive expiry threshold in days; must be positive and at most
+         *     {@link #MAX_EXPIRY_DAYS}
+         * @param checkpointFrequency the number of summaries per committed window; must be positive and at
+         *     most {@link #MAX_CARD_FREQUENCY}
          * @param progressLogFrequency the number of committed windows between progress reports; must be
-         *     positive
+         *     positive and at most {@link #MAX_CARD_FREQUENCY}
          * @throws NullPointerException if {@code businessDate} is {@code null}
          * @throws IllegalArgumentException if {@code expiryDays}, {@code checkpointFrequency} or
-         *     {@code progressLogFrequency} is not positive
+         *     {@code progressLogFrequency} is outside the range its card position can express
          */
         public PurgeParameters {
             Objects.requireNonNull(businessDate, "businessDate must not be null");
-            requirePositive(expiryDays, "expiryDays");
-            requirePositive(checkpointFrequency, "checkpointFrequency");
-            requirePositive(progressLogFrequency, "progressLogFrequency");
+            requireInRange(expiryDays, "expiryDays", MAX_EXPIRY_DAYS);
+            requireInRange(checkpointFrequency, "checkpointFrequency", MAX_CARD_FREQUENCY);
+            requireInRange(progressLogFrequency, "progressLogFrequency", MAX_CARD_FREQUENCY);
         }
 
         /**

@@ -127,11 +127,11 @@ one.
 
 Alternatives Considered: a single combined module creating a cluster together
 with its service. That is the reasonable alternative, and it fails on arity.
-`ecs-service` is instantiated once per service — eight times — while the cluster
-exists once per environment. A combined module would therefore either create
-eight clusters where exactly one is wanted, or push the per-service resources
-into a module that may only run once, forfeiting precisely the reuse the eight
-services need.
+`ecs-service` is instantiated once per workload — nine times, the eight Java
+services plus the data-migration ETL task — while the cluster exists once per
+environment. A combined module would therefore either create nine clusters where
+exactly one is wanted, or push the per-workload resources into a module that may
+only run once, forfeiting precisely the reuse those nine workloads need.
 
 Trade-offs: the split costs one more directory in the module tree and one more
 output-to-input wiring step in each environment root, since `cluster_name` and

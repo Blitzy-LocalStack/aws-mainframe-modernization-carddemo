@@ -444,15 +444,15 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 
 | Concern | Mechanism |
 |---|---|
-| Wire form | `InternalServiceToken` in the shared kernel: a JWT signed with `HS256`, carrying issuer `carddemo-internal`, the calling service as subject, the callee as audience, a `scope` claim naming the family of operations, and an expiry |
+| Wire form | `InternalServiceToken` in the shared kernel: a JWT signed with `HS256`, carrying issuer `carddemo-internal`, the calling service as subject, the callee as audience, a `scope` claim naming ONE family of operations, an expiry, and a `kid` header repeating the subject. The `kid` is load-bearing rather than decorative: it is how the verifier selects WHICH key to check the signature against, and therefore how a subject becomes a property the signature proves rather than a claim the holder writes |
 | Header | the ordinary `Authorization: Bearer` header, because the credential **is** a JWT — the callee's resource-server decoder is the thing that verifies it, so no separate header and no separate filter are involved |
-| Minting | `InternalIdentityConfig` in `authorization-service` supplies the minter with subject `carddemo-authorization-service`; `RestAccountContextClient` mints a FRESH token per request rather than reusing one, so a token is never presented near its expiry |
-| Checking | `InternalApiSecurityConfig` in `account-service`, through `NimbusJwtDecoder.withSecretKey` plus validators pinning the issuer to `InternalServiceToken.ISSUER` and requiring `InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT` among the audiences |
-| Authority granted | `InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY`, which is `SCOPE_internal:account-context.read` and is **not** either group authority, so no user token reaches an internal path and no machine token reaches a business route |
-| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names EXACT method-and-path pairs, enumerated in one place by `InternalApiSecurityConfig.internalPaths()` — `POST /api/v1/card-xrefs/lookup`, `GET /api/v1/accounts/{accountId}`, `GET` and `HEAD /api/v1/customers/{customerId}`, `GET /api/v1/customers` and `GET /api/v1/customers/{customerId}/record` — so the internal surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads. Refactoring Rationale: this row named three endpoints as an exact set. It was already one short, because the customer probe is claimed on both `GET` and `HEAD` from a single handler, and it went two further short when the customer scan and the customer record read were matched on that chain — those two are matched there not because the authorization context calls them but because `SecurityConfig`'s customer pattern denies the whole subtree on the human chain. The row now states the pairs and names the method that enumerates them, so a future route moves one list rather than three |
-| Callers admitted | exactly two — `authorization-service` and `transaction-service`, each minting through its own `InternalIdentityConfig` — because the signing key is held by exactly those two callers plus the one callee, and the audience constant names exactly one callee; a token minted for any other audience is refused by the validator rather than by an allow-list the application maintains. Refactoring Rationale: this row read "exactly one" caller and "exactly two" key holders while a second consumer of the account context was landing. The two numbers move together and were corrected together, because reading either alone would have understated who can mint |
+| Minting | `InternalIdentityConfig` in `authorization-service` supplies its minter with subject `carddemo-authorization-service`, and `InternalIdentityConfig` in `transaction-service` supplies its own with subject `carddemo-transaction-service`; each signs with ITS OWN key. Both services' `RestAccountContextClient` mints a FRESH token per request rather than reusing one, so a token is never presented near its expiry, and each selects the scope from the request path so a token carries only the family the call needs. Refactoring Rationale: this row named only `authorization-service` while `transaction-service` was minting through an identically-shaped config of its own — reading the row alone, an operator rotating key material would have found one holder and missed the other |
+| Checking | `InternalApiSecurityConfig` in `account-service`. It holds BOTH callers' keys as a `JWKSet` of two `OctetSequenceKey`s, each labelled with its caller's subject as `kid`, and decodes through a `DefaultJWTProcessor` whose `JWSVerificationKeySelector` picks the key the `kid` names — so a signature is only ever checked against the key belonging to the subject the token claims. Validators then run in one delegating chain: the framework default set, issuer pinned to `InternalServiceToken.ISSUER`, `InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT` required among the audiences, `InternalServiceToken::isKnownSubject`, `subjectMatchesSigningKey()` and `scopePermittedForSubject()`. Refactoring Rationale: this row described `NimbusJwtDecoder.withSecretKey` and ONE key. That shape could not validate a subject in any meaningful sense — with one shared key either caller could sign a token bearing the other's subject, so a subject check would only have confirmed a string the caller chose |
+| Authority granted | one authority PER OPERATION FAMILY, each its scope under the framework's `SCOPE_` prefix: `CARD_XREF_READ_AUTHORITY` = `SCOPE_internal:account-context.card-xref.read`, `ACCOUNT_READ_AUTHORITY` = `SCOPE_internal:account-context.account.read`, and `CUSTOMER_READ_AUTHORITY` = `SCOPE_internal:account-context.customer.read`. None is either group authority, so no user token reaches an internal path and no machine token reaches a business route; and because each matcher group requires its own, a token scoped to one family is refused on the others rather than admitted by a single blanket rule. The chain ends `.anyRequest().denyAll()`, so an address added to the matcher without an authorization rule is refused rather than defaulted open. Refactoring Rationale: this row named a single `INTERNAL_READ_AUTHORITY` of `SCOPE_internal:account-context.read`, which the chain required on `anyRequest()`. That granted every holder every internal address, including the customer records carrying a national identifier and a government-issued identifier that neither caller reads today |
+| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names EXACT method-and-path pairs — **eight** matcher calls over six addresses, composed in three groups by `InternalApiSecurityConfig.cardXrefPaths()`, `accountPaths()` and `customerPaths()` and unioned by `internalPaths()`. Cross-reference (3): `POST /api/v1/card-xrefs/lookup`, `POST /api/v1/card-xrefs/lookup-by-account`, `POST /api/v1/card-xrefs/search-by-account`. Account (1): `GET /api/v1/accounts/{accountId}`. Customer (4): `GET /api/v1/customers`, `GET /api/v1/customers/{customerId}/record`, `GET /api/v1/customers/{customerId}`, `HEAD /api/v1/customers/{customerId}`. The surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads. Refactoring Rationale: this row named three endpoints as an exact set, then six pairs enumerated by one method. Both were short, and the second was short by two because the cross-reference group carries three POST addresses rather than one. The row now states the count, the grouping and every pair, and names the three methods that enumerate them — grouped, because the grouping IS the authorization boundary rather than a presentational convenience |
+| Callers admitted | exactly two — `authorization-service` and `transaction-service` — and the admission is enforced three ways rather than one: `InternalServiceToken` refuses to construct a minter for a subject outside its closed two-entry table, the verifier holds a key for each of those two subjects and no others, and `isKnownSubject` refuses a token whose subject is not one of them. Their entitlements DIFFER: authorization-service may carry all three scopes, transaction-service the cross-reference and account scopes only — it never reads a customer record, so it cannot ask for one. `InternalServiceToken`'s permitted-scope table holds that split and `mint()` refuses a scope the subject may not carry, so an over-scoped token cannot be produced rather than merely being rejected on arrival. Refactoring Rationale: this row read "exactly one" caller, was corrected to two, and was still incomplete — it described the two as interchangeable holders of one key, which is precisely the property that let either impersonate the other |
 | Lifetime | 60 seconds from `InternalIdentityConfig.DEFAULT_LIFETIME`, bounded absolutely at 5 minutes by `InternalServiceToken.MAX_LIFETIME`; a longer lifetime is refused at minting rather than truncated |
-| Key material | one Secrets Manager entry created by [`infra/modules/secrets`](../../infra/modules/secrets), at least `InternalServiceToken.MIN_KEY_LENGTH` bytes, injected as the container secret `CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY` into exactly three task definitions — the two minting callers and the verifying callee — and readable by exactly those three task roles. `infra/modules/ecs-service` asserts the membership as a biconditional, so a fourth workload receiving the secret and a listed workload missing it both fail the plan |
+| Key material | **two** Secrets Manager entries created by each environment root, `<name-prefix>/<env>/internal-identity/authorization-signing-key` and `.../transaction-signing-key`, independently generated and each at least `InternalServiceToken.MIN_KEY_LENGTH` bytes. Each is injected into exactly TWO task definitions — its one minting caller and the verifying callee: `CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY` into `authorization` and `account`, and `CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY` into `transaction` and `account`. `account-service` therefore holds both and neither caller holds the other's. `infra/modules/ecs-service` asserts each membership as its own biconditional, so a third workload receiving either key and a listed workload missing it both fail the plan. Refactoring Rationale: this row described ONE entry injected into three task definitions. That is what made the two callers mutually impersonating, and it is what this correction records: with shared bytes, splitting scopes or checking subjects buys nothing, because the holder of the key writes both |
 | Routing | the two internal subtrees are forwarded on the **internal** load balancer only; `infra/modules/api-gateway-http` publishes no edge route key for either, so neither is reachable from the public edge |
 | Name resolution | a private Route 53 zone in each environment root resolving the internal service name to the load balancer inside the VPC, which is what lets the client verify the listener certificate it already covers |
 
@@ -460,7 +460,7 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 > differently.** The client presented no credential of any kind, so a call would have
 > been refused before reaching a handler; `account-service`'s chain required a group
 > authority on every route, so even a credential would not have authorized it; the load
-> balancer forwarded only the account subtree, so two of the three addresses were
+> balancer forwarded only the account subtree, so every internal address outside it was
 > answered 404 by the load balancer itself; and no DNS record resolved the name the
 > base URL would have used, which neither environment root published either. The
 > composite symptom was an unavailable dependency, which is the least informative of the
@@ -492,24 +492,36 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 > rejected here on two measured grounds. First, it buys nothing against this topology:
 > there is **one** audience and its verifier is the service that owns the records, so a
 > compromise of that verifier already grants everything a forged credential could obtain
-> from it. Second, it would have required a sixth key in
+> from it. Second, it would have required a **fifth** key in
 > [`infra/modules/kms`](../../infra/modules/kms), whose `enable_key_rotation` input
 > accepts only `true` on the stated ground that automatic rotation is an architecture
 > invariant — and a message-authentication key cannot rotate automatically at all, so the
 > key would have had to be carved out of an invariant that module declines to make
-> optional. Assumptions: the first ground holds only while there is one audience. A
+> optional. This ground is now **stronger** than when it was written, not weaker: it said
+> "a sixth key" because that module then declared five, and the frozen four-key allocation
+> it has since been reconciled to leaves even less room for one — a fifth key would have
+> to be argued against the design's own count as well as against the rotation invariant. Assumptions: the first ground holds only while there is one audience. A
 > second audience added under this same key would make a compromise of either verifier
 > the ability to mint for the other, and the managed-key split would then have to be
 > revisited — or a key issued per audience.
 >
-> Trade-offs: a shared key means the **verifier can mint**. The consequence is bounded
+> Trade-offs: a symmetric key means the **verifier can mint**. The consequence is bounded
 > and stated rather than left implicit: the only audience is the account context itself,
-> so the capability a compromise of that context gains from holding the key is a
-> capability it already has by being that context. What the key does buy is that no
-> **fourth** party can mint, which is why exactly three task roles may read the entry —
-> the two contexts that call the account context and the account context that verifies —
-> and why [`infra/modules/ecs-service`](../../infra/modules/ecs-service) requires the name
-> of each of them and admits it for no other workload.
+> so the capability a compromise of that context gains from holding the keys is a
+> capability it already has by being that context. What a key buys is that no **third**
+> party can mint with it, which is why each of the two entries is readable by exactly two
+> task roles — its one calling context and the account context that verifies — and why
+> [`infra/modules/ecs-service`](../../infra/modules/ecs-service) requires each name of the
+> workloads that hold it and admits it for no other.
+>
+> Refactoring Rationale: this paragraph argued the bound for **one** key held by three
+> task roles, and that argument was materially weaker than it read. With one key the two
+> *callers* could also mint as each other, so the bound was not "no fourth party" but "no
+> party outside the three" — and the two inside it were not distinguishable. Splitting the
+> key per caller narrows the claim to something the verifier can actually check: a
+> signature only verifies under the key labelled with the subject the token asserts, so a
+> caller cannot present itself as the other. The residual "the verifier can mint" is
+> unchanged and remains bounded by there being one audience.
 >
 > Alternatives Considered: **a hand-written wire form with an application-verified
 > message authentication code** — a version marker, an encoded payload and an HMAC over
@@ -961,13 +973,27 @@ assumed to improve upon.
 
 The KMS module authors **four customer-managed keys with rotation enabled**, one each
 for the **relational cluster**, the **object store**, the **secret store** and the
-**queues**. No environment root instantiates the module, so none is provisioned by
-this repository state. The intended split is nevertheless concrete in the reusable
-module: its input surface declares four independent key-user lists —
-[`infra/modules/kms/variables.tf`](../../infra/modules/kms/variables.tf) L349, L363,
-L392 and L406 — alongside `enable_key_rotation` at L171 and a deletion window at
-L216, so each key's set of authorised principals is configured separately from the
-other three.
+**queues**. Both environment roots instantiate the module, so both provision all
+four. The split is concrete in the module's input surface, which declares
+**five** independent principal lists —
+[`infra/modules/kms/variables.tf`](../../infra/modules/kms/variables.tf) L409, L423,
+L452, L466 and L510 — alongside `enable_key_rotation` at L225 and a deletion window
+at L270, so each key's set of authorised principals is configured separately from
+the others.
+
+Refactoring Rationale: five lists against four keys is not a discrepancy. Four of
+them are the storage-level grant for one key each; the fifth,
+`application_envelope_user_role_arns`, is the grant for the values the application
+enciphers **itself** — the card verification value and the two customer
+identifiers — and it attaches a **second statement to the Aurora key** rather than
+provisioning a key of its own. An earlier revision of
+[ADR-008](../adr/ADR-008-security-and-identity.md) did adopt a fifth key for those
+envelopes; it was withdrawn, because a `kms:ViaService` condition sits on a
+statement rather than on a key, so the requirement that drove it is met by a second
+statement. Assumptions: Aurora is the right domain for them because every value
+they protect is a column in that cluster. This paragraph also previously stated
+that no environment root instantiated the module and cited line numbers that have
+since moved; both are corrected above and re-measured against the file.
 
 > Trade-offs: **four keys rather than one, and the reason is the shape of a key
 > policy rather than a preference for more keys.** A single key covering all four
@@ -1065,7 +1091,14 @@ the self-signed leaf it minted for itself, which the load balancer accepts becau
 does not validate target certificates. The chain at that hop is therefore
 unauthenticated by design and its confidentiality, not its authentication, is what the
 hop provides; the peer's identity is established instead by the security group, which
-admits load-balancer-to-application traffic on `8080` and nothing else.
+admits traffic to the application container port from the load-balancer group and from
+no other source. Assumptions: "and from no other source" is the precise claim, and it is
+narrower than the one this sentence used to make. The application group admits nothing
+else **on the container port**; it does carry five further flows, all of them egress
+except the self-referencing endpoint pair, enumerated in
+[Target security groups](#target-security-groups). Stating it as "on `8080` and nothing
+else" read as though the group had a single rule, which would make the flow table below
+look like a contradiction rather than a completion.
 
 Refactoring Rationale: this paragraph previously described a *fallback*: "when a root is
 applied without `alb_certificate_arn`, `service_tls_certificate` and
@@ -1099,7 +1132,26 @@ rather than restated.
 | Card verification value | `CARD-CVV-CD PIC 9(03)`, [`CVACT02Y.cpy`](../../app/cpy/CVACT02Y.cpy) L7 | **Never returned by any endpoint**; stored as an envelope in binary (`cvv_encrypted BYTEA`) — one data key per value from the application-data customer-managed key, enciphered locally under an authenticated cipher |
 | National identifier | `CUST-SSN PIC 9(09)`, [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) L17 | Stored encrypted (`ssn_encrypted BYTEA`); returned **masked** |
 | Government-issued identifier | `CUST-GOVT-ISSUED-ID PIC X(20)`, [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) L18 | Stored encrypted (`govt_issued_id_encrypted BYTEA`); returned **masked** |
-| Password | `SEC-USR-PWD PIC X(08)`, [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) L21 | **Does not exist in the target data model** — see [Identity](#identity-the-one-place-parity-is-explicitly-declined) |
+| Password | `SEC-USR-PWD PIC X(08)`, [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) L21 | **Does not exist in the target data model**, and is **never decoded on the way in** — see [Identity](#identity-the-one-place-parity-is-explicitly-declined) |
+
+The password row deserves one sentence more than the table gives it, because "does
+not exist in the target data model" describes the destination and says nothing about
+the path. The eight bytes are still in the source extract, and the migration reads
+that extract. So the field is marked **suppressed** on its own field descriptor in
+[`layouts.py`](../../data-migration/src/carddemo_migration/copybook/layouts.py): its
+span is declared, so the two fields after it keep their offsets and the record's
+geometry check still holds, and it is withheld from every decoded record and every
+rendered diagnostic the migration produces. It is the only suppressed field in the
+whole layout registry, and a test asserts that count so a second one cannot be added
+without the assertion being revisited.
+
+Assumptions: the marker sits on the descriptor rather than in a reader because the
+package holds **two** implementations of the reader contract — twelve hand-written
+per-record modules and one built from the layout — and the judgement has to be one
+fact that both read. It was previously declared inside the hand-written module only,
+where the layout-driven reader could not see it; that reader is the one the
+command-line load path builds, so the covered implementation withheld the credential
+and the used one published it.
 
 The card verification value is the strictest of the five, and it is the one of the
 three encrypted columns whose writer is now authored. The card DDL reserves a
@@ -1121,7 +1173,7 @@ That boundary is three classes and exactly one of each:
   directions so that neither a write nor a read can carry an unframed byte array
   across it.
 - [`CardVerificationValueCipher.java`](../../services/card-service/src/main/java/com/carddemo/card/service/CardVerificationValueCipher.java)
-  obtains one data key per value from the application-data customer-managed key,
+  obtains one data key per value from the **Aurora** customer-managed key,
   enciphers locally under AES/GCM, and zeroes both the key material and the
   plaintext afterwards. The encryption context is `carddemo:purpose=card-cvv` and
   deliberately does **not** name the card, because an encryption context is recorded
@@ -1130,20 +1182,49 @@ That boundary is three classes and exactly one of each:
 `Card.cvvEncrypted` is declared as `EncryptedCvv` with that converter, and `Card`
 exposes no `byte[]` constructor parameter or setter at all — asserted by reflection
 in `EncryptedCvvPersistenceBoundaryTest`, so the guarantee is a test rather than a
-convention. The key itself is provisioned as `aws_kms_key.application` in
-[`infra/modules/kms/main.tf`](../../infra/modules/kms/main.tf), and each environment
-root grants the card task role exactly `kms:GenerateDataKey*` and `kms:Decrypt` on
-that one key under that one encryption-context value — `kms:Encrypt` is withheld
-deliberately, since envelope encryption never calls it and a role holding it could
-use the key as a general-purpose oracle.
+convention. The key itself is provisioned as `aws_kms_key.aurora` in
+[`infra/modules/kms/main.tf`](../../infra/modules/kms/main.tf), which carries an
+`AllowEnvelopeEncryptionByApplicationRoles` statement alongside its RDS statement,
+and each environment root grants the card task role exactly `kms:GenerateDataKey*`
+and `kms:Decrypt` on that one key under that one encryption-context value —
+`kms:Encrypt` is withheld deliberately, since envelope encryption never calls it and
+a role holding it could use the key as a general-purpose oracle. Refactoring
+Rationale: this named `aws_kms_key.application`, a **fifth** key that has been
+withdrawn — the frozen design allocates four customer-managed keys by data domain
+and this ciphertext lives in Aurora columns, so the grant moved to the Aurora key
+rather than the count being kept.
 
-`ssn_encrypted` and `govt_issued_id_encrypted` have **no** writer yet, and that
-remains measurable rather than assumed: the JPA attribute converters authored
-anywhere in the tree are the two `MoneyAmountConverter` declarations in
-`reporting-service`, on `ReportTransactionView` and `StatementTransactionView`,
-which convert money rather than ciphertext, plus the `EncryptedCvvConverter` above.
-The customer-side writers must encrypt before persistence, on the same shape, so
-that a `SELECT *` exposes ciphertext rather than the original identifiers.
+`ssn_encrypted` and `govt_issued_id_encrypted` **do** have a writer, and it is a
+different shape from the card path rather than a copy of it.
+[`CustomerIdentifierCipher.java`](../../services/account-service/src/main/java/com/carddemo/account/service/CustomerIdentifierCipher.java)
+draws one data key per identifier from the same Aurora key under
+`carddemo:purpose=customer-identifier`, and
+[`CustomerMapper.java`](../../services/account-service/src/main/java/com/carddemo/account/mapper/CustomerMapper.java)
+calls it from `nationalIdentifierUpdate` and `governmentIdentifierUpdate`, so the
+plaintext is enciphered in the mapper before it reaches the entity and a `SELECT *`
+exposes ciphertext. The card path uses a JPA `AttributeConverter`
+(`EncryptedCvvConverter`); the customer path deliberately does not, because each of
+its two columns carries a three-way submission intent — preserve, clear or replace —
+that a converter has no way to express, so the decision is made in the mapper where
+the submitted request is still visible.
+
+The **authorisation** for that writer was the gap, not the writer. The account task
+role carried no KMS grant at all while the alias was already published to it as
+`CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID`, so every write of either identifier
+would have been refused with an AccessDenied on `GenerateDataKey` — a failed account
+update rather than a visible configuration error. Both environment roots now carry an
+`EnvelopeEncryptCustomerIdentifiers` statement on that role, conditioned on
+`carddemo:purpose = customer-identifier`, and the path from statement to task is
+complete: the policy document feeds `local.task_role_policy_json["account"]`, which
+`ecs-service` attaches as `aws_iam_role_policy.task` to `aws_iam_role.task`, which the
+task definition names as its `task_role_arn`.
+
+Refactoring Rationale: this paragraph asserted the columns had "**no** writer yet" and
+supported it by enumerating the JPA attribute converters in the tree. The enumeration
+was the flaw: it assumed field encryption must arrive as a converter, so a writer
+implemented in a mapper was invisible to it, and the conclusion held only for as long
+as nobody chose the other shape. The claim is now made against the calling code rather
+than against a mechanism it was expected to use.
 
 Refactoring Rationale: this passage previously stated that no class references any
 of the three columns and that the only converters in the tree convert money. Both
@@ -1232,7 +1313,8 @@ claim.
 >
 > `cvv_encrypted` has moved from this list to the authored one: `card-service` declares
 > `EncryptedCvv`, `EncryptedCvvConverter` and `CardVerificationValueCipher`, `Card`
-> carries the value type behind `@Convert`, and the application-data key and the card
+> carries the value type behind `@Convert`, and the Aurora key's application-envelope
+> grant and the card
 > task role's two-action grant are both provisioned. What is still absent for that
 > column is only the caller: `card-service` publishes no controller, so no request
 > path reaches the entity and nothing invokes the cipher yet. Its response mapper is no
@@ -1294,11 +1376,20 @@ subnet tiers, and it is authored:
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) declares
 `aws_subnet.public`, `aws_subnet.private_app` and `aws_subnet.isolated_data`,
 `aws_nat_gateway.this` for address-translation egress, `aws_vpc_endpoint.interface`
-over the eight-service default set (`ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`,
-`kms`, `sqs`, `states`, `ssm`), `aws_vpc_endpoint.s3` for the object-store gateway
-endpoint, and the three security groups `alb`, `app` and `data`. Both environment
-roots instantiate the module. What remains true is only the deployment boundary: these
-are declared resources, not provisioned ones.
+over the ten-service default set (`ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`,
+`kms`, `sqs`, `states`, `ssm`, `xray`, `cognito-idp`), `aws_vpc_endpoint.s3` for the object-store gateway
+endpoint, and the **four** security groups `alb`, `app`, `data` and `vpc_endpoints`.
+Both environment roots instantiate the module. What remains true is only the
+deployment boundary: these are declared resources, not provisioned ones.
+
+Refactoring Rationale: this sentence named **three** groups and omitted
+`vpc_endpoints`, which is the group attached to the interface endpoint ENIs and is
+therefore the other end of the application tier's `443` flow — so an inventory that
+left it out described a flow with only one side. The distinction to keep is between
+what the module CREATES and what it PUBLISHES: four groups are created, and three are
+exported as outputs, because the endpoint group has no consumer outside the module
+that owns the endpoints. `infra/modules/network/README.md` states that split in the
+same words.
 
 ```mermaid
 graph TB
@@ -1320,7 +1411,7 @@ graph TB
         end
         subgraph app["Private application subnets"]
             TASK["Service tasks<br/>one task role each"]
-            VPCE["8 interface endpoints<br/>+ S3 gateway endpoint"]
+            VPCE["10 interface endpoints<br/>+ S3 gateway endpoint"]
         end
         subgraph data["Isolated data subnets"]
             NOROUTE["No route to NAT.<br/>No route to the internet."]
@@ -1334,20 +1425,35 @@ graph TB
     ALB -->|"8080"| TASK
     TASK -->|"5432"| DB
     TASK -->|"443, never leaves the VPC"| VPCE
-    TASK -->|"outbound egress"| NAT
+    TASK -->|"443, cross-context reads"| ALB
+    TASK -->|"443, objects + ECR layers"| VPCE
+    TASK -->|"443, identity-provider key set"| NAT
 %% This is the connectivity contract the network module declares. The security
 %% statement is an intended ABSENCE -- no edge leaves the isolated data subnets --
 %% represented by omitting an edge rather than drawing a dashed "no route" arrow,
 %% because a rendered arrow would still read as a path that exists.
+%% The task-to-balancer edge is drawn even though an ALB-to-task edge already
+%% exists in the other direction: they are two different rules on two different
+%% ports, and the return edge is what carries every synchronous call from one
+%% bounded context to another. Omitting it was how a delivered dependency came to
+%% have no rule at all.
+%% The task-to-gateway edge is labelled with its ONE destination rather than as
+%% "outbound egress". Under the enumerated rules the application group carries,
+%% the identity provider is the only destination reached that way -- every other
+%% one resolves to an interface endpoint or to the S3 gateway path -- and the
+%% unqualified label read as general internet access the rules do not grant.
 ```
 
 ### The target three tiers
 
 * **Public subnets** will carry **only** the internal load balancer and the
   address-translation gateways. No service task and no database runs here.
-* **Private application subnets** will carry the container tasks. They reach the internet
-  for outbound needs through the address-translation gateways, and they reach managed
-  AWS APIs without doing so, through the endpoints below.
+* **Private application subnets** will carry the container tasks. They reach every
+  managed AWS API that has an endpoint without leaving the VPC, through the endpoints
+  below, and they reach the two that do not — Cognito and X-Ray — through the
+  address-translation gateways. Assumptions: those two are the whole of the residue,
+  because the endpoint set is validated as an exact set rather than a minimum, so the
+  list of uncovered services cannot grow without a reviewed change to the module.
 * **Isolated data subnets** will carry the relational cluster and **have no internet route
   at all** — no address-translation route, no gateway route, nothing.
 
@@ -1369,9 +1475,9 @@ graph TB
 
 ### Target endpoints: AWS API traffic stays inside the network
 
-Eight **interface endpoints** are provisioned from a fixed, validated inventory rather
+Ten **interface endpoints** are provisioned from a fixed, validated inventory rather
 than from a free-form caller list: the `interface_endpoint_services` input exists, but
-its validation admits only the architecture's exact eight services, so a root may
+its validation admits only the architecture's exact ten services, so a root may
 neither shorten nor extend the set. The all-or-none endpoint contract and the reason
 for it are recorded at
 [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf)
@@ -1387,6 +1493,8 @@ L327–L384:
 | `sqs` | The authorization and inquiry queues |
 | `states` | How the reporting service starts an on-demand execution and how a batch task reports back |
 | `ssm` | The parameters that replace the JCL `DD` statements, including the read-only flag the batch window sets |
+| `xray` | Where the per-task telemetry collector exports its trace segments — the task role already carried the permission, so before this endpoint existed the traces were simply dropped at the security group |
+| `cognito-idp` | How every service resolves the identity-provider issuer and its signing keys, and how the auth service performs its administrative pool calls — a service that cannot resolve its issuer refuses every request it is given |
 
 Object storage is reached through a **gateway endpoint** instead, created
 unconditionally rather than configured. The same fixed-topology rationale at
@@ -1398,7 +1506,7 @@ one.
 
 Both resources are declared in
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) —
-`aws_vpc_endpoint.interface` over the eight-service set and `aws_vpc_endpoint.s3` for
+`aws_vpc_endpoint.interface` over the ten-service set and `aws_vpc_endpoint.s3` for
 the gateway — and both environment roots instantiate the module, so the intended
 consequence that **service-to-AWS-API traffic does not leave the private network** is
 expressed in the resource graph rather than only in the input surface. It becomes an
@@ -1406,25 +1514,58 @@ observed property, rather than a declared one, only after an apply.
 
 ### Target security groups
 
-The target contract calls for three groups, each admitting exactly one direction on
-one port:
+The target contract calls for **three groups** — `alb`, `app` and `data` — and the
+count is frozen (AAP section 0.5.1.12). Nothing outside the network module may create
+a fourth: the eight interface-endpoint ENIs carry the `app` group and the API Gateway
+VPC Link carries the `alb` group. Those three groups admit **six** flows, each one a
+separately named rule resource so a plan diff shows which single flow changed:
 
-| Direction | Port |
-|---|---|
-| Load balancer → application task | the application container port, `8080` |
-| Application task → relational cluster | the database port, `5432` |
-| Application task → interface endpoint | `443` |
+| # | Direction | Port | Destination form |
+|---|---|---|---|
+| 1 | Load balancer → application task | the application container port, `8080` | group reference |
+| 2 | Application task → relational cluster | the database port, `5432` | group reference |
+| 3 | Application task → interface endpoint ENI | `443` | **self** reference on `app` |
+| 4 | Application task → S3 gateway endpoint | `443` | the endpoint's own prefix list |
+| 5 | Application task → identity-provider key set | `443` | CIDR list, the one unbounded destination |
+| 6 | Application task → internal load balancer listener | `443` | group reference |
 
-Those three port values are the ones the design fixes, and two of them are shared
-inputs so that no second module has to repeat a literal: the application container
-port is declared at
-[`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf)
-L385–L406 with the default `8080`, and the database port at L407–L427 with the default
-`5432`. The network module republishes both, and the environment roots pass them into
-`ecs-service` and `aurora-postgresql`, so the security-group rule and the listener it
-admits traffic to are supplied from one place. The endpoint flow remains fixed at
-`443`; nothing outside this module has to agree on that service-owned listener, so
-there is deliberately no third shared port input. No other port is opened or
+`api-gateway-http` adds one further pair, a self-referencing `443` rule on the `alb`
+group for the VPC Link. It is authored there because the network module already
+publishes `alb_security_group_id` to it, and referencing back would close a cycle.
+
+> Refactoring Rationale: this section stated three groups "each admitting exactly one
+> direction on one port", and **neither half held**. The implementation created five
+> functional groups — a fourth here for the endpoint ENIs and a fifth in
+> `api-gateway-http` for the VPC Link — so the stated count described the design and
+> not the delivery. And three flows were not enough to run the system: flows 4, 5 and
+> 6 were absent, and each absence was disabling rather than cosmetic. Without 4 a task
+> could not **start**, because an ECR image pull resolves its manifest through the
+> `ecr.api` and `ecr.dkr` endpoints and then fetches its layers from S3. Without 5
+> every authenticated request failed token validation, because there is no interface
+> endpoint and no managed prefix list for the user-pool token-issuer surface. Without 6
+> every cross-context read failed to connect, because both the authorization and
+> transaction contexts address the account context at `https://<internal-domain>` —
+> this listener. All three presented as an unavailable dependency, the least
+> informative symptom available. The groups were folded to three and the three missing
+> flows declared, so the count and the flow list now describe the same artifact.
+>
+> Trade-offs: flow 3 is a self reference, so it also permits task-to-task `443`. No
+> task listens on `443` — every task's listener and target-group port is
+> `app_container_port` — and `infra/modules/network/variables.tf` now **refuses** 443
+> for that input, so the bound is enforced rather than merely true today. Flow 5 is the
+> one unbounded egress at its default; it is a separate, named rule with a single
+> documented reason and a per-environment variable that narrows it, rather than a
+> blanket `443` allowance that would carry every future dependency silently.
+
+Two of the port values are shared inputs so that no second module has to repeat a
+literal: the application container port and the database port are both declared in
+[`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf) with
+the defaults `8080` and `5432`. The network module republishes both, and the
+environment roots pass them into `ecs-service` and `aurora-postgresql`, so the
+security-group rule and the listener it admits traffic to are supplied from one place.
+The four `443` flows are fixed at that port; nothing outside the module has to agree on
+a service-owned TLS listener, so there is deliberately no shared port input for them.
+No other port is opened or
 
 ### The edge
 
@@ -1882,33 +2023,99 @@ assert "USER_PASSWORD_AUTH" in auth_config
 # satisfies, a route to nothing, or a name resolving to nothing -- and the omission of
 # any one of them presents to an operator as the same unavailable dependency.
 token = services / "common-lib/src/main/java/com/carddemo/common/security/InternalServiceToken.java"
-minter = services / "authorization-service/src/main/java/com/carddemo/authorization/config/InternalIdentityConfig.java"
+minters = {
+    "carddemo-authorization-service": services
+    / "authorization-service/src/main/java/com/carddemo/authorization/config/InternalIdentityConfig.java",
+    "carddemo-transaction-service": services
+    / "transaction-service/src/main/java/com/carddemo/transaction/config/InternalIdentityConfig.java",
+}
 verifier = services / "account-service/src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java"
-client = services / "authorization-service/src/main/java/com/carddemo/authorization/service/RestAccountContextClient.java"
-assert all(path.is_file() for path in (token, minter, verifier, client))
+clients = [
+    services / "authorization-service/src/main/java/com/carddemo/authorization/service/RestAccountContextClient.java",
+    services / "transaction-service/src/main/java/com/carddemo/transaction/service/RestAccountContextClient.java",
+]
+assert all(path.is_file() for path in [token, verifier, *minters.values(), *clients])
 token_text = token.read_text(encoding="utf-8")
 assert 'ISSUER = "carddemo-internal"' in token_text
 assert 'AUDIENCE_ACCOUNT_CONTEXT = "carddemo-account-service"' in token_text
 assert "MAX_LIFETIME = Duration.ofMinutes(5)" in token_text
-assert "setBearerAuth" in client.read_text(encoding="utf-8"), (
-    "the credential IS a JWT, so it travels on Authorization and the resource server verifies it"
+assert all(
+    "setBearerAuth" in path.read_text(encoding="utf-8") for path in clients
+), "the credential IS a JWT, so it travels on Authorization and the resource server verifies it"
+
+# The two callers are distinct identities, not two holders of one identity.
+assert 'SUBJECT_AUTHORIZATION_SERVICE = "carddemo-authorization-service"' in token_text
+assert 'SUBJECT_TRANSACTION_SERVICE = "carddemo-transaction-service"' in token_text
+assert 'KEY_ID_HEADER = "kid"' in token_text and ".keyID(this.subject)" in token_text, (
+    "the subject labels the signing key, which is what makes it verifiable rather than merely asserted"
 )
+# Three scopes, one per operation family, and a table saying which caller may carry which.
+for scope in (
+    'SCOPE_CARD_XREF_READ = "internal:account-context.card-xref.read"',
+    'SCOPE_ACCOUNT_READ = "internal:account-context.account.read"',
+    'SCOPE_CUSTOMER_READ = "internal:account-context.customer.read"',
+):
+    assert scope in token_text
+assert "SCOPE_ACCOUNT_CONTEXT_READ" not in token_text, (
+    "the single blanket scope is withdrawn, not merely supplemented"
+)
+assert "PERMITTED_SCOPES" in token_text and "permits(this.subject, scope)" in token_text, (
+    "an over-scoped token is refused at MINTING, so it cannot be produced and then rejected on arrival"
+)
+# Each caller mints under its OWN subject and reads its OWN key property. Asserting the pair together
+# is the point: a minter naming one caller's subject while reading the other's key would sign a token
+# the verifier resolves to the wrong identity, which no single-sided assertion would catch.
+for subject, path in minters.items():
+    minter_text = path.read_text(encoding="utf-8")
+    caller = "authorization" if subject.endswith("authorization-service") else "transaction"
+    assert f'InternalServiceToken.SUBJECT_{caller.upper()}_SERVICE' in minter_text
+    assert f'"${{carddemo.internal-identity.{caller}-signing-key}}"' in minter_text
+    other = "transaction" if caller == "authorization" else "authorization"
+    assert f"internal-identity.{other}-signing-key" not in minter_text, (
+        "neither caller may read the key the other signs with"
+    )
+
 internal_chain = verifier.read_text(encoding="utf-8")
 assert "CHAIN_ORDER = 10" in internal_chain and "@Order(CHAIN_ORDER)" in internal_chain, (
     "a separately-ordered chain is what lets the matcher name exact addresses at all"
 )
-assert 'INTERNAL_READ_AUTHORITY =\n            "SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ' in internal_chain
-assert internal_chain.count("matchers.matcher(") == 6, (
-    "six exact method-and-path pairs over five addresses, all reads bar the lookup POST; "
-    "a subtree pattern would admit future routes too"
+# One authority per operation family, each its scope under the framework's prefix.
+for declaration in (
+    'CARD_XREF_READ_AUTHORITY =\n            AUTHORITY_PREFIX + InternalServiceToken.SCOPE_CARD_XREF_READ',
+    'ACCOUNT_READ_AUTHORITY =\n            AUTHORITY_PREFIX + InternalServiceToken.SCOPE_ACCOUNT_READ',
+    'CUSTOMER_READ_AUTHORITY =\n            AUTHORITY_PREFIX + InternalServiceToken.SCOPE_CUSTOMER_READ',
+):
+    assert declaration in internal_chain
+assert "INTERNAL_READ_AUTHORITY" not in internal_chain, (
+    "the blanket authority the chain required on anyRequest() is gone, not shadowed"
 )
-# This assertion read == 3 and was wrong in BOTH directions at once, which is why it is
-# restated as pairs rather than addresses. It was already one short before any route moved,
-# because the customer probe is claimed on GET and on HEAD from one handler; and it went
-# two further short when the customer scan and the customer record read were matched on
-# this chain. Counting matcher CALLS is what the expression actually measures, so the
-# stated number and the measured thing now agree.
-assert "NimbusJwtDecoder" in internal_chain and "withSecretKey" in internal_chain
+assert ".anyRequest().denyAll()" in internal_chain.replace("\n", "").replace(" ", ""), (
+    "an address added to the matcher without an authorisation rule must be refused, not defaulted open"
+)
+assert internal_chain.count("matchers.matcher(") == 8, (
+    "eight exact method-and-path pairs over six addresses -- three cross-reference POSTs, one account "
+    "GET, and four customer matchers -- composed in three groups because the grouping IS the "
+    "authorisation boundary; a subtree pattern would admit future routes too"
+)
+# This assertion read == 3, then == 6, and was short both times. The first reading missed that the
+# customer probe is claimed on GET and on HEAD from one handler and that the customer scan and record
+# read are matched here at all; the second missed that the cross-reference group carries THREE POST
+# addresses, not one. Counting matcher CALLS is what the expression measures, so the stated number and
+# the measured thing agree -- and the three group methods are now named so a future route moves one list.
+assert "NimbusJwtDecoder" in internal_chain and "withSecretKey" not in internal_chain, (
+    "one shared secret key cannot express two identities; the decoder selects a key by the kid the "
+    "token carries, so a signature is checked against the key belonging to the claimed subject"
+)
+for construct in (
+    "OctetSequenceKey",
+    "ImmutableJWKSet",
+    "JWSVerificationKeySelector",
+    "DefaultJWTProcessor",
+    "subjectMatchesSigningKey()",
+    "scopePermittedForSubject()",
+    "InternalServiceToken::isKnownSubject",
+):
+    assert construct in internal_chain
 # The user chain must NOT have been loosened to admit the machine token anywhere.
 account_chain = (
     services / "account-service/src/main/java/com/carddemo/account/config/SecurityConfig.java"
@@ -1922,14 +2129,27 @@ assert not any(
     for path in services.rglob("*.java")
 ), "no Workload* type survives anywhere under services/"
 ecs_service = (root / "infra/modules/ecs-service/main.tf").read_text(encoding="utf-8")
-assert "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY" in ecs_service
+assert "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY" in ecs_service
+assert "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY" in ecs_service
+assert "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY" not in ecs_service, (
+    "the undifferentiated name is withdrawn; admitting it alongside the two per-caller names would let "
+    "one key be injected into every caller again without failing any assertion"
+)
 assert "CARDDEMO_SECURITY_WORKLOAD_CREDENTIAL_KEY" not in ecs_service
 for environment in ("dev", "prod"):
     environment_root = (root / "infra/envs" / environment / "main.tf").read_text(encoding="utf-8")
-    assert 'contains(["authorization", "account", "transaction"], service) ?' \
-        ' local.internal_identity_secret_sources' in environment_root, (
-        "exactly three task roles may read the key, so no fourth party can mint or verify"
+    # Two keys, two gates. Each names the ONE minting caller and the one verifying callee, so a caller
+    # never holds the key the other signs with -- which is the whole reason a subject check has force.
+    assert 'contains(["authorization", "account"], service) ?' \
+        ' local.internal_identity_authorization_secret_sources' in environment_root, (
+        "exactly two task roles may read the authorization key, so no third party can mint or verify it"
     )
+    assert 'contains(["transaction", "account"], service) ?' \
+        ' local.internal_identity_transaction_secret_sources' in environment_root, (
+        "exactly two task roles may read the transaction key, so no third party can mint or verify it"
+    )
+    for secret in ("internal-identity/authorization-signing-key", "internal-identity/transaction-signing-key"):
+        assert secret in environment_root
     assert 'resource "aws_route53_record" "internal_service"' in environment_root, (
         "the base URL the client resolves has to resolve to the internal load balancer"
     )

@@ -1397,9 +1397,10 @@ public final class DateEditValidator {
      * @return the outcome, carrying the feedback code, its severity and message number, the verdict text
      *     and the submitted date and mask echoed back
      * @throws NullPointerException if {@code date} or {@code mask} is {@code null}
-     * @throws IllegalArgumentException if {@code date} is not the width the recognised {@code mask}
+     * @throws DateWidthException if {@code date} is not the width the recognised {@code mask}
      *     declares, since the service reads its components by offset and a shorter text has no components
-     *     to read
+     *     to read; the type is distinct from the invariant failures this class also reports through the
+     *     same supertype, so a boundary can answer this case alone as a caller refusal
      */
     public static LanguageEnvironmentResult evaluateWithLanguageEnvironment(String date, String mask) {
         Objects.requireNonNull(date, "date must not be null");
@@ -2098,14 +2099,78 @@ public final class DateEditValidator {
      * @param date the date text to measure; read only for its length
      * @param width the width the mask declares
      * @param mask the mask itself, named in the failure message so a caller can see which pairing failed
-     * @throws IllegalArgumentException if {@code date} is not exactly {@code width} characters; the message
+     * @throws DateWidthException if {@code date} is not exactly {@code width} characters; the message
      *     names the two widths and the mask, and never any part of {@code date}
      */
     private static void requireWidth(String date, int width, String mask) {
         if (date.length() != width) {
-            throw new IllegalArgumentException(
+            throw new DateWidthException(
                     "mask " + mask + " declares a " + width + "-character date, but the supplied date is "
                             + date.length() + " characters");
+        }
+    }
+
+    /**
+     * The one condition this class raises about a CALLER's value rather than about an internal invariant.
+     *
+     * <p>Refactoring Rationale: this type exists because the width mismatch was previously raised as a
+     * bare {@code IllegalArgumentException}, which left the only consumer able to recognise it -- the
+     * synchronous date endpoint of the reference context -- with no choice but to catch that whole
+     * supertype. Everything else this class raises with that supertype is an INTERNAL invariant: a
+     * feedback record whose severity contradicts its own code, an unknown date-component identity, a year
+     * outside the four-digit domain, a value too wide for a four-digit field. Catching the supertype
+     * therefore reported each of those to the caller as a four-hundred naming the date parameter,
+     * telling a caller its own input was at fault when the fault was in this class. A distinct type lets
+     * the boundary catch exactly the caller-caused case and lets every invariant failure reach the
+     * internal-failure channel the alerting watches.</p>
+     *
+     * <p>Alternatives Considered: having the width mismatch return a feedback verdict, the way an
+     * unrecognised mask does. It was rejected because the two are different in the baseline. An
+     * unrecognised picture has a declared condition and a selected verdict at
+     * {@code app/cbl/CSUTLDTC.cbl} line 68 and lines 141 to 142, so returning it is transcription; a
+     * date whose width disagrees with its picture has no such condition, because the platform passed
+     * fixed-width linkage fields that could not disagree. Inventing a verdict for it would publish a
+     * feedback code the utility never produces.</p>
+     *
+     * <p>Alternatives Considered: extending the shared caller-refusal type in
+     * {@code com.carddemo.common.error} directly, so the shared advice would answer it as four hundred
+     * with no boundary catch at all. It was rejected because this package is a validation kernel with no
+     * dependency on the error-rendering package, and reversing that would put a web-facing concern
+     * inside the rules; the boundary that renders HTTP is the right place to decide a status, and it can
+     * now do so from a type that names the case precisely.</p>
+     *
+     * <p>Assumptions: the supertype is retained rather than exchanged for a checked exception. Every
+     * other consumer of this class treats a width disagreement as programmer error against a value it
+     * has already bounded, and making it checked would oblige each of them to handle a case they have
+     * excluded upstream.</p>
+     *
+     * <p>Trade-offs: the message names the two widths and the mask, and never any part of the date. One
+     * of this class's public entry points is the date-of-birth gate over a field the shared record layout
+     * classifies as sensitive at {@code CUST-DOB-YYYY-MM-DD} in {@code app/cpy/CVCUS01Y.cpy} line 19, and
+     * an exception message travels into every stack trace the fault produces. What is given up is that an
+     * operator cannot see the offending characters; what it buys is that a date of birth cannot reach a
+     * log aggregator, and a width disagreement is diagnosed entirely by the two widths anyway.</p>
+     */
+    public static final class DateWidthException extends IllegalArgumentException {
+
+        /**
+         * The serialization identity of this condition, declared rather than generated.
+         *
+         * <p>Assumptions: the inherited hierarchy is serializable and this class adds no member of its
+         * own, so a fixed value is declared to keep the identity stable if one is ever added. A generated
+         * identity changes with the shape of the class, which would break a peer holding a serialized
+         * copy for no functional reason.</p>
+         */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Builds the condition with a message naming the two widths and the mask.
+         *
+         * @param message the diagnostic, which names the declared width, the observed width and the mask,
+         *     and must name no part of the date itself
+         */
+        public DateWidthException(String message) {
+            super(message);
         }
     }
 }

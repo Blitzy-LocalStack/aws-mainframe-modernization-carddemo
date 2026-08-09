@@ -2,6 +2,11 @@ package com.carddemo.common.error;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -239,5 +244,50 @@ class AbendDetailTest {
         AbendDetail second = new AbendDetail("0C7", "CBTRN02C", "reason\nwith control", "msg");
 
         assertThat(first).isEqualTo(second).hasSameHashCodeAs(second);
+    }
+
+    /**
+     * Confirms this record is Java-serializable and survives a round trip unchanged.
+     *
+     * <p>Refactoring Rationale: this record is a FIELD of a serializable exception --
+     * {@code com.carddemo.reference.service.DisclosureGroupService.DisclosureGroupNotFoundException},
+     * which declares a serialization identity of its own and retains this record so an operator can read
+     * the abend code, culprit, reason and message that stand in for the reference program's termination
+     * at {@code app/cbl/CBACT04C.cbl} line 458. Java records are not serializable unless declared so, so
+     * that exception promised a stable serialized form while holding a member that could not be written:
+     * any attempt to write it -- a container replicating an error, a harness round-tripping one, a
+     * framework capturing one for later inspection -- would have failed at the field, reporting this type
+     * rather than the exception a reader was looking at.</p>
+     *
+     * <p>Assumptions: the round trip is performed rather than the interface merely asserted, because
+     * declaring the interface is not sufficient on its own -- a component whose own type were not
+     * serializable would still fail at write time. Every component here is a {@code String}, and
+     * exercising the write is what proves it.</p>
+     *
+     * <p>Assumptions: the record is built with a control character in one component, so the round trip is
+     * asserted over the NORMALISED value this type stores rather than over the input. Serializing a record
+     * bypasses its canonical constructor on the way back in, so a normalisation that did not survive would
+     * show up here as an inequality.</p>
+     *
+     * @throws Exception if the round trip cannot be performed, which is itself the failure under test
+     */
+    @Test
+    @DisplayName("the record is serializable and survives a round trip unchanged")
+    void theRecordSurvivesAJavaSerializationRoundTrip() throws Exception {
+        AbendDetail original = new AbendDetail("0C7", "CBACT04C", "reason\nwith control", "msg");
+
+        assertThat(original).isInstanceOf(Serializable.class);
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+            out.writeObject(original);
+        }
+        Object restored;
+        try (ObjectInputStream in =
+                new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+            restored = in.readObject();
+        }
+
+        assertThat(restored).isEqualTo(original);
     }
 }

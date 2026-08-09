@@ -55,9 +55,12 @@
  * stopped after the message-listener class. Two additions and one deletion have since moved the
  * figure, and each is named here because a "closed set" that disagrees with its own directory
  * stops being a contract a reader can rely on -- Rule 1 fails a rationale that is stale as
- * squarely as one that is absent. The two additions are the keyed-identity classes below, both of
- * which arrived with the security correction that took a primary account number out of queue
- * metadata. The deletion is {@code MessagingTokenConfig}, a SECOND tokeniser configuration that
+ * squarely as one that is absent. The two additions are the keyed-identity classes below. Both arrived
+ * with a security correction that took a primary account number out of queue metadata; that correction
+ * has since been withdrawn for the two first-in-first-out identities, which specification &sect;0.4.1.8
+ * freezes as literal values, and the consequence is recorded on {@link MessagingIdentityConfig}'s bullet
+ * below rather than left to be inferred from a class that survived its original purpose. The deletion is
+ * {@code MessagingTokenConfig}, a SECOND tokeniser configuration that
  * bound {@code carddemo.security.mask-hmac-key} -- a property the sibling
  * {@code application.yml} withdrew, and which {@code infra/modules/ecs-service} provisions for the
  * extract-transform-load workload alone. It contributed an unqualified bean of the same type as
@@ -70,8 +73,9 @@
  *   <li>{@code SecurityConfig} builds the resource server filter chain. Every business request
  *       carries a Cognito-issued token that the chain validates before anything else runs; the
  *       {@code cognito:groups} claim on that token becomes the caller's Spring Security
- *       authorities; and fraud marking is guarded so that only the {@code carddemo-admin} group
- *       reaches it. Only {@code /actuator/health} is permitted before authentication; every
+ *       authorities; and fraud marking carries its own route rule, admitting either business group,
+ *       which is the authority the baseline grants an ordinary user through main-menu option 11.
+ *       Only {@code /actuator/health} is permitted before authentication; every
  *       business endpoint and every other actuator endpoint stays protected. Trade-offs: the load
  *       balancer target group and the container health check both poll that endpoint before any
  *       credential exists, so requiring a token there would fail every probe and remove a healthy
@@ -110,19 +114,31 @@
  * configure a client that nothing can inject.
  *
  * <ul>
- *   <li>{@link MessagingIdentityConfig} supplies the ONE keyed tokeniser every queue identity in
- *       this context is derived through, from {@code carddemo.messaging.hmac-key}. It is named and
- *       injected by qualifier rather than by type, which is what makes a second tokeniser a
- *       compile-time decision at each call site instead of a silent rebinding. Assumptions: the key
- *       is a deployment secret with no default, delivered as {@code CARDDEMO_MESSAGING_HMAC_KEY},
- *       and it is a DIFFERENT secret from the extract-transform-load masking key -- the two have
- *       different holders and different trust purposes, so sharing one value would let a migration
- *       workload compute production queue group identities. That separation is the whole reason
- *       this class exists rather than a method on {@code SqsConfig}: the tokeniser is a security
- *       primitive keyed from the secret store, while {@code SqsConfig} wires a transport client.</li>
+ *   <li>{@link MessagingIdentityConfig} supplies the ONE keyed tokeniser this context holds, from
+ *       {@code carddemo.messaging.hmac-key}. It is named and injected by qualifier rather than by
+ *       type, which is what makes a second tokeniser a compile-time decision at each call site
+ *       instead of a silent rebinding. Assumptions: the key is a deployment secret with no default,
+ *       delivered as {@code CARDDEMO_MESSAGING_HMAC_KEY}, and it is a DIFFERENT secret from the
+ *       extract-transform-load masking key -- the two have different holders and different trust
+ *       purposes, so sharing one value would let a migration workload compute values a production
+ *       consumer derives. That separation is the whole reason this class exists rather than a method
+ *       on {@code SqsConfig}: the tokeniser is a security primitive keyed from the secret store,
+ *       while {@code SqsConfig} wires a transport client. Refactoring Rationale: this bullet said the
+ *       tokeniser was what every QUEUE IDENTITY in this context is derived through, and that is no
+ *       longer true of either first-in-first-out identity. Specification &sect;0.4.1.8 freezes
+ *       {@code MessageGroupId} as {@code card_num} and {@code MessageDeduplicationId} as
+ *       {@code transaction_id}, so both are now emitted literally -- a derived group identity is only
+ *       equal for equal cards WITHIN one producer, which is not the guarantee the specification
+ *       describes. What the tokeniser remains is the keyed primitive the derived-identity surfaces of
+ *       {@code .mapper} accept, {@code AuthorizationMessageMapper.businessCorrelationToken} and
+ *       {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}; no component of this context
+ *       injects the bean at present, and it is retained rather than retired because the deployment
+ *       contract that delivers its key is asserted by {@code infra/modules/ecs-service} and
+ *       provisioned by both environment roots, which are outside the change this correction is
+ *       part of.</li>
  *   <li>{@link InternalIdentityConfig} supplies the short-lived bearer identity this context
  *       presents when it reads the card cross-reference and the account master from the context
- *       that owns them, from {@code carddemo.internal-identity.signing-key}. Assumptions: it is
+ *       that owns them, from {@code carddemo.internal-identity.authorization-signing-key}. Assumptions: it is
  *       separate from the messaging tokeniser above for the same reason the two secrets are
  *       separate -- one authenticates this service to a sibling service, the other derives queue
  *       metadata -- so one class holding both would make rotating either require reasoning about

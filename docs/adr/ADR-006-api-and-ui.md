@@ -169,9 +169,20 @@ the eight service modules, `batch-service`, publishes no HTTP surface at all, an
 the census is set out under [Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service).
 Requests arrive through an **API
 Gateway HTTP API** that validates a bearer token at the edge and forwards to an
-**internal** application load balancer, which routes per service. Every service
-additionally validates the token itself as a resource server, so no service
-depends on the front door having done it.
+**internal** application load balancer, which routes per service. Each of those
+**seven** services additionally validates the token itself as a resource server, so
+no service depends on the front door having done it. The eighth service,
+`batch-service`, has no HTTP surface and so validates nothing — the same seven-of-
+eight split the contract census in
+[Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service)
+already draws.
+
+*WHY (Refactoring Rationale).* This read "**Every** service additionally validates
+the token itself," which contradicted this record's **own** census two sentences
+earlier: that census counts seven OpenAPI contracts, "one per service with an HTTP
+surface," precisely because `batch-service` has none. A service with no HTTP surface
+cannot validate a bearer token, so the word "every" made the document disagree with
+itself and overstated the number of enforcement points by one.
 
 **Interface.** The **21** screens are **to be** re-implemented as one **React 19 +
 TypeScript** single-page application, one route per mapset, using **Ant Design**
@@ -1088,9 +1099,12 @@ If the front door validates a token and the services trust it blindly, a request
 that reaches a service by any other path is unauthenticated.
 
 Mitigation: **validation happens twice, independently.** The authorizer validates
-at the edge, and each service additionally validates as a resource server, so no
-service depends on its caller having checked. The token's issuance, claims and
-group mapping belong to [ADR-008](ADR-008-security-and-identity.md).
+at the edge, and each of the **seven** request-serving services additionally
+validates as a resource server, so no service depends on its caller having checked.
+`batch-service` is not part of this mitigation and does not need to be: it exposes
+no HTTP surface, so there is no path by which a request could reach it at all. The
+token's issuance, claims and group mapping belong to
+[ADR-008](ADR-008-security-and-identity.md).
 
 **A third divergence is possible on the browser side, and it is closed the same
 way.** The interface reads the `cognito:groups` claim to decide which routes to
@@ -1256,7 +1270,7 @@ is worth stating because "one per service" is the shape but not the count:
 | Contract | Operations | Reachable from the browser |
 |---|---|---|
 | `auth-service/…/auth-api.yaml` | 8 | yes |
-| `account-service/…/account-api.yaml` | 3 | **no — internal only** |
+| `account-service/…/account-api.yaml` | 11 | **8 internal-only; 3 end-user, no client module yet** |
 | `card-service/…/card-api.yaml` | 5 | yes |
 | `transaction-service/…/transaction-api.yaml` | 4 | yes |
 | `reference-service/…/reference-api.yaml` | 19 | yes |
@@ -1277,8 +1291,37 @@ both omits it from the route-key default and carries a validation that **rejects
 any `/batch` route outright. Three artifacts already agreed that this module has no
 contract, and this record was the only one that disagreed.
 
-Assumptions: `account-api.yaml` is counted as a contract and not as a
-browser-facing one, and the distinction is load-bearing rather than pedantic. It
+The `account-api.yaml` row is the one that repays reading twice: it carries
+**eleven** operations split across **both** surfaces, and it is the only contract in
+the census that is not wholly one or the other. The **eight** internal-tagged
+operations are `POST /api/v1/card-xrefs/lookup`,
+`POST /api/v1/card-xrefs/lookup-by-account`,
+`POST /api/v1/card-xrefs/search-by-account`, `GET /api/v1/accounts/{accountId}`,
+`GET /api/v1/customers`, `HEAD /api/v1/customers/{customerId}`,
+`GET /api/v1/customers/{customerId}` and
+`GET /api/v1/customers/{customerId}/record` — exactly the matcher set
+`InternalApiSecurityConfig` enumerates. The remaining **three** are end-user
+operations reachable from the browser by design: `PUT /api/v1/accounts/{accountId}`,
+`GET /api/v1/accounts/{accountId}/view` and
+`GET /api/v1/accounts/{accountId}/card-cross-references`.
+
+*WHY (Refactoring Rationale).* This row recorded **3** operations and marked the
+whole contract "**no — internal only**." Both halves were wrong, and they were wrong
+in opposite directions, which is why neither corrected the other. The count was
+stale by eight — the contract holds eleven operations, measured from the document
+itself — and the reachability verdict inverted the very split the count was missing:
+the three operations it did count are in fact the **browser-reachable** ones, so the
+row named the right number for the wrong set and then labelled that set
+machine-facing. The prose below already conceded that "the internal-tagged set grew
+when the customer scan and the customer record read landed," so this table was
+contradicting the paragraph immediately beneath it. Enumerating both surfaces
+explicitly makes the row checkable against the contract and against
+`InternalApiSecurityConfig` rather than against a recollection of either.
+
+Assumptions: `account-api.yaml` is counted as a contract and, for client-module
+purposes, not yet as a browser-facing one — the distinction is load-bearing rather
+than pedantic, and it is a statement about what the SPA has authored rather than
+about what the contract permits. It
 marks its machine-facing operations with an `internal` tag, and every operation so
 tagged is governed by `InternalApiSecurityConfig` in account-service, an ordered
 filter chain requiring a machine token minted by the calling service, and that chain
@@ -1291,7 +1334,12 @@ no browser client addresses an internal-tagged operation, and that is asserted
 mechanically by the gate named below rather than by a count here. The SPA therefore
 has **six** client modules for
 seven contracts, and [`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts)
-asserts that the internal one has none rather than leaving the exclusion to prose.
+asserts mechanically that no browser client addresses an **internal-tagged**
+operation, rather than leaving the exclusion to prose. The absent seventh module is
+the account one, and that test is explicit about the reason: no `accounts.ts` has
+been written **yet**, not that none may be. Its three end-user operations therefore
+have no client-side gate at present — a gap the test records at its point of use so
+that adding the module is understood to require adding it to that gate.
 
 ### Twenty-one routes, and three transactions with no route
 

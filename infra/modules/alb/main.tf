@@ -145,10 +145,25 @@
 #     account identifier and a region, neither of which may appear anywhere in
 #     this tree, so an input is the only admissible form.
 #
-#   aws_route53_record -- created by nobody, at any layer, deliberately.
+#   aws_route53_record -- created by THIS MODULE deliberately, and by the calling
+#     environment root deliberately. The ownership boundary is the point, not the
+#     absence: DNS for a service belongs to the layer that decides the service's
+#     name, which is the root, so this module publishes `alb_dns_name` and
+#     `alb_zone_id` and creates no record of its own.
+#     Refactoring Rationale: this paragraph said the record was "created by
+#     nobody, at any layer" and that one "would serve no consumer". Both halves
+#     are false as the tree now stands. Each of infra/envs/dev and infra/envs/prod
+#     creates an aws_route53_zone for a VPC-private zone plus an apex
+#     aws_route53_record of type A, aliased to this module's own alb_dns_name and
+#     alb_zone_id with evaluate_target_health enabled. It has a real consumer:
+#     the account-context and reference-context base URLs the authorization,
+#     transaction and account services resolve are built from that name, so
+#     service-to-service calls depend on the record existing. The reasoning about
+#     api-gateway-http remains true and is retained below -- it is simply not the
+#     only caller.
 #     api-gateway-http reaches this load balancer through a VPC Link private
 #     integration, which targets the listener by ARN rather than resolving a
-#     name, so a record would serve no consumer. The DNS name is published as
+#     name, so that path needs no record. The DNS name is published as
 #     an output instead of being written down as a literal anywhere.
 #
 #   aws_wafv2_web_acl_association -- out of scope for this migration. The

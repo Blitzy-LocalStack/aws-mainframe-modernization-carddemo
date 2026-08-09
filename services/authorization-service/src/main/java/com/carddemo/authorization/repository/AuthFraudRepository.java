@@ -3,10 +3,9 @@ package com.carddemo.authorization.repository;
 import com.carddemo.authorization.domain.AuthFraud;
 import com.carddemo.authorization.domain.AuthFraudKey;
 import java.time.LocalDate;
-import java.util.List;
 import java.util.Optional;
-import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -119,14 +118,23 @@ import org.springframework.data.repository.query.Param;
  *
  * <p>Assumptions: a {@code *RepositoryIT} in this module's own test tree is REQUIRED to settle what
  * only a live engine can, and this interface relies on those assertions rather than restating them:
- * the composite primary key; the DIRECTION of the index {@link #findFraudHistoryForCard} reads
- * through, taken from the catalogue rather than from the index's existence, since an all-ascending
- * index would satisfy a name check; that a write to an existing row leaves the other twenty-four
- * columns byte-identical; that the insert-versus-update discriminator reports each path correctly;
- * and that the report date arrives from the server on both paths rather than from a value the test
- * supplied. Nothing in this module is held to captured output -- no recorded output exists for any
- * path here and none is claimed for one, because the screens this data serves are CICS online
+ * the composite primary key; the DIRECTION of the {@code (card_num ASC, auth_ts DESC)} index declared
+ * by {@code db/migration/V1__authorization.sql}, taken from the CATALOGUE rather than from the index's
+ * existence, since an all-ascending index would satisfy a name check; that a write to an existing row
+ * leaves the other twenty-four columns byte-identical; that the insert-versus-update discriminator
+ * reports each path correctly; that TWO CONCURRENT first marks both succeed rather than one aborting
+ * on the primary key; and that the report date arrives from the server on both paths rather than from
+ * a value the test supplied. All but the last of those are properties of {@link AuthFraudUpserter},
+ * which owns both write arms, so the test asserts them through that collaborator rather than through
+ * this interface. Nothing in this module is held to captured output -- no recorded output exists for
+ * any path here and none is claimed for one, because the screens this data serves are CICS online
  * programs the reference suite documents as unable to run without a CICS runtime.
+ *
+ * <p>Refactoring Rationale: the index-direction assertion above used to be stated as the direction
+ * "{@code findFraudHistoryForCard} reads through". That query has been withdrawn as uncalled, so the
+ * obligation is restated against the SCHEMA OBJECT instead. The distinction matters: the index is a
+ * specified parity requirement and outlives any particular reader of it, so the test must assert the
+ * catalogue rather than a Java method that may not exist.
  */
 public interface AuthFraudRepository extends JpaRepository<AuthFraud, AuthFraudKey> {
 
@@ -154,63 +162,31 @@ public interface AuthFraudRepository extends JpaRepository<AuthFraud, AuthFraudK
      */
     Optional<AuthFraud> findById(AuthFraudKey id);
 
-    /**
-     * Reads one card's fraud-tagged authorizations, most recent first.
-     *
-     * <p>Refactoring Rationale: the ordering is {@code card_num} ascending then {@code auth_ts}
-     * descending because THREE independent places in the baseline encode that one intention, and the
-     * declared index is only the nearest of them. First, {@code ddl/XAUTHFRD.ddl} -- whose entire
-     * content is four lines, the first of them the {@code CREATE} itself rather than a licence header
-     * -- declares the index over {@code (CARD_NUM ASC, AUTH_TS DESC)} at L3. Second,
-     * {@code cbl/COPAUA0C.cbl} L874 and L875 compute a nines complement, {@code 99999 - WS-YYDDD} and
-     * {@code 999999999 - WS-TIME-WITH-MS}, so the hierarchical side reached the newest authorization
-     * first by complementing the KEY. Third, {@code ims/DBPAUTP0.dbd} L37 declares that key as
-     * {@code FIELD NAME=(PAUT9CTS,SEQ,U),START=1,BYTES=8,TYPE=C}, a plainly ASCENDING character
-     * sequence -- which is why the complement was needed at all, since a DBD field has no descending
-     * option. The relational side had no complement to lean on and re-expressed the same intention as
-     * an index direction. The alternative was to order ascending on the second column, or to leave
-     * both directions to the default; its concrete consequence is that this read stops matching the
-     * declared index, so the engine answers it by walking that index backwards or by sorting, which
-     * is a different access path from the one the baseline shipped.
-     *
-     * <p>Assumptions: newest-first is expressed over the DECODED value and never over a complement.
-     * The complemented integers are an IMS key-ordering device; they are neither stored nor sorted by
-     * here. The baseline itself decodes the complement the moment it wants date semantics, at
-     * {@code cbl/CBPAUP0C.cbl} L280, whose {@code 99999 - PA-AUTH-DATE-9C} is the exact inverse of
-     * the computation cited above. This query therefore orders a real {@code TIMESTAMP(6)}
-     * descending.
-     *
-     * <p>Assumptions: the index this ordering matches is a SEPARATE schema object from the primary
-     * key over the same two columns, which in PostgreSQL it has to be -- a unique constraint's own
-     * tree ascends in both columns and so does not carry this access path, and neither would an index
-     * repeating the key's directions. The baseline index is additionally unique and carries
-     * {@code COPY YES}; uniqueness is already asserted by the primary key, and {@code COPY YES} is a
-     * Db2 image-copy attribute whose equivalent is the cluster's automated backups and point-in-time
-     * recovery, which are infrastructure rather than schema and so are not an index option. Both
-     * dispositions are recorded in {@code db/migration/V1__authorization.sql}, which declares the
-     * index this method reads through.
-     *
-     * <p>Trade-offs: the result is bounded by an explicit limit and by nothing else, so a caller
-     * steps a card's history inward from its most recent end and cannot address an arbitrary position
-     * within it. That is accepted because the baseline exposes no positional addressing either, and
-     * because a positional bound would have to count from the start of the ordering on every call, so
-     * a row inserted ahead of that point between two calls shifts every later row and the reader then
-     * either misses a row or sees one twice.
-     *
-     * @param cardNum the sixteen-character primary account number whose history is read, matched
-     *     against the card-number half of the key; must not be {@code null}
-     * @param limit the greatest number of rows to return, counted from the most recent;
-     *     {@code Limit.unlimited()} returns the card's whole history
-     * @return that card's fraud rows ordered most recent first and bounded by {@code limit}, or an
-     *     empty list when the card has none
-     */
-    @Query("""
-            select f
-              from AuthFraud f
-             where f.id.cardNum = :cardNum
-             order by f.id.cardNum asc, f.id.authTs desc
-            """)
-    List<AuthFraud> findFraudHistoryForCard(@Param("cardNum") String cardNum, Limit limit);
+    // WHY : Refactoring Rationale: a findFraudHistoryForCard query stood here, reading one card's
+    //       fraud-tagged authorizations newest-first through the (card_num ASC, auth_ts DESC) index. It
+    //       has been WITHDRAWN because it had no caller -- no service, no controller and no test in this
+    //       module invoked it, and the published contract in openapi/authorization-api.yaml offers no
+    //       fraud-history route for it to serve. The reference system offers none either: the fraud table
+    //       is written by cbl/COPAUS2C.cbl and read back by no screen in the reference tree.
+    // WHY : Assumptions: an uncalled query over this table is not merely dead weight, it is a standing
+    //       liability. Its first parameter is an unmasked sixteen-digit primary account number, and the
+    //       rows it returns carry the twenty-four-column authorization snapshot -- so the cheapest way for
+    //       a later reader to build a fraud-history endpoint is to call a method that already takes a raw
+    //       PAN, which is the shape the exposure rules narrow everywhere else. Removing it means such an
+    //       endpoint has to declare its own access path and be reviewed on the way in.
+    // WHY : Alternatives Considered: keeping it and adding a bounded authorized consumer plus tests.
+    //       Rejected because that invents a capability neither the reference system nor the target
+    //       contract asks for, and a capability added to satisfy a coverage gap is the wrong way round.
+    // WHY : Assumptions: the INDEX the query read through is NOT withdrawn with it and must not be
+    //       "cleaned up" as unused by a later reader. It is a specified requirement -- an index on
+    //       (card_num ASC, auth_ts DESC) matching the reference ddl/XAUTHFRD.ddl, whose entire content is
+    //       four lines with the index declared over exactly those directions at L3 -- and it is declared
+    //       in db/migration/V1__authorization.sql, which carries the full reasoning: the hierarchical side
+    //       reached the newest authorization first by complementing its key at cbl/COPAUA0C.cbl L874 and
+    //       L875, because the DBD field at ims/DBPAUTP0.dbd L37 is a plainly ASCENDING character sequence
+    //       with no descending option, and the relational side re-expressed that same intention as an
+    //       index direction instead. Preserving the access path is the parity obligation; publishing a
+    //       reader for it is not.
 
     /**
      * Reads the database server's own current date, which is what a fraud report is dated by.
@@ -244,4 +220,84 @@ public interface AuthFraudRepository extends JpaRepository<AuthFraud, AuthFraudK
      */
     @Query(value = "SELECT CURRENT_DATE", nativeQuery = true)
     LocalDate currentDate();
+
+    /**
+     * Inserts one fraud row, or does nothing when its key is already taken, and says which happened.
+     *
+     * <p><strong>Purpose.</strong> This is the transcription of the reference insert AND of the branch it
+     * takes when that insert is refused. {@code cbl/COPAUS2C.cbl} issues
+     * {@code INSERT INTO CARDDEMO.AUTHFRDS} at L141 and L142 with its twenty-six-column list at L143 to
+     * L168, tests the outcome at L199, and takes {@code PERFORM FRAUD-UPDATE} at L203 and L204 when the
+     * code is {@code -803} -- the duplicate-key condition. The reference program therefore treats a taken
+     * key as a NORMAL outcome that selects its other arm, not as a failure. This statement reproduces
+     * exactly that: the key being taken is reported as a zero row count for the caller to branch on.
+     *
+     * <p>Refactoring Rationale: the create arm reached this table through {@code save}, preceded by a
+     * separate {@code findById} probe. That pair is not atomic, and the two failure modes it produced were
+     * both wrong. Two writers whose rows compose the SAME key -- reachable because the key is
+     * {@code (card_num, auth_ts)} and the timestamp half is composed from the acquirer's originating date
+     * and the authorization time rather than from the row's own primary key, so two authorizations of one
+     * card can compose one fraud key -- both saw an absent row and both inserted, and the second failed at
+     * COMMIT with an integrity violation that rolled the whole mark back. That is not the reference
+     * behaviour: the reference program's second writer takes its update arm and succeeds. And because the
+     * violation surfaced from the commit rather than from a statement, no code could branch on it -- a JPA
+     * persistence context is not usable after a constraint failure on flush, so catching it and continuing
+     * to the update arm inside the same transaction is not available either.
+     *
+     * <p>Assumptions: {@code ON CONFLICT DO NOTHING} is what makes the branch reachable, because it
+     * REPORTS the conflict instead of raising it. The statement leaves the transaction usable and returns
+     * zero, so the caller performs the update arm in the same unit of work the reference program uses. The
+     * conflict target is left implicit -- {@code DO NOTHING} with no target covers every constraint on the
+     * table, and the table has exactly one, the primary key declared at
+     * {@code db/migration/V1__authorization.sql}. Naming it explicitly was the alternative and is rejected
+     * for a specific reason: a named target that stops matching the constraint after a schema change
+     * raises rather than absorbing, so the failure would return to being a rolled-back mark.
+     *
+     * <p>Assumptions: this is a NATIVE statement, so it names {@code auth_fraud} unqualified and depends
+     * on the connection {@code search_path} that {@code config/DataSourceConfig} pins to the
+     * {@code authorization} schema -- the requirement this package's charter states for exactly this case.
+     *
+     * <p>Assumptions: the row's twenty-six values are bound from the entity the caller already projected,
+     * rather than through twenty-six method parameters. The entity is the single place the column-to-field
+     * correspondence is declared, and a twenty-six-parameter signature would be a second declaration of it
+     * in positional form -- where two columns of the same type transposed against each other compile,
+     * pass every type check, and write a real but wrong row.
+     *
+     * <p>Assumptions: the report date is BOUND rather than written as {@code CURRENT_DATE}, even though
+     * the reference insert supplies the server expression positionally at {@code cbl/COPAUS2C.cbl} L194.
+     * The caller reads that date once through {@link #currentDate()} and uses the one value for both this
+     * row and the authorization's own copy, which is registered as divergence
+     * {@code D-AUTH-FRAUD-ONE-CLOCK}; writing {@code CURRENT_DATE} here would silently reintroduce the
+     * second clock read that entry exists to record the removal of.
+     *
+     * <p>Assumptions: this method declares no transaction of its own, in keeping with the package charter,
+     * so the CALLER must already be inside one -- a modifying query outside a transaction is refused by
+     * the persistence abstraction, because only {@code save}, {@code delete} and {@code flush} inherit one
+     * from the repository base. {@code FraudMarkingService.mark} is the only caller and is transactional.
+     *
+     * @param row the fully projected fraud row to insert, whose key and twenty-six column values are read
+     *     from its own members; must not be {@code null}
+     * @return {@code 1} when the row was inserted, {@code 0} when a row already held its key, which is the
+     *     signal to take the replace arm
+     */
+    @Modifying
+    @Query(value = """
+            INSERT INTO auth_fraud (
+                card_num, auth_ts, auth_type, card_expiry_date, message_type, message_source,
+                auth_id_code, auth_resp_code, auth_resp_reason, processing_code, transaction_amt,
+                approved_amt, merchant_category_code, acqr_country_code, pos_entry_mode, merchant_id,
+                merchant_name, merchant_city, merchant_state, merchant_zip, transaction_id,
+                match_status, auth_fraud, fraud_rpt_date, acct_id, cust_id)
+            VALUES (
+                :#{#row.id.cardNum}, :#{#row.id.authTs}, :#{#row.authType}, :#{#row.cardExpiryDate},
+                :#{#row.messageType}, :#{#row.messageSource}, :#{#row.authIdCode},
+                :#{#row.authRespCode}, :#{#row.authRespReason}, :#{#row.processingCode},
+                :#{#row.transactionAmt}, :#{#row.approvedAmt}, :#{#row.merchantCategoryCode},
+                :#{#row.acqrCountryCode}, :#{#row.posEntryMode}, :#{#row.merchantId},
+                :#{#row.merchantName}, :#{#row.merchantCity}, :#{#row.merchantState},
+                :#{#row.merchantZip}, :#{#row.transactionId}, :#{#row.matchStatus},
+                :#{#row.authFraud}, :#{#row.fraudRptDate}, :#{#row.acctId}, :#{#row.custId})
+            ON CONFLICT DO NOTHING
+            """, nativeQuery = true)
+    int insertFraudRowIfAbsent(@Param("row") AuthFraud row);
 }

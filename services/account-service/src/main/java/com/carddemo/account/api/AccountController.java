@@ -1,33 +1,41 @@
 package com.carddemo.account.api;
 
 import com.carddemo.account.dto.AccountContextView;
+import com.carddemo.account.dto.AccountLookupRequest;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.service.AccountUpdateService;
 import com.carddemo.account.service.AccountViewService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CursorToken;
+import com.carddemo.common.web.PageResponse;
 import jakarta.validation.Valid;
-import java.util.List;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.security.Principal;
 import java.util.Objects;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-// WHAT: the REST adapter for the account master, replacing two CICS transactions. Both bindings are
-//       declared in app/csd/CARDDEMO.CSD: transaction CAVW at L317 names program COACTVWC at L318, and
-//       transaction CAUP at L306 names program COACTUPC at L308. The programs themselves are
-//       app/cbl/COACTVWC.cbl and app/cbl/COACTUPC.cbl.
+// WHY : Assumptions: the two transactions this adapter answers for are named by
+//       app/csd/CARDDEMO.CSD -- CAVW at L317 naming program COACTVWC at L318, and CAUP at L306 naming
+//       COACTUPC at L308 -- so the provenance of every rule below is app/cbl/COACTVWC.cbl and
+//       app/cbl/COACTUPC.cbl, and neither is restated here.
 // WHY : this adapter is where the reference system's pseudo-conversational state is dismantled. Both
 //       transactions are defined TWASIZE(0) at app/csd/CARDDEMO.CSD L308 and L318, so no Transaction
 //       Work Area existed and every scrap of continuity between screen turns travelled in the
@@ -195,6 +203,29 @@ public class AccountController {
     public static final String BASE_PATH = "/api/v1/accounts";
 
     /**
+     * The sub-path of the internal account context lookup, beneath {@link #BASE_PATH}.
+     *
+     * <p>Assumptions: exposed as a constant for the reason the sibling cross-reference controller
+     * exposes its own -- {@code InternalApiSecurityConfig} builds its request matcher from this value, so
+     * the authority the operation requires and the operation itself cannot come to disagree by an edit to
+     * one of them. A literal in the security configuration would silently stop matching if this path were
+     * renamed, and a matcher that stops matching leaves the operation reachable by whichever chain claims
+     * it next rather than failing.</p>
+     */
+    public static final String LOOKUP_PATH = "/lookup";
+
+    /**
+     * The two words the cross-reference walk accepts as a direction.
+     *
+     * <p>Assumptions: the domain is enforced at the EDGE rather than only inside the service, so a
+     * misspelled direction is refused as a bad request instead of silently reading forward. The service
+     * still treats anything other than {@code previous} as forward, which is what makes an absent
+     * parameter the opening page; this constraint narrows what can reach it to the two words the contract
+     * publishes.</p>
+     */
+    static final String CARD_XREF_DIRECTION_DOMAIN = "next|previous";
+
+    /**
      * The request property name a refused account identifier is reported under.
      *
      * <p>Assumptions: the name is the path variable this class binds, and the committed contract states
@@ -243,7 +274,23 @@ public class AccountController {
     }
 
     /**
-     * Reads the limits and balance of one account.
+     * Reads the limits and balance of one account, taking the identifier from a request body.
+     *
+     * <p>Purpose: this is the machine read the pending-authorization and transaction contexts call before
+     * they decide, and it is the operation their clients address as
+     * {@code POST /api/v1/accounts/lookup}. It is a separate operation from the human account view below:
+     * this one carries three amounts and serves a neighbouring bounded context, that one carries the
+     * account's fields beside its customer's and serves a screen.</p>
+     *
+     * <p>Refactoring Rationale: the operation is a {@code POST} on a fixed segment where it was a
+     * {@code GET} on {@code /{accountId}}, and the reason is disclosure rather than semantics -- the
+     * identifier is withdrawn from the request line so that the load balancer's access record cannot hold
+     * it. The two consuming clients were already written against this shape and address; publishing the
+     * keyed form instead left every one of their calls without a handler, so the calls were read as
+     * dependency failures, rolled back and redelivered until they dead-lettered. Republishing the
+     * documented shape is what closes that, and it is verified in both directions: the published contract
+     * is asserted against the mounted handlers by this module's contract test, and each client's own test
+     * pins the method and the path it calls.</p>
      *
      * <p>Assumptions: the transaction boundary sits on the service method this handler calls, so the
      * read-only declaration governs the unit of work rather than the request binding.</p>
@@ -253,16 +300,50 @@ public class AccountController {
      * keyed read -- so the guards at {@code app/cbl/COACTVWC.cbl} L666 and L667, which belong to that
      * program's own screen filter, have no jurisdiction over it, and refusing a value here that the
      * consumer obtained from its own stored row would turn a data condition into a validation failure
-     * the consumer cannot act on.</p>
+     * the consumer cannot act on. What the bound record does constrain is the declared eleven-digit width,
+     * because a wider value cannot match a stored row and is a malformed request rather than an absent
+     * one.</p>
      *
-     * @param accountId the eleven-digit account identifier
+     * <p>Refactoring Rationale: this operation was {@code GET /api/v1/accounts/{accountId}} and is now
+     * {@code POST} on {@value #LOOKUP_PATH} with the identifier in the body. The move is not a style
+     * preference and it closes a real gap rather than relocating one. Two consuming contexts --
+     * {@code authorization-service} and {@code transaction-service}, each through its own
+     * {@code RestAccountContextClient} -- were ALREADY addressing {@code /api/v1/accounts/lookup} with a
+     * JSON body, having been migrated to the body form when {@link AccountLookupRequest} was introduced,
+     * while this controller still published only the keyed {@code GET}. Every such call therefore reached
+     * this service as a 404 from the dispatcher, so the pending-authorization decision path and the bill
+     * payment path could not read an account at all. The reason the callers moved is recorded in full on
+     * {@link AccountLookupRequest}: the load balancer composes its access record from the request line
+     * before any application code runs, so an identifier in a path segment is written to a durable log
+     * that no masker, filter or exception handler inside a service can reach, and the migration's
+     * sensitive-data logging contract names account identifiers among the values such a log may not
+     * carry.</p>
+     *
+     * <p>Trade-offs: the keyed {@code GET} is REMOVED rather than kept beside the {@code POST} as a
+     * deprecated alias. Keeping it would have restored the callers with no further change, which is
+     * exactly the argument against it -- the reason for the move is that the path form writes an
+     * identifier to the access log, so a surviving alias would leave that disclosure reachable by anyone
+     * who addressed the older shape, and an internal contract with two spellings has no way to tell a
+     * caller which one it is meant to use. Nothing else addressed the {@code GET}: the browser client
+     * does not consume this contract at all, and the two internal clients had already moved.</p>
+     *
+     * @param request the lookup request carrying the account identifier; must satisfy its declared
+     *     constraints
      * @return the account's credit limit, cash credit limit and posted balance, never {@code null}
      * @throws java.util.NoSuchElementException if the account master holds no such row, which the shared
      *     advice renders as 404 -- and which the consumer reads as its account-not-found decision input
      */
-    @GetMapping(path = "/{accountId}", produces = MediaType.APPLICATION_JSON_VALUE)
-    public AccountContextView read(@PathVariable long accountId) {
-        return this.reads.readAccountContext(accountId);
+    @OnlineWriteGateExempt(reason =
+            "A READ of the account context, a POST only so that the eleven-digit account identifier"
+            + " travels in a request body rather than in a request line the load balancer records."
+            + " It is the decision read the authorization and transaction contexts make, so it has to"
+            + " keep answering while the batch window is closed. The human update on this same"
+            + " controller is a PUT and is deliberately NOT exempt.")
+    @PostMapping(path = LOOKUP_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public AccountContextView lookup(@Valid @RequestBody AccountLookupRequest request) {
+        return this.reads.readAccountContext(request.accountId());
     }
 
     /**
@@ -380,29 +461,59 @@ public class AccountController {
     }
 
     /**
-     * Lists an account's card cross-reference rows through the migrated by-account index.
+     * Lists an account's card cross-reference rows a page at a time through the migrated by-account index.
      *
      * <p>Purpose: this is the {@code CXACAIX} access path, which the baseline surfaces to the online
      * region as an alternate index over the cross-reference file and reads by account. Until this route
      * existed the path had no production consumer: the secondary index, the ordered repository query and
      * the response projection all existed and nothing joined them.</p>
      *
+     * <p>Refactoring Rationale: this operation returned the WHOLE of an account's cross-reference rows in
+     * one array, and it now returns a bounded keyset page. The unbounded shape had no ceiling of any kind:
+     * the index is not unique, so the row count is whatever the data holds, and every row carries a
+     * primary account number -- so a single request decided how much cardholder data this process read
+     * into its heap and serialised. The bounded read is not new work either; the seven-row keyset walk,
+     * its repository statements and its sealed cursors already existed on the service and this route was
+     * simply not using them.</p>
+     *
+     * <p>Assumptions: seven rows to a page, which is the reference screen's own capacity rather than a
+     * number chosen here -- {@code app/cbl/COCRDLIC.cbl} fills seven rows and discovers a further page by
+     * reading one more. Trade-offs: a caller wanting every row now issues several requests, which is the
+     * cost; what it buys is that no single request can be made arbitrarily large by the data.</p>
+     *
      * <p>Assumptions: the route hangs off the ACCOUNT rather than living under a cross-reference subtree
      * of its own, because the by-account read is a property of an account and because the standalone
      * cross-reference subtree is denied to end users by the filter chain -- it carries the by-card lookup,
      * which takes a whole primary account number and is reachable only from inside the network.</p>
      *
-     * <p>Assumptions: an empty list is returned for an account with no cards rather than a not-found
-     * outcome, matching an alternate-index browse that ends immediately.</p>
+     * <p>Assumptions: an account with no cards yields an EMPTY page rather than a not-found outcome,
+     * matching an alternate-index browse that ends immediately.</p>
      *
      * @param accountId the account whose cross-reference rows are required
-     * @return the rows in ascending card-number order, empty when the account has none, never
-     *     {@code null}
+     * @param cursor the sealed boundary a previous page issued, or absent to read the first page
+     * @param direction {@code previous} to step backward, absent or anything else to step forward;
+     *     meaningful only alongside a cursor
+     * @param principal the authenticated caller, supplied by the framework; the cursors this operation
+     *     issues are sealed against its name, the account in the path and the direction, so a page issued
+     *     to one caller walking one account cannot reposition another caller or another account
+     * @return one page of at most seven rows in ascending card-number order, with both sealed boundaries
+     *     and both availability indicators; never {@code null}
+     * @throws CursorToken.InvalidCursorException if the cursor cannot be opened, or was sealed for another
+     *     query, subject, account or direction, which the shared advice renders as HTTP 400
      */
     @GetMapping(path = "/{accountId}/card-cross-references",
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public List<CardXrefResponse> listCardCrossReferences(@PathVariable long accountId) {
-        return this.reads.listCardCrossReferences(accountId);
+    public PageResponse<CardXrefResponse> listCardCrossReferences(
+            @PathVariable long accountId,
+            @RequestParam(name = "cursor", required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            String cursor,
+            @RequestParam(name = "direction", required = false)
+            @Pattern(regexp = CARD_XREF_DIRECTION_DOMAIN)
+            String direction,
+            Principal principal) {
+
+        return this.reads.listCardCrossReferences(accountId, cursor, direction, principal.getName());
     }
 
     /**

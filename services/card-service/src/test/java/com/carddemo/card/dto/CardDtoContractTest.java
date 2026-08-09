@@ -238,29 +238,47 @@ class CardDtoContractTest {
     }
 
     /**
-     * Asserts that the update request refuses a month or a year outside the window the baseline accepts.
+     * Asserts that the update request bounds each attribute's WIDTH and leaves its DOMAIN to the service.
+     *
+     * <p>Refactoring Rationale: this case previously asserted the opposite -- that the record itself
+     * refused month 13, the unpadded month 1, and the years 1949 and 2100. Those domains are the
+     * reference's, taken from {@code 88 VALID-MONTH VALUES 1 THRU 12} at {@code app/cbl/COCRDUPC.cbl:95}
+     * and {@code 88 VALID-YEAR VALUES 1950 THRU 2099} at {@code :99}, and they are still enforced and still
+     * asserted -- by {@code CardUpdateService}, whose gates also classify a blank field separately from an
+     * unacceptable one and report all four attributes together. A declarative constraint runs first, so
+     * while the record refused these values the service's classification was unreachable for every caller
+     * arriving over HTTP. The record therefore admits them now, and this case pins that so a reinstated
+     * constraint fails here rather than quietly taking the parity away again.</p>
+     *
+     * <p>Assumptions: what the record still refuses is asserted alongside, because "leaves the domain to
+     * the service" must not be read as "validates nothing". A value one character past its declared width
+     * is still refused here: the reference field physically could not hold it, so the reference has no
+     * sentence for it and the service has none either, which makes the declarative refusal the only one
+     * available.</p>
      */
     @Test
-    @DisplayName("the update request bounds the expiry month and year to the baseline's windows")
-    void theUpdateRequestBoundsTheExpiryParts() {
+    @DisplayName("the update request bounds each attribute's width and leaves its domain to the service")
+    void theUpdateRequestBoundsWidthAndLeavesTheDomainToTheService() {
         try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
             Validator validator = factory.getValidator();
 
             assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "12", "2026", 0)))
                     .isEmpty();
             assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "13", "2026", 0)))
-                    .as("88 VALID-MONTH VALUES 1 THRU 12 at app/cbl/COCRDUPC.cbl:95 admits no"
-                            + " thirteenth month")
-                    .isNotEmpty();
+                    .as("month 13 must reach the service, which refuses it with the reference sentence")
+                    .isEmpty();
             assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "1", "2026", 0)))
-                    .as("the leading zero is data, because the stored date is assembled from the"
-                            + " two-character field at :1468")
-                    .isNotEmpty();
+                    .as("the unpadded month must reach the service, which classifies it not-ok")
+                    .isEmpty();
             assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "12", "1949", 0)))
-                    .as("88 VALID-YEAR VALUES 1950 THRU 2099 at :99 opens at 1950")
-                    .isNotEmpty();
+                    .as("1949 must reach the service, which holds the 1950 to 2099 window")
+                    .isEmpty();
             assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "12", "2100", 0)))
-                    .as("and closes at 2099")
+                    .as("and so must 2100")
+                    .isEmpty();
+            assertThat(validator.validate(new CardUpdateRequest(EMBOSSED_NAME, "Y", "123", "2026", 0)))
+                    .as("a month one character past its declared width is refused here, because no"
+                            + " reference sentence covers an over-long value")
                     .isNotEmpty();
         }
     }

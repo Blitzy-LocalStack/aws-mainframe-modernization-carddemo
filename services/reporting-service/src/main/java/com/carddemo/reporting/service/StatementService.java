@@ -4,20 +4,22 @@ import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.common.time.TimestampFormatter;
-import com.carddemo.reporting.domain.AccountView;
 import com.carddemo.reporting.domain.CardXrefView;
-import com.carddemo.reporting.domain.CustomerView;
 import com.carddemo.reporting.domain.StatementTransactionView;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
 import com.carddemo.reporting.dto.StatementTransactionResponse;
-import com.carddemo.reporting.mapper.ReportingDtoMapper;
+import com.carddemo.reporting.config.ArtifactIdentityConfig;
 import com.carddemo.reporting.mapper.StatementHtmlMapper;
 import com.carddemo.reporting.mapper.StatementTextMapper;
+import com.carddemo.reporting.domain.AccountView;
+import com.carddemo.reporting.domain.CustomerView;
 import com.carddemo.reporting.repository.StatementAccountRepository;
 import com.carddemo.reporting.repository.StatementCardXrefRepository;
+import com.carddemo.reporting.repository.StatementCardXrefRepository.StatementHeadingRow;
 import com.carddemo.reporting.repository.StatementCustomerRepository;
 import com.carddemo.reporting.repository.StatementTransactionRepository;
 import java.time.LocalDateTime;
@@ -25,11 +27,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.function.ToIntFunction;
-import java.util.stream.Stream;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Produces the cardholder statement of {@code app/cbl/CBSTM03A.CBL} in its plain-text and its
@@ -200,8 +201,10 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>Assumptions: monetary values stay exact and the clock is never read</h2>
  *
- * <p>Every amount is {@code com.carddemo.common.money.Money}, carried at scale 2 with HALF_UP
- * rounding, because {@code TRNX-AMT} is declared {@code PIC S9(09)V99} at L29 of
+ * <p>Every amount is {@code com.carddemo.common.money.Money}, carried at scale 2 and reduced under
+ * that type's general mode, {@code Money.GENERAL_ROUNDING}, which is HALF_UP -- its other mode,
+ * truncation, governs the interest accrual alone and this service performs none -- because
+ * {@code TRNX-AMT} is declared {@code PIC S9(09)V99} at L29 of
  * {@code app/cpy/COSTM01.CPY} and is therefore exact by contract. That declaration is 11 digit
  * positions and not 12: it is narrower than the account balance and is deliberately not widened to
  * match it. IEEE-754 binary floating point, in both its primitive and its boxed shape, and a bare
@@ -268,6 +271,79 @@ public class StatementService {
     //       AbendDetail without being shortened. Naming the paragraph's own program rather than this
     //       Java type is what lets an operator carry an abend straight back to the transcribed
     //       paragraph, which is the whole value of the field in the reference.
+    /**
+     * Greatest number of transactions one HTTP statement response body carries, being 1000.
+     *
+     * <p>Refactoring Rationale: no bound existed. The request-edge path collected every transaction of
+     * the requested card into a list, and the operation returning only heading data collected them too
+     * and then discarded them. A statement's row count is a property of a cardholder's activity, so the
+     * response size was a function of data rather than of contract, and one busy card was enough to
+     * turn a request into an unbounded allocation on a request thread.</p>
+     *
+     * <p>Assumptions: the bound applies to the RESPONSE and not to the artifact. The rendered
+     * statement is still unbounded -- that is divergence D-2 and it is what keeps a document from
+     * stopping at a number the business never chose -- and the two are different destinations: an
+     * artifact is written once by a batch task to object storage, a response is assembled per request
+     * inside a web container. The bound on the response is registered as divergence
+     * D-STMT-RESPONSE-BOUNDED in {@code docs/architecture/cobol-to-service-traceability.md}, because
+     * the reference publishes no request surface at all and so has no bound to compare against.</p>
+     *
+     * <p>Assumptions: truncation is DETECTABLE by the caller rather than silent. The heading the same
+     * request returns carries the true transaction count, taken from a database aggregate over the
+     * whole card, so a caller comparing the rows it received against that count learns exactly whether
+     * and by how much the body was bounded. Alternatives Considered: refusing the request outright
+     * once a card passed the bound, which would make the operation unusable for precisely the
+     * cardholders it matters most for; and returning a cursor, which the published contract
+     * deliberately does not declare here because a statement's set is closed by its own period rather
+     * than open-ended.</p>
+     */
+    public static final int MAX_RESPONSE_TRANSACTIONS = 1000;
+
+    /**
+     * Number of statement heading rows one whole-run chunk reads, being 200.
+     *
+     * <p>Assumptions: a chunk exists so that no database cursor is open while an artifact record is
+     * written. 200 is chosen as a size whose row width -- a card rendering, two identifiers, nine
+     * customer attributes and one money figure -- keeps a chunk comfortably small while making the
+     * number of round trips a two-hundredth of the number of cards. Nothing depends on the exact
+     * figure: it trades round trips against transient memory and changing it changes neither the
+     * documents produced nor their order.</p>
+     */
+    public static final int HEADING_CHUNK_SIZE = 200;
+
+    /**
+     * Number of one card's transactions a whole-run chunk reads, being 500.
+     *
+     * <p>Assumptions: this matches the retrieval batch the transaction repository declares, so a chunk
+     * is one server round trip rather than a fraction of one. Refactoring Rationale: the run read a
+     * card's transactions through an open cursor and wrote each record to the object store as it went,
+     * which held a database transaction open across every network write of the run. Reading a bounded
+     * chunk, ending the transaction and then writing gives the same records in the same order with no
+     * transaction open while any write is in flight.</p>
+     */
+    public static final int TRANSACTION_CHUNK_SIZE = 500;
+
+    /**
+     * The continuation value that starts a keyset walk from the beginning.
+     *
+     * <p>Assumptions: the empty string, because every key it is compared against -- a hexadecimal
+     * digest and a sixteen-digit identifier -- sorts strictly above it, so one strict comparison serves
+     * both the first chunk and every later one. Alternatives Considered: a nullable parameter, which
+     * would make the predicate two predicates and force either two queries per chunk or a
+     * null-tolerant comparison no index serves.</p>
+     */
+    private static final String WALK_FROM_START = "";
+
+    /**
+     * The purpose the artifact identity is tokenised under.
+     *
+     * <p>Assumptions: a purpose string is required by the tokeniser and is authenticated along with the
+     * value, so a token minted here cannot be correlated with a token minted for another purpose under
+     * the same key. It names the artifact rather than the card, because that is what the token stands
+     * for.</p>
+     */
+    private static final String ARTIFACT_TOKEN_PURPOSE = "reporting-statement-artifact";
+
     private static final String ABEND_CULPRIT = "CBSTM03A";
 
     // WHY : Assumptions: four characters is what ABEND-CODE declares, so the code is chosen to fit
@@ -350,9 +426,23 @@ public class StatementService {
 
     private final StatementCardXrefRepository cardXrefs;
 
+    /**
+     * The keyed customer read, used by the single-card request path.
+     *
+     * <p>Assumptions: the request path reads one card, so three keyed reads are three statements for one
+     * document rather than a per-row multiplication -- which is why the whole-run path uses the joined
+     * chunk query instead and this collaborator serves the request path alone.</p>
+     */
     private final StatementCustomerRepository customers;
 
+    /**
+     * The keyed account read, used by the single-card request path.
+     *
+     * <p>Assumptions: retained for the reason recorded on the customer read above.</p>
+     */
     private final StatementAccountRepository accounts;
+
+
 
     // WHY : Assumptions: the store and prefix are configuration rather than stored values, so no
     //       relation has to be written to record where an artifact went -- which matters because this
@@ -362,6 +452,16 @@ public class StatementService {
     private final String outputBucket;
 
     private final String statementPrefix;
+
+    /**
+     * The keyed tokeniser that turns a card's identity into the opaque component of an object key.
+     *
+     * <p>Assumptions: injected by NAME rather than by type, for the reason the authorization context
+     * records on its own tokeniser: more than one keyed tokeniser can legitimately exist in one
+     * application under different keys, and injection by type alone would bind whichever the context
+     * happened to hold.</p>
+     */
+    private final OpaqueIdentifier artifactIdentity;
 
     /**
      * Builds the statement service over the four read-only roles that replace the reference's file
@@ -379,16 +479,18 @@ public class StatementService {
      *
      * @param transactions the card-ordered transaction cursor replacing the sequential transaction
      *     definition at L33 of {@code app/cbl/CBSTM03B.CBL}
-     * @param cardXrefs the cross-reference cursor and keyed read replacing the sequential
-     *     cross-reference definition at L39 of {@code app/cbl/CBSTM03B.CBL}
-     * @param customers the customer read by identity replacing the random definition at L45 of
-     *     {@code app/cbl/CBSTM03B.CBL}
-     * @param accounts the account read by identity replacing the random definition at L51 of
-     *     {@code app/cbl/CBSTM03B.CBL}
+     * @param cardXrefs the cross-reference resolution, the joined heading chunk and the ordered cursor
+     *     replacing the sequential cross-reference definition at L39 of {@code app/cbl/CBSTM03B.CBL}
+     * @param customers the keyed customer read replacing the random definition at L45 of
+     *     {@code app/cbl/CBSTM03B.CBL}, reached by the single-card request path
+     * @param accounts the keyed account read replacing the random definition at L51 of
+     *     {@code app/cbl/CBSTM03B.CBL}, reached by the single-card request path
      * @param outputBucket the object store the two artifacts are published to, supplied by
      *     {@value #OUTPUT_BUCKET_PROPERTY}
      * @param statementPrefix the key prefix the artifacts sit under, supplied by
      *     {@value #STATEMENT_PREFIX_PROPERTY}
+     * @param artifactIdentity the keyed tokeniser the artifact object key is built with, so that no
+     *     account identifier and no part of a card number appears in a key an object store logs
      * @throws NullPointerException if any collaborator or configuration value is {@code null}
      */
     public StatementService(
@@ -397,7 +499,9 @@ public class StatementService {
             StatementCustomerRepository customers,
             StatementAccountRepository accounts,
             @Value("${" + OUTPUT_BUCKET_PROPERTY + "}") String outputBucket,
-            @Value("${" + STATEMENT_PREFIX_PROPERTY + "}") String statementPrefix) {
+            @Value("${" + STATEMENT_PREFIX_PROPERTY + "}") String statementPrefix,
+            @Qualifier(ArtifactIdentityConfig.ARTIFACT_TOKENISER)
+                    OpaqueIdentifier artifactIdentity) {
         this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
         this.cardXrefs = Objects.requireNonNull(cardXrefs, "cardXrefs must not be null");
         this.customers = Objects.requireNonNull(customers, "customers must not be null");
@@ -405,156 +509,434 @@ public class StatementService {
         this.outputBucket = Objects.requireNonNull(outputBucket, "outputBucket must not be null");
         this.statementPrefix =
                 Objects.requireNonNull(statementPrefix, "statementPrefix must not be null");
+        this.artifactIdentity =
+                Objects.requireNonNull(artifactIdentity, "artifactIdentity must not be null");
+    }
+
+    /**
+     * One card's statement heading, however it was read.
+     *
+     * <p>Purpose: the two paths into this class read the same fifteen values by two different shapes --
+     * the single-card request path by three keyed reads, the whole-run path by one outer-joined chunk
+     * query -- and everything downstream of the read needs only the values. This record is what lets the
+     * heading assembly, the score check, the name assembly and the object-key derivation each be written
+     * once instead of once per read shape.</p>
+     *
+     * <p>Alternatives Considered: making the whole-run projection interface the common type and adapting
+     * the request path to it. Rejected because the request path would then have to synthesise an
+     * anonymous implementation of a fifteen-method interface, which is more code than this record and
+     * puts the adaptation where the reader is least expecting it. Alternatives Considered: making the
+     * request path use the joined query too, which would collapse the two shapes into one. Rejected
+     * because that query positions on a keyset continuation to serve a chunk, and expressing a
+     * single-card lookup as a bounded traversal makes the answer depend on where the card sits in the
+     * ordering -- the same objection the cross-reference repository records against replacing its keyed
+     * read with its cursor.</p>
+     *
+     * <p>Assumptions: every component is non-null by the time an instance exists, because both factory
+     * paths refuse an unresolved dimension before constructing one. That is what lets the downstream
+     * methods read a component without a null test each.</p>
+     *
+     * @param cardNum the masked rendering of the card, twelve asterisks and the last four digits
+     * @param cardFingerprint the keyed per-card fingerprint naming the card exactly
+     * @param accountId the account the card is issued against
+     * @param firstName the customer's first name
+     * @param middleName the customer's middle name, held as blanks when the customer has none, because
+     *     the constructor below normalises an absent value onto the reference's space-filled rendering
+     * @param lastName the customer's last name
+     * @param addressLine1 the first address line
+     * @param addressLine2 the second address line, held as blanks when the customer has none, on the
+     *     same terms as the middle name above
+     * @param addressLine3 the third address line
+     * @param stateCode the two-character state code as stored
+     * @param countryCode the three-character country code as stored
+     * @param postalCode the ten-character postal code as stored
+     * @param ficoCreditScore the three-digit credit score the heading band prints
+     * @param currentBalance the account balance the heading band prints
+     */
+    private record StatementHeading(
+            String cardNum,
+            String cardFingerprint,
+            Long accountId,
+            String firstName,
+            String middleName,
+            String lastName,
+            String addressLine1,
+            String addressLine2,
+            String addressLine3,
+            String stateCode,
+            String countryCode,
+            String postalCode,
+            Short ficoCreditScore,
+            Money currentBalance) {
+
+        /**
+         * Renders the two genuinely optional text attributes as blanks rather than as absent values.
+         *
+         * <p>Purpose: {@code account.customers} declares {@code middle_name} and {@code addr_line_2}
+         * nullable and every other projected attribute not null, so those two -- and only those two --
+         * can reach a heading absent. Registered as divergence D-STMT-OPTIONAL-ADDRESS-BLANK in
+         * {@code docs/architecture/cobol-to-service-traceability.md}, which records that the rendered
+         * artifact is byte-identical to the reference's and that what changed is the code path.
+         * Blanks are the reference's own rendering of an absent one:
+         * {@code app/cpy/COSTM01.CPY} carries each as a fixed-width character field, and a COBOL
+         * {@code MOVE} of an empty group leaves the receiving field space-filled, so a customer with no
+         * second address line prints a blank line rather than stopping the run.</p>
+         *
+         * <p>Refactoring Rationale: normalising here rather than at each use site is what makes the
+         * behaviour hold for both read shapes at once. Without it the nightly run raised a null-pointer
+         * failure inside the band assembly on the first customer with no second address line -- the band
+         * assembler refuses a null because a band field is required, which is correct of the assembler
+         * and wrong of the caller that handed it one. That failure surfaced as a run-wide abort naming a
+         * field rather than as a statement, and it would have been reached only in production, because a
+         * fixture with every attribute populated cannot produce it.</p>
+         *
+         * <p>Alternatives Considered: refusing an absent value as an unresolved dimension, alongside the
+         * customer and account checks below. Rejected because an absent second address line is a
+         * legitimate customer record, not a broken join -- the column is nullable by design -- and
+         * treating it as an abend would stop a whole run over a customer who simply has a one-line
+         * street address. Alternatives Considered: making the band assembler tolerate a null. Rejected
+         * because every other field it receives is required, so admitting a null there would weaken the
+         * check that catches a genuinely missing value.</p>
+         *
+         * @param cardNum the masked card rendering, as read
+         * @param cardFingerprint the keyed per-card fingerprint, as read
+         * @param accountId the account identifier, as read
+         * @param firstName the customer's first name, as read
+         * @param middleName the customer's middle name, rendered as blanks when the customer has none
+         * @param lastName the customer's last name, as read
+         * @param addressLine1 the first address line, as read
+         * @param addressLine2 the second address line, rendered as blanks when the customer has none
+         * @param addressLine3 the third address line, as read
+         * @param stateCode the state code, as read
+         * @param countryCode the country code, as read
+         * @param postalCode the postal code, as read
+         * @param ficoCreditScore the credit score, as read
+         * @param currentBalance the account balance, as read
+         */
+        StatementHeading {
+            middleName = middleName == null ? "" : middleName;
+            addressLine2 = addressLine2 == null ? "" : addressLine2;
+        }
+
+        /**
+         * Builds a heading from one row of the joined chunk query, refusing an unresolved dimension.
+         *
+         * <p>Assumptions: the customer is tested through its last name and the account through its
+         * balance, because both base columns are declared not null in the relations that own them -- so a
+         * null here can only mean the outer join found nothing. Testing the joined identifier instead
+         * would not work: it comes from the cross-reference and is present whether or not the dimension
+         * row exists, which is exactly the condition being detected.</p>
+         *
+         * <p>Assumptions: an unresolved dimension stops the run rather than producing a partial heading.
+         * {@code app/cbl/CBSTM03A.CBL} reads the customer at L368 and the account at L392 with no
+         * not-found arm and reaches its abend paragraph at L921 when either fails.</p>
+         *
+         * @param row one row of the joined heading chunk; must not be {@code null}
+         * @return the heading with every component resolved, never {@code null}
+         * @throws IllegalStateException if the cross-reference names a customer or an account that does
+         *     not resolve
+         */
+        static StatementHeading of(StatementHeadingRow row) {
+            if (row.getLastName() == null) {
+                throw abend("CUSTFILE",
+                        "the cross-reference names a customer that does not resolve");
+            }
+            if (row.getCurrentBalance() == null) {
+                throw abend("ACCTFILE",
+                        "the cross-reference names an account that does not resolve");
+            }
+            return new StatementHeading(
+                    row.getCardNum(),
+                    row.getCardFingerprint(),
+                    row.getAccountId(),
+                    row.getFirstName(),
+                    row.getMiddleName(),
+                    row.getLastName(),
+                    row.getAddressLine1(),
+                    row.getAddressLine2(),
+                    row.getAddressLine3(),
+                    row.getStateCode(),
+                    row.getCountryCode(),
+                    row.getPostalCode(),
+                    row.getFicoCreditScore(),
+                    row.getCurrentBalance());
+        }
+
+        /**
+         * Builds a heading from the three keyed reads the single-card request path performs.
+         *
+         * @param xref the cross-reference row the requested card resolved to; must not be {@code null}
+         * @param customer the customer that cross-reference names; must not be {@code null}
+         * @param account the account that cross-reference names; must not be {@code null}
+         * @return the heading with every component resolved, never {@code null}
+         */
+        static StatementHeading of(CardXrefView xref, CustomerView customer, AccountView account) {
+            return new StatementHeading(
+                    xref.getCardNum(),
+                    xref.getCardFingerprint(),
+                    account.getAccountId(),
+                    customer.getFirstName(),
+                    customer.getMiddleName(),
+                    customer.getLastName(),
+                    customer.getAddressLine1(),
+                    customer.getAddressLine2(),
+                    customer.getAddressLine3(),
+                    customer.getStateCode(),
+                    customer.getCountryCode(),
+                    customer.getPostalCode(),
+                    customer.getFicoCreditScore(),
+                    account.getCurrentBalance());
+        }
     }
 
     /**
      * Reports what one card's statement covers, without producing either artifact.
      *
-     * <p>Assumptions: this answers a request and does not generate, so it repeats the four reads the
-     * reference performs per card and then stops. It exists separately from generation because a
-     * request-time read that also wrote would produce a document that then disagreed with the one the
-     * run produced.</p>
+     * <p>Assumptions: this answers a request and does not generate. It exists separately from
+     * generation because a request-time read that also wrote would produce a document that then
+     * disagreed with the one the run produced.</p>
      *
-     * <p>Assumptions: the running total is accumulated over the same rows in the same card order the
-     * artifact would use, so the figure reported here is the figure the artifact's trailer carries at
-     * L433 to L434 of {@code app/cbl/CBSTM03A.CBL}.</p>
+     * <p>Refactoring Rationale: the total and the count come from a database AGGREGATE and no longer
+     * from a traversal this method performs. It previously collected every transaction of the card into
+     * a list, summed the list, counted it and discarded it -- an unbounded allocation on a request
+     * thread performed to produce two scalars, in an operation whose whole purpose is to return heading
+     * data. The aggregate returns the same two numbers over the same rows, and the sum is computed on a
+     * {@code NUMERIC(11,2)} column so it stays exact.</p>
      *
-     * @param request the card the statement is wanted for, optionally naming the account it is
-     *     expected to resolve to
-     * @return the heading figures, the accumulated total, the row count and the two artifact
-     *     locations
-     * @throws ClientInputException if no card number is supplied, if the stated account is not the
-     *     one the cross-reference resolves to, or if two distinct cards share the requested masked
-     *     rendering
-     * @throws NoSuchElementException if no cross-reference row exists for the requested card
+     * @param request the card or account the statement is wanted for
+     * @return the heading figures, the accumulated total, the row count and the two artifact locations
+     * @throws ClientInputException if the request does not name exactly one of a card and an account,
+     *     or if the named account holds more than one card
+     * @throws NoSuchElementException if no card with the requested number exists, or the requested
+     *     account holds no card
      * @throws IllegalStateException if the cross-reference names a customer or an account that does
      *     not resolve, which the reference treats as an abend rather than as an omission
      */
-    @Transactional(readOnly = true)
     public StatementResponse describe(StatementRequest request) {
-        return read(request).heading();
+        StatementHeading heading = resolveHeading(request);
+        StatementTransactionRepository.StatementAggregate totals =
+                transactions.aggregateByCardFingerprint(heading.cardFingerprint());
+        return headingResponse(heading, Money.of(totals.getTotal()), totals.getLineCount());
     }
 
     /**
-     * Reports one card's statement together with the lines it covers, without producing either
-     * artifact.
+     * Reports one card's statement together with a bounded window of the lines it covers.
      *
      * <p>Assumptions: the lines are the same rows in the same order the artifact renders, so a caller
      * comparing this against a stored artifact is comparing one traversal against itself rather than
      * two independently ordered reads. The order is the transaction identifier ascending, which the
-     * cursor's own {@code order by} fixes and which is the second sort key of
-     * {@code app/jcl/CREASTMT.JCL} L53; nothing here re-sorts, because a second ordering rule could
-     * disagree with the one the artifact was written under.</p>
+     * query's own {@code order by} fixes and which is the second sort key of
+     * {@code app/jcl/CREASTMT.JCL} L53; nothing here re-sorts.</p>
      *
-     * @param request the card the statement is wanted for, optionally naming the account it is
-     *     expected to resolve to
-     * @return the heading and one line per transaction, in card-then-transaction order
-     * @throws ClientInputException if no card number is supplied, if the stated account is not the
-     *     one the cross-reference resolves to, or if two distinct cards share the requested masked
-     *     rendering
-     * @throws NoSuchElementException if no cross-reference row exists for the requested card
+     * <p>Refactoring Rationale: the window is bounded at {@value #MAX_RESPONSE_TRANSACTIONS} rows,
+     * where it was unbounded. The reasoning for that is recorded on the constant. The heading returned
+     * beside the rows carries the TRUE count from the aggregate rather than the number of rows in the
+     * body, which is what makes truncation something a caller measures rather than something it has to
+     * be told.</p>
+     *
+     * @param request the card or account the statement is wanted for
+     * @return the heading and at most {@value #MAX_RESPONSE_TRANSACTIONS} lines, in transaction order
+     * @throws ClientInputException if the request does not name exactly one of a card and an account,
+     *     or if the named account holds more than one card
+     * @throws NoSuchElementException if no card with the requested number exists, or the requested
+     *     account holds no card
      * @throws IllegalStateException if the cross-reference names a customer or an account that does
      *     not resolve, which the reference treats as an abend rather than as an omission
      */
-    @Transactional(readOnly = true)
     public StatementDocument compose(StatementRequest request) {
-        ResolvedStatement resolved = read(request);
-        return new StatementDocument(resolved.heading(), resolved.lines());
+        StatementHeading heading = resolveHeading(request);
+        String fingerprint = heading.cardFingerprint();
+        StatementTransactionRepository.StatementAggregate totals =
+                transactions.aggregateByCardFingerprint(fingerprint);
+
+        List<StatementTransactionView> window = transactions.findWindowByCardFingerprint(
+                fingerprint, WALK_FROM_START, MAX_RESPONSE_TRANSACTIONS);
+        List<StatementTransactionResponse> lines = new ArrayList<>(window.size());
+        for (StatementTransactionView row : window) {
+            lines.add(toLine(heading.cardNum(), row));
+        }
+
+        StatementResponse response =
+                headingResponse(heading, Money.of(totals.getTotal()), totals.getLineCount());
+        return new StatementDocument(response, List.copyOf(lines));
     }
 
     /**
-     * One card's resolved statement, carried between the two request-edge methods.
+     * Resolves one request to exactly one card's heading row.
      *
-     * <p>Assumptions: this exists so that the four reads and the traversal happen once for either
-     * entry point. Trade-offs: the alternative was for the heading method to read without the lines,
-     * which would have been the cheaper read but would have accumulated the total from a second
-     * traversal, and two traversals of a relation that concurrent writers may extend can disagree
-     * about the total they report.</p>
+     * <p>Refactoring Rationale: this replaces a lookup by the NARROWED card rendering, and the change
+     * is the substance of a broken-object-selection fix rather than a refactor. The narrowed rendering
+     * is twelve constant asterisks and four digits, so the old lookup selected a tail. Where the
+     * requested card did not exist but a different cardholder's card shared that tail, the lookup
+     * matched exactly one row and returned it -- so the caller received another cardholder's customer,
+     * account and statement, with nothing recording the substitution. Where both existed it matched two
+     * and raised, refusing a legitimate request. Resolution is now an equality on the whole number,
+     * performed by {@code reporting.resolve_card}, which is the only construct in the reporting schema
+     * that can express one: no relation this module may read publishes the unmasked number.</p>
      *
-     * @param heading the heading figures and artifact locations for the card
-     * @param lines one line per transaction, in the order the artifact renders them
-     */
-    private record ResolvedStatement(
-            StatementResponse heading, List<StatementTransactionResponse> lines) {
-    }
-
-    /**
-     * Resolves one requested card to its heading and its lines through the reference's four reads.
+     * <p>Refactoring Rationale: the account selector is now IMPLEMENTED, where the previous
+     * implementation required a card number and ignored the account except as a cross-check. The
+     * published contract at {@code reporting-api.yaml} states that exactly one of the two selects the
+     * statement, so a caller following the contract and sending only an account received a refusal
+     * naming a field it had been told to omit.</p>
      *
-     * <p>Assumptions: the requested number is narrowed before any read, because every relation in the
-     * reporting schema presents a card number already narrowed and a stored number would match none
-     * of them. The narrowing is delegated to the mapper that owns it for this context rather than
-     * repeated here: a second narrowing rule would give one value two renderings, so a lookup could
-     * narrow one way while a response narrowed the other and the two would silently fail to match.
-     * The operation is idempotent by its own contract, so a caller that has already narrowed reaches
-     * the same row.</p>
+     * <p>Assumptions: a request naming an account whose cards number more than one is REFUSED rather
+     * than answered from one of them. A statement is a per-card document in the reference --
+     * {@code app/cbl/CBSTM03A.CBL} produces one per cross-reference row -- so an account with several
+     * cards has several statements and no basis exists for choosing between them. Choosing the lowest
+     * would answer a different question from the one asked and would look like success.</p>
      *
-     * <p>Assumptions: the traversal is collected because the total, the count and the rendered lines
-     * each need the rows and a forward-only cursor can be traversed once. Nothing bounds that
-     * collection: this is the request-edge counterpart of the same decision D-2 records, so a card
-     * with more transactions than the reference's inner table could hold is reported in full rather
-     * than reported short.</p>
-     *
-     * @param request the card the statement is wanted for, optionally naming its expected account
-     * @return the heading and the lines for that card
-     * @throws ClientInputException if no card number is supplied, if the stated account is not the
-     *     one the cross-reference resolves to, or if two distinct cards share the narrowed rendering
-     * @throws NoSuchElementException if no cross-reference row exists for the requested card
+     * @param request the request naming exactly one of a card and an account; must not be {@code null}
+     * @return the heading for that one card, with its dimensions already resolved
+     * @throws ClientInputException if neither selector is supplied, if both are, or if the named
+     *     account holds more than one card
+     * @throws NoSuchElementException if no card with the requested number exists, or the requested
+     *     account holds no card
      * @throws IllegalStateException if the cross-reference names a customer or an account that does
      *     not resolve
      */
-    private ResolvedStatement read(StatementRequest request) {
+    private StatementHeading resolveHeading(StatementRequest request) {
         Objects.requireNonNull(request, "request must not be null");
-        String requestedCard = request.cardNumber();
-        if (requestedCard == null || requestedCard.isBlank()) {
-            throw new ClientInputException(ApiError.CODE_VALIDATION, "cardNumber",
-                    "cardNumber must be supplied");
-        }
-        String narrowedCard = ReportingDtoMapper.maskPrimaryAccountNumber(requestedCard);
+        String card = blankToNull(request.cardNumber());
+        String account = blankToNull(request.accountId());
 
-        // WHY : Assumptions: a card a caller ASKED for and that does not exist is a different
-        //       condition from a dimension the cross-reference itself names and that does not
-        //       resolve. The first is the caller naming something absent, which this module reports
-        //       as an absent element; the second is a referential-integrity violation inside the
-        //       data, which the reference abends on at L921. Collapsing the two would either turn a
-        //       broken load into a benign answer or turn a mistyped card number into a run failure.
-        CardXrefView xref = cardXrefs.findByCardNum(narrowedCard)
+        if (card == null && account == null) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, "cardNumber",
+                    "exactly one of cardNumber and accountId must be supplied");
+        }
+        if (card != null && account != null) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, "accountId",
+                    "exactly one of cardNumber and accountId must be supplied, not both");
+        }
+
+        String fingerprint = card != null
+                ? fingerprintOfCard(card)
+                : fingerprintOfSoleCardOf(account);
+        return requireHeading(fingerprint);
+    }
+
+    /**
+     * Resolves one whole card number to the fingerprint that names it exactly.
+     *
+     * @param cardNumber the whole primary account number as the caller supplied it; must not be
+     *     {@code null}
+     * @return the keyed fingerprint of that card
+     * @throws NoSuchElementException if no card with that number exists, which is the caller naming
+     *     something absent rather than a defect in the data
+     */
+    private String fingerprintOfCard(String cardNumber) {
+        return cardXrefs.resolveByWholeCardNumber(cardNumber)
+                .orElseThrow(() -> new NoSuchElementException(
+                        "no cross-reference row for the requested card"))
+                .getCardFingerprint();
+    }
+
+    /**
+     * Resolves one account to the fingerprint of its single card, refusing an ambiguous account.
+     *
+     * <p>Assumptions: two rows are requested where one is wanted, which is the same look-ahead device
+     * the reference uses to discover whether a further page exists at {@code app/cbl/COCRDLIC.cbl}
+     * L1197. Asking for one row could not tell an account with one card from an account with several.
+     * </p>
+     *
+     * @param accountId the account identifier as digits; must not be {@code null}
+     * @return the keyed fingerprint of that account's single card
+     * @throws ClientInputException if the account holds more than one card
+     * @throws NoSuchElementException if the account holds no card at all
+     */
+    private String fingerprintOfSoleCardOf(String accountId) {
+        List<CardXrefView> cards = cardXrefs.findCardsOfAccount(
+                Long.parseLong(accountId), Limit.of(2));
+        if (cards.isEmpty()) {
+            throw new NoSuchElementException("no cross-reference row for the requested account");
+        }
+        if (cards.size() > 1) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, "accountId",
+                    "the requested account holds more than one card, so name the card instead");
+        }
+        return cards.get(0).getCardFingerprint();
+    }
+
+    /**
+     * Reads one card's heading through the three keyed reads the reference performs per card.
+     *
+     * <p>Assumptions: three keyed reads are used on THIS path and the joined chunk query on the
+     * whole-run path, and the split is deliberate rather than an inconsistency. The request path reads
+     * one card, so three statements produce one document -- there is no per-row multiplication to
+     * remove, and the keyed shape has independent first-hand authority: {@code app/cbl/CBSTM03B.CBL}
+     * declares the customer definition {@code ACCESS MODE IS RANDOM} at L45 and the account definition
+     * at L51, and {@code app/cbl/CBSTM03A.CBL} supplies the whole key at L370 and L396. The whole-run
+     * path reads every card, where the same three reads per card were the {@code 1 + 3N} the joined
+     * query removes.</p>
+     *
+     * <p>Assumptions: an unresolved customer or account stops the request rather than producing a
+     * partial heading. The reference's two reads carry exactly two arms each -- {@code WHEN '00'} and
+     * {@code WHEN OTHER} -- with no not-found arm at all, and the second performs the abend at L921. A
+     * missing dimension for an existing cross-reference row is a referential-integrity violation and not
+     * an absence to render around, which is why it is reported as a failure and not as an empty
+     * document.</p>
+     *
+     * @param fingerprint the keyed fingerprint naming exactly one card; must not be {@code null}
+     * @return the heading with every component resolved, never {@code null}
+     * @throws NoSuchElementException if the fingerprint names no card, which after resolution can only
+     *     be a card removed between two reads
+     * @throws IllegalStateException if the cross-reference names a customer or an account that does not
+     *     resolve
+     */
+    private StatementHeading requireHeading(String fingerprint) {
+        CardXrefView xref = cardXrefs.findById(fingerprint)
                 .orElseThrow(() -> new NoSuchElementException(
                         "no cross-reference row for the requested card"));
-        requireStatedAccountMatches(request, xref);
+        CustomerView customer = customers.findById(xref.getCustomerId())
+                .orElseThrow(() -> abend("CUSTFILE",
+                        "the cross-reference names a customer that does not resolve"));
+        AccountView account = accounts.findById(xref.getAccountId())
+                .orElseThrow(() -> abend("ACCTFILE",
+                        "the cross-reference names an account that does not resolve"));
+        return StatementHeading.of(xref, customer, account);
+    }
 
-        CustomerView customer = requireCustomer(xref);
-        AccountView account = requireAccount(xref);
-
-        List<StatementTransactionResponse> lines = new ArrayList<>();
-        Money runningTotal = Money.ZERO;
-        String groupingToken = null;
-        try (Stream<StatementTransactionView> rows =
-                transactions.streamByCardNumber(narrowedCard)) {
-            for (StatementTransactionView row : (Iterable<StatementTransactionView>) rows::iterator) {
-                groupingToken = requireOneCard(groupingToken, row);
-                runningTotal = runningTotal.plus(row.amount());
-                lines.add(toLine(narrowedCard, row));
-            }
-        }
-
-        StatementResponse heading = new StatementResponse(
-                narrowedCard,
-                String.valueOf(account.getAccountId()),
-                assembleName(customer),
-                runningTotal,
-                lines.size(),
-                artifactUri(account.getAccountId(), narrowedCard, PLAIN_TEXT_SUFFIX),
-                artifactUri(account.getAccountId(), narrowedCard, HTML_SUFFIX),
-                // WHY : Assumptions: the produced-at stamp is left blank on a request-edge read and
-                //       is not invented. Its own contract on StatementResponse records that an
-                //       all-blank value round-trips unchanged and is deliberately not refused, and
-                //       this method has produced no artifact to stamp. The only honest alternative
-                //       would be a clock reading, which the package charter forbids on this path and
-                //       which would report a production time for a document nothing produced.
+    /**
+     * Assembles the heading response one request-edge operation returns.
+     *
+     * @param heading the resolved heading row; must not be {@code null}
+     * @param total the exact sum of the card's transaction amounts; must not be {@code null}
+     * @param lineCount how many transactions the card has, which is the true count and not the number
+     *     of rows any body carries
+     * @return the heading response, never {@code null}
+     */
+    private StatementResponse headingResponse(
+            StatementHeading heading, Money total, long lineCount) {
+        return new StatementResponse(
+                heading.cardNum(),
+                String.valueOf(heading.accountId()),
+                assembleName(heading),
+                total,
+                Math.toIntExact(lineCount),
+                artifactUri(heading, PLAIN_TEXT_SUFFIX),
+                artifactUri(heading, HTML_SUFFIX),
+                // WHY : Assumptions: the produced-at stamp is left blank on a request-edge read and is
+                //       not invented. Its own contract on StatementResponse records that an all-blank
+                //       value round-trips unchanged and is deliberately not refused, and this method has
+                //       produced no artifact to stamp. The only honest alternative would be a clock
+                //       reading, which the package charter forbids on this path and which would report a
+                //       production time for a document nothing produced.
                 " ".repeat(TimestampFormatter.TIMESTAMP_LENGTH));
+    }
 
-        return new ResolvedStatement(heading, List.copyOf(lines));
+    /**
+     * Reduces a blank or absent selector to {@code null}.
+     *
+     * <p>Assumptions: a blank string and an absent one are one condition here, because a JSON body that
+     * carries an empty string for a field it means to omit is indistinguishable in intent from one that
+     * omits it, and treating them differently would make the exactly-one-of rule depend on a caller's
+     * serialiser.</p>
+     *
+     * @param value the selector as it arrived, which may be {@code null}
+     * @return the value, or {@code null} when it is absent or blank
+     */
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**
@@ -567,33 +949,44 @@ public class StatementService {
      * This method keeps that order exactly, so a failure occurs at the same point in the sequence and
      * names the same relation.</p>
      *
-     * <p>Assumptions: the cursor is opened over the cross-reference in card order and the transactions
-     * of one card are read inside that traversal, which is the streaming join that replaces the
-     * working-storage index. Neither dimension is bounded: a run may produce more statements than the
-     * reference's outer table could hold and any one statement may carry more transactions than its
-     * inner table could hold, which is divergence D-2 as the class documentation sets out. The cursors
-     * carry a retrieval batch size in the repositories that declare them; a batch size governs how
-     * many rows a fetch brings back at once and cannot end a traversal, so it is not a ceiling and
-     * cannot shorten an artifact.</p>
+     * <p>Refactoring Rationale: the run reads in bounded CHUNKS and holds no database transaction while
+     * it writes, where it previously ran as a single read-only transaction wrapping the whole run with
+     * a cursor open over the cross-reference and a second cursor open per card inside it. Three
+     * separate defects came from that one shape and all three close together. The query count was
+     * {@code 1 + 3N} for {@code N} cards, because each row drove a keyed customer read and a keyed
+     * account read; those two are now one outer-joined chunk query. Two cursors were open at once, the
+     * outer pinned across the inner, which is a shape a single connection sustains only by accident of
+     * driver behaviour. And a database transaction was held open across every object-store write of the
+     * run, so its lifetime was the run's wall-clock time including all of its network latency -- which
+     * blocks vacuum, pins a connection and makes a slow store into a database problem.</p>
      *
-     * <p>Assumptions: the whole run is one read-only transaction. Both cursors require an enclosing
-     * transaction rather than starting one of their own, so that each outlives the call that opened
-     * it, and a single transaction also gives every statement in one run the same read view instead of
-     * letting a concurrent writer change the totals part way through.</p>
+     * <p>Refactoring Rationale: the credit-score resolver parameter is REMOVED. The value now comes
+     * from the customer row, because {@code reporting.v_customers} now projects
+     * {@code fico_credit_score}. The parameter existed only because that column was withheld on the
+     * ground that no reporting band printed it, and a band does print it --
+     * {@code app/cbl/CBSTM03A.CBL} moves it into {@code ST-FICO-SCORE}, declared {@code PIC X(20)} at
+     * L118 of {@code app/cpy/COSTM01.CPY}. The parameter was also a large part of why this method could
+     * not be invoked at all: a caller had to supply a function no component in the module offered.</p>
+     *
+     * <p>Trade-offs: the run is no longer one read view, and that is stated rather than implied. It
+     * never was one in the sense the previous prose claimed: the transaction isolation this deployment
+     * runs at is read-committed, under which each statement inside a transaction takes a fresh snapshot,
+     * so a long transaction gave the run a long LOCK footprint and not a stable view. Run-level
+     * consistency comes from where it actually comes from -- the orchestrated batch window brackets
+     * statement generation between the states that quiesce and resume online writes, states 1 and 11 of
+     * the {@code carddemo-daily-batch} machine -- and per-card consistency comes from each card's rows
+     * being read inside one statement. Both are recorded here so that a reader does not have to infer a
+     * guarantee from a transaction boundary that never provided it.</p>
      *
      * @param sink the destination for both record streams, cleared once before the first statement
-     * @param creditScoreSource resolves the credit score of a customer, for the reason recorded on
-     *     {@link #creditScoreOf(CustomerView, ToIntFunction)}
      * @return the number of statements produced, which is the number of cross-reference rows read
-     * @throws NullPointerException if {@code sink} or {@code creditScoreSource} is {@code null}
+     * @throws NullPointerException if {@code sink} is {@code null}
      * @throws IllegalStateException if a cross-reference row names a customer or an account that does
-     *     not resolve, or if the credit score source yields a value the statement band cannot carry,
-     *     either of which stops the run as the reference's abend does
+     *     not resolve, or if a credit score cannot be carried by the statement band, either of which
+     *     stops the run as the reference's abend does
      */
-    @Transactional(readOnly = true)
-    public int generateStatements(StatementSink sink, ToIntFunction<CustomerView> creditScoreSource) {
+    public int generateStatements(StatementSink sink) {
         Objects.requireNonNull(sink, "sink must not be null");
-        Objects.requireNonNull(creditScoreSource, "creditScoreSource must not be null");
 
         // WHY : Assumptions: the previous run's artifacts are discarded BEFORE the first record and
         //       unconditionally, which is the deletion step app/jcl/CREASTMT.JCL runs at L66 ahead of
@@ -602,20 +995,19 @@ public class StatementService {
         sink.replaceArtifacts();
 
         int statementsProduced = 0;
-        try (Stream<CardXrefView> xrefRows = cardXrefs.streamAllInCardNumberOrder()) {
-            // WHY : Assumptions: the cursor is walked as an iterable rather than through a terminal
-            //       stream operation because each row drives further reads and two nested writes, and
-            //       a statement body reads as the paragraph it encodes when it is a loop. Trade-offs:
-            //       the cast to Iterable is the idiom that adapts a Stream to an enhanced for without
-            //       collecting it, and collecting it instead would materialise every cross-reference
-            //       row in memory -- reintroducing, by a different route, the whole-input
-            //       materialisation that D-2 removes.
-            for (CardXrefView xref : (Iterable<CardXrefView>) xrefRows::iterator) {
-                emitStatementForXref(xref, sink, creditScoreSource);
+        String afterFingerprint = WALK_FROM_START;
+        for (;;) {
+            List<StatementHeadingRow> chunk =
+                    cardXrefs.findHeadingChunk(afterFingerprint, HEADING_CHUNK_SIZE);
+            if (chunk.isEmpty()) {
+                return statementsProduced;
+            }
+            for (StatementHeadingRow row : chunk) {
+                emitStatement(StatementHeading.of(row), sink);
                 statementsProduced++;
+                afterFingerprint = row.getCardFingerprint();
             }
         }
-        return statementsProduced;
     }
 
     /**
@@ -634,20 +1026,14 @@ public class StatementService {
      * them. The distinction is kept because the trailer carries the accumulated total, which does not
      * exist until the traversal has finished.</p>
      *
-     * @param xref the cross-reference row naming the card, its customer and its account
+     * @param heading the heading row naming the card, its customer's printed attributes and its balance
      * @param sink the destination for both record streams
-     * @param creditScoreSource resolves the credit score of the resolved customer
-     * @throws IllegalStateException if the row names a customer or an account that does not resolve,
-     *     or if the credit score cannot be carried by the statement band
+     * @throws IllegalStateException if the credit score cannot be carried by the statement band, or if
+     *     the sink refuses a record
      */
-    private void emitStatementForXref(CardXrefView xref, StatementSink sink,
-            ToIntFunction<CustomerView> creditScoreSource) {
-        CustomerView customer = requireCustomer(xref);
-        AccountView account = requireAccount(xref);
-
-        createStatement(customer, account, sink, creditScoreSource);
-
-        Money cardTotal = emitTransactionsForCard(xref.getCardNum(), sink);
+    private void emitStatement(StatementHeading heading, StatementSink sink) {
+        createStatement(heading, sink);
+        Money cardTotal = emitTransactionsForCard(heading, sink);
         emitCardTrailer(cardTotal, sink);
     }
 
@@ -675,27 +1061,24 @@ public class StatementService {
      * separate destinations, so the order within each is what the reference fixes and the interleaving
      * between them is not observable in either.</p>
      *
-     * @param customer the customer the statement is addressed to
-     * @param account the account the statement reports on
+     * @param heading the heading row carrying the customer's printed attributes and the account balance
      * @param sink the destination for both record streams
-     * @param creditScoreSource resolves the credit score the heading band carries
      * @throws IllegalStateException if the credit score cannot be carried by the statement band
      */
-    private void createStatement(CustomerView customer, AccountView account, StatementSink sink,
-            ToIntFunction<CustomerView> creditScoreSource) {
+    private void createStatement(StatementHeading heading, StatementSink sink) {
         StatementTextMapper.PreparedHeaderFields header = StatementTextMapper.prepareHeaderFields(
-                customer.getFirstName(),
-                customer.getMiddleName(),
-                customer.getLastName(),
-                customer.getAddressLine1(),
-                customer.getAddressLine2(),
-                customer.getAddressLine3(),
-                customer.getStateCode(),
-                customer.getCountryCode(),
-                customer.getPostalCode(),
-                account.getAccountId(),
-                account.getCurrentBalance(),
-                creditScoreOf(customer, creditScoreSource));
+                heading.firstName(),
+                heading.middleName(),
+                heading.lastName(),
+                heading.addressLine1(),
+                heading.addressLine2(),
+                heading.addressLine3(),
+                heading.stateCode(),
+                heading.countryCode(),
+                heading.postalCode(),
+                heading.accountId(),
+                heading.currentBalance(),
+                creditScoreOf(heading));
 
         for (byte[] record : StatementTextMapper.emitHeaderBlock(header)) {
             sink.writeStatementRecord(record);
@@ -773,26 +1156,41 @@ public class StatementService {
      * matched card alone and reflects negative amounts as they stand; the golden statement's total of
      * 150.00 over amounts of 183.88, 14.00 and -47.88 is that behaviour.</p>
      *
-     * @param narrowedCard the narrowed card number whose transactions are wanted
+     * @param heading the heading row naming the card whose transactions are wanted
      * @param sink the destination for both record streams
      * @return the accumulated total of the card's transactions, zero when the card has none
      * @throws IllegalStateException if the sink refuses a record, which stops the run rather than
      *     leaving a statement missing transactions it totalled
      */
-    private Money emitTransactionsForCard(String narrowedCard, StatementSink sink) {
+    private Money emitTransactionsForCard(StatementHeading heading, StatementSink sink) {
         // WHY : Assumptions: the accumulator is a LOCAL and not a member, which is what resets it per
         //       statement without an explicit reset step. The reference needs MOVE ZERO TO
         //       WS-TOTAL-AMT at L325 precisely because its accumulator is process-wide
         //       working storage; a member here would be shared across concurrent runs as well as
         //       across statements, so the reset would be necessary and insufficient at once.
         Money cardTotal = Money.ZERO;
-        try (Stream<StatementTransactionView> rows = transactions.streamByCardNumber(narrowedCard)) {
-            for (StatementTransactionView row : (Iterable<StatementTransactionView>) rows::iterator) {
+        String fingerprint = heading.cardFingerprint();
+        String after = WALK_FROM_START;
+        for (;;) {
+            // WHY : Refactoring Rationale: the card's rows arrive in bounded chunks rather than through
+            //       one open cursor, and the chunk is fully read before the first record of it is
+            //       written. A cursor kept a database transaction open across every object-store write
+            //       of the run, which made the transaction's lifetime the run's wall-clock time
+            //       including its network latency. The rows, their order and the accumulated total are
+            //       identical either way: the continuation is strict and on the unique transaction
+            //       identifier the query orders by, so no row is skipped at a chunk boundary and none
+            //       is counted twice.
+            List<StatementTransactionView> chunk = transactions.findWindowByCardFingerprint(
+                    fingerprint, after, TRANSACTION_CHUNK_SIZE);
+            if (chunk.isEmpty()) {
+                return cardTotal;
+            }
+            for (StatementTransactionView row : chunk) {
                 writeTransaction(row, sink);
                 cardTotal = cardTotal.plus(row.amount());
+                after = row.key().transactionId();
             }
         }
-        return cardTotal;
     }
 
     /**
@@ -863,102 +1261,47 @@ public class StatementService {
     }
 
     /**
-     * Resolves the customer a cross-reference row names, encoding {@code 2000-CUSTFILE-GET} at L368 of
-     * {@code app/cbl/CBSTM03A.CBL}.
-     *
-     * <p>Assumptions: an unresolved customer stops the run. The reference's read has exactly two arms,
-     * {@code WHEN '00' CONTINUE} and {@code WHEN OTHER}, at L379 to L386, and the second displays the
-     * relation name and the return code and then performs the abend at L921. There is <b>no
-     * not-found arm at all</b>: unlike the cross-reference read at L353 to L362, which tolerates
-     * end-of-file through {@code WHEN '10'}, a missing customer for an existing cross-reference row is
-     * a referential-integrity violation that kills the whole run.</p>
-     *
-     * <p>Assumptions: that is why the resolution is a lookup returning an optional value followed by an
-     * explicit refusal, rather than a join. Alternatives Considered: expressing the two dimensions as
-     * an inner join in the query. Rejected because an inner join <b>silently drops</b> the
-     * cross-reference row instead of stopping, which yields a run that appears to succeed while
-     * producing fewer statements and different totals than the reference would; the discrepancy would
-     * surface only as a golden-master difference, and only for the population that has the broken
-     * reference. Refusing here reproduces the reference's outcome and names the identifier that failed
-     * to resolve, which a join has no place to report.</p>
-     *
-     * @param xref the cross-reference row naming the customer
-     * @return the resolved customer, never {@code null}
-     * @throws IllegalStateException if no customer row exists for the identifier the cross-reference
-     *     names
-     */
-    private CustomerView requireCustomer(CardXrefView xref) {
-        return customers.findById(xref.getCustomerId())
-                .orElseThrow(() -> abend("CUSTFILE",
-                        "no customer row for customer " + xref.getCustomerId()));
-    }
-
-    /**
-     * Resolves the account a cross-reference row names, encoding {@code 3000-ACCTFILE-GET} at L392 of
-     * {@code app/cbl/CBSTM03A.CBL}.
-     *
-     * <p>Assumptions: an unresolved account stops the run, for the reason recorded on
-     * {@link #requireCustomer(CardXrefView)}. The account read at L403 to L410 carries the same two
-     * arms and the same absence of a not-found arm, and reaches the same abend at L921.</p>
-     *
-     * <p>Assumptions: the read is by the projection's own identifier and by nothing else, which is the
-     * read {@code app/cbl/CBSTM03B.CBL} declares {@code ACCESS MODE IS RANDOM} at L51 with
-     * {@code RECORD KEY IS FD-ACCT-ID} at L52, and for which the caller supplies the whole eleven-digit
-     * key at L396 to L398. One identifier therefore yields at most one row.</p>
-     *
-     * @param xref the cross-reference row naming the account
-     * @return the resolved account, never {@code null}
-     * @throws IllegalStateException if no account row exists for the identifier the cross-reference
-     *     names
-     */
-    private AccountView requireAccount(CardXrefView xref) {
-        return accounts.findById(xref.getAccountId())
-                .orElseThrow(() -> abend("ACCTFILE",
-                        "no account row for account " + xref.getAccountId()));
-    }
-
-    /**
      * Resolves the credit score the heading band carries.
      *
-     * <p>Assumptions: the score is supplied by the caller and is neither read from a relation nor
-     * defaulted here, and the reason is a deliberate decision taken elsewhere. The band needs it:
-     * L485 of {@code app/cbl/CBSTM03A.CBL} moves {@code CUST-FICO-CREDIT-SCORE} into its item, and the
-     * golden statement renders it. But the projection this module reads does not carry it:
-     * {@code data-migration/sql/V1__reporting_views.sql} omits that column from the customer view at
-     * its L472 to L473 on the ground that a credit assessment is not statement heading data, the
-     * view's own comment records the omission, and {@code CustomerView} documents it as a decision
-     * rather than an oversight and directs that a band genuinely needing it is a change to the
-     * relation, reported against that artifact rather than worked around.</p>
+     * <p>Refactoring Rationale: the score is read from the customer row and no longer supplied by a
+     * caller-passed resolver function, and the reasoning that justified the resolver is withdrawn
+     * because its premise was false. That reasoning said the band needed the value but the projection
+     * "does not carry it", citing the customer view's own comment that a credit assessment is not
+     * statement heading data. It is statement heading data: {@code app/cbl/CBSTM03A.CBL} L485 moves
+     * {@code CUST-FICO-CREDIT-SCORE} into {@code ST-FICO-SCORE}, declared {@code PIC X(20)} at L118 of
+     * {@code app/cpy/COSTM01.CPY}, and the migrated renderer emits that band. The column is now
+     * projected, so the value comes from the row it belongs to. What the resolver actually bought was
+     * an unfilled seam: no production component supplied one, so the generation method it guarded could
+     * not be invoked at all.</p>
      *
-     * <p>Trade-offs: a caller-supplied resolver is accepted so that this class fabricates nothing.
-     * Alternatives Considered: substituting zero, which would print a real-looking credit score of 000
-     * in a cardholder's statement and is the one outcome worse than refusing; and widening the
-     * projection from here, which is not available to this module at all, because the column is absent
-     * from the relation and the login role holds no privilege on the schema the base table lives in, so
-     * naming it would fail the first read rather than return a value. What is given up is that a caller
-     * has to supply the value; what is kept is that no invented figure can reach a financial
-     * document.</p>
+     * <p>Assumptions: a null score is a defect in the data rather than a state to render around, so it
+     * stops the run. The base column is declared {@code SMALLINT NOT NULL}, so the only way a null
+     * reaches here is a relation redefined underneath this module, which is exactly the condition
+     * register entry <b>R11</b> says to report rather than work around.</p>
      *
-     * @param customer the customer whose score is wanted
-     * @param creditScoreSource the caller-supplied resolver
+     * <p>Assumptions: a negative score is refused here as well as at the mapper, and the duplication is
+     * deliberate: the source picture {@code PIC 9(03)} is unsigned and has no position to represent a
+     * sign, so a negative value cannot have come from a conforming record.</p>
+     *
+     * <p>Trade-offs: the refusal names no identifier. Refactoring Rationale: it named the customer
+     * identifier, on the ground that an operator needs to find the offending customer -- and
+     * {@code docs/architecture/observability.md} names the customer identifier among the values an
+     * operator-read rendering must OMIT. What locates the failure instead is the correlation identifier
+     * on the request-scoped line and the {@code batch.batch_run} step ledger for a run, both of which
+     * the same document records as the substitutes for exactly this need.</p>
+     *
+     * @param heading the heading row whose score is wanted; must not be {@code null}
      * @return the resolved credit score
-     * @throws IllegalStateException if the resolver yields a negative value, which the unsigned source
-     *     picture {@code PIC 9(03)} has no position to represent
+     * @throws IllegalStateException if the row carries no score, or carries a negative one, which the
+     *     unsigned source picture {@code PIC 9(03)} has no position to represent
      */
-    private static int creditScoreOf(CustomerView customer,
-            ToIntFunction<CustomerView> creditScoreSource) {
-        int score = creditScoreSource.applyAsInt(customer);
+    private static int creditScoreOf(StatementHeading heading) {
+        Short score = heading.ficoCreditScore();
+        if (score == null) {
+            throw abend("CUSTFILE", "customer row carries no credit score");
+        }
         if (score < 0) {
-            // WHY : Assumptions: this is refused here rather than left to the mapper so that the
-            //       failure names the customer whose score was unusable. The mapper refuses a negative
-            //       score too, on the same unsigned-picture ground, but it sees only the number and
-            //       could not say which of a run's statements produced it.
-            // WHY : Assumptions: the reason is kept short enough to survive AbendDetail's declared
-            //       50-character reason width, which truncates on the right rather than refusing. A
-            //       longer sentence would lose the identifier, which is the one part an operator
-            //       needs to find the offending customer.
-            throw abend("CUSTFILE",
-                    "negative credit score for customer " + customer.getCustomerId());
+            throw abend("CUSTFILE", "customer row carries a negative credit score");
         }
         return score;
     }
@@ -996,69 +1339,6 @@ public class StatementService {
     }
 
     /**
-     * Refuses a request whose stated account is not the account the cross-reference names.
-     *
-     * <p>Assumptions: the account is optional on the request and is a cross-check rather than a second
-     * key. When it is absent the cross-reference alone decides, which is what the reference does at
-     * L322 of {@code app/cbl/CBSTM03A.CBL}; when it is present and disagrees, the caller has named two
-     * things that cannot both be true and is told so rather than being served the card's statement
-     * under the wrong account heading.</p>
-     *
-     * @param request the request, whose account component may be absent
-     * @param xref the cross-reference row the requested card resolved to
-     * @throws ClientInputException if the stated account is present and is not the resolved one
-     */
-    private static void requireStatedAccountMatches(StatementRequest request, CardXrefView xref) {
-        String stated = request.accountId();
-        if (stated == null || stated.isBlank()) {
-            return;
-        }
-        if (Long.parseLong(stated) != xref.getAccountId()) {
-            throw new ClientInputException(ApiError.CODE_VALIDATION, "accountId",
-                    "the requested card resolves to a different account than the one stated");
-        }
-    }
-
-    /**
-     * Refuses a narrowed collision, in which two distinct cards render to one narrowed form.
-     *
-     * <p>Assumptions: a narrowed value is not a card identity, so the per-card grouping token on the
-     * row decides which card a statement is for. Two cards sharing their last four digits narrow
-     * identically, and the token is a keyed digest that distinguishes them while disclosing neither.
-     * Checking row by row rather than over a collected group is what lets the check run inside a
-     * traversal that is deliberately unbounded.</p>
-     *
-     * <p>Trade-offs: the request is refused rather than answered. That denies a statement to two
-     * genuine cardholders until the request distinguishes them, and it is accepted because the
-     * alternative is a statement whose total is the sum of two cards' activity, which is wrong for
-     * both of them and says so nowhere. An empty traversal is not a collision: a card with no activity
-     * has no token, and the reference produces a statement for it because the cross-reference walk
-     * drives one statement per card whatever the activity.</p>
-     *
-     * @param knownToken the token seen so far in this traversal, or {@code null} on the first row
-     * @param row the row just read
-     * @return the token to carry forward, which is {@code knownToken} once one has been seen
-     * @throws ClientInputException if the row's token differs from the one already seen, which means
-     *     two distinct cards narrow to one rendering
-     */
-    private static String requireOneCard(String knownToken, StatementTransactionView row) {
-        String token = row.cardFingerprint();
-        if (knownToken == null) {
-            return token;
-        }
-        if (!knownToken.equals(token)) {
-            // WHY : Assumptions: the message names neither the narrowed rendering nor either token.
-            //       The rendering carries four digits of a primary account number and a token is
-            //       derived from the whole of one, so neither belongs in a message that may be logged;
-            //       that a collision occurred is the whole of what a caller needs.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, "cardNumber",
-                    "the requested card number narrows to a rendering shared by more than one "
-                            + "distinct card, so a statement cannot be attributed");
-        }
-        return knownToken;
-    }
-
-    /**
      * Assembles the customer name the statement heads with.
      *
      * <p>Assumptions: the three parts are joined with one blank literal after each, unconditionally,
@@ -1075,13 +1355,18 @@ public class StatementService {
      * has a declared width and a response component does not, and a response that reused the band's
      * padded form would publish trailing blanks as data.</p>
      *
-     * @param customer the customer row resolved for the requested card
+     * @param heading the heading row carrying the three name parts for the requested card
      * @return the assembled name, with one blank after each of the three parts and any absent part
      *     contributing only its blank
      */
-    private static String assembleName(CustomerView customer) {
-        String middle = customer.getMiddleName() == null ? "" : customer.getMiddleName();
-        return customer.getFirstName() + " " + middle + " " + customer.getLastName();
+    private static String assembleName(StatementHeading heading) {
+        // WHY : Refactoring Rationale: the null test that stood here is gone, because the heading's own
+        //       constructor now renders an absent middle name as blanks and an absent second address
+        //       line likewise. Keeping the test would have left two answers to one question -- this
+        //       method's and the constructor's -- and the two would have had to be changed together
+        //       forever after. The composed value is unchanged either way: a blank middle name still
+        //       produces the two separators the reference's own MOVE of a space-filled field produces.
+        return heading.firstName() + " " + heading.middleName() + " " + heading.lastName();
     }
 
     /**
@@ -1150,18 +1435,35 @@ public class StatementService {
     /**
      * Builds the location of one stored statement artifact.
      *
-     * <p>Assumptions: the key is derived from the account identifier and the narrowed card's last four
-     * digits rather than from a stored card number, so no primary account number appears in an object
-     * key. An object key is written to an access log by the store itself and by every intermediary that
-     * serves it, which is the same exposure the card context's addressing decision turns on.</p>
+     * <p>Refactoring Rationale: the key was the account identifier in full, a hyphen, the card's last
+     * four digits and the suffix, and the comment defending it said that "no primary account number
+     * appears in an object key". That was true and was answering too narrow a question. An object key is
+     * written to the store's own access log for every request that touches the object, is returned by
+     * every listing and appears in a bucket inventory, none of which a content-encryption key reaches --
+     * so a key discloses whatever it spells out to a wider audience than the cardholder. An eleven-digit
+     * account identifier is named by the sensitive-data logging contract in
+     * {@code docs/architecture/observability.md} in its own right, and four card digits beside it narrow
+     * a cardholder further than either does alone. The key now carries a keyed opaque token instead,
+     * which discloses neither and still names one artifact stably.</p>
      *
-     * @param accountId the account the statement is attributed to
-     * @param narrowedCard the narrowed rendering of the card the statement is for
+     * <p>Assumptions: the token is computed over the account identifier and the card fingerprint
+     * together, so two cards of one account yield two artifacts rather than overwriting each other, and
+     * a card that moves between accounts yields a new artifact rather than silently replacing the
+     * statement of its former account.</p>
+     *
+     * <p>Assumptions: the token is STABLE for one card under one key, so rerunning a night overwrites
+     * the artifact it replaces instead of accumulating a second copy under a new name. That is the
+     * property a random identifier would have cost, and it is why the tokeniser is keyed rather than
+     * random -- the reasoning is recorded in full on {@code ArtifactIdentityConfig}.</p>
+     *
+     * @param heading the heading row naming the account and the card the artifact belongs to; must not
+     *     be {@code null}
      * @param suffix the artifact suffix, either {@value #PLAIN_TEXT_SUFFIX} or {@value #HTML_SUFFIX}
      * @return the artifact location, never {@code null}
      */
-    private String artifactUri(Long accountId, String narrowedCard, String suffix) {
-        String tail = narrowedCard.substring(narrowedCard.length() - 4);
-        return "s3://" + outputBucket + "/" + statementPrefix + accountId + "-" + tail + suffix;
+    private String artifactUri(StatementHeading heading, String suffix) {
+        String token = this.artifactIdentity.token(ARTIFACT_TOKEN_PURPOSE,
+                heading.accountId() + ":" + heading.cardFingerprint());
+        return "s3://" + outputBucket + "/" + statementPrefix + token + suffix;
     }
 }

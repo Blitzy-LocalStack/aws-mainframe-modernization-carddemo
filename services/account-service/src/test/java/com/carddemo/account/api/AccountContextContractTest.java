@@ -9,12 +9,14 @@ import com.carddemo.account.config.SecurityConfig;
 import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.dto.AccountContextView;
+import com.carddemo.account.dto.AccountLookupRequest;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
+import com.carddemo.account.dto.CustomerLookupRequest;
 import com.carddemo.account.mapper.AccountContextMapper;
 import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CardXrefMapper;
@@ -101,14 +103,33 @@ class AccountContextContractTest {
     private static final String XREF_SEARCH_BY_ACCOUNT_PATH = "/api/v1/card-xrefs/search-by-account";
 
     /**
-     * The account read path template, written as a literal on purpose.
+     * The end-user account edit path template, written as a literal on purpose.
+     *
+     * <p>Refactoring Rationale: this template named the address of BOTH the machine read and the end-user
+     * edit while the machine read was a keyed {@code GET}. The read moved to
+     * {@link #ACCOUNT_LOOKUP_PATH} with its identifier in a body, so this template now names one operation
+     * only, and the constant is described for what remains at it rather than for what used to share it.</p>
      */
     private static final String ACCOUNT_PATH_TEMPLATE = "/api/v1/accounts/{accountId}";
 
     /**
-     * The customer presence path template, written as a literal on purpose.
+     * The internal account context lookup path, written as a literal on purpose.
+     *
+     * <p>Assumptions: a literal and not a template, because the identifier no longer appears in the
+     * address at all. That is the property this constant exists to pin: a future edit that reintroduced a
+     * path variable here would have to change this literal, and the disjointness assertion below would
+     * report it.</p>
      */
-    private static final String CUSTOMER_PATH_TEMPLATE = "/api/v1/customers/{customerId}";
+    private static final String ACCOUNT_LOOKUP_PATH = "/api/v1/accounts/lookup";
+
+    /**
+     * The customer presence path, written as a literal on purpose.
+     *
+     * <p>Refactoring Rationale: this was the template {@code /api/v1/customers/{customerId}}, carrying a
+     * {@code HEAD} and a {@code GET} served by one handler. Both collapsed into one {@code POST} at this
+     * address with the identifier in a body, for the reason recorded on {@code CustomerLookupRequest}.</p>
+     */
+    private static final String CUSTOMER_LOOKUP_PATH = "/api/v1/customers/lookup";
 
     /** The end-user account-view path template. */
     private static final String ACCOUNT_VIEW_PATH_TEMPLATE = "/api/v1/accounts/{accountId}/view";
@@ -123,8 +144,15 @@ class AccountContextContractTest {
      */
     private static final String CUSTOMER_SCAN_PATH = "/api/v1/customers";
 
-    /** The keyed customer read path template, written as a literal on purpose. */
-    private static final String CUSTOMER_RECORD_PATH_TEMPLATE = "/api/v1/customers/{customerId}/record";
+    /**
+     * The keyed customer record read path, written as a literal on purpose.
+     *
+     * <p>Refactoring Rationale: the {@code {customerId}} segment is gone for the same reason it left the
+     * presence check above, and this operation additionally moved onto its own internal scope. Both changes
+     * are recorded where they are enforced -- the address on {@code CustomerController.RECORD_PATH}, the
+     * scope on {@code InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ}.</p>
+     */
+    private static final String CUSTOMER_RECORD_PATH = "/api/v1/customers/record";
 
     /** The end-user by-account cross-reference listing path template. */
     private static final String ACCOUNT_XREF_PATH_TEMPLATE =
@@ -142,9 +170,16 @@ class AccountContextContractTest {
 
     /**
      * The transfer records whose shape this contract restates, checked component for component.
+     *
+     * <p>Refactoring Rationale: the two lookup request records were added here when the machine reads moved
+     * onto bodies. A request record whose schema this contract did not restate is one a caller composes from
+     * the document and the server rejects at binding -- the same class of caller-versus-server disagreement
+     * the whole move was made to close, so the records are enrolled rather than left to the path assertions
+     * alone.</p>
      */
     private static final List<Class<?>> DOCUMENTED_RECORDS = List.of(
             AccountContextView.class, CardXrefView.class, CardXrefLookupRequest.class,
+            AccountLookupRequest.class, CustomerLookupRequest.class,
             AccountViewResponse.class, AccountViewResponse.AccountDetail.class,
             AccountViewResponse.CustomerDetail.class, AccountUpdateRequest.class,
             AccountUpdateResponse.class, CardXrefResponse.class);
@@ -272,23 +307,34 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies the paths the neighbouring context BUILDS are exactly the three it is pinned to.
+     * Verifies the addresses this context MOUNTS for the neighbouring context are the ones its client is
+     * pinned to.
      *
-     * <p>Refactoring Rationale: this case was named for "the three internal paths", which read as a claim
-     * about the internal surface and stopped being one when the customer scan and the customer record read
-     * were mounted there. Its subject was never the surface: it is the path set
-     * {@code RestAccountContextClient} in the authorization context assembles, and that set is three
-     * because that consumer makes three reads. Naming the consumer instead of the surface keeps the
-     * sentence true the next time an internal route lands, and the assertions below are unchanged -- only
-     * the description of what they measure is.</p>
+     * <p>Assumptions: the subject is the path set the pending-authorization context's
+     * {@code RestAccountContextClient} assembles, not the internal surface as a whole -- that surface is
+     * wider, because the customer scan and the customer record read are matched on the internal chain for a
+     * reason unrelated to this consumer. Naming the consumer keeps the sentence true the next time an
+     * internal route lands.</p>
+     *
+     * <p>Assumptions: the assertion is a composition of the CONTROLLER constants against literals declared
+     * in this class, so it fails when either side moves alone. The consuming context holds its own copy of
+     * each literal, which is what this comparison stands in for: the two services cannot import one
+     * another, so a shared address is agreed by two pinned literals and a build that compares them.</p>
      */
     @Test
-    @DisplayName("the paths the consumer builds are exactly the three it is pinned to")
+    @DisplayName("the addresses mounted for the consumer are the ones it is pinned to")
     void theConsumerBuiltPathsArePinned() {
+        // WHY : Refactoring Rationale: two of the three pins moved from a path TEMPLATE to a fixed
+        //   /lookup segment, matching the addresses the consumer's own constants declare. They are
+        //   asserted from the controller constants rather than from the literals alone, so a segment
+        //   renamed on the server side fails here instead of at run time as a 404 the consumer reports
+        //   as a dependency failure.
         assertThat(CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH)
                 .isEqualTo(XREF_LOOKUP_PATH);
-        assertThat(AccountController.BASE_PATH + "/{accountId}").isEqualTo(ACCOUNT_PATH_TEMPLATE);
-        assertThat(CustomerController.BASE_PATH + "/{customerId}").isEqualTo(CUSTOMER_PATH_TEMPLATE);
+        assertThat(AccountController.BASE_PATH + AccountController.LOOKUP_PATH)
+                .isEqualTo(ACCOUNT_LOOKUP_PATH);
+        assertThat(CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH)
+                .isEqualTo(CUSTOMER_LOOKUP_PATH);
     }
 
     /**
@@ -306,11 +352,15 @@ class AccountContextContractTest {
      * fail on different mistakes. The set is widened as routes are added rather than left to drift, which
      * is what makes it an assertion instead of a snapshot.</p>
      *
-     * <p>Assumptions: the two customer reads are named individually rather than folded into the probe's
-     * entry, because each is a separate address with one operation. The scan sits at the collection address
-     * and the keyed read at a segment below the probe, for the reason recorded on
-     * {@code CustomerController.RECORD_PATH}: the probe's address already carries a status-only contract a
-     * neighbouring context depends on.</p>
+     * <p>Assumptions: the two customer-record reads are named individually, because each is a separate
+     * address with one operation. The scan sits at the collection address and the keyed read at a segment
+     * below it, for the reason recorded on {@code CustomerController.RECORD_PATH}.</p>
+     *
+     * <p>Refactoring Rationale: the keyed customer template is GONE from the expected set and two fixed
+     * lookup addresses are in it. The machine account read and the customer presence check both moved onto
+     * bodies, so the keyed customer template is published by nothing and the keyed account template carries
+     * the end-user update alone. Asserting the set as CLOSED is what makes the withdrawal assertable: a
+     * stale entry left behind for a route no handler serves fails here.</p>
      *
      * @throws Exception if the packaged document is absent or unreadable, which is itself the defect
      */
@@ -320,9 +370,9 @@ class AccountContextContractTest {
         Map<String, Object> paths = contractPaths();
 
         assertThat(paths).containsOnlyKeys(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
-                XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_PATH_TEMPLATE, ACCOUNT_VIEW_PATH_TEMPLATE,
-                ACCOUNT_XREF_PATH_TEMPLATE, CUSTOMER_PATH_TEMPLATE, CUSTOMER_SCAN_PATH,
-                CUSTOMER_RECORD_PATH_TEMPLATE);
+                XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH, ACCOUNT_PATH_TEMPLATE,
+                ACCOUNT_VIEW_PATH_TEMPLATE, ACCOUNT_XREF_PATH_TEMPLATE, CUSTOMER_LOOKUP_PATH,
+                CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH);
         assertThat(operation(paths, XREF_LOOKUP_PATH)).containsOnlyKeys("post");
 
         // WHY : Assumptions: all three cross-reference addresses declare a post and nothing else, and the
@@ -334,29 +384,32 @@ class AccountContextContractTest {
         assertThat(operation(paths, XREF_LOOKUP_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
         assertThat(operation(paths, XREF_SEARCH_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
 
-        // WHY : Assumptions: the account address carries BOTH a get and a put, and the two serve
-        //   different surfaces -- the get is the neighbouring context's machine read, the put is the
-        //   end-user edit. They share an address because they act on one record; they are separated by
-        //   filter chain rather than by prefix, which SecurityConfig.ACCOUNT_PATH_PATTERN records in
-        //   full.
-        assertThat(operation(paths, ACCOUNT_PATH_TEMPLATE)).containsOnlyKeys("get", "put");
+        // WHY : Refactoring Rationale: the keyed account address carries a put and NOTHING else, where it
+        //   previously carried a get beside it. The get was the neighbouring context's machine read and it
+        //   moved to ACCOUNT_LOOKUP_PATH as a post, taking its identifier out of the request line. The two
+        //   are still separated by filter chain rather than by prefix, which SecurityConfig
+        //   .ACCOUNT_PATH_PATTERN records in full -- what changed is that they no longer share an address,
+        //   so the internal chain's matcher no longer has to distinguish them by method.
+        assertThat(operation(paths, ACCOUNT_LOOKUP_PATH)).containsOnlyKeys("post");
+        assertThat(operation(paths, ACCOUNT_PATH_TEMPLATE)).containsOnlyKeys("put");
         assertThat(operation(paths, ACCOUNT_VIEW_PATH_TEMPLATE)).containsOnlyKeys("get");
         assertThat(operation(paths, ACCOUNT_XREF_PATH_TEMPLATE)).containsOnlyKeys("get");
 
-        // WHY : Assumptions: the customer path must declare BOTH methods, and the HEAD entry is the one
-        //   that matters most: the consumer issues HEAD, so a contract naming only GET would document a
-        //   surface nobody calls. GET is required too because one handler serves both -- it is declared as a
-        //   GET mapping and the framework answers HEAD from it -- so a document naming only HEAD would
-        //   misdescribe the mapping that actually exists.
-        assertThat(operation(paths, CUSTOMER_PATH_TEMPLATE)).containsOnlyKeys("head", "get");
+        // WHY : Refactoring Rationale: the presence check declares ONE method where the document
+        //   previously declared a head and a get at a keyed address. Both were served by one handler, so
+        //   the pair described one behaviour twice and could not diverge; collapsing them into a single
+        //   post removed the duplicate description rather than a capability, and the answer was never in a
+        //   body so a caller wanting only presence still transfers none.
+        assertThat(operation(paths, CUSTOMER_LOOKUP_PATH)).containsOnlyKeys("post");
 
-        // WHY : Assumptions: each customer READ declares a GET and nothing else. Neither is paired with a
-        //   HEAD entry, unlike the probe above, and the asymmetry is deliberate: HEAD is implicitly
-        //   available on every GET in this system, and it is declared on the probe only because that is the
-        //   method its consumer actually issues. Declaring it on a read that returns a representation would
-        //   document an operation no caller has a reason to send.
+        // WHY : Assumptions: the scan declares a get and the record read a post, and the asymmetry follows
+        //   from what each carries. The scan is positioned by an opaque cursor and bounded by a size, so it
+        //   holds no identifier and keeps the method its shape implies; the record read carries the
+        //   nine-digit key, so it takes a body for the reason its request record states. Neither declares a
+        //   HEAD entry: HEAD is implicitly available on every GET in this system, and declaring it on a
+        //   read that returns a representation would document an operation no caller has reason to send.
         assertThat(operation(paths, CUSTOMER_SCAN_PATH)).containsOnlyKeys("get");
-        assertThat(operation(paths, CUSTOMER_RECORD_PATH_TEMPLATE)).containsOnlyKeys("get");
+        assertThat(operation(paths, CUSTOMER_RECORD_PATH)).containsOnlyKeys("post");
     }
 
     /**
@@ -376,12 +429,16 @@ class AccountContextContractTest {
      * named here, and until it is, its routes appear in neither set and the omission is visible as a
      * missing contract entry rather than as silence.</p>
      *
-     * <p>Assumptions: HEAD is the one asymmetry, and it is deliberate rather than a gap. The framework
+     * <p>Assumptions: the HEAD normalisation below is retained although no operation currently declares
+     * that method. The only published HEAD was the customer probe's, and it collapsed into the presence
+     * check's single POST -- so the mapping is a no-op today. It is kept rather than deleted because the
+     * property it encodes is a framework behaviour and not a fact about this contract: the framework
      * answers HEAD from a GET mapping by discarding the body, so a published HEAD is served by the GET
-     * mapping at the same address and there is no HEAD annotation to find. The reverse does not hold: a
-     * GET mapping does not oblige the contract to declare HEAD, because HEAD is implicitly available on
-     * every GET in this system and declaring it everywhere would document six operations no consumer
-     * issues. The customer probe declares it because its consumer issues exactly that method.</p>
+     * mapping at the same address and there is no HEAD annotation for the mounted set to find. Deleting the
+     * mapping would leave the next declared HEAD failing this case as an unmounted operation, which it
+     * would not be. Refactoring Rationale: the alternative -- deleting it and restoring it if needed -- was
+     * rejected because the failure it prevents reports the opposite of the truth, and a reviewer would
+     * spend the effort on the handler rather than on this case.</p>
      *
      * @throws Exception if the packaged document is absent or unreadable, which is itself the defect
      */
@@ -490,8 +547,8 @@ class AccountContextContractTest {
                 .as("the internal surface must be exactly the addresses the internal chain is composed"
                         + " from")
                 .containsExactlyInAnyOrder(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
-                        XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_PATH_TEMPLATE,
-                        CUSTOMER_PATH_TEMPLATE, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH_TEMPLATE);
+                        XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH,
+                        CUSTOMER_LOOKUP_PATH, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH);
         internal.forEach((name, operation) ->
                 assertThat(securitySchemesOf(operation))
                         .as("%s must require the internal token", name)
@@ -588,7 +645,7 @@ class AccountContextContractTest {
 
         AccountContextView view = controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)))
-                .read(ACCOUNT_ID);
+                .lookup(new AccountLookupRequest(ACCOUNT_ID));
 
         String body = this.json.writeValueAsString(view);
         assertThat(this.json.readValue(body, Map.class))
@@ -623,7 +680,7 @@ class AccountContextContractTest {
 
         String body = this.json.writeValueAsString(controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)))
-                .read(ACCOUNT_ID));
+                .lookup(new AccountLookupRequest(ACCOUNT_ID)));
 
         assertThat(body)
                 .contains("\"currentBalance\":\"0.00\"")
@@ -652,19 +709,40 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies an absent account raises the type the shared advice renders as 404.
+     * Verifies an absent account raises the type the shared advice renders as 404, naming no identifier.
+     *
+     * <p>Refactoring Rationale: this case previously asserted the message CONTAINED the account
+     * identifier, so it did not merely tolerate a disclosure -- it required one, and a fix removing the
+     * identifier would have been reported as a regression. The sensitive-data contract in
+     * {@code docs/architecture/observability.md} names account and customer identifiers alongside the
+     * primary account number as values a durable diagnostic may not carry, and requires a prohibited
+     * value to be OMITTED rather than abbreviated. This message is durable: the shared advice writes it
+     * to the operational record and returns it in a response body. The assertion is therefore inverted
+     * to absence, which is the direction that keeps the disclosure from returning.</p>
+     *
+     * <p>Assumptions: the exact remaining text is pinned as well as the absence, because an absence
+     * assertion alone would also pass against a message emptied to nothing and an operator reading the
+     * record still needs to know WHICH refusal occurred. The correlation identifier the shared filter
+     * stamps carries the join back to the calling context, which is where the identifier legitimately
+     * lives.</p>
+     *
+     * <p>Assumptions: the premise the old comment rested on -- that the identifier "already appears in
+     * the request path" -- is not merely unsupported now, it is false: this operation is reached by a
+     * {@code POST} carrying its key in a body, so the identifier appears in no request line and no
+     * access log, and the message would have been the ONLY place it landed.</p>
      */
     @Test
-    @DisplayName("an absent account raises a not-found")
+    @DisplayName("an absent account raises a not-found that names no account identifier")
     void anAbsentAccountRaisesNotFound() {
         AccountRepository accounts = mock(AccountRepository.class);
         when(accounts.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
         AccountController controller = controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)));
 
-        assertThatThrownBy(() -> controller.read(ACCOUNT_ID))
+        assertThatThrownBy(() -> controller.lookup(new AccountLookupRequest(ACCOUNT_ID)))
                 .isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining(String.valueOf(ACCOUNT_ID));
+                .hasMessageNotContaining(String.valueOf(ACCOUNT_ID))
+                .hasMessage("no account master row exists for the requested account");
     }
 
     /**
@@ -683,8 +761,8 @@ class AccountContextContractTest {
         CustomerController controller = new CustomerController(
                 reads(mock(CardXrefRepository.class), mock(AccountRepository.class), customers));
 
-        ResponseEntity<Void> present = controller.exists(CUSTOMER_ID);
-        ResponseEntity<Void> absent = controller.exists(CUSTOMER_ID + 1);
+        ResponseEntity<Void> present = controller.lookup(new CustomerLookupRequest(CUSTOMER_ID));
+        ResponseEntity<Void> absent = controller.lookup(new CustomerLookupRequest(CUSTOMER_ID + 1));
 
         assertThat(present.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
         assertThat(present.getBody()).isNull();

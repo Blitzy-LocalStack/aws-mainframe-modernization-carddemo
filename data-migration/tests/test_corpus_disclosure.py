@@ -1,13 +1,23 @@
-"""Exercise the corpus-wide fail-closed disclosure policy and the masking key's strength floor.
+"""Exercise the corpus-wide fail-closed disclosure policy over every declared record.
 
 Purpose
 -------
-Execute the two controls that stand between a decoded CardDemo extract and an operator's log:
-the allowlist in :mod:`carddemo_migration.copybook.layouts` that decides which fields a
-diagnostic may render, and the enforcement that refuses masking-key material too weak to make a
-redaction tag unconfirmable. Both were fail-open before, and both fail in the same silent way
-when they regress -- a disclosed field decodes and renders perfectly, and a weak key produces a
-tag that looks identical to a strong one -- so neither can be verified by reading the source.
+Execute the first of the two controls that stand between a decoded CardDemo extract and an
+operator's log: the allowlist in :mod:`carddemo_migration.copybook.layouts` that decides which
+fields a diagnostic may render. It fails in a silent way when it regresses -- a disclosed field
+decodes and renders perfectly -- so it cannot be verified by reading the source.
+
+Refactoring Rationale: this module also carried the masking key's strength floor, in seven cases
+that were byte-identical duplicates of the seven in ``test_mask_key_material.py``. Both copies
+ran, so both passed, and the duplication was invisible in a green run -- which is precisely the
+trap it set: the key rule changed, the copy here still asserted that a blank key falls back to
+the process key, and a maintainer editing one file would have seen the suite fail for a reason
+the file in front of them did not explain. The seven cases live in ``test_mask_key_material.py``
+alone now, whose module docstring states the key concern in full. Alternatives Considered:
+keeping both copies as independent guards, on the reasoning that the key floor matters enough to
+assert twice. Rejected because two copies of one assertion are not two guards -- they are one
+guard and one thing that can silently disagree with it, and the disagreement surfaces as a
+failure in whichever file the maintainer did not touch.
 
 Assumptions: the disclosure properties are asserted over EVERY field of EVERY record this
 module declares, not over a sample. A fail-closed policy earns its keep on the field nobody
@@ -28,13 +38,60 @@ per-field application are asserted in ``test_authorization_disclosure.py`` and i
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import secrets
+import ast
+import pathlib
+from typing import TYPE_CHECKING
 
 import pytest
 
+import carddemo_migration
 from carddemo_migration.copybook import layouts
+
+if TYPE_CHECKING:
+    # WHY : Assumptions: the builder class is imported for ANNOTATION only, under the
+    #   type-checking guard, which is the idiom ``test_mask_key_material`` states in full for the
+    #   same fixture. pytest injects the object itself, so the name is needed to document the
+    #   parameter and for nothing else; importing it unconditionally would tie collection of this
+    #   file to the folder's conftest being importable for no run-time gain.
+    from conftest import SentinelRecordBuilder
+
+# Assumptions: the package directory is resolved from the IMPORTED package rather than from this
+#   file's own location, so the duplicate-declaration walk below examines the same source tree the
+#   rest of the suite imports. Deriving it from `__file__` here would walk the checkout even when
+#   the suite is running against an installed distribution, which is the arrangement
+#   data-migration/pyproject.toml deliberately sets up.
+_PACKAGE_ROOT = pathlib.Path(carddemo_migration.__file__).parent
+
+
+def _bound_names(node: ast.stmt) -> tuple[str, ...]:
+    """Return the module-level names one top-level statement binds.
+
+    Parameters
+    ----------
+    node : ast.stmt
+        One statement from a module body.
+
+    Returns
+    -------
+    tuple of str
+        Each name the statement binds, empty for a statement that binds none.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Assumptions): the four binding forms that matter for a module of declarations are
+    #   covered -- a function, a class, an annotated assignment and a plain assignment -- and an
+    #   import is deliberately NOT, because re-importing a name is already ruff's F811 territory and
+    #   a conditional import guarded by a version check is a legitimate double binding.
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        return (node.name,)
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return (node.target.id,)
+    if isinstance(node, ast.Assign):
+        return tuple(target.id for target in node.targets if isinstance(target, ast.Name))
+    return ()
+
 
 # Assumptions: the population is taken from the module's own namespace walker rather than from
 #   a list written here, for the same reason the walker exists: a list in the test would have the
@@ -64,6 +121,33 @@ _PROHIBITED_NAMES = (
     "DALYTRAN-AMT",
     "EXP-TRAN-AMT",
     "TRAN-CAT-BAL",
+    # Account identifiers, wherever a record carries one.
+    # WHY (Refactoring Rationale): these seven were NAMED DISCLOSABLE by
+    #   _CORPUS_DISCLOSABLE_FIELDS on the ground that "the published REST contracts already
+    #   render an account identifier in full", while every one of them was in fact marked
+    #   sensitive at its declaration site -- so the stated policy and the applied policy
+    #   disagreed, and the stated one was the one a reader consulted. The repository's
+    #   operator-log contract in docs/architecture/observability.md names account identifiers
+    #   among the values a diagnostic must omit "not its content, not its length, and not a
+    #   digest of it", and a REST path is a different surface with a different audience from a
+    #   retained log store. The names were withdrawn from the allowlist, and they are listed
+    #   HERE so the property is enforced from the direction that matters: this case fails if any
+    #   record ever discloses one, whereas removing a name from an allowlist only stops
+    #   admitting it.
+    # WHY (Assumptions): PA-ACCT-ID is deliberately NOT in this list. The authorization
+    #   allowlist names it, that list is read field by field out of layouts.py by
+    #   AuthorizationDisclosurePolicyTest, under
+    #   services/common-lib/src/test/java/com/carddemo/common/codec/,
+    #   and test_master_disclosure.py pins the disagreement between the two policies as a
+    #   deliberate fact. Adding it here would break a cross-language literal rather than close a
+    #   gap.
+    "ACCT-ID",
+    "EXP-ACCT-ID",
+    "CARD-ACCT-ID",
+    "EXP-CARD-ACCT-ID",
+    "XREF-ACCT-ID",
+    "EXP-XREF-ACCT-ID",
+    "TRANCAT-ACCT-ID",
     # Card and transaction identifiers, and the customer identifier.
     "CARD-NUM",
     "XREF-CARD-NUM",
@@ -124,11 +208,6 @@ _PROHIBITED_NAMES = (
     "SEC-USR-PWD",
 )
 
-# Assumptions: 32 is asserted against the hash's own output size rather than written twice, so
-#   the floor cannot drift away from the reason for it if the construction ever changes.
-_HMAC_OUTPUT_BYTES = hashlib.sha256().digest_size
-
-
 # Assumptions: each field is filled with ONE character used by no other field of the same
 #   record, and the alphabet deliberately excludes every character a redaction can emit -- the
 #   hexadecimal digits, the angle brackets, the asterisk and the space. That exclusion is what
@@ -157,7 +236,7 @@ def _sentinel_record(layout: layouts.RecordSpec) -> str:
     AssertionError
         If the record declares more fields than the sentinel alphabet can distinguish.
     """
-    # WHY (Assumptions): the sentinel is chosen by the field's ORDINAL and not by its name,
+    # Assumptions: the sentinel is chosen by the field's ORDINAL and not by its name,
     #   because a name-derived marker would let a leak of one field be mistaken for a leak of a
     #   similarly named one -- TRAN-MERCHANT-ZIP and TRNX-MERCHANT-ZIP share a suffix. An ordinal
     #   is unique within the record by construction.
@@ -205,7 +284,7 @@ def test_the_import_time_audit_reports_no_unnamed_disclosure() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): this re-runs the audit over the FULLY imported module rather than
+    # Assumptions: this re-runs the audit over the FULLY imported module rather than
     #   trusting the constant the module computed while importing. A record declared below the
     #   audit's own call site would escape that call, and re-running here is what closes the
     #   gap -- so the two assertions are not redundant.
@@ -221,7 +300,7 @@ def test_the_audit_detects_a_record_left_unclosed() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the guard is exercised against a record built HERE rather than by
+    # Assumptions: the guard is exercised against a record built HERE rather than by
     #   editing one of the module's own, because "the audit returned nothing" is only evidence
     #   that the corpus is closed if the audit returns something when it is not. Without this
     #   case an audit that had been reduced to `return ()` would pass every other test in this
@@ -239,7 +318,7 @@ def test_the_audit_detects_a_record_left_unclosed() -> None:
     findings = layouts._unnamed_disclosures((unclosed,))
     assert findings == ("SYNTHETIC-UNCLOSED.SYNTHETIC-KEY",), findings
 
-    # WHY (Assumptions): the same record passed through the closure helper reports nothing,
+    # Assumptions: the same record passed through the closure helper reports nothing,
     #   which is what proves the finding above was the POLICY speaking and not the audit
     #   objecting to a synthetic record on some unrelated ground.
     closed = layouts.RecordSpec(
@@ -265,7 +344,7 @@ def test_the_audit_walks_every_record_the_module_declares() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the count is asserted against the three populations that make it up
+    # Assumptions: the count is asserted against the three populations that make it up
     #   rather than against a bare number, so a record moved between them still reconciles while
     #   a record dropped from the walk does not. The registry holds the flat datasets; the export
     #   projections and the two IMS segments are declared outside it.
@@ -300,7 +379,7 @@ def test_a_prohibited_field_is_withheld_wherever_it_is_declared(name: str) -> No
         The assertion is the result.
     """
     declaring = [spec for spec in _DECLARED_LAYOUTS if any(f.name == name for f in spec.fields)]
-    # WHY (Assumptions): the case fails when NO record declares the name, rather than passing
+    # Assumptions: the case fails when NO record declares the name, rather than passing
     #   vacuously. A prohibited name that has been renamed or removed would otherwise leave this
     #   case green while asserting nothing at all, which is the failure mode a hand-kept list of
     #   names is most prone to.
@@ -319,7 +398,7 @@ def test_the_allowlist_names_no_field_the_corpus_does_not_declare() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): a stale allowlist entry is not merely untidy. It is a standing
+    # Assumptions: a stale allowlist entry is not merely untidy. It is a standing
     #   permission for whatever field is declared under that name next, granted before anybody
     #   looks at what that field holds, which is the exact reverse of the decision order a
     #   fail-closed policy exists to impose.
@@ -328,9 +407,99 @@ def test_the_allowlist_names_no_field_the_corpus_does_not_declare() -> None:
     assert stale == set(), f"the corpus allowlist names undeclared fields: {sorted(stale)}"
 
 
+def test_every_admitted_field_is_actually_disclosed() -> None:
+    """Assert the allowlists describe this module's behaviour and not merely its intention.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # WHY (Refactoring Rationale): this is the OTHER direction of the audit, and it is here
+    #   because its absence hid a real contradiction. Seven account identifiers -- ACCT-ID,
+    #   CARD-ACCT-ID, XREF-ACCT-ID, TRANCAT-ACCT-ID, EXP-ACCT-ID, EXP-CARD-ACCT-ID and
+    #   EXP-XREF-ACCT-ID -- were named as disclosable and were sensitive at every occurrence
+    #   anyway, because `_close_disclosure` can only ADD sensitivity: four had a `sensitive_*`
+    #   factory at their declaration site and three belong to records closed by the narrower
+    #   `_close_master_disclosure`. Every check that existed passed, because each looked only for
+    #   a field disclosed WITHOUT being named. The consequence was not a leak but something
+    #   harder to find: a reader auditing the corpus by reading the allowlist got the wrong
+    #   answer about seven fields.
+    # WHY (Assumptions): the union of the two allowlists is used, matching both audits in the
+    #   module, and it is sound here because no name occurs in both a corpus-closed and an
+    #   authorization-closed record -- so a name admitted by either list must be disclosed
+    #   wherever it occurs.
+    admitted = layouts._CORPUS_DISCLOSABLE_FIELDS | layouts._AUTHORIZATION_DISCLOSABLE_FIELDS
+    ineffective = sorted(
+        f"{spec.name}.{field.name}"
+        for spec in _DECLARED_LAYOUTS
+        for field in spec.fields
+        if field.sensitive and field.name in admitted
+    )
+    assert ineffective == [], (
+        "these fields are named as disclosable and withheld anyway, so the allowlist describes a"
+        f" policy the module does not apply: {ineffective}"
+    )
+
+
+def test_the_import_time_audit_reports_no_ineffective_admission() -> None:
+    """Assert the module's own bidirectional audit agrees with the assertion above.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # WHY (Assumptions): the module's audit and this suite's independent recomputation are both
+    #   asserted, for the same reason the one-directional pair are: the module's version runs at
+    #   import and would be skipped entirely by anything that stubbed it out, while this suite's
+    #   version cannot protect a deployment that never runs the suite. Each covers the other's
+    #   blind spot.
+    assert layouts._INEFFECTIVE_ADMISSIONS == ()
+
+
+def test_the_layouts_module_binds_no_top_level_name_twice() -> None:
+    """Assert no module-level declaration in the layouts module is silently shadowed by a twin.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # WHY (Refactoring Rationale): `_MASK_HMAC_KEY_MIN_BYTES` and `_mask_hmac_key` were declared
+    #   TWICE in that module, roughly 165 lines apart, with byte-identical bodies. Nothing behaved
+    #   differently, and that is precisely why it needed a test: Python binds a module-level name
+    #   by executing statements in order, so the second declaration silently replaced the first and
+    #   the first remained readable, reviewable and dead. A future strengthening of the key rule
+    #   applied to the first copy would have compiled, passed review and had no effect on the one
+    #   control that decides whether a redaction tag is confirmable.
+    # WHY (Assumptions): ruff cannot report this and the gap is in the RULE rather than in the
+    #   configuration -- F811 covers redefinition of an UNUSED name, and both of these were used.
+    #   So the check is written here against the AST rather than expected from the linter.
+    # WHY (Trade-offs): the whole package is walked rather than only the layouts module, because a
+    #   duplicate is a hazard wherever it occurs and naming one module would leave the other
+    #   thirty-odd unprotected for no saving. Only TOP-LEVEL statements are examined: a name
+    #   rebound inside a function is ordinary control flow, and a method redefined in a class body
+    #   is a separate hazard this check deliberately does not claim to cover.
+    duplicates: dict[str, list[str]] = {}
+    for module_path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        bindings: dict[str, list[int]] = {}
+        for node in ast.parse(module_path.read_text(encoding="utf-8")).body:
+            for name in _bound_names(node):
+                bindings.setdefault(name, []).append(node.lineno)
+        for name, lines in bindings.items():
+            if len(lines) > 1:
+                duplicates[f"{module_path.name}:{name}"] = [str(line) for line in lines]
+    assert duplicates == {}, (
+        "these module-level names are bound more than once, so every declaration but the last is"
+        f" dead code that still reads as live: {duplicates}"
+    )
+
+
 @pytest.mark.parametrize("layout", _DECLARED_LAYOUTS, ids=lambda spec: spec.name)
 def test_a_masked_record_carries_no_withheld_field_s_content(
     layout: layouts.RecordSpec,
+    sentinel_record_builder: SentinelRecordBuilder,
 ) -> None:
     """Assert masking removes every withheld field's characters and keeps every admitted one.
 
@@ -338,13 +507,15 @@ def test_a_masked_record_carries_no_withheld_field_s_content(
     ----------
     layout : layouts.RecordSpec
         The record descriptor under test.
+    sentinel_record_builder : SentinelRecordBuilder
+        Suite-wide builder for a record whose every field carries a position-unique sentinel.
 
     Returns
     -------
     None
         The assertion is the result.
     """
-    raw = _sentinel_record(layout)
+    raw = sentinel_record_builder.build(layout)
     assert len(raw) == layout.reclen
     masked = layouts.mask_record(raw, layout)
     assert len(masked) == layout.reclen, "a masked record must still tile the record it describes"
@@ -356,7 +527,7 @@ def test_a_masked_record_carries_no_withheld_field_s_content(
             assert rendered == span, f"{field.name} is admitted and must render verbatim"
             continue
         if field.name in layouts._LAST4_REVEAL:
-            # WHY (Assumptions): the four card-number names keep the documented last-four
+            # Assumptions: the four card-number names keep the documented last-four
             #   concession, so their span is asserted to be masked EXCEPT its final four
             #   characters rather than absent. Asserting absence here would contradict the
             #   policy, and asserting nothing would leave the concession's width unchecked --
@@ -368,15 +539,22 @@ def test_a_masked_record_carries_no_withheld_field_s_content(
         assert span not in masked, f"{field.name}'s content reappears elsewhere in the rendering"
 
 
-def test_the_customer_national_identifier_is_never_revealed_in_part() -> None:
+def test_the_customer_national_identifier_is_never_revealed_in_part(
+    sentinel_record_builder: SentinelRecordBuilder,
+) -> None:
     """Assert neither national-identifier field reveals its trailing characters.
+
+    Parameters
+    ----------
+    sentinel_record_builder : SentinelRecordBuilder
+        Suite-wide builder for a record whose every field carries a position-unique sentinel.
 
     Returns
     -------
     None
         The assertion is the result.
     """
-    # WHY (Refactoring Rationale): CUST-SSN was in the last-four concession and is removed, so
+    # Refactoring Rationale: CUST-SSN was in the last-four concession and is removed, so
     #   this case pins the removal. It asserts the rendered OUTPUT and not just the membership,
     #   because membership alone would keep passing if the masking function grew a second route
     #   to a partial reveal.
@@ -386,7 +564,7 @@ def test_the_customer_national_identifier_is_never_revealed_in_part() -> None:
     ):
         assert name not in layouts._LAST4_REVEAL
         field = spec.field(name)
-        raw = _sentinel_record(spec)
+        raw = sentinel_record_builder.build(spec)
         span = raw[field.start : field.end]
         rendered = layouts.mask_record(raw, spec)[field.start : field.end]
         assert span[-4:] not in rendered, f"{name} must not reveal its trailing characters"
@@ -404,7 +582,7 @@ def test_the_last_four_concession_covers_card_numbers_only() -> None:
     assert layouts._LAST4_REVEAL == frozenset(
         {"CARD-NUM", "XREF-CARD-NUM", "TRAN-CARD-NUM", "DALYTRAN-CARD-NUM"}
     )
-    # WHY (Assumptions): every member is additionally required to be a declared, withheld
+    # Assumptions: every member is additionally required to be a declared, withheld
     #   sixteen-character field, so the set cannot be satisfied by a name that no longer exists
     #   or by one whose width has changed -- the width is what bounds how much four revealed
     #   characters disclose.
@@ -414,223 +592,3 @@ def test_the_last_four_concession_covers_card_numbers_only() -> None:
         for spec in declaring:
             field = spec.field(name)
             assert field.sensitive and field.length == 16
-
-
-def test_the_key_floor_is_the_hash_s_own_output_size() -> None:
-    """Assert the minimum key length is the HMAC output size rather than an arbitrary number.
-
-    Returns
-    -------
-    None
-        The assertion is the result.
-    """
-    assert layouts._MASK_HMAC_KEY_MIN_BYTES == _HMAC_OUTPUT_BYTES == 32
-
-
-def test_an_unset_key_falls_back_to_strong_process_material(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Assert an unconfigured run uses the process key and that the key clears the floor.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Used to remove the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The assertion is the result.
-    """
-    monkeypatch.delenv(layouts.ENV_MASK_HMAC_KEY, raising=False)
-    assert layouts._mask_hmac_key() == layouts._PROCESS_MASK_KEY
-    assert len(layouts._PROCESS_MASK_KEY) >= layouts._MASK_HMAC_KEY_MIN_BYTES
-    assert len(set(layouts._PROCESS_MASK_KEY)) > 1
-
-    # WHY (Assumptions): empty and whitespace-only are asserted to take the same path as
-    #   unset, because a deployment that references the variable conditionally renders it empty
-    #   and the fallback is the safe outcome there. The case is stated so that behaviour is a
-    #   decision on record rather than something a later reader tightens without noticing that
-    #   tightening it refuses a correct deployment.
-    for blank in ("", "   ", "\n"):
-        monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, blank)
-        assert layouts._mask_hmac_key() == layouts._PROCESS_MASK_KEY
-
-
-@pytest.mark.parametrize(
-    ("supplied", "reason"),
-    [
-        ("hunter2!", "a passphrase carrying characters outside the base64 alphabet"),
-        ("password", "a passphrase that is valid base64 but decodes to six bytes"),
-        (base64.b64encode(bytes(range(16))).decode(), "sixteen bytes, half the floor"),
-        (base64.b64encode(bytes(range(31))).decode(), "thirty-one bytes, one short of the floor"),
-        ("-__--__--__--__--__--__--__--__--__--__--__-", "the URL-safe alphabet"),
-        (base64.b64encode(bytes(32)).decode(), "thirty-two zero bytes"),
-        (base64.b64encode(b"\xff" * 48).decode(), "forty-eight copies of one byte"),
-    ],
-)
-def test_weak_or_malformed_key_material_is_refused(
-    supplied: str,
-    reason: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Refuse key material that is malformed, below the floor, or a single repeated byte.
-
-    Parameters
-    ----------
-    supplied : str
-        The value configured for the masking-key variable.
-    reason : str
-        Prose naming why the value is unacceptable, carried into the failure message so a
-        failing case identifies itself.
-    monkeypatch : pytest.MonkeyPatch
-        Used to configure the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The refusal is the result.
-    """
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, supplied)
-    with pytest.raises(layouts.LayoutError) as refusal:
-        layouts._mask_hmac_key()
-    message = str(refusal.value)
-    assert layouts.ENV_MASK_HMAC_KEY in message, f"the refusal must name the variable ({reason})"
-    # WHY (Assumptions): the refusal is required NOT to echo the value. A message naming the
-    #   rejected key would put candidate key material into whatever log captured the failure,
-    #   which is a worse disclosure than the weak key it was refusing.
-    assert supplied not in message, f"the refusal must not echo the value ({reason})"
-    # WHY (Assumptions): the refusal must also name the remedy, because this abort reaches an
-    #   operator through a command that has stopped working and the generation command is the
-    #   only thing that makes it actionable.
-    assert "secrets.token_bytes" in message
-
-
-def test_a_non_canonical_encoding_of_conforming_material_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Refuse a base64 spelling whose unused trailing bits are non-zero.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Used to configure the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The refusal is the result.
-    """
-    # WHY (Assumptions): the variant is built by flipping an UNUSED bit of the final data
-    #   character, so it decodes to the identical thirty-two bytes and clears every other check.
-    #   That is what isolates the canonicality rule: without this case the rule could be deleted
-    #   and every remaining case would still pass, because the other refusals are reached first.
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    material = bytes(range(1, 33))
-    canonical = base64.b64encode(material).decode()
-    variant = canonical[:-2] + alphabet[alphabet.index(canonical[-2]) ^ 1] + canonical[-1]
-    assert base64.b64decode(variant, validate=True) == material
-    assert variant != canonical
-
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, variant)
-    with pytest.raises(layouts.LayoutError) as refusal:
-        layouts._mask_hmac_key()
-    assert "CANONICAL" in str(refusal.value)
-
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, canonical)
-    assert layouts._mask_hmac_key() == material
-
-
-@pytest.mark.parametrize("length", [32, 33, 48, 64])
-def test_conforming_key_material_is_accepted_at_or_above_the_floor(
-    length: int,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Accept canonical base64 of at least the floor, at several lengths.
-
-    Parameters
-    ----------
-    length : int
-        The number of random bytes the configured value encodes.
-    monkeypatch : pytest.MonkeyPatch
-        Used to configure the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The assertion is the result.
-    """
-    material = secrets.token_bytes(length)
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, base64.b64encode(material).decode())
-    assert layouts._mask_hmac_key() == material
-
-    # WHY (Trade-offs): a trailing newline is asserted to be tolerated because a secret store
-    #   and a shell here-document both add one, and refusing a correct key over a transport
-    #   artefact would push operators toward stripping it themselves -- or toward a shorter key
-    #   that avoids the problem.
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, f"\n {base64.b64encode(material).decode()} \n")
-    assert layouts._mask_hmac_key() == material
-
-
-def test_masking_refuses_to_run_at_all_under_weak_key_material(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Assert the enforcement reaches the masking path and is not merely a helper.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Used to configure the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The refusal is the result.
-    """
-    # WHY (Assumptions): this is asserted through mask_record rather than through the key
-    #   resolver, because a resolver nobody consulted would enforce nothing. It is the only case
-    #   in this file that proves the two are connected.
-    layout = layouts.CARD_LAYOUT
-    raw = _sentinel_record(layout)
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, "not base64 at all!")
-    with pytest.raises(layouts.LayoutError):
-        layouts.mask_record(raw, layout)
-
-    monkeypatch.setenv(
-        layouts.ENV_MASK_HMAC_KEY, base64.b64encode(secrets.token_bytes(32)).decode()
-    )
-    assert len(layouts.mask_record(raw, layout)) == layout.reclen
-
-
-def test_a_tag_is_stable_under_one_key_and_unrelated_across_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Assert the tag is a function of the key, so replacing the key replaces every tag.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Used to configure the masking-key variable for the duration of the test.
-
-    Returns
-    -------
-    None
-        The assertion is the result.
-    """
-    # WHY (Assumptions): key dependence is asserted because it is what makes the strength
-    #   floor matter. If the tag did not depend on the key, refusing weak material would be
-    #   theatre -- so this case is the one that gives every refusal above its purpose.
-    layout = layouts.CUSTOMER_LAYOUT
-    field = layout.field("CUST-GOVT-ISSUED-ID")
-    raw = _sentinel_record(layout)
-
-    first = base64.b64encode(secrets.token_bytes(32)).decode()
-    second = base64.b64encode(secrets.token_bytes(32)).decode()
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, first)
-    once = layouts.mask_record(raw, layout)[field.start : field.end]
-    again = layouts.mask_record(raw, layout)[field.start : field.end]
-    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, second)
-    other = layouts.mask_record(raw, layout)[field.start : field.end]
-
-    assert once == again, "one key must render one value identically"
-    assert once != other, "two keys must render one value differently"

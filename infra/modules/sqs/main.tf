@@ -437,24 +437,24 @@ resource "aws_sqs_queue" "pauth_request" {
   name = local.pauth_request_name
 
   # WHY : Assumptions: the ordering requirement is PER CARD, not global, and a
-  #       FIFO queue is the only queue type that can express it. Producers derive
-  #       MessageGroupId through CsvAuthCodec.AuthRequest.orderGroup using the
-  #       purpose-scoped HMAC held by OpaqueIdentifier. Equal cards therefore
-  #       produce one stable group while the primary account number itself never
-  #       appears in SQS metadata, queue telemetry or send traces. The key arrives
-  #       through CARDDEMO_MESSAGING_HMAC_KEY, so every producer in one environment
-  #       derives the same group without carrying key material in source.
-  # WHY : Refactoring Rationale: this comment named CARDDEMO_MASK_HMAC_KEY, and the
-  #       name was wrong in a way that mattered. That variable is the
-  #       extract-transform-load redaction key and infra/modules/ecs-service admits
-  #       it for the data-migration workload ONLY -- so the name here described a
-  #       key that could not reach any producer, and the derivation it describes
-  #       could not happen. The two keys are deliberately separate: this one is held
-  #       by the long-running authorization consumer and shared with every producer
-  #       on this queue, because the group identity must be equal for equal cards
-  #       ACROSS producers, while the mask key is held by a one-off migration
-  #       workload that reads cardholder extracts. Sharing one value would let that
-  #       workload compute production queue group identities.
+  #       FIFO queue is the only queue type that can express it. Producers set
+  #       MessageGroupId to the card number itself and MessageDeduplicationId to the
+  #       transaction identifier itself, which sections 0.4.1.8 and 0.7.6 of the
+  #       technical specification state literally, so equal cards produce one group
+  #       by construction rather than by agreement on a derivation.
+  # WHY : Refactoring Rationale: this comment described both identities as
+  #       purpose-scoped HMACs derived through OpaqueIdentifier from
+  #       CARDDEMO_MESSAGING_HMAC_KEY, so that no account number entered queue
+  #       metadata. The derivation is withdrawn because it removed the guarantees it
+  #       was layered on: a group identity orders one card's messages only while
+  #       EVERY producer computes the same value for that card, and a deduplication
+  #       identity suppresses a resend only while the REQUESTER can predict it. The
+  #       resulting exposure -- an account number in queue metadata -- is registered
+  #       as divergence D-AUTHORIZATION-FIFO-IDENTITY-METADATA in
+  #       docs/architecture/cobol-to-service-traceability.md, and this module
+  #       supplies two of the three controls bounding it: SSE under the
+  #       customer-managed key it is handed, and send/receive capability scoped by
+  #       the task-role policies built from its outputs.
   # WHY : Alternatives Considered: a single constant message group would give
   #       total ordering across the whole stream. It is rejected because it
   #       serialises every card behind every other and collapses throughput to

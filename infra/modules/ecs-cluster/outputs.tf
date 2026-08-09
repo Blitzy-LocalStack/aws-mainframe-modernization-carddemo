@@ -10,7 +10,9 @@
 #   The output NAMES are a ONE-WAY contract, and two modules already bind to
 #   them by name:
 #     ecs-service ............ reads `cluster_arn` AND `cluster_name`, once per
-#                              service, eight times in each environment root
+#                              workload, nine times in each environment root --
+#                              the eight Java services plus the data-migration
+#                              ETL task definition
 #     step-functions-batch ... reads the same ARN as its own `ecs_cluster_arn`
 #   Both receive the values through infra/envs/dev/main.tf and
 #   infra/envs/prod/main.tf, so renaming an output here breaks both consumers in
@@ -272,8 +274,8 @@ output "default_capacity_provider_strategy" {
 #
 # This is the output side of the narrowness main.tf argues for on cardinality.
 # The cluster exists ONCE PER ENVIRONMENT while ecs-service is instantiated ONCE
-# PER SERVICE, eight times in each root, so a cluster output reaching into a
-# service's resources would have to pick one of the eight -- and picking would
+# PER WORKLOAD, nine times in each root, so a cluster output reaching into a
+# service's resources would have to pick one of the nine -- and picking would
 # reintroduce into this contract exactly the per-service coupling that keeping
 # the two modules apart removes. Each value above is published by the module
 # that creates it and wired together by the environment root, which is also why

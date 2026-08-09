@@ -1,3 +1,24 @@
+/**
+ * @file The browser entry point: the one module `ui/index.html` loads, and the only place the
+ * application is mounted into the document.
+ *
+ * Purpose
+ * -------
+ * Perform the two steps that must happen in a fixed order before any screen renders -- resolve the
+ * runtime configuration that tells the API client which gateway to address, then mount
+ * {@link App} into the single root element the HTML entry declares. Nothing else belongs here:
+ * theming is `ui/src/App.tsx`'s and routing is `ui/src/router.tsx`'s.
+ *
+ * Startup contract
+ * ----------------
+ * Assumptions: three things must hold for a successful start, and each has a named failure. The
+ * document must carry an element with id `root`, or {@link applicationRoot} throws. The runtime
+ * configuration document must either resolve or be absent, the absent case falling back to the
+ * build-time variable. And the mount must be the LAST step, because the API client memoises its
+ * base URL on first construction. A failure at any of the three mounts nothing and writes the
+ * reason into the mount point, which is a deliberate choice recorded at the handler below.
+ */
+
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -37,6 +58,18 @@ function applicationRoot(): HTMLElement {
 async function bootstrap(): Promise<void> {
   await loadRuntimeConfig();
   createRoot(applicationRoot()).render(
+    // Trade-offs: StrictMode is kept, and what it costs is a DOUBLE invocation of every component
+    //   body, every state initialiser and every effect in a development build -- effects mount,
+    //   unmount and mount again. That is paid for one specific class of defect this migration is
+    //   exposed to: a screen effect that is not idempotent. Several migrated screens fetch a page
+    //   on mount and bind PF7/PF8 to a keyset cursor, so an effect that mutated a cursor instead of
+    //   deriving it, or that failed to release a key listener on unmount, would work in a single
+    //   invocation and misbehave only under a remount an operator triggered by navigating back --
+    //   the hardest kind of failure to reproduce from a bug report. StrictMode turns that into a
+    //   duplicated request or a duplicated key handler visible on the first run of the screen.
+    //   Assumptions: the cost is development-only. React strips the double invocation from a
+    //   production build, so the shipped bundle renders each component once and this wrapper
+    //   changes nothing an operator can observe.
     <StrictMode>
       <App />
     </StrictMode>,

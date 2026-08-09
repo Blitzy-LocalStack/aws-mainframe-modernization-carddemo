@@ -1,5 +1,6 @@
 package com.carddemo.auth.service;
 
+import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.CreateUserRequest;
 import com.carddemo.auth.dto.UpdateUserRequest;
@@ -26,7 +27,10 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UsernameExistsException;
 
@@ -387,21 +391,63 @@ public class UserService {
     private final CursorToken cursorToken;
 
     /**
-     * Builds the service over its four collaborators.
+     * The ledger of changes owed to the managed user pool, and its applier.
+     *
+     * <p>Assumptions: the two halves of a cross-store change are separated through this collaborator
+     * rather than by ordering two calls in one method. A write path records the intention inside its own
+     * transaction and applies it after that transaction commits, so no database transaction is ever held
+     * across a call to the provider and no provider call is ever made for a change that then rolled
+     * back.</p>
+     */
+    private final IdentitySyncService identitySync;
+
+    /**
+     * The template every short database unit of work in this class runs inside.
+     *
+     * <p>Refactoring Rationale: the three write methods were annotated {@code @Transactional} and called
+     * the identity provider from within, so the transaction spanned network latency and the two stores
+     * were described as atomic when they are not. A template makes the unit of work an EXPLICIT block
+     * with a visible end, which is what lets the provider call sit demonstrably after the commit.</p>
+     *
+     * <p>Alternatives Considered: keeping the annotation and moving the provider call into a second
+     * annotated method on this same class. Rejected because a self-invocation does not pass through the
+     * transactional proxy, so the second method's declared propagation would silently not apply -- the
+     * same defect the reference-service disclosure path was reported for. A template needs no proxy and
+     * cannot be bypassed by a call site.</p>
+     */
+    private final TransactionTemplate writeTransaction;
+
+    /**
+     * Builds the service over its six collaborators.
      *
      * @param users the repository over {@code auth.users}; must not be {@code null}
      * @param mapper the mapper between the stored row and the published shapes; must not be {@code null}
      * @param provisioning the managed-identity side of a user row; must not be {@code null}
      * @param cursorToken the sealer the paged read issues and redeems its cursors with; must not be
      *     {@code null}
+     * @param identitySync the durable ledger of intended provider changes, and its applier; must not be
+     *     {@code null}
+     * @param transactionManager the manager the write template is built over; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public UserService(UserRepository users, UserMapper mapper,
-            CognitoUserProvisioningService provisioning, CursorToken cursorToken) {
+            CognitoUserProvisioningService provisioning, CursorToken cursorToken,
+            IdentitySyncService identitySync, PlatformTransactionManager transactionManager) {
         this.users = Objects.requireNonNull(users, "users must not be null");
         this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
         this.provisioning = Objects.requireNonNull(provisioning, "provisioning must not be null");
         this.cursorToken = Objects.requireNonNull(cursorToken, "cursorToken must not be null");
+        this.identitySync = Objects.requireNonNull(identitySync, "identitySync must not be null");
+        Objects.requireNonNull(transactionManager, "transactionManager must not be null");
+
+        // WHY : Assumptions: the template is built here rather than injected, because its propagation is a
+        //       property of how this class uses it and not of the deployment. REQUIRES_NEW is chosen so a
+        //       write is a unit of work of its own even when a caller already holds one, which keeps the
+        //       span this class commits -- and therefore the span after which the provider is called --
+        //       independent of any enclosing transaction.
+        this.writeTransaction = new TransactionTemplate(transactionManager);
+        this.writeTransaction.setPropagationBehavior(
+                TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /**
@@ -489,28 +535,42 @@ public class UserService {
 
         Objects.requireNonNull(subject, "subject must not be null");
 
-        boolean backward = DIRECTION_PREVIOUS.equals(direction);
-        String binding = cursorBinding(subject, backward);
+        boolean requestedBackward = DIRECTION_PREVIOUS.equals(direction);
+        String binding = cursorBinding(subject, requestedBackward);
 
         // WHY : Assumptions: a direction supplied WITHOUT a cursor is not refused here, and the contract
         //       says why: the direction defaults to forward and "with no cursor supplied returns the
-        //       first page". A backward direction with no cursor therefore reads the first page rather
-        //       than failing, which is the same answer the reference gives when the backward key it holds
-        //       is its low-value sentinel.
+        //       first page".
         String cursorKey = cursor == null || cursor.isBlank() ? null : openCursor(binding, cursor);
 
-        // WHY : Assumptions: the sentinel for an opening forward page is the empty string and for an
-        //       opening backward page is a value ordering above every stored key. The identifier column
-        //       is CHAR(8) over the reference's own character set, so the empty string orders below every
-        //       stored key and a run of the highest admissible character orders above every one. The
-        //       reference uses the same device in the other representation, moving low values into its
-        //       forward key and high values into its backward key.
-        String position = cursorKey != null ? cursorKey
-                : backward ? BACKWARD_OPENING_SENTINEL : FORWARD_OPENING_SENTINEL;
+        // WHY : Refactoring Rationale: a cursorless request is CANONICALISED to the first ascending page,
+        //       whichever direction it named, and the previous arrangement is what makes this necessary
+        //       rather than tidy. It answered a cursorless backward request by seeking DOWN from a
+        //       high-value sentinel, which returns the LOGICAL LAST page -- the opposite end of the set
+        //       from the first page the contract promises for a request carrying no cursor. Two defects
+        //       followed from the sentinel and both are removed with it. The answer contradicted the
+        //       published contract; and the sentinel had to order above every stored identifier to be
+        //       correct, which the column's own admitted domain does not guarantee -- CHAR(8) over the
+        //       database's collation admits identifiers that sort after a run of tildes, and any such row
+        //       would have been silently omitted from that page.
+        // WHY : Alternatives Considered: refusing a direction supplied without a cursor with a 400, which
+        //       the review offered as the other resolution and which the sibling reference browse adopts.
+        //       Rejected HERE because this contract already publishes the opposite promise -- "with no
+        //       cursor supplied returns the first page" -- and a client written against it sends exactly
+        //       that combination on its opening request. Canonicalising honours the published contract
+        //       without changing what any conforming client sends.
+        // WHY : Alternatives Considered: adding an unbounded descending repository query so a cursorless
+        //       backward request could read the true last page without a sentinel. Rejected because it
+        //       answers a question the contract does not ask: no caller can page backward from a page it
+        //       has not been shown, so the last page is unreachable by any legitimate sequence of
+        //       requests, and a query serving only an illegitimate one is a query with no caller.
+        boolean backward = requestedBackward && cursorKey != null;
 
-        List<User> window = readWindow(position, backward);
+        List<User> window = cursorKey == null
+                ? readOpeningWindow()
+                : readWindow(cursorKey, backward);
 
-        return page(window, backward, subject);
+        return page(window, backward, cursorKey != null, subject);
     }
 
     /**
@@ -590,7 +650,6 @@ public class UserService {
     //       all-or-nothing shape explicitly. What it costs is that a caller can no longer observe a
     //       partially applied write -- which the reference could not offer either, so nothing observable is
     //       given up.
-    @Transactional
     public UserResponse create(CreateUserRequest request) {
 
         Objects.requireNonNull(request, "request must not be null");
@@ -604,19 +663,61 @@ public class UserService {
             throw new DuplicateUserException(MESSAGE_USER_ID_EXISTS);
         }
 
+        // WHY : Refactoring Rationale: provisioning still PRECEDES the insert, and here that ordering is a
+        //       constraint rather than a choice: V1__auth.sql declares cognito_sub NOT NULL UNIQUE, so the
+        //       row cannot be written until the pool has minted the subject it carries. This is the one
+        //       write path that cannot record its intention first, so the review's second remedy applies
+        //       instead -- the insert is FLUSHED inside the handler that compensates, and the compensation
+        //       itself is made durable below.
+        // WHY : Refactoring Rationale: the call is issued with NO database transaction open, which the
+        //       previous arrangement could not claim. This method was annotated transactional, so the
+        //       provider call and the insert shared one transaction and a connection was held for the
+        //       duration of a network round trip to the provider.
         UUID subject = provision(request);
 
+        User candidate = this.mapper.toEntity(request, subject);
+
         try {
-            User stored = this.users.save(this.mapper.toEntity(request, subject));
+            // WHY : Refactoring Rationale: the row is written by an INSERT statement rather than by the
+            //       inherited save, and the difference is the whole of this method's correctness under a
+            //       race. This entity carries an assigned identifier and no version attribute, so the
+            //       repository's newness test reduces to "is the identifier null" and is false for every
+            //       row this context builds; the inherited save therefore reached a MERGE, and a merge
+            //       against an identifier a row already holds loads that row and updates it. Two callers
+            //       racing one identifier did not collide at all -- the later silently overwrote the
+            //       earlier one's names and type and was answered as a successful create, so the
+            //       compensation below and the conflict this method publishes were both unreachable for
+            //       the one condition they exist to handle.
+            // WHY : Assumptions: the statement is issued inside an EXPLICIT short transaction rather than
+            //       relying on an ambient one. A modifying query declared on the repository carries no
+            //       transaction of its own, and this method deliberately holds none across the provider
+            //       call above, so the write needs a boundary of its own; opening it here keeps the
+            //       provider round trip outside any database transaction while still making the write
+            //       all-or-nothing.
+            // WHY : Assumptions: the statement is ISSUED HERE rather than deferred to commit, and that is
+            //       what puts the primary key's verdict inside this try block. A deferred write is issued
+            //       after this method has returned, so a refusal raised there could be caught by neither
+            //       handler below: the pool account would stay provisioned with no row behind it.
+            // WHY : Alternatives Considered: registering a transaction synchronization that withdrew the
+            //       pool account after rollback. Rejected because a rollback-time callback cannot turn
+            //       the failure into this method's conflict -- the response status has been decided by
+            //       then -- so it would have addressed the orphaned account and left the wrong answer.
+            this.writeTransaction.execute(status -> this.users.insertUser(
+                    candidate.getUserId(), candidate.getFirstName(), candidate.getLastName(),
+                    candidate.getUserType(), candidate.getCognitoSub().toString()));
             LOG.info("event=auth.user.created userId={}", userId);
-            return this.mapper.toResponse(stored);
+
+            // WHY : Assumptions: the response is rendered from the row THIS METHOD WROTE rather than from
+            //       a re-read of it, because the statement above wrote exactly these five values and
+            //       nothing on this table is generated by the database.
+            return this.mapper.toResponse(candidate);
 
             // WHY : Assumptions: the integrity violation is caught SEPARATELY from other store failures
             //       because it is the race the probe above cannot close, and its answer is a conflict
             //       rather than a fault. It is the only condition on this path that is the caller's to
             //       act on, and the action is to choose another identifier.
         } catch (DataIntegrityViolationException duplicate) {
-            withdrawQuietly(userId, "duplicate-on-insert");
+            compensateProvisioning(userId, "duplicate-on-insert");
             LOG.info("event=auth.user.create-refused reason=duplicate-race userId={}", userId);
             throw new DuplicateUserException(MESSAGE_USER_ID_EXISTS);
 
@@ -628,9 +729,47 @@ public class UserService {
             //       identifier is the primary key on auth.users. The identifier would have become
             //       permanently unusable through a path no operator could see.
         } catch (DataAccessException unwritable) {
-            withdrawQuietly(userId, "insert-failed");
+            compensateProvisioning(userId, "insert-failed");
             throw unableTo(MESSAGE_UNABLE_TO_ADD, "insert-" + unwritable.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * Records the withdrawal of an orphaned pool account durably, then attempts it immediately.
+     *
+     * <p>Refactoring Rationale: this replaces a best-effort withdrawal whose failure was logged and
+     * discarded. Logging was not enough: the orphaned account can authenticate, holds no membership this
+     * context records, and makes its identifier permanently unusable for a later create -- and nothing but
+     * a log line said so, which requires an operator to be reading at the moment it happened. The
+     * intention is now recorded in the same ledger the other two write paths use, so the reconciliation
+     * pass retries it until the pool agrees, and an operator reads the ledger rather than the logs.</p>
+     *
+     * <p>Assumptions: the ledger row is committed in a transaction of its OWN, because the transaction
+     * that was going to carry it has just rolled back. That is why this cannot be the ordinary
+     * record-then-apply sequence the other two paths use.</p>
+     *
+     * <p>Assumptions: a failure to record the intention is logged and swallowed, which is the one place in
+     * this class an exception is still discarded. It runs while another failure is being raised, and
+     * letting it propagate would replace the failure the caller needs to hear about with one about
+     * cleanup.</p>
+     *
+     * @param userId the provider username whose account is to be withdrawn; must not be {@code null}
+     * @param reason the internal cause of the failure being compensated, for the log alone
+     */
+    private void compensateProvisioning(String userId, String reason) {
+        try {
+            this.writeTransaction.execute(status -> this.identitySync.record(userId,
+                    IdentitySyncTask.OPERATION_WITHDRAW, null, null, null, null));
+        } catch (RuntimeException unrecordable) {
+            LOG.error("event=auth.user.compensation-unrecorded userId={} reason={} exception={}",
+                    userId, reason, unrecordable.getClass().getName());
+        }
+
+        // WHY : Assumptions: the withdrawal is ALSO attempted immediately rather than being left entirely
+        //       to reconciliation, because the ordinary case is a provider that is perfectly healthy and a
+        //       constraint that refused the insert. Applying now closes the window in the common case; the
+        //       ledger row is what closes it in the uncommon one.
+        this.identitySync.applyOwed(userId);
     }
 
     /**
@@ -685,10 +824,9 @@ public class UserService {
      *     row -- carrying, in each case, the reference sentence for that condition, and a field key for all
      *     but the last
      * @throws NoSuchElementException if no row carries the identifier
-     * @throws IllegalStateException if the change could not be written or the pool could not be brought
-     *     in line, carrying the reference sentence for a failed update
+     * @throws IllegalStateException if the change could not be written, carrying the reference sentence
+     *     for a failed update
      */
-    @Transactional
     public UserResponse update(String userId, UpdateUserRequest request) {
 
         Objects.requireNonNull(request, "request must not be null");
@@ -717,47 +855,81 @@ public class UserService {
         //       311 that names only the dataset. app/csd/CARDDEMO.CSD line 93 defines UPDATEMODEL(LOCKING)
         //       and line 89 RLSACCESS(NO), so the lock is pessimistic and held entirely inside that one
         //       task. A read and a write inside one transaction here occupy the same span.
-        User stored = require(userId);
-        String previousUserType = stored.getUserType();
 
-        if (matchesStoredRow(stored, request)) {
-            LOG.info("event=auth.user.update-refused reason=unchanged userId={}",
-                    stored.getUserId());
-            // WHY : Assumptions: the refusal names NO field, and the contract states the same: no single
-            //       field is at fault when every one of them matches. The shared advice keys an
-            //       unattributed entry to the request as a whole, which is what lets a form show the
-            //       sentence without marking a control that is not wrong.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, MESSAGE_MODIFY_TO_UPDATE);
-        }
+        // WHY : Refactoring Rationale: the row and the INTENTION to reproject it onto the pool are written
+        //       in one transaction, and the pool is called only after that transaction has committed. The
+        //       previous arrangement called the pool from inside the transaction and relied on the rollback
+        //       to keep the two stores agreeing, which it cannot do: the provider is not a participant, so
+        //       a provider call that SUCCEEDS and is followed by a failed commit leaves the pool holding a
+        //       projection of a row that was never changed, and no later request repairs it. The reverse
+        //       gap is closed the same way -- a commit followed by a lost provider call leaves a PENDING
+        //       ledger row that the reconciliation pass retries.
+        // WHY : Trade-offs: the two stores are now eventually rather than immediately consistent, and the
+        //       window is the interval between commit and the post-commit call below (ordinarily
+        //       sub-second, bounded by the reconciliation pass otherwise). That is the cost of the change.
+        //       The benefit is that the inconsistency is always RECORDED and always converges, where
+        //       before it was silent and permanent. Assumptions: the pool holds only a projection -- given
+        //       name, family name and group membership -- so a stale projection cannot admit a sign-on
+        //       this context would refuse; group membership is re-read from the claim on every request.
+        Written written = this.writeTransaction.execute(status -> {
 
-        this.mapper.applyUpdate(request, stored);
+            User stored = require(userId);
+            String previousUserType = stored.getUserType();
 
-        try {
-            User written = this.users.save(stored);
+            if (matchesStoredRow(stored, request)) {
+                LOG.info("event=auth.user.update-refused reason=unchanged userId={}",
+                        stored.getUserId());
+                // WHY : Assumptions: the refusal names NO field, and the contract states the same: no
+                //       single field is at fault when every one of them matches. The shared advice keys an
+                //       unattributed entry to the request as a whole, which is what lets a form show the
+                //       sentence without marking a control that is not wrong.
+                throw new ClientInputException(ApiError.CODE_VALIDATION, MESSAGE_MODIFY_TO_UPDATE);
+            }
 
-            // WHY : Assumptions: the pool is brought in line AFTER the row is written and inside the same
-            //       transaction, so a provider failure rolls the row back and leaves the two stores
-            //       agreeing. That is the opposite ordering from creation, and deliberately: creation
-            //       cannot write the row first because it needs the subject the pool mints, whereas here
-            //       the row already exists and the pool holds only a projection of it.
-            this.provisioning.synchronise(written.getUserId(), written.getFirstName(),
-                    written.getLastName(), previousUserType, written.getUserType());
+            this.mapper.applyUpdate(request, stored);
 
-            LOG.info("event=auth.user.updated userId={}", written.getUserId());
-            return this.mapper.toResponse(written);
+            try {
+                // WHY : Refactoring Rationale: saveAndFlush rather than save, so a constraint or
+                //       connection failure is raised HERE and answered with the reference sentence for a
+                //       failed update. Deferring the statement to commit would raise it outside this
+                //       handler, where the shared advice can only render a generic 500.
+                User saved = this.users.saveAndFlush(stored);
 
-        } catch (DataAccessException unwritable) {
-            throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
-                    "update-" + unwritable.getClass().getSimpleName());
+                return new Written(saved, this.identitySync.record(saved.getUserId(),
+                        IdentitySyncTask.OPERATION_SYNCHRONISE, saved.getFirstName(),
+                        saved.getLastName(), previousUserType, saved.getUserType()));
 
-            // WHY : Assumptions: a provider failure here is reported with the SAME sentence as a store
-            //       failure, because from the caller's position they are one outcome: the change it asked
-            //       for did not take effect. The internal reason distinguishes them for an operator, and
-            //       the transaction rolls the row back so the outcome is truthful.
-        } catch (SdkException providerFault) {
-            throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
-                    "update-provider-" + providerFault.getClass().getSimpleName());
-        }
+            } catch (DataAccessException unwritable) {
+                throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
+                        "update-" + unwritable.getClass().getSimpleName());
+            }
+        });
+
+        User result = Objects.requireNonNull(written,
+                "the write transaction returned no row, which its callback cannot do").row();
+
+        // WHY : Assumptions: the outcome of the post-commit call does NOT change this method's answer. The
+        //       change the caller asked for is committed and durable by this point, so answering a failure
+        //       would be untrue; the applier records its own failure in the ledger, and the reconciliation
+        //       pass owns the retry.
+        this.identitySync.applyOwed(result.getUserId());
+
+        LOG.info("event=auth.user.updated userId={}", result.getUserId());
+        return this.mapper.toResponse(result);
+    }
+
+    /**
+     * One committed row paired with the identity-synchronisation intention committed alongside it.
+     *
+     * <p>Refactoring Rationale: the pair exists so the transaction callback can hand BOTH outcomes back to
+     * a caller that then runs outside the transaction. Returning the row alone would have forced the
+     * post-commit applier to re-read the ledger to discover what it owed, which is a query the write path
+     * already has the answer to.
+     *
+     * @param row the row as stored after the write; never {@code null}
+     * @param intention the ledger entry recording what the provider still owes; never {@code null}
+     */
+    private record Written(User row, IdentitySyncTask intention) {
     }
 
     /**
@@ -792,45 +964,73 @@ public class UserService {
      * @throws NullPointerException if {@code userId} is {@code null}
      * @throws ClientInputException if the identifier is blank
      * @throws NoSuchElementException if no row carries the identifier
-     * @throws IllegalStateException if the row could not be deleted or the pool account could not be
-     *     removed, carrying the reference sentence the delete program writes for that condition -- which
-     *     names "Update", as that program writes it
+     * @throws IllegalStateException if the row could not be deleted, carrying the reference sentence the
+     *     delete program writes for that condition -- which names "Update", as that program writes it
      */
-    @Transactional
     public void delete(String userId) {
 
-        User stored = require(userId);
+        // WHY : Refactoring Rationale: the deletion and the INTENTION to withdraw the pool account are one
+        //       transaction, and the provider is called only after it commits. The previous arrangement
+        //       called the provider from inside the transaction, so a withdrawal that succeeded and was
+        //       followed by a failed commit destroyed the account behind a row that still exists -- a user
+        //       who cannot sign on and whose row no later operation repairs without reprovisioning, which
+        //       this class's own delete documentation names as the unrecoverable direction. Recording the
+        //       intention keeps the recoverable direction the only reachable one.
+        // WHY : Assumptions: the ledger entry outlives the row it names, which is why
+        //       V2__auth_identity_sync.sql declares identity_sync_task.user_id with NO foreign key to
+        //       auth.users. A reference would have made this insert impossible in the same transaction as
+        //       the delete, or -- worse, under a cascade -- would have removed the intention with the row.
+        User stored = this.writeTransaction.execute(status -> {
 
-        try {
-            this.users.delete(stored);
-            this.provisioning.withdraw(stored.getUserId());
-            LOG.warn("event=auth.user.deleted userId={}", stored.getUserId());
+            User row = require(userId);
 
-            // WHY : Refactoring Rationale: the sentence a failed delete reports names "Update", and that is
-            //       carried across rather than reworded. app/cbl/COUSR03C.cbl line 332 writes
-            //       'Unable to Update User...' on the delete path, and the wording's own home is
-            //       app/cbl/COUSR02C.cbl lines 386 to 387, where the same literal reports a failed rewrite.
-            //       The two programs are clones: their COPY statements sit on byte-identical line numbers
-            //       49, 60, 62, 63, 64, 65, 67 and 68, differing only in which mapset line 60 names, and
-            //       both carry live diagnostic DISPLAY statements in the same two positions -- COUSR03C
-            //       lines 294 and 330 against COUSR02C lines 347 and 384. The delete program's handler was
-            //       copied and never reworded for its new home. The baseline emits the update wording on
-            //       the delete path; the Java encodes the same string; the divergence from intent is
-            //       documented, not fixed.
-            // WHY : Trade-offs: carrying a sentence that names the wrong operation costs clarity for
-            //       whoever reads it, and the alternative -- a delete-specific wording -- costs parity on a
-            //       string the contract publishes verbatim under transformation rule T8 and that a client
-            //       may match on. Parity wins because the wording is externally observable and the
-            //       confusion is not, being confined to one failure path whose internal reason below names
-            //       the operation exactly.
-        } catch (DataAccessException undeletable) {
-            throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
-                    "delete-" + undeletable.getClass().getSimpleName());
+            try {
+                this.users.delete(row);
 
-        } catch (SdkException providerFault) {
-            throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
-                    "delete-provider-" + providerFault.getClass().getSimpleName());
-        }
+                // WHY : Refactoring Rationale: the delete is FLUSHED before the intention is recorded, so
+                //       a constraint or connection failure is answered with the reference sentence rather
+                //       than surfacing from commit as a generic fault -- and so the ledger entry is never
+                //       written for a deletion that the store refused.
+                this.users.flush();
+
+                this.identitySync.record(row.getUserId(), IdentitySyncTask.OPERATION_WITHDRAW,
+                        null, null, null, null);
+
+                return row;
+
+                // WHY : Refactoring Rationale: the sentence a failed delete reports names "Update", and
+                //       that is carried across rather than reworded. app/cbl/COUSR03C.cbl line 332 writes
+                //       'Unable to Update User...' on the delete path, and the wording's own home is
+                //       app/cbl/COUSR02C.cbl lines 386 to 387, where the same literal reports a failed
+                //       rewrite. The two programs are clones: their COPY statements sit on byte-identical
+                //       line numbers 49, 60, 62, 63, 64, 65, 67 and 68, differing only in which mapset
+                //       line 60 names, and both carry live diagnostic DISPLAY statements in the same two
+                //       positions -- COUSR03C lines 294 and 330 against COUSR02C lines 347 and 384. The
+                //       delete program's handler was copied and never reworded for its new home. The
+                //       baseline emits the update wording on the delete path; the Java encodes the same
+                //       string; the divergence from intent is documented, not fixed.
+                // WHY : Trade-offs: carrying a sentence that names the wrong operation costs clarity for
+                //       whoever reads it, and the alternative -- a delete-specific wording -- costs parity
+                //       on a string the contract publishes verbatim under transformation rule T8 and that a
+                //       client may match on. Parity wins because the wording is externally observable and
+                //       the confusion is not, being confined to one failure path whose internal reason
+                //       names the operation exactly.
+            } catch (DataAccessException undeletable) {
+                throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
+                        "delete-" + undeletable.getClass().getSimpleName());
+            }
+        });
+
+        User removed = Objects.requireNonNull(stored,
+                "the write transaction returned no row, which its callback cannot do");
+
+        // WHY : Assumptions: the outcome of the post-commit withdrawal does NOT change this method's
+        //       answer. The row is gone and the user is already refused at every guarded route, so
+        //       reporting a failure would tell the caller the deletion did not happen when it did. The
+        //       applier records its own failure and the reconciliation pass owns the retry.
+        this.identitySync.applyOwed(removed.getUserId());
+
+        LOG.warn("event=auth.user.deleted userId={}", removed.getUserId());
     }
 
     /**
@@ -981,14 +1181,28 @@ public class UserService {
     private static final String FORWARD_OPENING_SENTINEL = "";
 
     /**
-     * The value that orders above every stored identifier, opening a backward page.
+     * Reads one row more than a page from the start of the set, ascending.
      *
-     * <p>Assumptions: a run of the highest printable character, eight of them because the column is eight
-     * wide, so it orders above every identifier the column can hold. The reference moves high values into
-     * its backward key for the same purpose. It is a sentinel and never a stored value: the identifier
-     * domain the reference uses is letters and digits, so no row can collide with it.
+     * <p>Refactoring Rationale: the opening page is read by a query with NO position predicate rather
+     * than by seeking above a low sentinel, and the difference is not cosmetic. A sentinel is only correct
+     * while nothing stored can collide with it or sort below it, which is an assumption about the
+     * identifier domain that the column does not enforce; an unpositioned read carries no such
+     * assumption. The forward sentinel that remains is the empty string, used only where the repository's
+     * strict-inequality predicate needs a value, and its own declaration records why a null cannot serve.
+     *
+     * @return the first page's rows plus at most one surplus row, ascending by identifier, never
+     *     {@code null}
+     * @throws IllegalStateException if the read fails, carrying the reference sentence for a failed
+     *     lookup
      */
-    private static final String BACKWARD_OPENING_SENTINEL = "\u007e\u007e\u007e\u007e\u007e\u007e\u007e\u007e";
+    private List<User> readOpeningWindow() {
+        try {
+            return this.users.findAllByOrderByUserIdAsc(Limit.of(PAGE_SIZE + 1));
+        } catch (DataAccessException unreadable) {
+            throw unableTo(MESSAGE_UNABLE_TO_LOOKUP,
+                    "list-" + unreadable.getClass().getSimpleName());
+        }
+    }
 
     /**
      * Reads one row more than a page from the position, in the direction asked for.
@@ -1017,10 +1231,13 @@ public class UserService {
     /**
      * Turns a read window into the published page envelope.
      *
-     * <p>Assumptions: which end the surplus row sits at depends on the direction walked. A backward walk
-     * was read descending and is reversed into ascending order for presentation, so its surplus row is
-     * the earliest key and sits first before reversal; a forward walk's sits last. Removing the wrong end
-     * would silently drop a row the caller should have seen.
+     * <p>Assumptions: the surplus row is the LAST element of the window in both directions, because each
+     * query returns its own ordering and the surplus is by definition the row furthest from the position
+     * the read started at. A backward walk returns descending rows, so its furthest row is the smallest
+     * key and therefore the last element; a forward walk's is the largest. The trim happens before the
+     * reversal below for that reason: reversing first would move the surplus to the front and the trim
+     * would discard the row adjacent to the caller's page instead, leaving an undetectable one-row hole
+     * at every backward boundary.
      *
      * <p>Assumptions: the rows are always presented ASCENDING, whichever direction was walked, because
      * the contract declares the item array in ascending identifier order and the reference screen always
@@ -1053,15 +1270,29 @@ public class UserService {
      *
      * @param window the rows read, at most one more than a page, in the order the query returned them
      * @param backward whether the window was walked backwards
+     * @param resumed whether the request that produced this window carried a cursor, which is what
+     *     settles backward availability on a forward walk: the cursor is the trailing key of a page the
+     *     caller was shown, and the forward predicate is strictly greater than it, so at least that page
+     *     lies behind this one
      * @param subject the authenticated caller the two issued cursors are sealed against
      * @return the page envelope; never {@code null}
      */
-    private PageResponse<UserSummary> page(List<User> window, boolean backward, String subject) {
+    private PageResponse<UserSummary> page(
+            List<User> window, boolean backward, boolean resumed, String subject) {
 
         List<User> rows = new ArrayList<>(window);
         boolean more = rows.size() > PAGE_SIZE;
         if (more) {
-            rows.remove(backward ? 0 : rows.size() - 1);
+            // WHY : Refactoring Rationale: the surplus row is removed from the TAIL in BOTH directions,
+            //       and the previous arrangement removed index 0 on a backward walk, which dropped the
+            //       wrong row. The backward query orders DESCENDING from the cursor, so index 0 is the row
+            //       NEAREST the caller's position and the tail is the row furthest from it -- the surplus.
+            //       Removing index 0 therefore discarded the row immediately preceding the caller's page
+            //       and kept one a page further back, leaving a one-row hole at every backward boundary
+            //       that no caller could detect: the page returned was a plausible page of the right size.
+            //       The reversal below happens AFTER the trim for exactly this reason, so the trim always
+            //       operates on the query's own ordering rather than on the presentation ordering.
+            rows.remove(rows.size() - 1);
         }
         if (rows.isEmpty()) {
             // WHY : Assumptions: an empty page carries NO cursor in either direction, which
@@ -1103,10 +1334,20 @@ public class UserService {
         //       and reporting otherwise would strand it at the position it had just retreated from.
         boolean hasNext = backward || more;
 
+        // WHY : Refactoring Rationale: backward availability is now REPORTED rather than implied by the
+        //       leading cursor, and the two branches answer it without a second query. On a backward walk
+        //       the surplus row IS the answer -- it is a row lying further back than the page -- and on a
+        //       forward walk the answer is whether the caller arrived by cursor, because the forward
+        //       predicate is strictly greater than that cursor and the cursor names a row the caller was
+        //       already shown. An opening forward request therefore reports no earlier page, which is
+        //       what app/cbl/COUSR00C.cbl does at lines 309 to 310 when its page ordinal is already one.
+        boolean hasPrevious = backward ? more : resumed;
+
         return PageResponse.ofRows(items,
                 this.cursorToken.seal(cursorBinding(subject, true), leading),
                 this.cursorToken.seal(cursorBinding(subject, false), trailing),
-                hasNext);
+                hasNext,
+                hasPrevious);
     }
 
     /**
@@ -1241,27 +1482,6 @@ public class UserService {
         } catch (SdkException providerFault) {
             throw unableTo(MESSAGE_UNABLE_TO_ADD,
                     "provision-" + providerFault.getClass().getSimpleName());
-        }
-    }
-
-    /**
-     * Withdraws a provisioned account on a failure path without masking the failure being handled.
-     *
-     * <p>Assumptions: a failure of the withdrawal itself is logged and swallowed, which is the one place
-     * in this class an exception is discarded. It is deliberate: this runs while another failure is being
-     * raised, and letting a compensation failure propagate would replace the failure the caller needs to
-     * hear about with one about cleanup. The orphaned account is recorded at error level so an operator
-     * still learns of it.
-     *
-     * @param userId the provider username to remove
-     * @param reason the internal cause of the failure being compensated, for the log only
-     */
-    private void withdrawQuietly(String userId, String reason) {
-        try {
-            this.provisioning.withdraw(userId);
-        } catch (SdkException stillPresent) {
-            LOG.error("event=auth.user.compensation-failed userId={} reason={} exception={}",
-                    userId, reason, stillPresent.getClass().getName());
         }
     }
 

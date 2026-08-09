@@ -2,6 +2,8 @@ package com.carddemo.reference.api;
 
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import com.carddemo.reference.domain.TransactionCategory;
+import com.carddemo.reference.domain.TransactionType;
 import com.carddemo.reference.dto.PageDirection;
 import com.carddemo.reference.dto.TransactionCategoryCreateRequest;
 import com.carddemo.reference.dto.TransactionCategoryListRequest;
@@ -9,6 +11,9 @@ import com.carddemo.reference.dto.TransactionCategoryResponse;
 import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
 import com.carddemo.reference.service.TransactionCategoryService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.security.Principal;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -84,22 +89,40 @@ public class TransactionCategoryController {
      * @param direction the paging direction, absent meaning forward
      * @param typeCode an exact type-code filter, absent meaning every type
      * @param description a description filter, absent meaning unfiltered
+     * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
+     *     every position this page mints, so a position is not transferable between callers
      * @return one page of categories with its sealed positions
      */
     @GetMapping
     public PageResponse<TransactionCategoryResponse> listTransactionCategories(
-            @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
+            @RequestParam(name = PARAM_CURSOR, required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
             @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
-            @RequestParam(name = PARAM_TYPE_CODE, required = false) String typeCode,
-            @RequestParam(name = PARAM_DESCRIPTION, required = false) String description) {
+            @RequestParam(name = PARAM_TYPE_CODE, required = false)
+            @Size(min = TransactionCategoryListRequest.TYPE_CODE_LENGTH,
+                    max = TransactionCategoryListRequest.TYPE_CODE_LENGTH)
+            @Pattern(regexp = TransactionCategoryListRequest.TYPE_CODE_PATTERN) String typeCode,
+            @RequestParam(name = PARAM_DESCRIPTION, required = false)
+            @Size(min = TransactionCategoryListRequest.DESCRIPTION_MIN_LENGTH,
+                    max = TransactionCategoryListRequest.DESCRIPTION_MAX_LENGTH) String description,
+            Principal principal) {
 
         return this.service.list(
                 new TransactionCategoryListRequest(cursor, direction, typeCode, description),
-                this.cursorToken);
+                this.cursorToken, principal.getName());
     }
 
     /**
      * Answers one category by both halves of its key.
+     *
+     * <p>Assumptions: both segments are constrained to the schemas their published path parameters
+     * reference, so a malformed segment is refused BEFORE the value reaches the composite identity type.
+     * That ordering is the point rather than a nicety: the identity type refuses a component of the wrong
+     * width with a bare {@link IllegalArgumentException}, the shared advice tests for the caller-refusal
+     * subtype and deliberately not for its supertype, and the result was a 500 telling a caller its own
+     * malformed path was the service's fault. All three of this record's item routes share the identity
+     * type and therefore shared the defect, which is why all three carry the constraints.</p>
      *
      * @param typeCd the two-character type half
      * @param catCd the four-digit category half
@@ -107,8 +130,12 @@ public class TransactionCategoryController {
      */
     @GetMapping(path = ITEM_PATH)
     public TransactionCategoryResponse getTransactionCategory(
-            @PathVariable(name = PARAM_TYPE_CD) String typeCd,
-            @PathVariable(name = PARAM_CAT_CD) String catCd) {
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd,
+            @PathVariable(name = PARAM_CAT_CD)
+            @Size(min = TransactionCategory.CAT_CD_WIDTH, max = TransactionCategory.CAT_CD_WIDTH)
+            @Pattern(regexp = TransactionCategory.CAT_CD_PATTERN) String catCd) {
         return this.service.read(typeCd, catCd);
     }
 
@@ -135,8 +162,12 @@ public class TransactionCategoryController {
      */
     @PutMapping(path = ITEM_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public TransactionCategoryResponse replaceTransactionCategory(
-            @PathVariable(name = PARAM_TYPE_CD) String typeCd,
-            @PathVariable(name = PARAM_CAT_CD) String catCd,
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd,
+            @PathVariable(name = PARAM_CAT_CD)
+            @Size(min = TransactionCategory.CAT_CD_WIDTH, max = TransactionCategory.CAT_CD_WIDTH)
+            @Pattern(regexp = TransactionCategory.CAT_CD_PATTERN) String catCd,
             @Valid @RequestBody TransactionCategoryUpdateRequest request) {
         return this.service.replace(typeCd, catCd, request);
     }
@@ -150,8 +181,12 @@ public class TransactionCategoryController {
     @DeleteMapping(path = ITEM_PATH)
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteTransactionCategory(
-            @PathVariable(name = PARAM_TYPE_CD) String typeCd,
-            @PathVariable(name = PARAM_CAT_CD) String catCd) {
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd,
+            @PathVariable(name = PARAM_CAT_CD)
+            @Size(min = TransactionCategory.CAT_CD_WIDTH, max = TransactionCategory.CAT_CD_WIDTH)
+            @Pattern(regexp = TransactionCategory.CAT_CD_PATTERN) String catCd) {
         this.service.delete(typeCd, catCd);
     }
 }

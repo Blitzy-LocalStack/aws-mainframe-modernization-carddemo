@@ -7,12 +7,18 @@ import com.carddemo.account.api.AccountController;
 import com.carddemo.account.api.CardXrefController;
 import com.carddemo.account.api.CustomerController;
 import com.carddemo.common.security.InternalServiceToken;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.MACSigner;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Base64;
+import java.util.Date;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.annotation.AnnotationUtils;
@@ -67,20 +73,47 @@ class InternalApiSecurityConfigTest {
 
     /**
      * The subject the calling service mints under.
+     *
+     * <p>Assumptions: read from the shared constant rather than written as a literal, because the verifier
+     * now admits a CLOSED set of subjects and this fixture has to be a member of it. A literal here would
+     * keep passing after a rename on one side and would then be asserting that a refused subject is
+     * accepted, which is the inverse of the property.</p>
      */
-    private static final String SUBJECT = "carddemo-authorization-service";
+    private static final String SUBJECT = InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE;
 
     /**
-     * Builds the deployed decoder over the shared key.
+     * A subject naming no service the verifier admits.
+     *
+     * <p>Assumptions: shaped like a plausible service name rather than as obvious nonsense, because the
+     * property under test is that membership of the admitted set is what decides -- not that the value
+     * looks wrong.</p>
+     */
+    private static final String UNADMITTED_SUBJECT = "carddemo-reporting-service";
+
+    /**
+     * The subject the transaction context mints under, and the identifier of its key.
+     *
+     * <p>Assumptions: this test needs BOTH callers because the property under assertion is that they are
+     * distinguishable. A test holding one subject could not tell a verifier that checks the subject from one
+     * that ignores it.</p>
+     */
+    private static final String OTHER_SUBJECT = InternalServiceToken.SUBJECT_TRANSACTION_SERVICE;
+
+    /**
+     * Builds the deployed decoder over both callers' keys.
+     *
+     * <p>Assumptions: the two keys DIFFER, which is what makes every impersonation case below meaningful.
+     * Identical keys would let a token minted under one subject verify under the other's key, so the
+     * key-identifier and subject assertions would pass vacuously.</p>
      *
      * @return the decoder the bean method produces, never {@code null}
      */
     private static JwtDecoder decoder() {
-        return new InternalApiSecurityConfig().internalTokenDecoder(KEY);
+        return new InternalApiSecurityConfig().internalTokenDecoder(KEY, OTHER_KEY);
     }
 
     /**
-     * Builds a minter.
+     * Builds a minter for the authorization caller.
      *
      * @param key the signing key
      * @param lifetime how long the token is valid for
@@ -88,7 +121,21 @@ class InternalApiSecurityConfigTest {
      * @return the minter, never {@code null}
      */
     private static InternalServiceToken minter(String key, Duration lifetime, Instant issuedAt) {
-        return new InternalServiceToken(key.getBytes(StandardCharsets.UTF_8), SUBJECT,
+        return minter(key, lifetime, issuedAt, SUBJECT);
+    }
+
+    /**
+     * Builds a minter under a nominated subject.
+     *
+     * @param key the signing key
+     * @param lifetime how long the token is valid for
+     * @param issuedAt the instant the token claims it was issued at
+     * @param subject the subject the minted token names itself by
+     * @return the minter, never {@code null}
+     */
+    private static InternalServiceToken minter(String key, Duration lifetime, Instant issuedAt,
+            String subject) {
+        return new InternalServiceToken(key.getBytes(StandardCharsets.UTF_8), subject,
                 Clock.fixed(issuedAt, ZoneOffset.UTC), lifetime);
     }
 
@@ -100,7 +147,7 @@ class InternalApiSecurityConfigTest {
     private static String correctToken() {
         return minter(KEY, Duration.ofMinutes(1), Instant.now()).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                InternalServiceToken.SCOPE_CARD_XREF_READ);
     }
 
     /**
@@ -122,23 +169,121 @@ class InternalApiSecurityConfigTest {
         assertThat(authentication).isNotNull();
         assertThat(authentication.getAuthorities())
                 .extracting(GrantedAuthority::getAuthority)
-                .contains(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY);
+                .contains(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY);
     }
 
     /**
-     * Verifies a token signed with another key of the same length is refused.
+     * Verifies a token naming one caller but signed with the other caller's key is refused.
      *
-     * <p>Assumptions: the wrong key is the SAME length as the right one, so the refusal is attributable to the
-     * signature rather than to a length check the decoder might apply first.</p>
+     * <p>Refactoring Rationale: this case used to sign with a key the verifier did not hold at all, which was
+     * sufficient while there was one key and every other key was unknown. With one key per caller both keys are
+     * held, so the meaningful forgery is the IMPERSONATION -- a token naming the authorization context signed
+     * with the transaction context's key -- and that is what is asserted now. The refusal comes from the
+     * signature check rather than from a claim validator, because key selection reads the header's identifier
+     * and then verifies against that caller's key alone.</p>
+     *
+     * <p>Assumptions: both keys are the SAME length, so the refusal is attributable to the signature rather
+     * than to a length check the decoder might apply first.</p>
      */
     @Test
-    @DisplayName("a token signed with another key is refused")
-    void aTokenSignedWithAnotherKeyIsRefused() {
-        String forged = minter(OTHER_KEY, Duration.ofMinutes(1), Instant.now()).mint(
+    @DisplayName("a token naming one caller but signed with the other caller's key is refused")
+    void aTokenSignedWithAnotherCallersKeyIsRefused() {
+        String impersonation = minter(OTHER_KEY, Duration.ofMinutes(1), Instant.now(), SUBJECT).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                InternalServiceToken.SCOPE_CARD_XREF_READ);
 
-        assertThatThrownBy(() -> decoder().decode(forged)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(impersonation)).isInstanceOf(JwtException.class);
+    }
+
+    /**
+     * Verifies a token whose key identifier names no known caller is refused.
+     *
+     * <p>Assumptions: key selection finds no candidate at all for this token, which is the case a misconfigured
+     * third service would produce. It is asserted separately from the impersonation above because the two fail
+     * at different points -- selection here, signature there -- and a verifier could plausibly get one right
+     * and the other wrong.</p>
+     *
+     * @throws Exception if the hand-assembled token cannot be signed, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token whose key identifier names no known caller is refused")
+    void aTokenFromAnUnknownCallerIsRefused() throws Exception {
+        assertThatThrownBy(() -> decoder().decode(handSigned("carddemo-reporting-service",
+                "carddemo-reporting-service", InternalServiceToken.SCOPE_CARD_XREF_READ, KEY)))
+                .isInstanceOf(JwtException.class);
+    }
+
+    /**
+     * Verifies a token whose key identifier and subject name different callers is refused.
+     *
+     * <p>Assumptions: this token is CORRECTLY SIGNED with the key its identifier names, so the signature check
+     * cannot refuse it and only the agreement validator can. Without that validator the account context would
+     * attribute the call, in its refusal bodies and in whatever an operator reads afterwards, to a caller whose
+     * key did not sign it.</p>
+     *
+     * @throws Exception if the hand-assembled token cannot be signed, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token whose key identifier and subject disagree is refused")
+    void aTokenWhoseKeyIdentifierAndSubjectDisagreeIsRefused() throws Exception {
+        assertThatThrownBy(() -> decoder().decode(handSigned(SUBJECT, OTHER_SUBJECT,
+                InternalServiceToken.SCOPE_CARD_XREF_READ, KEY)))
+                .isInstanceOf(JwtException.class);
+    }
+
+    /**
+     * Verifies a caller presenting a scope it is not permitted to hold is refused at the decoder.
+     *
+     * <p>Assumptions: the token is assembled by hand rather than through the shared minter, because the minter
+     * refuses this scope for this subject -- which is the point of asserting it here too. The two refusals are
+     * complementary: the minter's stops an honest caller from asking, and this one stops a caller that obtained
+     * the token some other way from being admitted.</p>
+     *
+     * @throws Exception if the hand-assembled token cannot be signed, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a caller presenting a scope outside its permitted set is refused")
+    void aCallerPresentingAnUnpermittedScopeIsRefused() throws Exception {
+        assertThat(InternalServiceToken.permits(OTHER_SUBJECT,
+                InternalServiceToken.SCOPE_CUSTOMER_READ))
+                .as("the closed table must withhold this scope from this caller, or the case is vacuous")
+                .isFalse();
+
+        assertThatThrownBy(() -> decoder().decode(handSigned(OTHER_SUBJECT, OTHER_SUBJECT,
+                InternalServiceToken.SCOPE_CUSTOMER_READ, OTHER_KEY)))
+                .isInstanceOf(JwtException.class);
+    }
+
+    /**
+     * Assembles and signs a token directly, so a shape the shared minter refuses to produce can be presented.
+     *
+     * <p>Assumptions: this bypasses the minter deliberately and only for shapes the minter refuses -- a
+     * mismatched key identifier, an unknown caller, an unpermitted scope. Every shape the minter WILL produce
+     * is exercised through it instead, so this helper never becomes a second implementation of minting.</p>
+     *
+     * @param keyId the value to place in the key-identifier header
+     * @param subject the value to place in the subject claim
+     * @param scope the value to place in the scope claim
+     * @param key the key to sign with
+     * @return the serialised token, never {@code null}
+     * @throws Exception if signing fails, which would itself be the defect
+     */
+    private static String handSigned(String keyId, String subject, String scope, String key)
+            throws Exception {
+        Instant issuedAt = Instant.now();
+        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                .issuer(InternalServiceToken.ISSUER)
+                .subject(subject)
+                .audience(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT)
+                .issueTime(Date.from(issuedAt))
+                .expirationTime(Date.from(issuedAt.plus(Duration.ofMinutes(1))))
+                .claim(InternalServiceToken.SCOPE_CLAIM, scope)
+                .build();
+        SignedJWT token = new SignedJWT(new JWSHeader.Builder(InternalServiceToken.SIGNING_ALGORITHM)
+                .keyID(keyId)
+                .build(), claims);
+        token.sign(new MACSigner(key.getBytes(StandardCharsets.UTF_8)));
+        return token.serialize();
     }
 
     /**
@@ -153,7 +298,7 @@ class InternalApiSecurityConfigTest {
     @DisplayName("a correctly signed token minted for another audience is refused")
     void aTokenForAnotherAudienceIsRefused() {
         String misdirected = minter(KEY, Duration.ofMinutes(1), Instant.now())
-                .mint("carddemo-some-other-service", InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                .mint("carddemo-some-other-service", InternalServiceToken.SCOPE_CARD_XREF_READ);
 
         assertThatThrownBy(() -> decoder().decode(misdirected))
                 .isInstanceOf(JwtException.class)
@@ -171,7 +316,7 @@ class InternalApiSecurityConfigTest {
     void anExpiredTokenIsRefused() {
         String stale = minter(KEY, Duration.ofMinutes(1), NOW.minus(Duration.ofDays(1))).mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                InternalServiceToken.SCOPE_CARD_XREF_READ);
 
         assertThatThrownBy(() -> decoder().decode(stale))
                 .isInstanceOf(JwtException.class)
@@ -179,26 +324,159 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
-     * Verifies a correctly signed token carrying a different scope does not grant the required authority.
+     * Verifies a correctly signed token minted by a workload the verifier does not admit is refused.
      *
-     * <p>Assumptions: such a token DECODES successfully -- it is correctly signed, correctly addressed and
-     * unexpired -- so the decoder is the wrong place to look for the refusal. What must fail is the authority
-     * mapping, and that is what is asserted: the produced authority set must not contain the one the rule
-     * requires, which is what turns the request into a 403 rather than letting it through.</p>
+     * <p>Refactoring Rationale: this case did not exist, because nothing read the subject. Signature, issuer
+     * and audience together establish only that SOME holder of the shared key minted the token for this
+     * service, so before this check a workload that obtained the key -- or a future service given it for one
+     * purpose -- presented an indistinguishable credential. The refusal is asserted at the DECODER rather
+     * than at the authority mapping, which is where the scope refusal below is asserted, because the two are
+     * enforced in different places and a case that could not tell them apart would pass on either.</p>
+     * @throws Exception if the hand-assembled token cannot be signed, which would itself be the defect
      */
     @Test
-    @DisplayName("a token carrying a different scope decodes but grants no access")
-    void aTokenWithADifferentScopeGrantsNothing() {
-        String wrongScope = minter(KEY, Duration.ofMinutes(1), Instant.now())
-                .mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT, "internal:something-else.read");
+    @DisplayName("a correctly signed token from an unadmitted subject is refused")
+    void aTokenFromAnUnadmittedSubjectIsRefused() throws Exception {
+        // Assumptions: the token is HAND-SIGNED rather than minted, because the minter refuses an
+        //   unadmitted subject at construction -- so a minted one cannot exist to be presented. The
+        //   refusal being asserted here is the VERIFIER's, and it has to be reachable independently of
+        //   the minter's: a caller that obtained the shared key does not go through our minter at all.
+        String foreign = handSigned(UNADMITTED_SUBJECT, UNADMITTED_SUBJECT,
+                InternalServiceToken.SCOPE_ACCOUNT_READ, KEY);
 
-        Jwt verified = decoder().decode(wrongScope);
+        assertThat(InternalServiceToken.ADMITTED_SUBJECTS)
+                .as("the fixture only tests anything while this subject stays outside the admitted set")
+                .doesNotContain(UNADMITTED_SUBJECT);
+        assertThatThrownBy(() -> decoder().decode(foreign))
+                .isInstanceOf(JwtException.class);
+    }
+
+    /**
+     * Verifies both minting services are admitted, so neither is refused by the subject check.
+     *
+     * <p>Assumptions: asserted as a positive case beside the refusal above, because a subject check that
+     * refused everything would satisfy the refusal case alone while taking both production callers offline
+     * -- the same class of defect as the one this whole phase remediates.</p>
+     */
+    @Test
+    @DisplayName("both production minting subjects are admitted")
+    void bothProductionSubjectsAreAdmitted() {
+        for (String subject : InternalServiceToken.ADMITTED_SUBJECTS) {
+            // Assumptions: each subject mints with ITS OWN key, because the verifier holds one key per
+            //   admitted caller and selects it by the key identifier the token carries. Minting both with
+            //   one key would fail the signature check for whichever caller that key does not belong to,
+            //   which is a property of the fixture rather than of the subject check under test.
+            String signingKey = subject.equals(SUBJECT) ? KEY : OTHER_KEY;
+            String token = minter(signingKey, Duration.ofMinutes(1), Instant.now(), subject).mint(
+                    InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                    InternalServiceToken.SCOPE_ACCOUNT_READ);
+
+            assertThat(decoder().decode(token).getSubject())
+                    .as("subject %s is minted in production and must decode", subject)
+                    .isEqualTo(subject);
+        }
+        assertThat(InternalServiceToken.ADMITTED_SUBJECTS)
+                .as("the admitted set is exactly the two services that mint against this context")
+                .containsExactlyInAnyOrder(InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE,
+                        InternalServiceToken.SUBJECT_TRANSACTION_SERVICE);
+    }
+
+    /**
+     * Verifies a correctly signed token carrying a different scope does not grant the required authority.
+     *
+     * <p>Refactoring Rationale: this case used to mint an INVENTED scope and assert that it granted nothing.
+     * The minter now refuses a scope outside the caller's own set, so that token can no longer be produced by
+     * the honest path -- and the shape it was standing in for is covered from the decoder side by
+     * {@link #aCallerPresentingAnUnpermittedScopeIsRefused()}. What is worth asserting here instead is the
+     * property the per-family split introduced: a token carrying a scope the caller IS permitted to hold still
+     * confers only that family's authority, so the account read cannot reach a cross-reference address. Under
+     * the single-authority rule it replaces, there was no such thing to assert.</p>
+     *
+     * <p>Assumptions: such a token DECODES successfully -- it is correctly signed, correctly addressed,
+     * unexpired and permitted -- so the decoder is the wrong place to look for the refusal. What must fail is
+     * the authority mapping, and that is what is asserted, because it is what turns the request into a 403
+     * rather than letting it through.</p>
+     */
+    @Test
+    @DisplayName("a token scoped to one family grants that family's authority and no other")
+    void aTokenScopedToOneFamilyGrantsOnlyThatFamily() {
+        String accountScoped = minter(KEY, Duration.ofMinutes(1), Instant.now())
+                .mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                        InternalServiceToken.SCOPE_ACCOUNT_READ);
+
+        Jwt verified = decoder().decode(accountScoped);
         var authentication = InternalApiSecurityConfig.internalAuthenticationConverter().convert(verified);
 
         assertThat(authentication).isNotNull();
+        // WHY : Assumptions: the assertion is containment plus exclusion rather than an exact set,
+        //   because the framework contributes an authority of its own describing the presentation
+        //   factor. Pinning the whole set would make this case fail on a framework upgrade that
+        //   renamed that authority, which is not the property under assertion; naming the three
+        //   authorities this class owns covers both directions of the one that is.
         assertThat(authentication.getAuthorities())
                 .extracting(GrantedAuthority::getAuthority)
-                .doesNotContain(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY);
+                .contains(InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY)
+                .doesNotContain(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
+    }
+
+    /**
+     * Verifies a decision-path token does not grant the customer-record authority, and vice versa.
+     *
+     * <p>Refactoring Rationale: this is the case the finding turned on. One scope governed every internal
+     * route, so a token minted to decide an authorization also admitted enumerating the customer master and
+     * reading a whole record out of it -- names, addresses, phone numbers, dates of birth, transfer account
+     * identifiers, credit scores. Both directions are asserted, because a separation that held in only one
+     * direction would still let one group of callers reach the other's routes.</p>
+     * @throws Exception if the hand-assembled token cannot be signed, which would itself be the defect
+     */
+    @Test
+    @DisplayName("neither internal scope grants the other group's authority")
+    void neitherScopeGrantsTheOtherGroupsAuthority() throws Exception {
+        var converter = InternalApiSecurityConfig.internalAuthenticationConverter();
+
+        String decisionToken = minter(KEY, Duration.ofMinutes(1), Instant.now()).mint(
+                InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_ACCOUNT_READ);
+        var decisionAuthorities = converter.convert(decoder().decode(decisionToken));
+        assertThat(decisionAuthorities).isNotNull();
+        assertThat(decisionAuthorities.getAuthorities())
+                .extracting(GrantedAuthority::getAuthority)
+                .contains(InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY)
+                .doesNotContain(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY);
+
+        // Assumptions: the customer-master token is asserted to be REFUSED rather than mapped, and both
+        //   controls that refuse it are named here because either alone would be weaker. The minter
+        //   permits a subject only the scopes its own row names and this scope is in NO row, so no service
+        //   can issue it; and the verifier applies the same table, so a token a key-holder assembled by
+        //   hand is refused too. The two whole-customer-record addresses are therefore published and
+        //   presently unreachable, which is narrower than the state this replaces -- where a key-holder
+        //   could still reach them -- and is preferred for exactly that reason.
+        String recordsToken = handSigned(SUBJECT, SUBJECT,
+                InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ, KEY);
+        assertThatThrownBy(() -> decoder().decode(recordsToken))
+                .as("no admitted caller may carry the customer-master scope")
+                .isInstanceOf(JwtException.class);
+
+        // Assumptions: the authority MAPPING for that scope is still asserted, on a token built directly
+        //   rather than decoded, because the mapping and the admission are two different mechanisms and
+        //   the chain's own rule is written against the mapped authority. Asserting only the refusal would
+        //   leave the rule referring to an authority nothing in this class shows can exist.
+        Jwt records = Jwt.withTokenValue("assembled-for-the-converter-alone")
+                .header(InternalServiceToken.KEY_ID_HEADER, SUBJECT)
+                .subject(SUBJECT)
+                .audience(List.of(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT))
+                .claim(InternalServiceToken.SCOPE_CLAIM,
+                        InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ)
+                .build();
+        var recordsAuthorities = converter.convert(records);
+        assertThat(recordsAuthorities).isNotNull();
+        assertThat(recordsAuthorities.getAuthorities())
+                .extracting(GrantedAuthority::getAuthority)
+                .contains(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY)
+                .doesNotContain(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
     }
 
     /**
@@ -227,18 +505,30 @@ class InternalApiSecurityConfigTest {
      *
      * <p>Assumptions: failing at construction is what prevents a deployment from starting with a chain that
      * cannot verify anything. A decoder built over an empty key would either refuse every token -- taking the
-     * account context offline for its only internal caller -- or, worse, be constructible over a key an
+     * account context offline for that caller -- or, worse, be constructible over a key an
      * attacker could guess.</p>
+     *
+     * <p>Refactoring Rationale: BOTH properties are asserted in both directions, where one used to be. A
+     * deployment supplying one key and not the other is the misconfiguration this split makes possible, and its
+     * symptom is worse than a total failure: one caller's traffic keeps working while the other's is refused
+     * with a 401 that names no property, so an operator looks at the failing caller rather than at the
+     * verifier's configuration.</p>
      */
     @Test
-    @DisplayName("a blank or short configured key is refused at construction")
+    @DisplayName("a blank or short configured key is refused at construction, on either side")
     void aBlankOrShortKeyIsRefusedAtConstruction() {
         InternalApiSecurityConfig config = new InternalApiSecurityConfig();
 
-        assertThatThrownBy(() -> config.internalTokenDecoder("   "))
+        assertThatThrownBy(() -> config.internalTokenDecoder("   ", OTHER_KEY))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("carddemo.internal-identity.signing-key");
-        assertThatThrownBy(() -> config.internalTokenDecoder("tooshort"))
+                .hasMessageContaining("carddemo.internal-identity.authorization-signing-key");
+        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "   "))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.internal-identity.transaction-signing-key");
+        assertThatThrownBy(() -> config.internalTokenDecoder("tooshort", OTHER_KEY))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(String.valueOf(InternalServiceToken.MIN_KEY_LENGTH));
+        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "tooshort"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(String.valueOf(InternalServiceToken.MIN_KEY_LENGTH));
     }
@@ -285,14 +575,37 @@ class InternalApiSecurityConfigTest {
                 CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH))).isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET,
                 CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH))).isFalse();
-        assertThat(matcher.matches(request(HttpMethod.GET,
-                AccountController.BASE_PATH + "/12345678901"))).isTrue();
-        assertThat(matcher.matches(request(HttpMethod.HEAD,
-                CustomerController.BASE_PATH + "/987654321"))).isTrue();
-        assertThat(matcher.matches(request(HttpMethod.GET,
-                CustomerController.BASE_PATH + "/987654321/record")))
+        // WHY : Refactoring Rationale: the three keyed addresses these probes used to assert -- the
+        //   account read, the customer presence check and the keyed customer record read -- are gone. All
+        //   three moved their identifier into a request body, so the probes now address the body-based
+        //   forms and the keyed forms are asserted UNCLAIMED below, which is the half that keeps the
+        //   disclosure closed: an address this chain does not claim reaches the application chain, which
+        //   denies the customer subtree outright and admits the account subtree only to a business group.
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                AccountController.BASE_PATH + AccountController.LOOKUP_PATH))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                CustomerController.BASE_PATH + CustomerController.RECORD_PATH)))
                 .as("the keyed customer read is an internal address")
                 .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                AccountController.BASE_PATH + "/12345678901")))
+                .as("the retired keyed account read must NOT be claimed: claiming it would authorise the"
+                        + " shape that puts an account identifier back into a request line")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CustomerController.BASE_PATH + "/987654321")))
+                .as("the retired keyed customer probe must NOT be claimed")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.HEAD,
+                CustomerController.BASE_PATH + "/987654321")))
+                .as("nor its HEAD form, which the collapsed operation no longer serves")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CustomerController.BASE_PATH + "/987654321/record")))
+                .as("nor the retired keyed customer record read")
+                .isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET, CustomerController.BASE_PATH)))
                 .as("the customer scan is an internal address: the application chain denies this whole"
                         + " subtree, so leaving it there would refuse every caller and not merely the"
@@ -328,48 +641,60 @@ class InternalApiSecurityConfigTest {
      * scope, which no identity-provider token carries. The symptom was a 403 on a route that was correctly
      * mounted, correctly authorised by the application chain's own rule, and never reached it.</p>
      *
-     * <p>Assumptions: both halves are asserted for the account address, because the failure is invisible
-     * from either half alone. The GET must still be claimed -- narrowing too far would put the machine read
-     * on the human chain, which requires a group claim the calling service does not have -- and the PUT must
+     * <p>Refactoring Rationale: the account read and the end-user edit no longer share an address, so the
+     * property this case guards is asserted across TWO addresses rather than two methods of one. The read
+     * moved to its own lookup address as a POST when its identifier left the request line, and the edit
+     * keeps the keyed address. Both halves are still asserted, because the failure remains invisible from
+     * either alone: the lookup POST must be claimed -- narrowing too far would put the machine read on the
+     * human chain, which requires a group claim the calling service does not have -- and the keyed PUT must
      * not be.</p>
      *
-     * <p>Assumptions: the customer probe is asserted for GET and HEAD together. One handler serves both, so
-     * claiming one and not the other would make the two forms of one operation answer differently.</p>
+     * <p>Refactoring Rationale: the customer presence check is asserted for POST alone, where it was
+     * previously asserted for GET and HEAD together because one handler served both. The two collapsed into
+     * one operation when the identifier moved into a body, so there is no second form left to keep
+     * consistent -- and the HEAD form is now asserted UNCLAIMED, so a caller still issuing it is refused by
+     * the application chain rather than authorised here.</p>
      *
-     * <p>Assumptions: the two customer READS are asserted for the one method each publishes and refused for
-     * a write method neither publishes. Unlike the account address, no end-user operation shares either of
-     * them, so the narrowing here does not separate two surfaces -- it keeps the chain from authorising a
-     * method the dispatcher would refuse afterwards.</p>
+     * <p>Assumptions: each customer read is asserted for the one method it publishes and refused for a
+     * write method neither publishes. No end-user operation shares either address, so the narrowing here
+     * does not separate two surfaces -- it keeps the chain from authorising a method the dispatcher would
+     * refuse afterwards.</p>
      */
     @Test
     @DisplayName("the chain claims only the method each internal operation serves")
     void theChainClaimsOnlyTheMethodEachOperationServes() {
         var matcher = InternalApiSecurityConfig.internalPaths();
         String account = AccountController.BASE_PATH + "/12345678901";
-        String customer = CustomerController.BASE_PATH + "/987654321";
+        String accountLookup = AccountController.BASE_PATH + AccountController.LOOKUP_PATH;
+        String customerLookup = CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH;
+        String customerRecord = CustomerController.BASE_PATH + CustomerController.RECORD_PATH;
         String lookup = CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH;
 
-        assertThat(matcher.matches(request(HttpMethod.GET, account)))
-                .as("the machine read is a GET and must stay on this chain")
+        assertThat(matcher.matches(request(HttpMethod.POST, accountLookup)))
+                .as("the machine read is a POST at its own address and must stay on this chain")
                 .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.GET, accountLookup)))
+                .as("a GET to the lookup address is left to the application chain rather than authorised"
+                        + " here and answered as an unsupported method afterwards")
+                .isFalse();
         assertThat(matcher.matches(request(HttpMethod.PUT, account)))
-                .as("the end-user edit is a PUT on the SAME address and must fall through to the"
+                .as("the end-user edit is a PUT on the keyed address and must fall through to the"
                         + " application chain, which grants it to either business group")
                 .isFalse();
         assertThat(matcher.matches(request(HttpMethod.DELETE, account)))
                 .as("no internal operation deletes an account, so the method is not claimed here")
                 .isFalse();
 
-        assertThat(matcher.matches(request(HttpMethod.GET, customer))).isTrue();
-        assertThat(matcher.matches(request(HttpMethod.HEAD, customer)))
-                .as("one handler serves both forms, so both are claimed")
-                .isTrue();
-        assertThat(matcher.matches(request(HttpMethod.PUT, customer))).isFalse();
+        assertThat(matcher.matches(request(HttpMethod.POST, customerLookup))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.HEAD, customerLookup)))
+                .as("the collapsed operation serves POST alone, so no HEAD form is claimed")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.PUT, customerLookup))).isFalse();
 
-        assertThat(matcher.matches(request(HttpMethod.GET, customer + "/record")))
-                .as("the keyed customer read is a GET and must stay on this chain")
+        assertThat(matcher.matches(request(HttpMethod.POST, customerRecord)))
+                .as("the keyed customer read is a POST and must stay on this chain")
                 .isTrue();
-        assertThat(matcher.matches(request(HttpMethod.PUT, customer + "/record")))
+        assertThat(matcher.matches(request(HttpMethod.PUT, customerRecord)))
                 .as("no operation writes a customer record, so the method is not claimed here")
                 .isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET, CustomerController.BASE_PATH))).isTrue();
@@ -384,6 +709,65 @@ class InternalApiSecurityConfigTest {
                         + " which denies the whole cross-reference subtree rather than authorising it"
                         + " here and answering with an unsupported method afterwards")
                 .isFalse();
+    }
+
+    /**
+     * Verifies each route group is claimed by its own matcher and by neither the other's.
+     *
+     * <p>Refactoring Rationale: this case did not exist, because there was only one group. It is what pins
+     * the finding's fix to the routes rather than to the vocabulary: the authorization rules are written one
+     * per group, so an address that drifted into the wrong group would be governed by the wrong authority
+     * with nothing failing. Both directions are asserted for both groups.</p>
+     *
+     * <p>Assumptions: the union is asserted to equal the chain's own security matcher for every address
+     * either group claims, so a group added later that the chain does not match -- or matched but placed in
+     * no group, where the terminal rule denies it -- is caught here rather than in production.</p>
+     */
+    @Test
+    @DisplayName("each internal route group is claimed by its own matcher alone")
+    void eachRouteGroupIsClaimedByItsOwnMatcherAlone() {
+        var decisions = InternalApiSecurityConfig.decisionReadPaths();
+        var records = InternalApiSecurityConfig.customerMasterPaths();
+        var chain = InternalApiSecurityConfig.internalPaths();
+
+        List<MockHttpServletRequest> decisionRequests = List.of(
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH),
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH),
+                request(HttpMethod.POST, AccountController.BASE_PATH + AccountController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH));
+        List<MockHttpServletRequest> recordRequests = List.of(
+                request(HttpMethod.GET, CustomerController.BASE_PATH),
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.RECORD_PATH));
+
+        for (MockHttpServletRequest decision : decisionRequests) {
+            assertThat(decisions.matches(decision))
+                    .as("%s %s is a decision-path read", decision.getMethod(),
+                            decision.getRequestURI())
+                    .isTrue();
+            assertThat(records.matches(decision))
+                    .as("%s %s must not be gated on the customer-record scope, which nothing mints",
+                            decision.getMethod(), decision.getRequestURI())
+                    .isFalse();
+            assertThat(chain.matches(decision)).isTrue();
+        }
+        for (MockHttpServletRequest record : recordRequests) {
+            assertThat(records.matches(record))
+                    .as("%s %s discloses a whole customer record", record.getMethod(),
+                            record.getRequestURI())
+                    .isTrue();
+            assertThat(decisions.matches(record))
+                    .as("%s %s must NOT be reachable with a decision-path credential -- this is the"
+                            + " capability the finding removed", record.getMethod(),
+                            record.getRequestURI())
+                    .isFalse();
+            assertThat(chain.matches(record)).isTrue();
+        }
     }
 
     /**
@@ -439,14 +823,107 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
-     * Verifies the required authority is composed from the framework's own scope prefix.
+     * Verifies both required authorities are composed from the framework's own scope prefix.
+     *
+     * <p>Assumptions: both are asserted in one case because the property is about the composition rule and
+     * it is the same rule for both. The property that they are DIFFERENT values is asserted here as well,
+     * because two authorities spelled the same would publish a separation that granted nothing.</p>
      */
     @Test
-    @DisplayName("the required authority is the scope under the framework prefix")
-    void theRequiredAuthorityIsTheScopeUnderTheFrameworkPrefix() {
-        assertThat(InternalApiSecurityConfig.requiredAuthority().getAuthority())
-                .isEqualTo(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY)
-                .isEqualTo("SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+    @DisplayName("both required authorities are the scopes under the framework prefix")
+    void theRequiredAuthoritiesAreTheScopesUnderTheFrameworkPrefix() {
+        // Assumptions: the decision authorities are read as the published LIST rather than as one value,
+        //   because the single read authority this case once pinned was split into one per operation
+        //   family. The composition rule is the same for all four, which is why they are still one case.
+        assertThat(InternalApiSecurityConfig.requiredAuthorities())
+                .extracting(GrantedAuthority::getAuthority)
+                .containsExactly("SCOPE_" + InternalServiceToken.SCOPE_CARD_XREF_READ,
+                        "SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_READ,
+                        "SCOPE_" + InternalServiceToken.SCOPE_CUSTOMER_READ);
+        assertThat(InternalApiSecurityConfig.requiredCustomerRecordsAuthority().getAuthority())
+                .isEqualTo(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY)
+                .isEqualTo("SCOPE_" + InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ);
+        assertThat(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY)
+                .as("one authority under two names would separate nothing")
+                .isNotIn(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
+    }
+
+    /**
+     * Verifies the two authority groups are DISJOINT and together exhaust the chain's own matcher.
+     *
+     * <p>Purpose: this is the property that closes the escalation. One authority governed every internal
+     * address, so a token the authorization and transaction contexts mint in order to resolve ONE card
+     * number also reached the operation that returns every field of a customer record and the scan that
+     * pages the whole customer master. Splitting the authority is only effective if the two groups do not
+     * overlap -- an address in both would still answer to the decision authority -- and only complete if
+     * their union is the chain's whole matcher, because an address the chain claims and neither group names
+     * falls to the catch-all rule and silently regains the decision authority.</p>
+     *
+     * <p>Assumptions: the two authorities are asserted DIFFERENT as well as correctly composed. Two
+     * constants that happened to hold the same string would satisfy every other assertion in this class
+     * while leaving one credential reaching everything, which is precisely the state being corrected.</p>
+     */
+    @Test
+    @DisplayName("the two internal authority groups are disjoint and exhaust the chain")
+    void theTwoInternalAuthorityGroupsAreDisjointAndExhaustTheChain() {
+        assertThat(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY)
+                .isEqualTo("SCOPE_" + InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ)
+                .as("a shared value would leave one credential reaching every internal address")
+                .isNotIn(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
+
+        var decision = InternalApiSecurityConfig.decisionReadPaths();
+        var customerMaster = InternalApiSecurityConfig.customerMasterPaths();
+        var whole = InternalApiSecurityConfig.internalPaths();
+
+        List<MockHttpServletRequest> decisionAddresses = List.of(
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH),
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH),
+                request(HttpMethod.POST,
+                        AccountController.BASE_PATH + AccountController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH));
+        List<MockHttpServletRequest> customerMasterAddresses = List.of(
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.RECORD_PATH),
+                request(HttpMethod.GET, CustomerController.BASE_PATH));
+
+        for (MockHttpServletRequest address : decisionAddresses) {
+            assertThat(decision.matches(address))
+                    .as("%s %s is a decision read", address.getMethod(), address.getServletPath())
+                    .isTrue();
+            assertThat(customerMaster.matches(address))
+                    .as("%s %s must NOT also demand the customer-master authority",
+                            address.getMethod(), address.getServletPath())
+                    .isFalse();
+        }
+        for (MockHttpServletRequest address : customerMasterAddresses) {
+            assertThat(customerMaster.matches(address))
+                    .as("%s %s reads whole customer records", address.getMethod(),
+                            address.getServletPath())
+                    .isTrue();
+            // WHY : Assumptions: this is the assertion that makes the split real rather than nominal. If
+            //   a customer-master address also matched the decision group, the rule order in the chain
+            //   would be irrelevant -- the address would still be reachable with a token minted for a
+            //   card lookup, which is exactly the escalation being closed.
+            assertThat(decision.matches(address))
+                    .as("%s %s must NOT be reachable with a decision-read token",
+                            address.getMethod(), address.getServletPath())
+                    .isFalse();
+        }
+        for (MockHttpServletRequest address : decisionAddresses) {
+            assertThat(whole.matches(address)).isTrue();
+        }
+        for (MockHttpServletRequest address : customerMasterAddresses) {
+            assertThat(whole.matches(address)).isTrue();
+        }
     }
 
     /**

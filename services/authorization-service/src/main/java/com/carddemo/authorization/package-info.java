@@ -122,9 +122,9 @@
  * credential appears in this file or anywhere else in this package tree; every such value is
  * resolved at startup from configuration owned by the infrastructure and resources channels.
  *
- * <p><strong>Charter of the eight packages in this context.</strong> Each of the seven
+ * <p><strong>Charter of the nine packages in this context.</strong> Each of the eight
  * subpackages carries its own {@code package-info.java} for exactly the reason this file exists,
- * so the module is to hold eight charters in total and a missing one fails the gate before
+ * so the module is to hold nine charters in total and a missing one fails the gate before
  * compilation.
  * <ul>
  *   <li>{@code com.carddemo.authorization} - this charter and the entry point. Declares no type,
@@ -149,14 +149,28 @@
  *       makes, and primary-account-number masking. Domain types downstream of it stay free of
  *       layout concerns, which is the entire point of concentrating those concerns in one
  *       package.</li>
+ *   <li>{@code .task} - the container entry points for the two maintenance jobs, one class per job
+ *       plus the runner that resolves a job by name and the interface they share. Refactoring
+ *       Rationale: this bullet and its package are additions. The load and the purge had no way to
+ *       be invoked at all -- no schedule, no route and no orchestrator state -- while this module's
+ *       documentation described them as invoked, so the jobs existed and nothing could run them.
+ *       Assumptions: the entry points live in their OWN package rather than beside the jobs, because
+ *       a class that starts a Spring context and returns a process exit status is neither a business
+ *       rule nor a layer the import rules name, and putting it among the services would make the
+ *       service package's charter untrue.</li>
  *   <li>{@code .config} - {@code SecurityConfig}, {@code OpenApiConfig}, {@code SqsConfig},
  *       {@code InternalIdentityConfig} and {@code MessagingIdentityConfig}. {@code SqsConfig} is
  *       present because this module's own POM puts a queue starter and a queue client on the
  *       classpath; a sibling context that declares neither carries no such class, and adding one
- *       there would configure a client nothing can inject. The two identity classes supply the
- *       credentials this context cannot operate without: one mints the service token the account
- *       context demands on the three calls made to it, and the other keys the tokeniser that keeps a
- *       primary account number out of queue metadata. Refactoring Rationale: this bullet listed
+ *       there would configure a client nothing can inject. Of the two identity classes, one mints the
+ *       service token the account context demands on the three calls made to it -- a credential this
+ *       context cannot operate without -- and the other keys the single tokeniser this context holds.
+ *       Refactoring Rationale: that second class was described here as what keeps a primary account
+ *       number out of queue metadata, and it no longer does: specification &sect;0.4.1.8 freezes the reply
+ *       queue's {@code MessageGroupId} as {@code card_num} and its {@code MessageDeduplicationId} as
+ *       {@code transaction_id}, so both are emitted literally and the resulting metadata exposure is
+ *       registered as a divergence rather than derived away. The class and its charter entry in
+ *       {@code .config} record what it supplies now. Refactoring Rationale: this bullet listed
  *       {@code DataSourceConfig} and closed the set at four. That class does not exist in this
  *       module -- the {@code authorization} search-path pin it was credited with is declared in this
  *       module's {@code application.yml} -- and the closure at four excluded both identity classes,
@@ -258,7 +272,7 @@
  * about it, which is worse than failing, because a rule that silently stops applying looks
  * identical to a rule that is satisfied.
  *
- * <p>Alternatives Considered: this context is laid out as seven subpackages along
+ * <p>Alternatives Considered: this context is laid out as eight subpackages along
  * ports-and-adapters lines rather than as one flat package or as vertical feature slices. Both
  * alternatives were evaluated and rejected on the same concrete ground. The prohibitions this
  * tree is held to are expressed as import rules over package names: no cloud software development
@@ -268,8 +282,16 @@
  * the entity is indistinguishable from an import into the controller. Under either shape the
  * layering could only be a convention that reviewers remember, where under this shape it is a
  * test that fails a build. The migration plan records ports-and-adapters as the chosen pattern for
- * precisely that reason, and the seven names are kept identical across all eight contexts so one
- * rule expression covers the whole reactor.
+ * precisely that reason, and the SEVEN layering names -- {@code api}, {@code service},
+ * {@code repository}, {@code domain}, {@code dto}, {@code mapper} and {@code config} -- are kept
+ * identical across all eight contexts so one rule expression covers the whole reactor.
+ *
+ * <p>Refactoring Rationale: this context carries an eighth subpackage, {@code task}, and the
+ * sentence above once counted the layering names and the subpackages as one figure. They are now
+ * stated separately, because they are not the same thing: the seven layering names are the shape
+ * the import rules are written over and are common to every context, while {@code task} holds the
+ * container entry points this context alone needs and names no layer. Collapsing the two figures is
+ * what made a correct tree look like a miscount.
  *
  * <p>Refactoring Rationale: the two divergences above are stated as consequences of the
  * baseline's structure and never as verdicts on it. That framing is deliberate and it is the

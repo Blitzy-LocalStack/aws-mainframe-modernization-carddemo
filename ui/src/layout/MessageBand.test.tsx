@@ -1,5 +1,5 @@
 /**
- * Proves the message band is sized to the DISPLAY width of the mapset it stands in,
+ * @file Proves the message band is sized to the DISPLAY width of the mapset it stands in,
  * not to the 75-character work area.
  *
  * Purpose

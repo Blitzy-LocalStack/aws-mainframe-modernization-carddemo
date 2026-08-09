@@ -176,8 +176,8 @@
  * {@code common-lib} consumed by every service, and the migration keeps a shared concern single
  * sourced there for the same reason the reference suite keeps a record layout single sourced from
  * one directory instead of copying it per program ({@code tests/README.md} lines 540 to 542). Two
- * suites asserting one rounding contract can drift apart on it while both stay green, and a
- * one-cent rounding divergence is precisely the class of defect that survives a smoke test because
+ * suites asserting the same rounding contract can drift apart on it while both stay green, and a
+ * one-cent rounding difference is precisely the class of defect that survives a smoke test because
  * the numbers still look plausible. Verification is therefore single sourced alongside the type it
  * verifies.</p>
  *

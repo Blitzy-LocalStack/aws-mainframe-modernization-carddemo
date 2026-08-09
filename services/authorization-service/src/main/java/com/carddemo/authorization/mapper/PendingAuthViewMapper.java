@@ -7,6 +7,7 @@ import com.carddemo.authorization.dto.PendingAuthDetailView;
 import com.carddemo.authorization.dto.PendingAuthListView;
 import com.carddemo.authorization.dto.PendingAuthRowView;
 import com.carddemo.authorization.dto.PendingAuthSummaryView;
+import com.carddemo.authorization.service.AccountContextClient;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.security.CardNumberMasker;
@@ -193,11 +194,14 @@ public class PendingAuthViewMapper {
      * they admit. Padding here is therefore restoring the declared form, not decorating it.</p>
      *
      * @param summary the persistent summary row, never {@code null}
+     * @param customer the customer display fields the account context resolved, or {@code null} when it
+     *     resolved none; the four screen fields are published as {@code null} in that case
      * @return the summary block in the shape the contract publishes, never {@code null}
      * @throws NullPointerException if {@code summary} is {@code null}, or if any column the contract marks
      *     required is unset on it
      */
-    public PendingAuthSummaryView toSummaryView(PendingAuthSummary summary) {
+    public PendingAuthSummaryView toSummaryView(PendingAuthSummary summary,
+            AccountContextClient.CustomerDisplay customer) {
         Objects.requireNonNull(summary, "summary must not be null");
         return new PendingAuthSummaryView(
                 pad(summary.getAccountId(), PendingAuthSummaryView.ACCOUNT_ID_WIDTH, "accountId"),
@@ -215,7 +219,20 @@ public class PendingAuthViewMapper {
                 summary.getApprovedAuthCount(),
                 summary.getDeclinedAuthCount(),
                 money(summary.getApprovedAuthAmount()),
-                money(summary.getDeclinedAuthAmount()));
+                money(summary.getDeclinedAuthAmount()),
+                // WHY : Assumptions: the four display fields are passed straight through and are NOT
+                //       padded to their map widths here, unlike the two identifiers above. The widths in
+                //       the screen record are a rendering contract the screen response applies; padding
+                //       them at this layer would put trailing blanks into a JSON string that a client
+                //       other than the screen would then have to trim.
+                //       Assumptions: an ABSENT customer becomes four nulls rather than four blanks,
+                //       because null is the one value that distinguishes "not resolved" from "resolved
+                //       and empty" at this layer -- the screen collapses both to blanks, but a diagnostic
+                //       reading this record can still tell which happened.
+                customer == null ? null : customer.customerName(),
+                customer == null ? null : customer.addressLine1(),
+                customer == null ? null : customer.addressLine2(),
+                customer == null ? null : customer.phoneNumber1());
     }
 
     /**
@@ -351,10 +368,16 @@ public class PendingAuthViewMapper {
      *     {@code null} and never containing {@code null}
      * @param hasNext whether a further page follows this one, as the query that produced {@code rows}
      *     established
+     * @param hasPrevious whether a page precedes the one being rendered, established by the caller
+     *     that ran the read; it is not derived from the leading boundary token, which every page carrying
+     *     rows supplies
      * @param screenMessage the navigation-boundary sentence for this request, or {@code null} when the
      *     request was not a paging move that had already reached a boundary
      * @param subject the authenticated principal this page and every selector on it are issued to, which
      *     for a bearer-token caller is the token's subject claim; must not be {@code null} or blank
+     * @param customer the customer display fields the account context resolved for this summary, or
+     *     {@code null} when it resolved none; read ONCE per page rather than per row, because every
+     *     authorization beneath one summary belongs to the same account and so the same customer
      * @return the list body in the shape the contract publishes, never {@code null}
      * @throws NullPointerException if {@code summary}, {@code rows} or {@code subject} is {@code null}, or
      *     if {@code rows} contains {@code null}
@@ -363,7 +386,8 @@ public class PendingAuthViewMapper {
      *     the page envelope refuses the second and the body refuses the third
      */
     public PendingAuthListView toListView(PendingAuthSummary summary,
-            List<PendingAuthDetail> rows, boolean hasNext, String screenMessage, String subject) {
+            List<PendingAuthDetail> rows, boolean hasNext, boolean hasPrevious, String screenMessage,
+            String subject, AccountContextClient.CustomerDisplay customer) {
         Objects.requireNonNull(summary, "summary must not be null");
         Objects.requireNonNull(rows, "rows must not be null");
 
@@ -383,9 +407,14 @@ public class PendingAuthViewMapper {
         //       envelope's own contract refuses a boundary without rows for exactly that reason.
         String firstKey = items.isEmpty() ? null : items.get(0).key();
         String lastKey = items.isEmpty() ? null : items.get(items.size() - 1).key();
-        PageResponse<PendingAuthRowView> page =
-                PageResponse.ofRows(items, firstKey, lastKey, hasNext);
-        return new PendingAuthListView(toSummaryView(summary), page, screenMessage);
+        // WHY : Refactoring Rationale: backward availability is carried through rather than inferred from
+        //       the leading boundary token, which every page carrying rows supplies. Only the caller that
+        //       ran the read knows whether a row lies before the page, and the reference distinguishes the
+        //       two cases explicitly -- its top-of-page sentence at L381 fires when nothing precedes.
+        PageResponse<PendingAuthRowView> page = items.isEmpty()
+                ? PageResponse.empty()
+                : PageResponse.ofRows(items, firstKey, lastKey, hasNext, hasPrevious);
+        return new PendingAuthListView(toSummaryView(summary, customer), page, screenMessage);
     }
 
     /**

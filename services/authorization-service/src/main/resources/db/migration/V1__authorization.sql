@@ -1039,23 +1039,50 @@ CREATE TABLE auth_reply_outbox (
     --       got wrong. The reply is the six fields of cpy/CCPAURLY.cpy L19-L24,
     --       whose declared widths sum to 57 characters -- 16, 15, 6, 2, 4 and a
     --       14-character signed edited amount -- reaching 63 on the wire.
-    -- WHY : Refactoring Rationale: 63 and not 62, and the request is 169 and not
-    --       170; both figures are corrected here rather than left as an earlier
-    --       revision wrote them, because the executable contract disagreed with the
-    --       prose and the executable contract is what ships. The reply carries SIX
-    --       separators for six fields, not five: the reference program's STRING at
-    --       cbl/COPAUA0C.cbl L722-L730 emits a comma after the sixth field as well
-    --       as between the pairs, so 57 + 6 = 63, which is
-    --       CsvAuthCodec.REPLY_WIRE_LENGTH. The request has no trailing separator
-    --       and its ninth field is emitted at 13 characters rather than the
-    --       copybook's 14 -- because the reference UNSTRING receives that token
-    --       into WS-TRANSACTION-AMT-AN PIC X(13) at cbl/COPAUA0C.cbl L63 and L364,
-    --       so a fourteenth character would be discarded -- giving 18 fields
-    --       summing to 152 and 17 separators, 169 in total, which is
-    --       CsvAuthCodec.REQUEST_WIRE_LENGTH. TEXT rather than a bounded CHAR
-    --       because the width sum and the wire length are different things and a
-    --       column sized to the sum would truncate the separated form; the request
-    --       payload is not stored here at all.
+    -- WHY : Refactoring Rationale: the reply is 63 and not 62, and the request is
+    --       170 and not 169; both figures are corrected here rather than left as an
+    --       earlier revision wrote them, because the executable contract disagreed
+    --       with the prose and the executable contract is what ships. The reply
+    --       carries SIX separators for six fields, not five: the reference program's
+    --       STRING at cbl/COPAUA0C.cbl L722-L730 emits a comma after the sixth field
+    --       as well as between the pairs, so 57 + 6 = 63, which is
+    --       CsvAuthCodec.REPLY_WIRE_LENGTH. The request has no trailing separator,
+    --       and its 18 declared widths sum to 153 -- CsvAuthCodec
+    --       .REQUEST_DECLARED_WIDTH_SUM -- which with 17 separators reaches 170,
+    --       CsvAuthCodec.REQUEST_WIRE_LENGTH.
+    -- WHY : Refactoring Rationale: this block previously read 152 and 169, on the
+    --       ground that the ninth field is emitted at 13 characters rather than the
+    --       copybook's 14 because the reference UNSTRING receives that token into
+    --       WS-TRANSACTION-AMT-AN PIC X(13) at cbl/COPAUA0C.cbl L63 and L364. The
+    --       premise is true and the conclusion was not: the codec EMITS the
+    --       copybook's fourteen, CsvAuthCodec.REQUEST_MONEY_WIDTH, because
+    --       cpy/CCPAURQY.cpy L27 declares PIC +9(10).99 and the copybook is
+    --       normative for this wire. Narrowing the emission would make every other
+    --       consumer wrong to protect one, and the reference consumer keeps thirteen
+    --       of whatever it is sent either way -- the truncation is in its receiving
+    --       item, not in the payload. The codec additionally ACCEPTS the
+    --       thirteen-character form so a producer built against that intermediate is
+    --       not dead-lettered. That asymmetry is registered as
+    --       D-AUTH-AMOUNT-TOLERANT-READ in
+    --       docs/architecture/cobol-to-service-traceability.md, so this comment
+    --       cites the register rather than restating the argument.
+    -- WHY : Trade-offs: this file is EDITED in place although V3 rejected editing V1
+    --       for the rename it carries, and the two decisions are consistent rather
+    --       than contradictory. Flyway checksums a migration whole, comments
+    --       included, so this edit changes V1's checksum exactly as a statement
+    --       change would; what differs is that V3 altered the SCHEMA and therefore
+    --       needed a version of its own in any case, whereas nothing here needs
+    --       applying and a version that applies no statement would imply a change
+    --       that was not made. No database in this repository holds this baseline --
+    --       the local instance has applied the auth and reference schemas only -- and
+    --       every integration test migrates a fresh container from scratch, so the
+    --       checksum move is inert here. A database that HAS run V1 must be repaired
+    --       rather than re-migrated, which is one operator command against leaving a
+    --       normative wire length wrong in the file a reader consults first.
+    -- WHY : Assumptions: TEXT rather than a bounded CHAR, because the width sum and
+    --       the wire length are different things and a column sized to the sum would
+    --       truncate the separated form; the request payload is not stored here at
+    --       all.
     payload               TEXT           NOT NULL,
     content_type          VARCHAR(64)    NOT NULL DEFAULT 'text/csv',
 
@@ -1088,7 +1115,55 @@ CREATE TABLE auth_reply_outbox (
     --       alternative ordering -- mark first, then send -- turns a duplicate
     --       into a lost reply, which is the failure this table was added to
     --       remove, so the duplicate is the safer of the two.
-    attempts              SMALLINT       NOT NULL DEFAULT 0,
+    -- WHY : Refactoring Rationale: this counter is INTEGER rather than SMALLINT,
+    --       and it is incremented in exactly ONE place -- the claiming statement.
+    --       An earlier revision declared it SMALLINT and incremented it twice per
+    --       failed publication, once on the claim and once again when the reason
+    --       was recorded, so the stored count was double the attempts actually
+    --       made and a row whose reply queue stayed unreachable walked the
+    --       sixteen-bit range in half the expected time and then WRAPPED
+    --       NEGATIVE, at which point every attempt-bounded predicate below reads
+    --       it as a fresh row and retries it forever. Widening the column removes
+    --       the wrap and single-incrementing makes the number mean what its name
+    --       says. Alternatives Considered: keeping SMALLINT and relying on the
+    --       terminal marker below to stop a row long before 32,767 -- rejected
+    --       because it makes an audit column's correctness depend on a policy
+    --       value an operator may raise, and because BIGINT was equally rejected
+    --       in the other direction: four bytes already spans more attempts than
+    --       any retention window can hold rows for.
+    attempts              INTEGER        NOT NULL DEFAULT 0,
+
+    -- WHY : Assumptions: this is the LEASE and the BACKOFF in one column, and it
+    --       is what makes a claim durable without a lock. The claiming statement
+    --       sets it forward of the present, and the ready predicate admits only
+    --       rows whose value has arrived, so a row taken by one publisher is
+    --       invisible to another until the lease lapses -- and a row whose send
+    --       failed is invisible until its backoff elapses. Refactoring Rationale:
+    --       an earlier revision had neither. Its claim was an in-transaction row
+    --       write held for the whole pass, which forced the network send to
+    --       happen inside the database transaction, and its ready set was the
+    --       globally oldest unpublished rows, so a handful of permanently failing
+    --       heads were re-selected on every poll and every healthy group behind
+    --       them was STARVED -- a liveness failure that no amount of retrying
+    --       cleared, because the failing rows never stopped being the oldest.
+    --       Trade-offs: a publisher that dies mid-send leaves a lease that must
+    --       lapse before the row is retried, so the cost of this design is a
+    --       bounded delay after a crash rather than an immediate retry; the
+    --       benefit is that the connection is released before the send and that a
+    --       failing group yields its place to a healthy one.
+    next_attempt_at       TIMESTAMP(6)   NOT NULL DEFAULT TIMESTAMP '1970-01-01 00:00:00',
+
+    -- WHY : Assumptions: this is the TERMINAL state, and it is a distinct column
+    --       from published_at rather than a flag inside it, because the two say
+    --       different things and both need to stay true. A published row was
+    --       answered; an abandoned row never will be, and conflating them would
+    --       let a reply that was never sent read as delivered in every audit that
+    --       joins on publication. Trade-offs: an abandoned row keeps its payload
+    --       and its last_error so an operator can see WHICH reply was given up on
+    --       and why, and the retention sweep leaves it alone -- it is removed only
+    --       by an operator who has read it, which is the intended friction for a
+    --       reply the committed decision says was owed and never delivered.
+    abandoned_at          TIMESTAMP(6),
 
     -- WHY : Assumptions: this column holds REDACTED, metadata-only diagnostic
     --       text, and the constraint is on what the writer puts in rather than on
@@ -1166,3 +1241,27 @@ CREATE INDEX idx_auth_reply_outbox_unpublished
 CREATE INDEX idx_auth_reply_outbox_group
     ON auth_reply_outbox (order_group_token, outbox_id)
     WHERE published_at IS NULL;
+
+-- WHY : Assumptions: a THIRD partial index, and this one is over the PUBLISHED
+--       side, which is the exact complement of the two above. The retention sweep
+--       deletes rows whose publication instant precedes a cut-off, and neither
+--       index above can serve it: both carry WHERE published_at IS NULL, so the
+--       rows the sweep wants are precisely the rows they exclude. Refactoring
+--       Rationale: this index is added rather than the sweep being left as it was,
+--       because without it that delete was a full sequential scan of the whole
+--       table on every pass -- and the published population is the part of this
+--       table that grows without bound, so the scan got slower exactly as the
+--       reason to run it got stronger. Trade-offs: it is partial and keyed on the
+--       ordering column the chunked delete walks, so the sweep can take a bounded
+--       oldest-first slice per transaction instead of matching an unbounded
+--       population in one statement; the cost is one more index maintained on the
+--       single write that sets published_at.
+-- WHY : Assumptions: the predicate names published_at IS NOT NULL and NOT
+--       abandoned_at, so an abandoned reply is absent from this index and
+--       therefore invisible to the sweep. That is the mechanism behind the
+--       abandoned_at contract above -- a reply given up on is retained until an
+--       operator removes it -- expressed where the sweep actually reads rather
+--       than restated in the delete statement.
+CREATE INDEX idx_auth_reply_outbox_published
+    ON auth_reply_outbox (published_at, outbox_id)
+    WHERE published_at IS NOT NULL;

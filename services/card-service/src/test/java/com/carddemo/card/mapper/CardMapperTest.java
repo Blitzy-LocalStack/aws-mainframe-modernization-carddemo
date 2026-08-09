@@ -520,7 +520,8 @@ class CardMapperTest {
                         this.mapper.discloseCardNumberToAdministrator(stored)),
                 this.json.writeValueAsString(this.mapper.toDetail(updated)),
                 this.json.writeValueAsString(this.mapper.toSummaryPage(PageResponse.ofRows(
-                        List.of(stored), sealedCursor(position), sealedCursor(position), true))));
+                        List.of(stored), sealedCursor(position), sealedCursor(position), true,
+                        false))));
 
         for (String body : bodies) {
             assertThat(verificationValueLeaks(this.json.readTree(body), storedValue))
@@ -760,7 +761,8 @@ class CardMapperTest {
                 this.json.writeValueAsString(this.mapper.toDetail(stored)));
         JsonNode page = this.json.readTree(this.json.writeValueAsString(
                 this.mapper.toSummaryPage(PageResponse.ofRows(
-                        List.of(stored), sealedCursor(position), sealedCursor(position), false))));
+                        List.of(stored), sealedCursor(position), sealedCursor(position), false,
+                        false))));
 
         assertThat(row.propertyNames())
                 .containsExactlyInAnyOrder("key", "displayCardNumber", "accountId", "activeStatus");
@@ -768,7 +770,8 @@ class CardMapperTest {
                 .containsExactlyInAnyOrder("key", "displayCardNumber", "accountId", "embossedName",
                         "expirationDate", "activeStatus", "version");
         assertThat(page.propertyNames())
-                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
+                .containsExactlyInAnyOrder(
+                        "items", "firstKey", "lastKey", "hasNext", "hasPrevious");
         assertThat(detail.get("embossedName").asString())
                 .isEqualTo(detail.get("embossedName").asString().stripTrailing())
                 .isNotBlank();
@@ -945,7 +948,7 @@ class CardMapperTest {
         String lastToken = sealedCursor(trailingPosition);
 
         PageResponse<CardSummary> page = this.mapper.toSummaryPage(
-                PageResponse.ofRows(stored, firstToken, lastToken, true));
+                PageResponse.ofRows(stored, firstToken, lastToken, true, false));
 
         assertThat(page.firstKey()).isEqualTo(firstToken);
         assertThat(page.lastKey()).isEqualTo(lastToken);

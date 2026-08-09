@@ -15,6 +15,9 @@ import com.carddemo.reference.repository.UsPhoneAreaCodeRepository;
 import com.carddemo.reference.repository.UsStateRepository;
 import com.carddemo.reference.repository.UsStateZipPrefixRepository;
 import com.carddemo.reference.service.ReferencePaging;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.security.Principal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -94,6 +97,37 @@ public class AddressLookupController {
      */
     public static final int PAGE_SIZE = 20;
 
+    /**
+     * The exact width of an area code, from the {@code PhoneAreaCodeValue} schema.
+     *
+     * <p>Refactoring Rationale: the three widths and three expressions declared here and below are
+     * transcribed from the schemas the item routes' published path parameters reference --
+     * {@code PhoneAreaCodeValue}, {@code StateCodeValue} and {@code StateZipPrefixValue}. They are declared
+     * because each of those routes previously bound its segment as unconstrained text and read for it, so a
+     * value outside the published domain matched no seeded row and was answered 404 with the domain's
+     * "NOT found" sentence. That answer is wrong in a way a caller acts on: it says the code is not seeded
+     * when what is actually true is that the value cannot be a code at all, and the two call for different
+     * corrections. They are declared privately rather than published because this class is their only
+     * consumer -- unlike the two transaction codes, which are shared with the disclosure-group read and are
+     * therefore published on the entities that own them.</p>
+     */
+    private static final int AREA_CODE_WIDTH = 3;
+
+    /** The closed domain of an area code: exactly three digits, leading zeros retained. */
+    private static final String AREA_CODE_PATTERN = "^[0-9]{3}$";
+
+    /** The exact width of a state code, from the {@code StateCodeValue} schema. */
+    private static final int STATE_CODE_WIDTH = 2;
+
+    /** The closed domain of a state code: two upper-case letters. */
+    private static final String STATE_CODE_PATTERN = "^[A-Z]{2}$";
+
+    /** The exact width of a state-and-prefix pair, from the {@code StateZipPrefixValue} schema. */
+    private static final int ZIP_PREFIX_WIDTH = 4;
+
+    /** The closed domain of a state-and-prefix pair: two upper-case letters then two digits. */
+    private static final String ZIP_PREFIX_PATTERN = "^[A-Z]{2}[0-9]{2}$";
+
     /** The verbatim refusal when no seeded area code matches. */
     public static final String MESSAGE_AREA_CODE_NOT_FOUND = "Phone area code NOT found...";
 
@@ -149,16 +183,23 @@ public class AddressLookupController {
      * @param cursor the paging position a previous reply minted, absent on a first request
      * @param direction the paging direction, absent meaning forward
      * @param codeClass the classification filter, absent meaning unfiltered
+     * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
+     *     every position this page mints, so a position is not transferable between callers
      * @return one page of area codes with its sealed positions
      */
     @GetMapping(path = AREA_CODE_PATH)
     public PageResponse<PhoneAreaCodeResponse> listUsPhoneAreaCodes(
-            @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
+            @RequestParam(name = PARAM_CURSOR, required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
             @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
-            @RequestParam(name = PARAM_CODE_CLASS, required = false) String codeClass) {
+            @RequestParam(name = PARAM_CODE_CLASS, required = false)
+            @Pattern(regexp = LookupPageRequest.CODE_CLASS_PATTERN) String codeClass,
+            Principal principal) {
 
+        String subject = principal.getName();
         LookupPageRequest request = new LookupPageRequest(cursor, direction, codeClass);
-        String position = position(request, AREA_CODE_BINDING);
+        String position = position(request, AREA_CODE_BINDING, subject);
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
 
@@ -183,8 +224,10 @@ public class AddressLookupController {
                                             codeClass, position, limit);
         }
         return ReferencePaging.page(
-                rows, PAGE_SIZE, backward, AREA_CODE_BINDING, this.cursorToken,
-                LookupMapper::toResponse, UsPhoneAreaCode::getAreaCode);
+                rows, PAGE_SIZE, backward, position != null,
+                ReferencePaging.binding(AREA_CODE_BINDING, subject, true, codeClass),
+                ReferencePaging.binding(AREA_CODE_BINDING, subject, false, codeClass),
+                this.cursorToken, LookupMapper::toResponse, UsPhoneAreaCode::getAreaCode);
     }
 
     /**
@@ -195,7 +238,10 @@ public class AddressLookupController {
      * @throws NoSuchElementException carrying the verbatim refusal when the code is not seeded
      */
     @GetMapping(path = AREA_CODE_PATH + "/{areaCd}")
-    public PhoneAreaCodeResponse getUsPhoneAreaCode(@PathVariable(name = "areaCd") String areaCd) {
+    public PhoneAreaCodeResponse getUsPhoneAreaCode(
+            @PathVariable(name = "areaCd")
+            @Size(min = AREA_CODE_WIDTH, max = AREA_CODE_WIDTH)
+            @Pattern(regexp = AREA_CODE_PATTERN) String areaCd) {
         Optional<UsPhoneAreaCode> found = this.areaCodes.findByAreaCode(areaCd);
         if (found.isEmpty()) {
             throw new NoSuchElementException(MESSAGE_AREA_CODE_NOT_FOUND);
@@ -208,15 +254,21 @@ public class AddressLookupController {
      *
      * @param cursor the paging position a previous reply minted, absent on a first request
      * @param direction the paging direction, absent meaning forward
+     * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
+     *     every position this page mints, so a position is not transferable between callers
      * @return one page of state codes with its sealed positions
      */
     @GetMapping(path = STATE_PATH)
     public PageResponse<UsStateResponse> listUsStates(
-            @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
-            @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction) {
+            @RequestParam(name = PARAM_CURSOR, required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
+            @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
+            Principal principal) {
 
+        String subject = principal.getName();
         LookupPageRequest request = new LookupPageRequest(cursor, direction, null);
-        String position = position(request, STATE_BINDING);
+        String position = position(request, STATE_BINDING, subject);
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
 
@@ -229,8 +281,10 @@ public class AddressLookupController {
                                 .findByStateCodeGreaterThanOrderByStateCodeAsc(position, limit);
 
         return ReferencePaging.page(
-                rows, PAGE_SIZE, backward, STATE_BINDING, this.cursorToken,
-                LookupMapper::toResponse, UsState::getStateCode);
+                rows, PAGE_SIZE, backward, position != null,
+                ReferencePaging.binding(STATE_BINDING, subject, true),
+                ReferencePaging.binding(STATE_BINDING, subject, false),
+                this.cursorToken, LookupMapper::toResponse, UsState::getStateCode);
     }
 
     /**
@@ -241,7 +295,10 @@ public class AddressLookupController {
      * @throws NoSuchElementException carrying the verbatim refusal when the code is not seeded
      */
     @GetMapping(path = STATE_PATH + "/{stateCd}")
-    public UsStateResponse getUsState(@PathVariable(name = "stateCd") String stateCd) {
+    public UsStateResponse getUsState(
+            @PathVariable(name = "stateCd")
+            @Size(min = STATE_CODE_WIDTH, max = STATE_CODE_WIDTH)
+            @Pattern(regexp = STATE_CODE_PATTERN) String stateCd) {
         Optional<UsState> found = this.states.findByStateCode(stateCd);
         if (found.isEmpty()) {
             throw new NoSuchElementException(MESSAGE_STATE_NOT_FOUND);
@@ -254,15 +311,21 @@ public class AddressLookupController {
      *
      * @param cursor the paging position a previous reply minted, absent on a first request
      * @param direction the paging direction, absent meaning forward
+     * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
+     *     every position this page mints, so a position is not transferable between callers
      * @return one page of prefixes with its sealed positions
      */
     @GetMapping(path = ZIP_PREFIX_PATH)
     public PageResponse<UsStateZipPrefixResponse> listUsStateZipPrefixes(
-            @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
-            @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction) {
+            @RequestParam(name = PARAM_CURSOR, required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
+            @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
+            Principal principal) {
 
+        String subject = principal.getName();
         LookupPageRequest request = new LookupPageRequest(cursor, direction, null);
-        String position = position(request, ZIP_PREFIX_BINDING);
+        String position = position(request, ZIP_PREFIX_BINDING, subject);
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
 
@@ -275,8 +338,10 @@ public class AddressLookupController {
                                 .findByStateZipCdGreaterThanOrderByStateZipCdAsc(position, limit);
 
         return ReferencePaging.page(
-                rows, PAGE_SIZE, backward, ZIP_PREFIX_BINDING, this.cursorToken,
-                LookupMapper::toResponse, UsStateZipPrefix::getStateZipCd);
+                rows, PAGE_SIZE, backward, position != null,
+                ReferencePaging.binding(ZIP_PREFIX_BINDING, subject, true),
+                ReferencePaging.binding(ZIP_PREFIX_BINDING, subject, false),
+                this.cursorToken, LookupMapper::toResponse, UsStateZipPrefix::getStateZipCd);
     }
 
     /**
@@ -288,7 +353,9 @@ public class AddressLookupController {
      */
     @GetMapping(path = ZIP_PREFIX_PATH + "/{stateZipCd}")
     public UsStateZipPrefixResponse getUsStateZipPrefix(
-            @PathVariable(name = "stateZipCd") String stateZipCd) {
+            @PathVariable(name = "stateZipCd")
+            @Size(min = ZIP_PREFIX_WIDTH, max = ZIP_PREFIX_WIDTH)
+            @Pattern(regexp = ZIP_PREFIX_PATTERN) String stateZipCd) {
         Optional<UsStateZipPrefix> found = this.zipPrefixes.findByStateZipCd(stateZipCd);
         if (found.isEmpty()) {
             throw new NoSuchElementException(MESSAGE_ZIP_PREFIX_NOT_FOUND);
@@ -297,18 +364,33 @@ public class AddressLookupController {
     }
 
     /**
-     * Opens a supplied position under the binding of the browse that minted it.
+     * Refuses a malformed paging pair, then opens a supplied position under the binding that minted it.
+     *
+     * <p>Refactoring Rationale: this used to open under the browse name alone and to accept a direction
+     * with no position. Both were defects the sibling transaction-type browse was reported for, and both
+     * existed identically here; the reasoning is recorded once, on
+     * {@code ReferencePaging.binding} and {@code ReferencePaging.requireCursorForDirection}, and this
+     * method now delegates to both rather than restating either.</p>
+     *
+     * <p>Assumptions: the classification filter is passed as the single narrowing element for all three
+     * browses, and it is {@code null} for the two that have no filter. Passing it uniformly keeps one
+     * helper for three browses; the scope composition treats an absent element as its own value, so the
+     * two unfiltered browses do not thereby share a scope with a filtered one.</p>
      *
      * @param request the paging parameters
      * @param binding the cursor binding of this browse
+     * @param subject the authenticated caller's identity, sealed into the binding; must not be
+     *     {@code null}
      * @return the opened key, or {@code null} when no position was supplied
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if the position was not minted
-     *     by this browse
+     *     by this browse, for this caller, under this filter and for this direction
+     * @throws com.carddemo.common.error.ClientInputException if a paging direction arrives without the
+     *     position it would move from
      */
-    private String position(LookupPageRequest request, String binding) {
-        return request.cursor() == null
-                ? null
-                : this.cursorToken.open(binding, request.cursor());
+    private String position(LookupPageRequest request, String binding, String subject) {
+        ReferencePaging.requireCursorForDirection(request.cursor(), request.direction());
+        return ReferencePaging.openPosition(this.cursorToken, binding, subject, request.cursor(),
+                request.direction(), request.codeClass());
     }
 
     /**

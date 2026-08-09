@@ -3,6 +3,7 @@ package com.carddemo.auth.repository;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
@@ -16,6 +17,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
+import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
@@ -706,6 +708,83 @@ class UserRepositoryIT {
     }
 
     /**
+     * A raced insert of one identifier is refused, and the first writer's row survives untouched.
+     *
+     * <p>Purpose: this pins the two properties {@code UserService.create} depends on for its
+     * compensation to work at all. That method provisions a managed-identity account, writes the row,
+     * and withdraws the account again from a {@code catch} inside its own transaction, so the primary
+     * key's verdict has to arrive while the {@code try} block is still on the stack AND has to be a
+     * refusal rather than an overwrite.
+     *
+     * <p>Assumptions: the write under test is {@link UserRepository#insertUser} and not the inherited
+     * save, and the distinction is exactly what this case exists to hold. This entity carries an
+     * assigned identifier and no version attribute, so the repository's newness test is "is the
+     * identifier null" and is false for every row this context builds; the inherited save therefore
+     * reaches a merge, and a merge against an identifier a row already holds loads that row and updates
+     * it. Measured against this fixture, {@code saveAndFlush} of the second writer raised nothing and
+     * changed the stored type -- a silent overwrite reported to its caller as a successful create. The
+     * insert is the statement that refuses.
+     *
+     * <p>Assumptions: both halves are asserted because each can hold without the other. The refusal
+     * proves the key decided; the first writer's row still carrying its own type proves the refusal was
+     * a refusal and not an update.
+     *
+     * <p>Assumptions: the two writes are issued in SEPARATE committed transactions, the second running
+     * after the first has committed. That is the interleaving the service's existence probe cannot
+     * close: two callers can each read no row before either writes, and the later write is the one the
+     * key refuses.
+     */
+    @Test
+    void aRacedInsertOfOneIdentifierIsRefusedAndLeavesTheFirstRowStanding() {
+        User firstWriter = newUser(ADMIN_USER_ID, ADMIN_TYPE);
+        seedUsers(firstWriter);
+
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser(ADMIN_USER_ID, "Second", "Writer", USER_TYPE,
+                                subjectFor("a-different-subject").toString())))
+                .as("the primary key on auth.users must refuse the second insert of one identifier")
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("the row the first writer committed must survive the refused second insert")
+                .isPresent()
+                .get()
+                .satisfies(stored -> assertThat(stored.getUserType()).isEqualTo(ADMIN_TYPE));
+    }
+
+    /**
+     * The insert writes exactly the five values it is given, and the subject reaches the native column.
+     *
+     * <p>Assumptions: this is asserted separately from the refusal case above because a statement that
+     * refused a duplicate correctly could still write the wrong columns on the ordinary path -- the
+     * statement names its columns positionally, so a transposed pair of the two same-width name
+     * parameters would compile, refuse duplicates correctly, and store the values swapped.
+     *
+     * <p>Assumptions: the subject is read back through the alternate-key lookup rather than through the
+     * primary key, because that lookup is what exercises the {@code uuid} column the statement casts its
+     * text parameter into. Reading it back by identifier would confirm the row exists without
+     * confirming the cast produced a value the unique index can match.
+     */
+    @Test
+    void theInsertWritesEachColumnItIsGivenAndCastsTheSubjectToTheNativeType() {
+        UUID subject = subjectFor(ADMIN_USER_ID);
+
+        this.commit.executeWithoutResult(status -> this.users.insertUser(ADMIN_USER_ID, "Ada",
+                "Lovelace", ADMIN_TYPE, subject.toString()));
+
+        assertThat(this.users.findByCognitoSub(subject))
+                .as("the cast text subject must be matchable through the native uuid column")
+                .isPresent()
+                .get()
+                .satisfies(stored -> {
+                    assertThat(trimmedUserId(stored)).isEqualTo(ADMIN_USER_ID);
+                    assertThat(stored.getFirstName()).isEqualTo("Ada");
+                    assertThat(stored.getLastName()).isEqualTo("Lovelace");
+                    assertThat(stored.getUserType()).isEqualTo(ADMIN_TYPE);
+                });
+    }
+
+    /**
      * A subject with no local row resolves to an empty result rather than to a failure.
      *
      * <p>Assumptions: a subject the identity provider has issued need not yet have a row here, so
@@ -939,44 +1018,122 @@ class UserRepositoryIT {
     }
 
     /**
-     * The migration created one table and granted nothing of its own.
+     * The migrations created two tables and granted nothing of their own.
      *
-     * <p>Purpose: {@code V1__auth.sql} is a single executable statement, and this case asserts that
-     * shape from the engine rather than from the file's wording. Schema, role and grant creation
-     * belong to the bootstrap migration {@code data-migration/sql/V0__schemas_and_roles.sql}, so a
-     * privilege appearing here would mean this service's migration had taken on an ownership concern
-     * that is deliberately held elsewhere.
+     * <p>Purpose: this case asserts the schema's shape from the engine rather than from the migration
+     * files' wording. Schema, role and grant creation belong to the bootstrap migration
+     * {@code data-migration/sql/V0__schemas_and_roles.sql}, so a privilege appearing here would mean
+     * this service's migrations had taken on an ownership concern that is deliberately held elsewhere.
      *
-     * <p>Assumptions: the only relation the migration is permitted to have added is the identity
-     * table itself. The migration tool's own history table also lives in this schema, and it is
-     * excluded by name rather than by count, because excluding it by count would let a genuinely
-     * unexpected third relation pass unnoticed.
+     * <p>Assumptions: the two relations are the identity table from {@code V1__auth.sql} and the
+     * identity-synchronisation ledger from {@code V2__auth_identity_sync.sql}. The migration tool's own
+     * history table also lives in this schema, and it is excluded by name rather than by count, because
+     * excluding it by count would let a genuinely unexpected third relation pass unnoticed.
+     *
+     * <p>Refactoring Rationale: this case previously asserted ONE table, and the count is widened here
+     * rather than the assertion relaxed. {@code V2__auth_identity_sync.sql} adds the ledger that carries a
+     * committed user change to the managed user pool -- it exists because this context writes to two stores
+     * and the provider is not a transaction participant.</p>
+     *
+     * <p>Assumptions: the no-sequence assertion still holds unchanged even though the ledger's surrogate key
+     * is declared {@code GENERATED BY DEFAULT AS IDENTITY}, and that is worth stating because it reads like
+     * an oversight. PostgreSQL backs an identity column with a sequence it OWNS internally, and
+     * {@code information_schema.sequences} lists only sequences a schema declares in its own right, so an
+     * identity column contributes no row there. The assertion therefore still catches a sequence introduced
+     * deliberately, which is what it was written for.</p>
      */
     @Test
-    void theMigrationCreatedOneTableAndGrantedNothingOfItsOwn() {
+    void theMigrationsCreatedTwoTablesAndGrantedNothingOfTheirOwn() {
         assertThat(tablesInIdentitySchema())
-                .as("the migration creates exactly one table beside the tool's own history table")
-                .containsExactly("users");
+                .as("the migrations create exactly two tables beside the tool's own history table")
+                .containsExactly("identity_sync_task", "users");
         assertThat(nativeStringColumn(
                         "select table_name from information_schema.views where table_schema = ?1",
                         IDENTITY_SCHEMA))
-                .as("V1__auth.sql declares no view")
+                .as("neither migration declares a view")
                 .isEmpty();
         assertThat(nativeStringColumn(
                         "select sequence_name from information_schema.sequences"
-                                + " where sequence_schema = ?1",
+                                + " where sequence_schema = ?1 order by sequence_name",
                         IDENTITY_SCHEMA))
-                .as("V1__auth.sql declares no sequence")
+                .as("neither migration declares a sequence of its own")
                 .isEmpty();
         assertThat(nativeStringColumn(
                         "select trigger_name from information_schema.triggers"
                                 + " where trigger_schema = ?1",
                         IDENTITY_SCHEMA))
-                .as("V1__auth.sql declares no trigger")
+                .as("neither migration declares a trigger")
                 .isEmpty();
         assertThat(nonOwnerGranteesOnIdentityTable())
-                .as("V1__auth.sql grants no privilege to any role other than the table's owner")
+                .as("neither migration grants a privilege to any role other than the table's owner")
                 .isEmpty();
+    }
+
+    /**
+     * The ledger table admits only the three operations and the three statuses its applier implements.
+     *
+     * <p>Purpose: the operation and status domains are enforced by {@code CHECK} constraints in
+     * {@code V2__auth_identity_sync.sql}, and this case asserts the engine refuses a value outside each
+     * one. Assumptions: the constraints matter because the applier switches exhaustively over the three
+     * operations and refuses an unrecognised one as a programming error; a row carrying a fourth value
+     * would make that refusal reachable from data rather than from code.</p>
+     *
+     * <p>Assumptions: the ledger's {@code user_id} carries NO foreign key to the identity table, and this
+     * case asserts that absence deliberately. A withdrawal intention is recorded in the same transaction
+     * that deletes the row it names, so a reference would make the insert impossible -- and under a cascade
+     * would remove the intention along with the row, which is the exact loss the ledger exists to prevent.
+     * </p>
+     */
+    @Test
+    void theLedgerAdmitsOnlyTheOperationsAndStatusesItsApplierImplements() {
+        assertThatThrownBy(() -> insertLedgerRow("REPROJECT", IdentitySyncTask.STATUS_PENDING))
+                .as("an operation outside the three the applier implements is refused by the engine")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_identity_sync_task_operation"));
+        assertThatThrownBy(() -> insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, "CLAIMED"))
+                .as("a status outside the three the entity transitions between is refused")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_identity_sync_task_status"));
+
+        // Assumptions: an ADMISSIBLE row is inserted too, so the two refusals above are evidence that the
+        //   constraints discriminate rather than that the statement was malformed for every input.
+        insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, IdentitySyncTask.STATUS_PENDING);
+
+        assertThat(nativeStringColumn(
+                        "select c.conname from pg_catalog.pg_constraint c"
+                                + " join pg_catalog.pg_class t on t.oid = c.conrelid"
+                                + " join pg_catalog.pg_namespace n on n.oid = t.relnamespace"
+                                + " where n.nspname = ?1 and t.relname = 'identity_sync_task'"
+                                + " and c.contype = 'f'",
+                        IDENTITY_SCHEMA))
+                .as("the ledger names no foreign key, so a withdrawal intention outlives its row")
+                .isEmpty();
+    }
+
+    /**
+     * Inserts one ledger row directly, so a check constraint can be observed refusing a value.
+     *
+     * <p>Assumptions: the insert is issued as a native statement rather than through the repository,
+     * because the entity's own guards would refuse an inadmissible value before the engine ever saw it --
+     * and it is the ENGINE's refusal this case is about, since the entity is not the only thing that can
+     * write this table.</p>
+     *
+     * <p>Assumptions: the refusal therefore arrives as the provider's own constraint-violation type rather
+     * than the framework's translated one, which is why the case above names that type. Exception
+     * translation is applied by the repository proxy, and this statement does not pass through one.</p>
+     *
+     * @param operation the operation value to attempt, admissible or not
+     * @param status the status value to attempt, admissible or not
+     */
+    private void insertLedgerRow(String operation, String status) {
+        this.commit.executeWithoutResult(status2 -> bind(
+                        "insert into " + IDENTITY_SCHEMA + ".identity_sync_task"
+                                + " (user_id, operation, status, created_at)"
+                                + " values (?1, ?2, ?3, now())",
+                        "USER0001", operation, status)
+                .executeUpdate());
     }
 
     /**

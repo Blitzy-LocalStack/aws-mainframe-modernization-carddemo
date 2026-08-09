@@ -153,23 +153,31 @@ export type PageDirection = 'next' | 'previous';
 /**
  * Shared sealed-cursor page envelope returned by every browse operation.
  *
- * Assumptions: FOUR members, matching the `PageResponse` record in common-lib and the `CardPage`,
+ * Assumptions: FIVE members, matching the `PageResponse` record in common-lib and the `CardPage`,
  * `PageResponse`, `TransactionPage`, `PendingAuthPage`, `TransactionTypePage` and sibling schemas the
- * contracts publish. A fifth member -- a next cursor, a previous cursor, a `hasPrev` flag -- would
- * describe a body no service sends, and a member that is always absent is worse than no member
- * because it reads as a value that merely happens to be missing this time.
+ * contracts publish, each of which lists all five as required with `additionalProperties: false`. A
+ * sixth member -- a next cursor, a previous cursor, a row total -- would describe a body no service
+ * sends, and a member that is always absent is worse than no member because it reads as a value that
+ * merely happens to be missing this time.
  *
  * Assumptions: `lastKey` is both the last row's identity and the position a forward request is issued
  * from, and `firstKey` likewise for a backward one. The service seals the direction into each token,
  * so replaying `firstKey` with direction `next` is refused with HTTP 400 rather than answered with
- * the wrong page -- which is what makes one value safe to serve both purposes. A backward step is
- * expressible exactly when `firstKey` is non-null, so no separate availability member is needed.
+ * the wrong page -- which is what makes one value safe to serve both purposes.
+ *
+ * Refactoring Rationale: `hasPrevious` exists because the earlier four-member shape asked this client
+ * to derive backward availability from `firstKey` being non-null, and that derivation was wrong. Every
+ * page that returns rows names its own first row, so the OPENING page satisfied it, the backward
+ * control was enabled there, and following it replaced the rows on screen with an empty page. The
+ * services now establish the answer from the read that built the page, and this client reads it rather
+ * than inferring it.
  */
 export interface PageResponse<T> {
   readonly items: readonly T[];
   readonly firstKey: string | null;
   readonly lastKey: string | null;
   readonly hasNext: boolean;
+  readonly hasPrevious: boolean;
 }
 
 /**

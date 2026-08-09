@@ -116,7 +116,9 @@ terraform {
   required_providers {
     # WHY : `dev` is the environment allowed to run Aurora Serverless at a
     #       minimum capacity of 0, and the provider only accepts a zero minimum
-    #       from 5.81.0 onward; 6.56 clears that floor with room to spare. The
+    #       from 5.80.0 onward and the auto-pause argument a zero minimum makes
+    #       mandatory only from 5.81.0, so the pair floors at 5.81.0; 6.56 clears
+    #       that floor with room to spare. The
     #       floor is the entire reason this constraint is not looser.
     #       Alternatives Considered: an exact `= 6.56.0` pin, rejected because
     #       it blocks provider patch releases while buying nothing this root

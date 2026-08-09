@@ -10,9 +10,15 @@
  * stated below with the evidence that settles it, because a reader acting on superseded wording is the
  * specific failure this file exists to prevent.
  *
- * <p><strong>The subtree, as verified on disk.</strong> Eight test packages sit beneath this one and each
- * carries its own {@code package-info.java}, for exactly the reason this file does, so this tree holds nine
- * charters in total and a missing one fails the gate before compilation:
+ * <p><strong>The subtree, as verified on disk.</strong> Ten test packages sit beneath this one and each
+ * carries its own {@code package-info.java}, for exactly the reason this file does, so this tree holds
+ * eleven charters in total and a missing one fails the gate before compilation. The roster is closed and is
+ * measured against the directory on every build:
+ *
+ * <pre>
+ * this package: 10 subpackages
+ * </pre>
+ *
  * <ul>
  *   <li>{@code .api} - the HTTP boundary only: that a request reaches the published route, that binding and
  *       validation produce the per-field refusal, and that the outcome selects the declared status.</li>
@@ -30,9 +36,19 @@
  *       and assert each one's width, its fields, its final record and its failure path.</li>
  *   <li>{@code .mapper} - the anti-corruption boundary: segment conversion, the wire fixtures, the date
  *       pivot, and what a mapper is permitted to expose.</li>
+ *   <li>{@code .repository} - schema truth against a real engine: the shape of each primary key, the
+ *       domain each check constraint admits and refuses, the fraud access path as the two catalogue
+ *       objects it became here, the accept-and-refuse behaviour of an upsert, and the look-ahead row a
+ *       paging query must return. Its own charter records why it exists despite the rule below that
+ *       mirroring a production package is not a reason to stand a test package up.</li>
  *   <li>{@code .service} - the business behaviour transcribed from the COBOL, together with the queue
  *       listener, the outbox publisher, the purge job, the extract round trip and the outbound
  *       account-context client. This is where the divergences below are actually asserted.</li>
+ *   <li>{@code .task} - whether the maintenance jobs can be INVOKED at all: that every job name the runner
+ *       publishes resolves to a bean and every bean implementing the task contract is published under a
+ *       name, asserted in both directions and read from the task sources rather than from a started
+ *       context. It is separate from {@code .service} because a behavioural test calls a job directly and
+ *       therefore cannot observe whether any caller exists.</li>
  * </ul>
  *
  * <p>Assumptions: this charter fixes no leaf-class count and names no leaf class, and both omissions are
@@ -47,14 +63,24 @@
  * {@code .service}, {@code .mapper} and {@code .repository} - holding twenty-three files behind five
  * charters, with {@code .dto}, {@code .domain} and {@code .config} named as packages that must not exist.
  * Every part of that is superseded by what is on disk, and the correction is recorded here rather than left
- * for eight agents to rediscover separately. There are eight packages, not four. There is no
- * {@code .repository} test package at all. {@code .dto}, {@code .domain} and {@code .config} all exist and
- * are load-bearing. {@code .contract} and {@code .fixtures} exist and were not planned. The migration plan
+ * for eight agents to rediscover separately. There are ten packages, not four. {@code .dto},
+ * {@code .domain} and {@code .config} all exist and
+ * are load-bearing. {@code .contract}, {@code .fixtures} and {@code .task} exist and were not planned. The migration plan
  * states the governing precedence for exactly this case: the repository is authoritative, and where the two
  * differ the repository wins and the difference is recorded so that no downstream agent re-derives it.
  * Publishing the planned map instead would have sent a reader looking for a package that is not there and
  * told three real packages to delete themselves. What survives unchanged from the planned shape is the
  * naming contract below, which is real and is enforced by the build.
+ *
+ * <p>Refactoring Rationale: this section, and the census above it, said there were EIGHT packages and that
+ * there was "no {@code .repository} test package at all". Both statements were true when written and were
+ * falsified by that package landing, and the sentence that mattered was the second one: a flat denial of a
+ * directory's existence is not a stale count, it is an instruction to a reader that the four container-backed
+ * integration tests sitting there are misplaced. That package's own charter recorded the correction locally
+ * from the moment it was added, which was the right thing to do and was not enough, because a reader
+ * consults the root charter FIRST and has no reason to open the charter of a package this one says is not
+ * there. The census is now a marker line the build measures, so the next package added here fails a test
+ * rather than making this paragraph wrong again.
  *
  * <p><strong>Naming contract: obey the suffix or the class does not run.</strong> Two plugins split this
  * tree by class name alone, and neither reads an include list authored here. A unit test name must end
@@ -330,12 +356,23 @@
  *
  * <p>Assumptions: the production package names the tests import are {@code .api}, {@code .service},
  * {@code .repository}, {@code .domain}, {@code .dto}, {@code .mapper} and {@code .config}, seven in all,
- * and they are NOT the same set as the eight test packages above. The asymmetry is intended in both
- * directions: there is no {@code .repository} test package even though a production one exists, because the
- * single integration test that exercises persistence lives with the fixture tests that supply its rows; and
- * there are {@code .contract} and {@code .fixtures} test packages with no production counterpart, because a
- * wire width and a recorded byte image are subjects of a test rather than of a deployable. No test package
- * is added merely to mirror a production one, and none is deleted merely because no production one exists.
+ * and they are NOT the same set as the nine test packages above. The asymmetry runs one way only now: there
+ * are {@code .contract} and {@code .fixtures} test packages with no production counterpart, because a
+ * wire width and a recorded byte image are subjects of a test rather than of a deployable, and there is no
+ * production package without a test package. No test package
+ * is added merely to mirror a production one, and none is deleted merely because no production one exists;
+ * {@code .repository} exists because four persistence contracts had no assertion anywhere, which its own
+ * charter sets out, and its name coinciding with a production package's is a consequence rather than the
+ * reason.
+ *
+ * <p>Refactoring Rationale: this paragraph gave the asymmetry as running BOTH ways and offered the
+ * missing repository test package as its first example, adding that "the single integration test that
+ * exercises persistence lives with the fixture tests that supply its rows". That was two claims and both
+ * are now wrong: the package exists, and the count of container-backed tests is no longer one. The one
+ * that does live with the fixtures, {@code fixtures.PendingAuthFraudDomainRepositoryIT}, is still there
+ * and still belongs there, because its subject is a recorded image and the constraint that refuses it
+ * rather than a catalogue shape -- so the sentence was not merely out of date, it also described the
+ * remaining case's reason for being where it is, which is why the reason is restated rather than dropped.
  *
  * <p>Assumptions: this module has no batch job and no test may assume one. Its own POM declares no batch
  * starter and no batch dependency of any kind; chunk-oriented batch is scoped to the batch context, whose

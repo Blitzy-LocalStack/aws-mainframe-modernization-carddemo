@@ -62,7 +62,8 @@ Cutover is **read, then verify, then switch** — never a single swap:
    the one schema that owns it.
 3. **Verify.** Three independent passes run: row counts per dataset, record
    checksums, and money-total parity against the source files. All three are
-   mandatory ([§10](#10-verification)).
+   mandatory where they apply, and [§10](#10-verification) records the one place a
+   pass does not yet apply to every record.
 4. **Switch.** Traffic moves only after the verification gate passes. The gate lives
    in [the data-migration runbook](../docs/runbooks/data-migration.md), not here.
 
@@ -75,7 +76,8 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > boundary, the normative layout catalogue, the zoned-decimal codec, the
 > packed-decimal and binary codecs, the per-field EBCDIC decoder, the S3
 > generation writer, the credential-application bootstrap, the schema/role DDL, the
-> masked reporting views, the eleven fixed-width readers, the Aurora bulk loader, the
+> masked reporting views, the twelve fixed-width readers, the shared timestamp
+> authority, the Aurora bulk loader with its protected-column ciphers, the
 > three verification passes, and the command-line entry point carrying the eight
 > subcommands whose backing modules are present — `list-datasets`, `decode-record`,
 > `stage-dataset`, `apply-credentials`, `load-dataset`, `verify-row-counts`,
@@ -105,12 +107,20 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 >
 > Assumptions: a source-record cutover from this checkout is now a matter of
 > CREDENTIALS AND A CLUSTER rather than of missing code. The load and the three
-> verification passes are implemented and tested, and `load-dataset` refuses two
-> records deliberately — `CUSTOMER` and `CARD`, whose tables declare ciphertext
-> columns as `NOT NULL` under a key the owning services hold and this package does
-> not, as [§5.2](#52-subcommands-and-their-arguments) records. A cutover claim must
-> therefore still account for those two, and for the fact that nothing here has been
-> exercised against a provisioned Aurora cluster.
+> verification passes are implemented and tested, and `load-dataset` serves all TEN
+> loadable records — including `CUSTOMER` and `CARD`, whose tables declare ciphertext
+> columns that this package now produces under the same envelope framing and the same
+> key the owning service reads, as [§5.2](#52-subcommands-and-their-arguments)
+> records. Two things a cutover claim must still account for: the checksum pass
+> serves three of the ten records rather than all ten, for the measured reason in
+> [§10](#10-verification), and nothing here has been exercised against a provisioned
+> Aurora cluster.
+>
+> Refactoring Rationale: this paragraph recorded `CUSTOMER` and `CARD` as deliberately
+> refused, which was accurate while the loader held no cipher for their `*_encrypted`
+> columns. Leaving it would have told an integrator that two of the eight schemas
+> could not be populated from here, which is the sort of claim that gets a second
+> loader written elsewhere rather than checked.
 >
 > Refactoring Rationale: this note previously listed the packed and EBCDIC codecs as
 > undelivered after both had landed, and later listed the readers, the loader and the
@@ -119,9 +129,14 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > reading it would have written a second copy of something that already exists, or
 > concluded that a path they could see in the tree was not meant to be used. The
 > inventory is measured rather than remembered: `src/carddemo_migration/` holds
-> **thirty-one** modules and `ruff check . --show-files` lists **forty-nine** governed
+> **thirty-four** modules and `ruff check . --show-files` lists **sixty-two** governed
 > files, and [`pyproject.toml`](pyproject.toml) states the same two numbers so a
 > disagreement between the two files is visible.
+>
+> Refactoring Rationale: these two figures read thirty-one and forty-nine here while
+> that file read thirty-two and fifty-six, so the cross-check this sentence describes
+> was itself broken — the two files disagreed and nothing surfaced it. Both are now
+> set from the same two commands, run against this tree.
 >
 > Assumptions: an unimplemented subcommand is left OUT of the parser rather than
 > registered and made to fail. A registered command that cannot work would be
@@ -150,12 +165,13 @@ data-migration/
 │   ├── V0__schemas_and_roles.sql       delivered -- 8 schemas, 1 role per context
 │   ├── V1__reporting_views.sql         delivered -- masked cross-schema views
 │   ├── V2__runtime_delete_grants.sql   delivered -- table-specific DELETE, 3 tables
+│   ├── V3__verification_surfaces.sql   delivered -- aggregate-only verification views
 │   └── verify/
 │       ├── alternate_database_users.sql    delivered -- role-attribute ceiling
 │       ├── reporting_view_privileges.sql   delivered -- masked-view privileges
 │       ├── runtime_delete_grants.sql       delivered -- pairs with V2, fails on drift
-│       ├── row_counts.sql                  contracted -- pairs with verify/row_counts.py
-│       └── money_totals.sql                contracted -- pairs with verify/money_parity.py
+│       ├── row_counts.sql                  delivered -- pairs with verify/row_counts.py
+│       └── money_totals.sql                delivered -- pairs with verify/money_parity.py
 ├── src/carddemo_migration/
 │   ├── __init__.py               delivered -- import and layering contract
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
@@ -167,7 +183,8 @@ data-migration/
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
 │   │   ├── zoned.py              delivered -- sign-overpunch decode and encode
 │   │   ├── packed.py             delivered -- COMP-3 and COMP decode and encode
-│   │   └── ebcdic_codec.py       delivered -- cp037 decode, applied PER FIELD
+│   │   ├── ebcdic_codec.py       delivered -- cp037 decode, applied PER FIELD
+│   │   └── timestamp.py          delivered -- the two admitted 26-character stamp forms
 │   ├── readers/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── factory.py            delivered -- one layout descriptor, twelve bound readers
@@ -181,12 +198,13 @@ data-migration/
 │   │   ├── discgrp.py            delivered -- CVTRA02Y, 50 bytes
 │   │   ├── trantype.py           delivered -- CVTRA03Y, 60 bytes
 │   │   ├── trancatg.py           delivered -- CVTRA04Y, 60 bytes
-│   │   ├── usrsec.py             delivered -- CSUSR01Y, 80 bytes; EBCDIC form only
+│   │   ├── usrsec.py             delivered -- CSUSR01Y, 80 bytes; EBCDIC only; NO password
 │   │   └── export_record.py      delivered -- CVEXPORT, 500 bytes; NO text form
 │   ├── loaders/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── s3_stage.py           delivered -- generation staging and LIMIT/SCRATCH retention
-│   │   └── aurora.py             delivered -- bulk COPY into one owning schema
+│   │   ├── protected_columns.py  delivered -- the two envelope ciphers, framed as Java reads
+│   │   └── aurora.py             delivered -- ten targets; COPY, or stage-and-merge
 │   └── verify/
 │       ├── __init__.py           delivered -- makes the subpackage a regular package
 │       ├── row_counts.py         delivered -- pass 1, exact COUNT(*) against source records
@@ -194,22 +212,32 @@ data-migration/
 │       └── money_parity.py       delivered -- pass 3, exact Decimal totals per column
 └── tests/
     ├── conftest.py                     delivered -- corpora, record builders, client doubles
-    ├── test_aurora_loader.py           delivered -- targets, COPY shape, atomicity, privacy
+    ├── test_aurora_loader.py           delivered -- ten targets, COPY, merge, sealing, privacy
     ├── test_authorization_disclosure.py
     │                                   delivered -- the authorization allow-list
+    ├── test_card_protected_value.py    delivered -- the CVV wrapper's every rendering route
     ├── test_cli.py                     delivered
     ├── test_config_name_contract.py    delivered
     ├── test_corpus_disclosure.py       delivered -- the corpus allow-list, fail-closed
     ├── test_database_trust.py          delivered
     ├── test_docstring_gate.py          delivered -- Rule 1 presence gate, all visibilities
+    ├── test_doubles.py                 delivered
     ├── test_ebcdic_code_page_allow_list.py
     │                                   delivered -- the measured code-page allow-list
     ├── test_ebcdic_codec.py            delivered
+    ├── test_mask_key_material.py       delivered
+    ├── test_master_disclosure.py       delivered
+    ├── test_online_write_lease.py      delivered
     ├── test_packed.py                  delivered
+    ├── test_protected_columns.py       delivered -- both envelope framings, against the Java
+    ├── test_reader_factory.py          delivered -- the reader the CLI builds; suppression
     ├── test_readers.py                 delivered -- all twelve readers at declared geometry
     ├── test_reporting_views.py         delivered
     ├── test_s3_stage.py                delivered
+    ├── test_seed_datasets.py           delivered
     ├── test_seed_user_subjects.py      delivered
+    ├── test_shared_doubles.py          delivered
+    ├── test_timestamp.py               delivered -- the two admitted stamp forms, round-tripped
     ├── test_verification.py            delivered -- the three passes and their two queries
     └── test_zoned.py                   delivered
 ```
@@ -390,20 +418,40 @@ extract; an earlier draft of these four commands spelled the selector `--record`
 gave one flag two unrelated meanings, which the "change only the verb" path above would
 have run straight into.
 
-> **Cipher boundary — two records cannot be loaded from here.** `load-dataset` refuses
-> `CUSTOMER` and `CARD` by name, with the reason in the message. `account.customers`
-> declares `ssn_encrypted` and `govt_issued_id_encrypted`, and `card.cards` declares
-> `cvv_encrypted`, as `BYTEA NOT NULL` holding ciphertext produced by the owning
-> service's cipher under a key this package does not hold. Both records have readers and
-> both decode correctly; what is absent is any way for this package to produce the
-> ciphertext those columns require.
+> **Cipher boundary — three columns are sealed, never written in the clear.**
+> `account.customers.ssn_encrypted`, `account.customers.govt_issued_id_encrypted` and
+> `card.cards.cvv_encrypted` hold ciphertext, and `load-dataset` produces it. Each is
+> sealed under the key the service owning the column resolves at run time, in the
+> envelope framing that service's own decipher expects, so a row this package writes is
+> a row that service can read and no other representation is admitted.
+>
+> The key is resolved per record and only when the record asks for it. A target declares
+> which of its columns are sealed; the loader resolves exactly the keys those
+> declarations name and nothing else. So `load-dataset TRANTYPE` — seven rows of
+> reference data with no sealed column — needs no key-management grant at all, and an
+> environment that has provisioned none can still load the reference tables that
+> everything else joins through.
 >
 > Alternatives Considered: loading the plaintext into the `*_encrypted` columns, which
 > would succeed. It is rejected because it succeeds — the load would report a clean
 > result and the row-count and checksum passes would agree, while every national
 > identifier in the database sat in cleartext in a column whose name asserted otherwise.
-> A refusal that names the reason is the only outcome that cannot be mistaken for a
-> completed load.
+>
+> Alternatives Considered: leaving the two records refused, which is what this section
+> described until the ciphers landed. Rejected because the refusal closed two of the
+> eight schemas to this package permanently, and the missing piece was never the key —
+> the key identifier is published at the same parameter path the owning service reads it
+> from — but the envelope framing. Both framings were read out of the Java sources
+> byte for byte and are asserted against those sources' own declared constants by test,
+> so a change on either side fails rather than producing envelopes that store cleanly
+> and refuse to decrypt days later.
+>
+> Assumptions: the encryption context travels to the key-management service on the
+> data-key call and binds the WRAPPED KEY. It is deliberately **not** bound into the
+> local cipher as additional authenticated data, because neither Java implementation
+> does so — measured, not assumed: neither calls `updateAAD`. Binding it here would
+> produce envelopes that frame correctly, load cleanly, verify cleanly, and then fail
+> authentication in the application. One test asserts the absence on both sides.
 
 Assumptions: `list-datasets` prints the five properties
 [`layouts.py`](src/carddemo_migration/copybook/layouts.py) holds authoritatively, and
@@ -436,9 +484,10 @@ becomes optional when the mapping has an authoritative home in code.
 ### 5.3 Applying the DDL is deliberately not a subcommand
 
 There is no `bootstrap-schemas` subcommand, and there will not be one.
-All three shipped DDL files — [`sql/V0__schemas_and_roles.sql`](sql/V0__schemas_and_roles.sql),
-[`sql/V1__reporting_views.sql`](sql/V1__reporting_views.sql) and
-[`sql/V2__runtime_delete_grants.sql`](sql/V2__runtime_delete_grants.sql) — are applied by
+All four shipped DDL files — [`sql/V0__schemas_and_roles.sql`](sql/V0__schemas_and_roles.sql),
+[`sql/V1__reporting_views.sql`](sql/V1__reporting_views.sql),
+[`sql/V2__runtime_delete_grants.sql`](sql/V2__runtime_delete_grants.sql) and
+[`sql/V3__verification_surfaces.sql`](sql/V3__verification_surfaces.sql) — are applied by
 [the data-migration runbook](../docs/runbooks/data-migration.md), with
 `psql -v ON_ERROR_STOP=1` under a temporary administrative identity, and
 [§11](#11-schema-and-role-bootstrap) describes what they create.
@@ -546,7 +595,7 @@ one exception and it carries secret VALUE material**; §5.7.1 states what that o
 | `CARDDEMO_DB_SSL_ROOT_CERT` | path | Trust anchor for the database connection | the CA bundle the image installs |
 | `CARDDEMO_DB_MASTER_SECRET` | name | Name of the cluster's administrative secret, used only by `apply-credentials` | none |
 | `CARDDEMO_DB_ALTERNATE_USERS` | names | Additional database user names permitted to act for a schema's role | none |
-| `CARDDEMO_MASK_HMAC_KEY` | ⚠ **secret value** | The HMAC-SHA256 **key** that the redaction tag in [`copybook/layouts.py`](src/carddemo_migration/copybook/layouts.py) is derived with | none — a process-scoped random key is used instead |
+| `CARDDEMO_MASK_HMAC_KEY` | ⚠ **secret value** | The HMAC-SHA256 **key** that the redaction tag in [`copybook/layouts.py`](src/carddemo_migration/copybook/layouts.py) is derived with | none — **omitting** the variable selects a process-scoped random key; setting it blank is refused (§5.7.1) |
 
 #### 5.7.1 `CARDDEMO_MASK_HMAC_KEY` is key material, not a name
 
@@ -590,14 +639,20 @@ Four obligations follow, and each is enforced somewhere rather than merely advis
   python3 -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
   ```
 
-  Two limits of that enforcement are stated so neither is assumed away. Leaving the
-  variable **empty or whitespace-only** is treated as leaving it unset and takes the
-  32-byte process-scoped fallback, because a deployment that references the variable
-  conditionally renders it empty and the fallback is the safe outcome there. And a
-  **hexadecimal** key is *accepted*: 64 hexadecimal characters are also valid base64 and
-  decode to 48 bytes, so the value is used as base64 of bytes you did not intend — harmless,
-  because the result is longer than the floor and no more guessable, but it is why exactly
-  one encoding is documented here.
+  Setting the variable to an **empty or whitespace-only** value is **also refused**, and it
+  is refused separately from leaving it out. Absence means "run without a supplied key" and
+  takes the 32-byte process-scoped fallback; presence with no content means a key was
+  expected and did not arrive, which is exactly what a failed secret projection or an empty
+  secret version delivers. Accepting it silently cost the one mode that *needs* a supplied
+  key — the cross-run verification pass — because that run then derived per-process tags,
+  compared every field unequal, and reported nothing about the missing key. To run without a
+  key, **omit the variable** rather than setting it blank.
+
+  One limit of the enforcement is stated so it is not assumed away: a **hexadecimal** key is
+  *accepted*. 64 hexadecimal characters are also valid base64 and decode to 48 bytes, so the
+  value is used as base64 of bytes you did not intend — harmless, because the result is
+  longer than the floor and no more guessable, but it is why exactly one encoding is
+  documented here.
 - **Rotation invalidates comparability, so rotate deliberately.** The tag is a function of
   the key, so a rotated key re-derives every tag: a verification pass that compares a
   rendering produced before rotation against one produced after will report differences
@@ -677,10 +732,17 @@ reader covers the 500-byte packed export record described in
 Each of these was measured against the repository, and each one silently breaks a
 reader that does not know it.
 
-**`usrsec` exists only in EBCDIC form.** There is no `app/data/ASCII/usrsec.txt`; the
-only extract is `app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS`. The `usrsec` reader
-therefore goes through the EBCDIC path unconditionally rather than choosing a path
-from the file it was handed.
+**`usrsec` exists only in EBCDIC form, and publishes only an EBCDIC path.** There is no
+`app/data/ASCII/usrsec.txt`; the only extract is
+`app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS`. The `usrsec` reader therefore publishes no
+`decode_ascii_*` / `iter_ascii_*` / `read_ascii_*` trio at all, and `--encoding ascii`
+is refused for `SECUSER` by the shared reader factory as well. Refactoring Rationale:
+the trio *was* published, on the grounds that a caller might legitimately hold converted
+text. That was the wrong trade for this record specifically — see §8.1: a character entry
+point can only be fed a transcode, and every transcode of this dataset is a copy of a
+plaintext password written somewhere outside the one reference file meant to hold it. The
+refusal is stated in both places so the path cannot be reached through one door after
+being closed at the other.
 
 **`TRANSACT` has no seed extract at all.** The 350-byte transaction master is produced
 by the posting and backup pipeline, not shipped, so there is nothing under `app/data`
@@ -1089,15 +1151,32 @@ plaintext password, matching `SEC-USR-PWD PIC X(08)` at line 21 of
 [`CSUSR01Y`](../app/cpy/CSUSR01Y.cpy). The target `auth.users` table has **no password
 column** at all.
 
-The `usrsec` reader therefore **reads the whole record and drops the password field on
-the way out.** The field must be declared in the layout — omitting it would move every
-field after it — so it is declared and flagged sensitive, and the loader simply never
-maps it to a column. Refactoring Rationale: carrying the field forward into any
-column, hash or shadow table would reproduce in the target the exact defect the
-migration exists to correct, and would do so in a datastore with a far larger
+The `usrsec` reader therefore **never slices the password span at all.** The field must
+be declared in the layout — omitting it would move every field after it — so it is
+declared and flagged sensitive, it is excluded from the reader's published field tuple,
+and the loader has no column to map it to. Refactoring Rationale: carrying the field
+forward into any column, hash or shadow table would reproduce in the target the exact
+defect the migration exists to correct, and would do so in a datastore with a far larger
 audience than a mainframe VSAM file. Identity moves to the managed user pool instead,
-and credential recovery becomes an identity-provider reset. **No artifact in this
-package reproduces those credentials, and no example security record appears in this
+and credential recovery becomes an identity-provider reset.
+
+Two further routes onto that value were closed after review, and both are worth naming
+because each looked harmless in isolation:
+
+- **The whole-record masked rendering** used to hand the record straight to the shared
+  masker, which redacts a sensitive field by replacing it with an HMAC **of that field's
+  own characters** — so the password was an input to a digest, and two different
+  passwords produced two different tags. For an eight-character credential that tag is a
+  confirmable oracle to anyone holding the key. The rendering now substitutes a fixed,
+  same-width withheld-marker into the span **before** the masker runs, and re-imposes
+  that marker on the output, so the span is identical under every key and derived from
+  nothing in the record. Every *other* sensitive field still renders as a keyed tag,
+  which is what keeps a masked diff useful.
+- **The character decode path** was removed outright, in the reader and in the shared
+  factory — see §6.2's note on this record for the reasoning.
+
+**No artifact in this package reproduces those credentials in any form — not plaintext,
+not masked, not digested, not keyed — and no example security record appears in this
 document.**
 
 ### 8.2 Sensitive fields in diagnostic output
@@ -1116,13 +1195,11 @@ and the free-text transaction description.
 
 `layouts.py` now inverts that. Two allowlists — one for the authorization segments and one
 for the rest of the corpus — name every field a diagnostic may render, and every other
-field of every record is withheld. A field admitted by name is one of: a date or a time, a
-code from a small closed domain, a count or a sequence rather than a money value, an
-**account** identifier the published REST contracts already render in full, or the trailing
-pad. Four consequences are worth knowing before reading a diagnostic:
+field of every record is withheld. A field admitted by name is one of **four** things: a date
+or a time, a code from a small closed domain, a count or a sequence rather than a money value,
+or the trailing pad. Four consequences are worth knowing before reading a diagnostic:
 
-- an account identifier is rendered and a **customer** identifier is not, following the
-  contracts and the authorization allowlist's own asymmetry;
+- an **account identifier is withheld**, in every record that carries one;
 - an account's open, expiration and reissue dates are rendered and a **card expiry** date is
   not, because the latter is a credential rather than a lifecycle fact;
 - a state and a country code are rendered and a **postal code** is not, because ten
@@ -1131,10 +1208,26 @@ pad. Four consequences are worth knowing before reading a diagnostic:
   category — are rendered **in full**, rate and description included, because every byte of
   them is seeded configuration linked to no customer.
 
+Refactoring Rationale: this section listed a **fifth** admission reason — "an account
+identifier the published REST contracts already render in full" — and opened its consequences
+with "an account identifier is rendered and a customer identifier is not". Both are withdrawn,
+and the reasoning behind them is worth naming because it is easy to reach again. A REST path
+and an operator diagnostic are different surfaces read by different populations: what a caller
+may be told about its own account says nothing about what may be written into a retained log
+store. [`docs/architecture/observability.md`](../docs/architecture/observability.md) settles it
+— account identifiers are among the values a diagnostic must **omit**, "not its content, not
+its length, and not a digest of it". Seven names were withdrawn from the corpus allowlist
+(`ACCT-ID`, `EXP-ACCT-ID`, `CARD-ACCT-ID`, `EXP-CARD-ACCT-ID`, `XREF-ACCT-ID`,
+`EXP-XREF-ACCT-ID`, `TRANCAT-ACCT-ID`). Every one of them was **already** marked sensitive at
+its declaration site, so no diagnostic output changed; what changed is the stated policy and
+the audit's admitted set — which is precisely the pair that had drifted apart.
+
 The policy is enforced twice rather than documented once. `layouts.py` **refuses to import**
 if any record it declares leaves a field disclosable that no allowlist names, and
-`tests/test_corpus_disclosure.py` re-runs that audit over the fully imported module and
-asserts the rendered output field by field.
+`tests/test_corpus_disclosure.py` re-runs that audit over the fully imported module,
+asserts the rendered output field by field, and holds the seven withdrawn names in its
+`_PROHIBITED_NAMES` list so a record that ever disclosed one fails a test rather than passing
+an audit.
 
 Assumptions: a verification failure has to show *where* two records differ in order to be
 actionable, and it must do that without emitting a complete cardholder identity or payment
@@ -1306,6 +1399,40 @@ the failure mode the next one catches, which is why the set is three rather than
 and why `verify-all` exists as a single indivisible invocation — so that "verified"
 cannot come to mean "two of the three passed".
 
+**Both SQL passes run as `carddemo_reporting`, the least-privilege read-only role, and
+name no base table.** They read the two aggregate-only views
+[`sql/V3__verification_surfaces.sql`](sql/V3__verification_surfaces.sql) creates —
+counts, exact `NUMERIC` sums and strictly-negative row counts, and nothing row-level.
+Refactoring Rationale: both files previously read the eleven base tables directly, so
+neither could be run by that role at all; `row_counts.sql` documented an operator
+principal instead and `money_totals.sql` named the **write-capable** `carddemo_batch`.
+Two properties were missing and are now present: a verification pass cannot modify the
+data it is verifying, and running one is not itself a row-level disclosure of every
+balance, card number and identity record in the system. The output of both files is
+byte-identical across the change — same columns, same eleven and nine rows, same exact
+totals — because the aggregates were moved rather than rewritten.
+
+**Measured coverage today: passes 1 and 3 serve all ten loadable records; pass 2 serves
+three of them.** The three are the reference records `TRANTYPE`, `TRANCAT` and
+`DISGROUP`. Pass 2 digests the decoded source against the rows read back, so both sides
+must be constructed identically, and the digest accepts characters, an exact decimal or
+raw bytes only. Every comparable column of those three records is `CHAR`, `VARCHAR` or
+`NUMERIC`, so the two sides agree. Each of the other seven carries at least one
+`BIGINT`, `DATE`, `SMALLINT`, `TIMESTAMP` or `UUID` comparable column, which the driver
+returns as an `int`, a `date` or a `UUID`; and for an identifier the two sides also
+disagree in representation, because a reader publishes the declared full width with its
+leading zeros where the column holds a number. Extending the pass to all ten is a
+matter of rendering those columns back into the reader's published shape at the
+read-back boundary.
+
+Assumptions: this is recorded here, in the section that states the requirement, rather
+than left for an operator to meet as a type error mid-cutover. Pass 2 does not report a
+difference for those seven — it fails on a value it cannot digest — so the
+[data-migration runbook](../docs/runbooks/data-migration.md) prescribes it for the three
+it serves and names the gap at its cutover gate. A verification requirement that
+overstates its own reach is the failure mode this whole section exists to prevent, so it
+would be self-defeating to state the requirement and omit the measurement.
+
 The two existing verification scripts,
 [`alternate_database_users.sql`](sql/verify/alternate_database_users.sql) and
 [`reporting_view_privileges.sql`](sql/verify/reporting_view_privileges.sql), are a
@@ -1446,31 +1573,75 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-All sixteen modules are delivered:
+All **33** modules are delivered — **32** test modules plus the shared `conftest.py`:
+
+<!-- carddemo:test-module-roster:begin -->
 [`conftest.py`](tests/conftest.py),
 [`test_aurora_loader.py`](tests/test_aurora_loader.py),
 [`test_authorization_disclosure.py`](tests/test_authorization_disclosure.py),
+[`test_card_protected_value.py`](tests/test_card_protected_value.py),
 [`test_cli.py`](tests/test_cli.py),
 [`test_config_name_contract.py`](tests/test_config_name_contract.py),
 [`test_corpus_disclosure.py`](tests/test_corpus_disclosure.py),
 [`test_database_trust.py`](tests/test_database_trust.py),
+[`test_declaration_shadowing.py`](tests/test_declaration_shadowing.py),
 [`test_docstring_gate.py`](tests/test_docstring_gate.py),
+[`test_doubles.py`](tests/test_doubles.py),
 [`test_ebcdic_code_page_allow_list.py`](tests/test_ebcdic_code_page_allow_list.py),
 [`test_ebcdic_codec.py`](tests/test_ebcdic_codec.py),
+[`test_mask_key_material.py`](tests/test_mask_key_material.py),
+[`test_master_disclosure.py`](tests/test_master_disclosure.py),
+[`test_online_write_lease.py`](tests/test_online_write_lease.py),
+[`test_package_surfaces.py`](tests/test_package_surfaces.py),
 [`test_packed.py`](tests/test_packed.py),
+[`test_protected_columns.py`](tests/test_protected_columns.py),
+[`test_reader_factory.py`](tests/test_reader_factory.py),
+[`test_reader_hardening.py`](tests/test_reader_hardening.py),
 [`test_readers.py`](tests/test_readers.py),
+[`test_readme_inventory.py`](tests/test_readme_inventory.py),
 [`test_reporting_views.py`](tests/test_reporting_views.py),
 [`test_s3_stage.py`](tests/test_s3_stage.py),
+[`test_seed_datasets.py`](tests/test_seed_datasets.py),
 [`test_seed_user_subjects.py`](tests/test_seed_user_subjects.py),
+[`test_shared_doubles.py`](tests/test_shared_doubles.py),
+[`test_source_hardening.py`](tests/test_source_hardening.py),
+[`test_symbol_uniqueness.py`](tests/test_symbol_uniqueness.py),
+[`test_timestamp.py`](tests/test_timestamp.py),
 [`test_verification.py`](tests/test_verification.py) and
-[`test_zoned.py`](tests/test_zoned.py) — **741 tests** in total. No test module is
-contracted.
+[`test_zoned.py`](tests/test_zoned.py).
+<!-- carddemo:test-module-roster:end -->
 
-Refactoring Rationale: the count and the module list are re-measured with
-`python -m pytest data-migration/tests -q --collect-only` and
-`ls data-migration/tests/test_*.py` rather than incremented. A remembered total is the one
-number in a README that is always slightly wrong, and here it is load-bearing: the reader
-who checks it is checking whether their own run executed the whole suite.
+No test module is contracted.
+
+Refactoring Rationale: **this roster is now machine-checked, and it is machine-checked because
+re-measuring by hand did not work.** It previously read "All sixteen modules are delivered",
+listed **seventeen**, and omitted **seven** that existed — `test_card_protected_value.py`,
+`test_doubles.py`, `test_mask_key_material.py`, `test_master_disclosure.py`,
+`test_online_write_lease.py`, `test_seed_datasets.py` and `test_shared_doubles.py` — while the
+paragraph beneath it asserted that "the count and the module list are re-measured ... rather
+than incremented". A claim of having re-measured is worth less than nothing when it is wrong,
+because it stops the next reader checking. It went stale a second time, at **25** stated against
+**27** listed and **33** present, which is what the check below then reported rather than a reader
+noticing; all three figures are re-measured together from the directory, and none is adjusted by the
+number of modules anybody believes was added.
+[`tests/test_readme_inventory.py`](tests/test_readme_inventory.py)
+reads the fenced region above, parses the file names out of it, equals that set against
+`data-migration/tests/*.py` in **both** directions, checks that each entry's link target
+resolves to the module its label names, and checks both stated counts against the same walk. A
+module added or removed without touching this list fails a test.
+
+Assumptions: the fence comments delimit the roster so the check reads a bounded region rather
+than the whole document. Without them a link to a test module anywhere else in this README —
+and there are several — would be swept into the roster, and the check would fail on a correct
+document.
+
+Trade-offs: the **test total** is deliberately not stated here. It was "**741 tests**", a
+figure the suite passed years of edits ago; the current run collects **924**. A total changes
+on every test added, so pinning it in prose guarantees a stale number and pinning it in a test
+guarantees a failing build on every legitimate addition. What a reader wanting the number
+should do instead is run
+`PYTHONPATH=data-migration/src python -m pytest data-migration/tests -q --collect-only | tail -1`,
+which reports it from the suite rather than from a memory of it.
 
 Assumptions: `test_ebcdic_code_page_allow_list.py` is a separate module from
 `test_ebcdic_codec.py` even though both exercise one source file, because the two ask

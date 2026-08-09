@@ -2,6 +2,7 @@ package com.carddemo.batch.repository;
 
 import com.carddemo.batch.domain.CardXref;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.springframework.data.repository.Repository;
 
 /**
@@ -19,7 +20,7 @@ import org.springframework.data.repository.Repository;
  * {@code saveAll}, {@code delete}, {@code deleteAll} and {@code flush}, and this interface must
  * expose none of them. {@code org.springframework.data.repository.Repository} contributes no member
  * of its own while still giving Spring Data enough to build a proxy, so the reachable surface is
- * exactly the two methods declared below, and the read-only guarantee is structural rather than a
+ * exactly the three methods declared below, and the read-only guarantee is structural rather than a
  * convention that a later edit could relax by adding one call.</p>
  *
  * <p>Assumptions: the cross-reference has no writer anywhere in this module, and the evidence for
@@ -35,7 +36,7 @@ import org.springframework.data.repository.Repository;
  * is no update path for one to guard -- so exposing a mutator would offer a capability the owning
  * context has itself declined to model.</p>
  *
- * <h2>Two access paths over one table, and why they are not interchangeable</h2>
+ * <h2>Three access paths over one table, and why they are not interchangeable</h2>
  *
  * <p>Assumptions: the second path is not an invention of this migration, and the reference expresses
  * both paths through a SINGLE file declaration. {@code app/cbl/CBACT04C.cbl:34-39} declares one file
@@ -49,7 +50,7 @@ import org.springframework.data.repository.Repository;
  * and {@code app/jcl/POSTTRAN.jcl:32-33} accordingly supplies the base cluster alone. One logical
  * table, two access paths, and a driver that mounts only the paths its program declares.</p>
  *
- * <p>Assumptions: the two paths run in OPPOSITE directions, which is what makes them
+ * <p>Assumptions: the two KEYED paths run in OPPOSITE directions, which is what makes them
  * non-interchangeable rather than merely distinct. The by-card path yields an ACCOUNT IDENTIFIER:
  * posting moves the resolved value into an account key at {@code app/cbl/CBTRN02C.cbl:394} and reads
  * again at line 395, then moves that same value into the leading component of the category-balance
@@ -57,6 +58,15 @@ import org.springframework.data.repository.Repository;
  * the resolved value onto every generated interest transaction at
  * {@code app/cbl/CBACT04C.cbl:495}. Recording the direction of each path is what stops a reader
  * reaching for the one that cannot answer the question being asked.</p>
+ *
+ * <p>Assumptions: the THIRD path asks no question of a key at all, and it too is expressed by the
+ * reference rather than introduced here. {@code app/cbl/CBEXPORT.cbl:47-51} declares the same dataset
+ * a third way -- {@code ACCESS MODE IS SEQUENTIAL}, one record key, no alternate -- and its driver
+ * mounts the base cluster alone at {@code app/jcl/CBEXPORT.jcl:53-54}, matching the pattern that a
+ * program is given only the paths it declares. What distinguishes it from the two above is not the
+ * key it reads but the CARDINALITY of its result: both keyed paths answer with one row, and this one
+ * answers with the whole table. Confusing the third with the second is what loses records, so the
+ * three are enumerated here rather than left for a reader to infer from three method names.</p>
  *
  * <h2>The by-account path is served by a NON-UNIQUE index</h2>
  *
@@ -72,16 +82,27 @@ import org.springframework.data.repository.Repository;
  * <b>One account therefore legitimately holds many cards</b>, and every consequence recorded on the
  * by-account method below follows from that one sentence.</p>
  *
- * <p>Trade-offs: the relation is one-to-many, yet only the single-row path has a caller, so no
- * list-returning member is declared. The four call sites in this module are
- * {@code PreflightDailyTransactionsJob} and {@code PostTransactionsJob} on the by-card method, and
- * {@code CalculateInterestJob} and {@code ExportJob} on the by-account method; none of the four
- * needs more than one row, because each reproduces a reference paragraph that reads exactly one.
- * The compromise accepted is that the one-to-many nature of the relation is recorded here in prose
- * instead of being expressed in a signature, and the reason for accepting it is that an unused
- * list-returning member is surface which has to be maintained and which no test can meaningfully
- * exercise. A caller that genuinely needs every card of an account adds that member then, ordered by
- * card number so it stays deterministic, with its own recorded rationale.</p>
+ * <p>Refactoring Rationale: this paragraph recorded that "only the single-row path has a caller, so
+ * no list-returning member is declared", and invited a caller that genuinely needed every card of an
+ * account to add such a member "ordered by card number so it stays deterministic, with its own
+ * recorded rationale". That invitation is now taken up by the third member below, and it had to be:
+ * {@code ExportJob} was listed here as a by-account caller that "needs no more than one row", and
+ * that description was wrong. {@code app/cbl/CBEXPORT.cbl:47-51} declares the cross-reference file
+ * {@code ACCESS MODE IS SEQUENTIAL} keyed on the card number and its paragraph at
+ * {@code app/cbl/CBEXPORT.cbl:376-389} reads until end of file, so the reference exports one record
+ * per CARD ROW. Reaching those rows one-per-account dropped every card of every multi-card account
+ * from the exported dataset -- silently, because the dataset is still well formed and every record in
+ * it is correct. Losing rows is the one failure a round-trip test cannot detect if the same shape
+ * writes and reads.</p>
+ *
+ * <p>Trade-offs: the census of callers is therefore three paths across four sites, and the pairing
+ * matters more than the count. {@code PreflightDailyTransactionsJob} and {@code PostTransactionsJob}
+ * read by CARD because a feed record names one; {@code CalculateInterestJob} reads by ACCOUNT at a
+ * control break because {@code app/cbl/CBACT04C.cbl:394-395} issues one keyed read per account and
+ * never advances; {@code ExportJob} walks the WHOLE table because its reference paragraph does. No
+ * by-account list-returning member is declared even now, because no caller wants the cards of one
+ * account -- the export wants every row of the table, which the ordered walk below answers directly
+ * and without a per-account query.</p>
  *
  * <h2>What this interface deliberately does not declare</h2>
  *
@@ -95,9 +116,9 @@ import org.springframework.data.repository.Repository;
  * module means part-way through a nightly chain, with earlier steps already committed. The hazard is
  * concrete rather than theoretical here: the batch-local mapping and the owning migration do not
  * agree on every physical spelling, since {@link CardXref} maps {@code customerId} onto
- * {@code customer_id} and {@code accountId} onto {@code account_id}. Both members below are derived
- * methods bound to property names {@link CardXref} declares, so no physical column name appears
- * anywhere in this file.</p>
+ * {@code customer_id} and {@code accountId} onto {@code account_id}. All three members below are
+ * derived methods bound to property names {@link CardXref} declares, so no physical column name
+ * appears anywhere in this file.</p>
  *
  * <p>Refactoring Rationale: two mainframe artifacts of the by-account path are retired outright
  * rather than translated, under the migration plan's transformation rule T6. The explicit index
@@ -169,8 +190,8 @@ public interface CardXrefRepository extends Repository<CardXref, String> {
     //     way -- the choice is purely one of name, not of surface. Given that, naming the property
     //     is the more informative of the two: findByCardNum states WHICH column answers the query,
     //     where findById leaves a reader to open the entity to discover it, and it is the name the
-    //     four call sites in com.carddemo.batch.job already read by. It also keeps both members of
-    //     this interface in one derived-name idiom, so neither looks like the special case.
+    //     four call sites in com.carddemo.batch.job already read by. It also keeps every member of
+    //     this interface in one derived-name idiom, so none looks like the special case.
     // Assumptions: the single-result contract this optional states is a claim about the SCHEMA,
     //     exactly as the sibling BatchRunRepository records for its own finder, and here the claim
     //     is discharged by a primary key rather than by a secondary constraint. The base cluster
@@ -266,4 +287,52 @@ public interface CardXrefRepository extends Repository<CardXref, String> {
     //     would make the by-account path unusable by the one caller that legitimately tolerates a
     //     gap.
     Optional<CardXref> findFirstByAccountIdOrderByCardNumAsc(Long accountId);
+
+    /**
+     * Walks every cross-reference row once, in ascending card-number order.
+     *
+     * <p>This is the third and last access path, and it belongs to the export alone. It is the
+     * sequential pass of {@code app/cbl/CBEXPORT.cbl:4000-EXPORT-XREFS} at {@code :376-389}: an
+     * unkeyed {@code READ} at {@code :393} repeated until the end-of-file condition declared at
+     * {@code :107}, over a file opened {@code ACCESS MODE IS SEQUENTIAL} with
+     * {@code RECORD KEY IS XREF-CARD-NUM} at {@code :47-51}. One record is written per ROW of the
+     * table, which is one per card rather than one per account.</p>
+     *
+     * @return a lazily-evaluated {@code Stream<CardXref>} over every cross-reference row in
+     *     ascending card-number order; never {@code null}, possibly empty, and the CALLER owns
+     *     closing it
+     * @throws org.springframework.dao.InvalidDataAccessApiUsageException if the stream is opened
+     *     without a surrounding transaction to keep the underlying connection open for the duration
+     *     of the walk; the caller satisfies this by consuming the stream inside the transaction its
+     *     step already runs in
+     * @throws org.springframework.dao.DataAccessException if the read itself cannot be carried out
+     *     -- most usefully, a permission failure when the {@code SELECT} grant recorded on this
+     *     interface is missing, which surfaces here rather than at start-up because a privilege is
+     *     checked when a statement executes and not when the mapping is validated
+     */
+    // Assumptions: the ordering is on the CARD NUMBER and is declared on the method name rather than
+    //     left to the query planner, because the card number is what the reference's sequential pass
+    //     is ordered by -- app/cbl/CBEXPORT.cbl:50 names it as the record key and an indexed
+    //     sequential read returns rows in record-key order. Ordering by anything else, or by nothing,
+    //     would emit the same SET of records in a different sequence, and the export's record
+    //     sequence number is assigned in write order, so the sequence numbers would then differ
+    //     between two runs over identical data.
+    // Trade-offs: a stream rather than a list, matching the account and ledger walks the same job
+    //     already opens. The cross-reference holds one row per card issued, so materialising it would
+    //     make the export's memory profile a function of the size of the portfolio. The cost is a
+    //     resource the caller must release, which is why the obligation is stated on the return tag
+    //     and why the export opens it in a try-with-resources block.
+    // Alternatives Considered: reaching these rows through the by-account member above, once per
+    //     exported account, which is what this job did before and which needed no new member at all.
+    //     REJECTED because it is lossy rather than merely indirect: that member is bounded to one row
+    //     by design -- the bound is what makes its optional return type safe over a NONUNIQUE index
+    //     -- so an account holding three cards contributed one cross-reference record and the other
+    //     two were absent from the dataset with nothing reporting it. It also issued one query per
+    //     account to read a table the reference reads once.
+    // Alternatives Considered: an unbounded findAllByAccountIdOrderByCardNumAsc(Long) returning a
+    //     list per account, keeping the per-account loop but making it complete. Rejected on two
+    //     counts. It would still issue one query per account, and it would emit records grouped by
+    //     account rather than ordered by card number, so the record sequence would not match the
+    //     reference's even though the set would.
+    Stream<CardXref> findAllByOrderByCardNumAsc();
 }

@@ -220,18 +220,24 @@
  * unordered feed produces one accrual per row instead of one per account, and does so without
  * failing.</p>
  *
- * <p>Assumptions: the baseline truncates toward zero where the migrated code rounds half up, and the
- * difference is a documented divergence rather than something for an assertion here to reconcile.
- * The baseline carries no {@code ROUNDED} phrase on the statement at
- * {@code app/cbl/CBACT04C.cbl:464-465} -- measured, not assumed: the phrase appears nowhere in that
- * program's 652 lines and nowhere in {@code app/cbl} at all -- so its target field, declared
- * {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168, discards surplus digits toward zero. The
- * migrated {@code InterestCalculationService} declares {@code ACCRUAL_ROUNDING} as half-up instead.
- * The baseline behaves as it behaves, the Java implements half-up, and the divergence is registered
- * as C-ROUNDING in {@code docs/architecture/cobol-to-service-traceability.md}. An assertion in this
- * package expects the production rounding and cites that register; expecting truncation would fail
- * against production code that is behaving as designed, and quietly changing the production mode to
- * make an assertion pass would retire a divergence by accident.</p>
+ * <p>Assumptions: the baseline truncates toward zero and the migrated code now does the same, so
+ * there is no rounding difference for an assertion here to reconcile. The baseline carries no
+ * {@code ROUNDED} phrase on the statement at {@code app/cbl/CBACT04C.cbl:464-465} -- measured, not
+ * assumed: the phrase appears nowhere in that program's 652 lines and nowhere in {@code app/cbl} at
+ * all -- so its target field, declared {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168, discards
+ * surplus digits toward zero. {@code InterestCalculationService} declares {@code ACCRUAL_ROUNDING} as
+ * that mode and an assertion in this package compares it against
+ * {@code Money.BASELINE_INTEREST_ROUNDING}, so a constant that drifted from the behaviour it names
+ * fails the build rather than misleading a reader.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph recorded a divergence identified C-ROUNDING and instructed
+ * a maintainer that "expecting truncation would fail against production code that is behaving as
+ * designed". Expecting truncation is now correct, and the instruction is withdrawn along with the
+ * divergence -- the identifier survives only as a withdrawal record in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. The warning the paragraph
+ * ended with is worth keeping in its inverted form: an assertion here must not be changed to make a
+ * production mode pass, because that is how a parity difference gets retired by accident in either
+ * direction.</p>
  *
  * <h3>The two category-balance arms are separately asserted partitions</h3>
  *

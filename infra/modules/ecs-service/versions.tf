@@ -6,10 +6,12 @@
 #   `ecs-service` module. The module carries exactly one CardDemo service onto
 #   ECS Fargate -- task definition, task role, log group, load-balancer target
 #   group and autoscaling -- and each of the two environment roots,
-#   infra/envs/dev and infra/envs/prod, instantiates it eight times, once per
-#   bounded context: auth, account, card, transaction, reference, batch,
-#   authorization and reporting. Every constraint declared below is therefore
-#   inherited by sixteen module instances across the two roots.
+#   infra/envs/dev and infra/envs/prod, instantiates it nine times, once per
+#   workload: the eight Java services -- auth, account, card, transaction,
+#   reference, batch, authorization and reporting -- plus the data-migration
+#   ETL, which needs a task definition and no service. Every constraint
+#   declared below is therefore inherited by eighteen module instances across
+#   the two roots.
 #
 # Parameters:
 #   None. This file declares no `variable` and reads none; its only inputs are
@@ -56,8 +58,8 @@
 #     path alone on the second line, then Purpose and a WHY list. Inventing a
 #     new shape for the first .tf file in the repository would have left the
 #     modules that follow with no precedent to match.
-#   - Trade-offs: one parameterised module is preferred over eight bespoke
-#     per-service definitions, and app/csd/CARDDEMO.CSD is the evidence that
+#   - Trade-offs: one parameterised module is preferred over nine bespoke
+#     per-workload definitions, and app/csd/CARDDEMO.CSD is the evidence that
 #     this matches the baseline's own shape -- all 18 `DEFINE TRANSACTION`
 #     stanzas (L306-L488) are attribute-identical, with ISOLATE(YES),
 #     TASKDATAKEY(USER), ACTION(BACKOUT), PRIORITY(1), RESTART(NO),
@@ -71,18 +73,19 @@
 terraform {
   # WHY : Assumptions: the infrastructure package is validated on 1.15.8, and it
   #       depends on provider behaviour that no older release can express -- a
-  #       zero minimum Aurora capacity requires hashicorp/aws 5.81.0 or later,
+  #       zero minimum Aurora capacity (provider 5.80.0) together with the
+  #       auto-pause argument it makes mandatory (5.81.0) requires 5.81.0,
   #       which the constraint below clears comfortably. A floor (`>=`) rather
   #       than an exact pin (`=`) is deliberate: a module must not forbid its
   #       caller from running a newer CLI, and one toolchain is shared by all
-  #       eight instantiations in both roots, so pinning here would dictate the
+  #       nine instantiations in both roots, so pinning here would dictate the
   #       CLI version for the entire repository from inside a leaf module.
   required_version = ">= 1.15.0"
 
   required_providers {
     # WHY : Trade-offs: the pessimistic constraint admits 6.56 and later 6.x
     #       releases but excludes 7.x, so a provider major bump cannot silently
-    #       change resource schemas underneath eight instantiations at once;
+    #       change resource schemas underneath nine instantiations at once;
     #       the accepted cost is that a genuinely required 7.x feature needs an
     #       explicit, reviewed edit to this line. Note the division of labour:
     #       .terraform.lock.hcl is tracked in this repository -- .gitignore
@@ -112,7 +115,7 @@ terraform {
 #       roots are the single place environment parameterization is allowed to
 #       live -- dev and prod differ only in sizing and retention, never in
 #       topology. Second, a module-local provider configuration cannot be
-#       varied per instantiation, so it would fix all eight services within a
+#       varied per instantiation, so it would fix all nine workloads within a
 #       root to one identical configuration. Contrast
 #       infra/bootstrap/versions.tf, which DOES own a provider block:
 #       bootstrap is a root, not a module, so there it is the only correct

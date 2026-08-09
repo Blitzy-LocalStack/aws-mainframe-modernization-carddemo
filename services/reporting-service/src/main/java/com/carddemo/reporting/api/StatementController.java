@@ -1,5 +1,6 @@
 package com.carddemo.reporting.api;
 
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
@@ -68,6 +69,11 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping(path = StatementController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
+@OnlineWriteGateExempt(reason =
+        "Both operations render an existing statement and persist nothing. They are POSTs because"
+        + " the account and card identifiers they select on must travel in a request body rather"
+        + " than in a request line the load balancer records. A rendered statement is a read of"
+        + " already-posted data, so it stays available while the window is closed.")
 public class StatementController {
 
     /**

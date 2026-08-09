@@ -89,6 +89,25 @@ class RuntimeDeletePrivilegeContractTest {
             Pattern.compile("delete\\s+from\\s+([A-Z]\\w+)", Pattern.CASE_INSENSITIVE);
 
     /**
+     * Matches a NATIVE delete statement and captures the unqualified table name it names.
+     *
+     * <p>Refactoring Rationale: this pattern was added because the query-language pattern above cannot
+     * see a native statement, and a native delete is every bit as much a delete. The distinction the two
+     * patterns turn on is the case of the first character -- the query language names an ENTITY, which is
+     * a Java type and so begins upper case, while native SQL names a TABLE, which this schema spells in
+     * lower snake case. Without this pattern a repository that expressed a delete natively reported no
+     * delete call site at all, so this test flagged its perfectly necessary grant as unused privilege --
+     * a false gap that would have been resolved by revoking a grant the code needs.</p>
+     *
+     * <p>Assumptions: the captured name is matched against the MAPPED TABLE names this test has already
+     * resolved from the entities, rather than trusted as a table name in its own right. A native statement
+     * against a table no entity in the module maps is not a table this contract governs, and admitting one
+     * on the strength of a regular expression alone would let a typo satisfy the test.</p>
+     */
+    private static final Pattern DELETE_NATIVE =
+            Pattern.compile("delete\\s+from\\s+([a-z]\\w+)", Pattern.CASE_INSENSITIVE);
+
+    /**
      * The entity type argument of a Spring Data repository declaration.
      */
     private static final Pattern REPOSITORY_ENTITY =
@@ -265,6 +284,18 @@ class RuntimeDeletePrivilegeContractTest {
         while (jpql.find()) {
             entities.add(jpql.group(1));
         }
+        // WHY : Assumptions: a NATIVE delete contributes its raw table name, which the caller resolves
+        //       against the tables it has already mapped from the entities rather than trusting as a table
+        //       name. Refactoring Rationale: this was added because a repository that expressed a delete
+        //       natively -- as the outbox retention sweep now must, because an ordered and limited delete
+        //       has no portable form in the query language -- contributed no call site at all, so this test
+        //       reported its necessary grant as unused privilege. The failure mode that matters is the
+        //       resolution such a false gap invites: revoking a grant the code needs, which then fails at
+        //       run time under the runtime role rather than here.
+        Matcher nativeDelete = DELETE_NATIVE.matcher(text);
+        while (nativeDelete.find()) {
+            entities.add(nativeDelete.group(1));
+        }
         return entities;
     }
 
@@ -282,7 +313,16 @@ class RuntimeDeletePrivilegeContractTest {
             Path root, Map<String, Path> sources, String module, String type) {
         Path declaration = sources.get(type);
         if (declaration == null) {
-            return Optional.empty();
+            // WHY : Assumptions: a name that resolves to no Java type is treated as a RAW TABLE NAME from a
+            //       native statement, and is admitted only when some entity in the same module maps a table
+            //       of exactly that name. Refactoring Rationale: this arm was added because the collector
+            //       above now also reports native deletes, whose captured name is a table rather than a
+            //       type; returning empty for it, as this method previously did for everything unresolvable,
+            //       would leave a native delete contributing nothing and this test flagging a grant the code
+            //       genuinely needs. Requiring a mapped table of the same name is what keeps the admission
+            //       narrow -- a misspelled or unrelated table name still resolves to nothing, so a typo
+            //       cannot satisfy the contract.
+            return mappedTableNamed(root, sources, module, type);
         }
         String text = read(declaration);
         if (type.endsWith("Repository")) {
@@ -398,5 +438,35 @@ class RuntimeDeletePrivilegeContractTest {
         } catch (IOException unreadable) {
             throw new UncheckedIOException("cannot read " + file, unreadable);
         }
+    }
+
+    /**
+     * Resolves a raw table name from a native statement, if an entity in the same module maps it.
+     *
+     * <p>Assumptions: every main source of the module is scanned for a table mapping whose unqualified name
+     * equals the one given. That is deliberately the same resolution path the entity route takes, so a
+     * native delete and a query-language delete against one table produce the SAME qualified name and the
+     * grant comparison cannot depend on which form a repository happened to use.</p>
+     *
+     * @param root the repository root
+     * @param sources every main source file, indexed by simple type name
+     * @param module the service module the delete was found in
+     * @param table the unqualified table name a native statement named
+     * @return the unquoted qualified table name, or empty when no entity in the module maps it
+     * @throws UncheckedIOException if a candidate source file cannot be read
+     */
+    private static Optional<String> mappedTableNamed(
+            Path root, Map<String, Path> sources, String module, String table) {
+        for (Map.Entry<String, Path> candidate : sources.entrySet()) {
+            if (candidate.getKey().endsWith("Repository")) {
+                continue;
+            }
+            Matcher mapped = MAPPED_TABLE.matcher(read(candidate.getValue()));
+            if (mapped.find() && mapped.group(1).equals(table)) {
+                String schema = mapped.group(2) != null ? mapped.group(2) : pinnedSchema(root, module);
+                return Optional.of(schema + "." + table);
+            }
+        }
+        return Optional.empty();
     }
 }

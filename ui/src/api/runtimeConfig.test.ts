@@ -1,3 +1,15 @@
+/**
+ * @file Unit tests for the runtime configuration loader in `ui/src/api/runtimeConfig.ts`.
+ *
+ * Purpose
+ * -------
+ * Pin the three outcomes the start-up sequence depends on: a published document resolves and its
+ * base URL is adopted, an ABSENT document is not a failure and the build-time variable is used
+ * instead, and a malformed value is refused rather than adopted. `ui/src/main.tsx` awaits this
+ * loader before mounting, so an error in any of the three would misaddress every request the
+ * application makes for the life of the tab.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

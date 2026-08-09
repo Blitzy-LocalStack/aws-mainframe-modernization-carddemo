@@ -9,18 +9,20 @@
  * there is no full-context test, no persistence slice, no web slice and no container anywhere in this
  * directory. A test that needs one of those is in the wrong package rather than in need of a new
  * dependency, and the parent charter at {@code com/carddemo/authorization/package-info.java} says where
- * each belongs -- orchestration and transaction boundaries in {@code .service}, the single persistence
- * integration test in {@code .fixtures}, and status selection and body binding at the HTTP edge in
+ * each belongs -- orchestration and transaction boundaries in {@code .service}, catalogue shape and
+ * constraint behaviour in {@code .repository}, the recorded-image persistence case in {@code .fixtures},
+ * and status selection and body binding at the HTTP edge in
  * {@code .api}.
  *
  * <p>Refactoring Rationale: the planned division of labour sent database constraint and index assertions
- * to a sibling {@code .repository} TEST package. No such package exists and none is to be created. The
- * production tree does have a {@code .repository} package, which is what makes the mistake easy, but the
- * one integration test that exercises persistence is
- * {@code .fixtures.PendingAuthFraudDomainRepositoryIT}, placed with the fixture tests that supply its
- * rows. The parent charter records the same asymmetry and its reason. Naming a package that is not there
- * would send a reader looking for it and would invite them to create it, splitting one integration test's
- * concerns across two directories.
+ * to a sibling {@code .repository} TEST package, and this paragraph used to answer that "no such package
+ * exists and none is to be created". It exists, and the assertions the plan assigned to it are there. The
+ * paragraph is corrected rather than deleted because its warning still has a live half: the production
+ * tree also has a {@code .repository} package, so a reader can still put a MAPPING test in the test
+ * package of that name on the strength of the name alone. The boundary that matters to this package is
+ * unchanged -- a width, an offset, a numeric regime or a masking rule is asserted here, and a key shape,
+ * a constraint domain or an index direction is asserted there. The one recorded-image persistence case,
+ * {@code .fixtures.PendingAuthFraudDomainRepositoryIT}, stays with the fixtures that supply its rows.
  *
  * <p>This package is FOUNDATIONAL to the rest of this module's test tree. The record widths, the field
  * offsets, the numeric regimes, the one spelling correction and the masking rules are all established
@@ -30,9 +32,24 @@
  *
  * <h2>What executes here</h2>
  *
- * <p>Seven test classes occupy this package as this charter is written, and together they cover the four
+ * <p>Eight test classes occupy this package, and together they cover the four
  * responsibilities the parent charter assigns to it -- segment conversion, the wire fixtures, the date
- * pivot, and what a mapper is permitted to expose:
+ * pivot, and what a mapper is permitted to expose. The census is measured against the directory on every
+ * build:
+ *
+ * <pre>
+ * this directory: 9 java files = 8 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: this section said seven and enumerated seven, omitting
+ * {@code PendingAuthDetailMapperTest}. The omission is a poor one to carry HERE specifically, because
+ * that class was written to close a gap the rest of this package had left -- ten members of
+ * {@code PendingAuthDetailMapper} with no caller anywhere in the test tree -- so a reader auditing this
+ * boundary for uncovered members was being handed a list that hid the very class that answers the
+ * question. The marker line above is measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which also holds every class named below to a file in this directory, so a ninth class or a renamed one
+ * fails the build rather than making this list wrong again.
  *
  * <ul>
  *   <li>{@code SegmentConversionContractTest} -- every public conversion of the two segment mappers,
@@ -53,16 +70,28 @@
  *   <li>{@code MapperRenderingExposureTest} and {@code PendingAuthViewMapperTest} -- what a mapper is
  *       permitted to expose, and that the projections published at the HTTP edge are exactly the ones
  *       the service contract document declares.</li>
+ *   <li>{@code PendingAuthDetailMapperTest} -- the members of the detail mapper that no other class in
+ *       this tree reaches: both directions of the nines-complement key arithmetic and its refusals, the
+ *       nine-digit time padding, the twenty-three character authorization timestamp, the rendered
+ *       point-of-sale entry mode and processing code, the fraud mark and its report date, and the masked
+ *       card number. Assumptions: it belongs to the segment-conversion responsibility rather than being a
+ *       fifth one, because every member it reaches is a component of the 200-byte detail conversion; what
+ *       distinguishes it from {@code SegmentConversionContractTest} is that the latter asserts the
+ *       conversion as a whole against a committed image while this one asserts the parts the whole does
+ *       not exercise, which is why organising per contract did not already cover them.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the planned inventory for this package was five files naming four test
- * classes, three of which do not exist -- a per-mapper test for the detail segment, one for the summary
- * segment and one for the fraud mapper. What is on disk is organised by CONTRACT rather than by mapper,
- * which is why one class covers every segment conversion and two cover the wire images. The planned
+ * classes, two of which do not exist -- a per-mapper test for the summary segment and one for the fraud
+ * mapper. What is on disk is organised by CONTRACT rather than by mapper,
+ * which is why one class covers every segment conversion and two cover the wire images; the one planned
+ * name that does have a counterpart is the detail-segment test, and even that one is narrower than the
+ * plan intended, covering the members the contract-shaped classes leave unreached rather than the mapper
+ * as a whole. The planned
  * inventory also assumed four production mappers when there are five, the fifth being the view mapper
- * whose test is named above. Publishing the planned list would have told a reader that three named
- * classes were missing and that an existing one was surplus, and the likely response -- creating the
- * three and deleting the seventh -- would have duplicated coverage that already exists and removed
+ * whose test is named above. Publishing the planned list would have told a reader that named
+ * classes were missing and that an existing one was surplus, and the likely response -- creating them
+ * and deleting the surplus -- would have duplicated coverage that already exists and removed
  * coverage that nothing else provides.
  *
  * <p>Alternatives Considered: organising this package as one test class per mapper was the planned shape,
@@ -80,7 +109,7 @@
  * and it dropped the number rather than correcting it, because the point that sentence existed to make
  * did not depend on it. The same holds here. What is durable is the set of responsibilities and which
  * class carries each, because that is what a new test has to be placed against; the total is not. A
- * genuinely new contract at this boundary may be added as an eighth class, and a helper serving a single
+ * genuinely new contract at this boundary may be added as a ninth class, and a helper serving a single
  * class stays private INSIDE that class rather than becoming a shared type, so that a reader of one test
  * can see everything it depends on without opening a second file.
  *
@@ -89,8 +118,12 @@
  * <p>A class in this directory runs only if its name ends {@code Test}, which is what the standard
  * Surefire binding selects during the test phase; it reports into {@code target/surefire-reports}. No
  * class here may end {@code IT}. That suffix is claimed by Failsafe, which asserts after packaging in the
- * verify phase and reports into {@code target/failsafe-reports}, and in this module exactly one class
- * carries it -- ending {@code RepositoryIT}, in {@code .fixtures}. Both report directories are the
+ * verify phase and reports into {@code target/failsafe-reports}. Refactoring Rationale: this sentence used
+ * to add that "in this module exactly one class carries it -- ending {@code RepositoryIT}, in
+ * {@code .fixtures}", which was true of the module it described and is not true of this one: the
+ * {@code .repository} package now holds four such classes and {@code .fixtures} still holds the one. The
+ * count is dropped rather than corrected, because nothing in THIS package depends on how many there are --
+ * what it depends on is that the suffix is reserved, which does not change. Both report directories are the
  * plugin defaults and {@code services/pom.xml} records that neither may be relocated, because the
  * continuous integration workflow collects precisely those two paths. Moving either would leave the
  * build green while the workflow published nothing.

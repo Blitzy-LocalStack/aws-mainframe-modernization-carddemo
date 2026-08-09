@@ -13,7 +13,27 @@
  * no type and holds no import, so nothing here runs; its whole effect is on what the four classes
  * beside it assert and, just as much, on what they leave to somebody else.
  *
- * <p>Four classes sit beside this charter, one per table in the schema this context owns:
+ * <p>Five classes sit beside this charter, covering the four tables in the schema this context owns
+ * and, for the fraud table, the writer and the catalogue separately. The roster is closed and is
+ * measured against the directory on every build:
+ *
+ * <pre>
+ * this directory: 6 java files = 5 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: the marker line is added because this enumeration named a class that did not
+ * exist. {@code AuthFraudRepositoryIT} was listed below, with its two catalogue objects described in
+ * detail, while no file of that name was anywhere in the reactor -- and
+ * {@code AuthFraudRepository}'s own header separately stated that it relied on such a class to settle
+ * five properties. Two documents therefore asserted coverage that did not exist, in the one direction
+ * where the absence was invisible: an all-ascending index would have satisfied every check that actually
+ * ran. The class was written rather than the entry removed, because the migration plan fixes the
+ * descending index as a preserved contract, so removing the entry would have made the paperwork
+ * consistent while leaving a required property unverified. The marker is measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which additionally holds every class named below to a file in this directory, so a named-but-absent
+ * class now fails the build.
+ *
  * <ul>
  *   <li>{@code PendingAuthSummaryRepositoryIT} -- that {@code pk_pending_auth_summary} is over
  *       {@code account_id} <b>alone</b> and not over a wider tuple, that a lookup for an account
@@ -27,17 +47,22 @@
  *       {@code ck_pending_auth_detail_auth_resp_reason}; that
  *       {@code fk_pending_auth_detail_summary} makes a detail row unreachable without its summary;
  *       and the look-ahead contract, because this is the only one of the four tables that pages.</li>
- *   <li>{@code AuthFraudRepositoryIT} -- the fraud access path as <b>two</b> catalogue objects,
+ *   <li>{@code AuthFraudUpserterIT} -- the fraud access path as <b>two</b> catalogue objects,
  *       {@code pk_auth_fraud} over {@code (card_num, auth_ts)} and the index
  *       {@code idx_auth_fraud_card_recent} over {@code (card_num ASC, auth_ts DESC)}, asserted
  *       against the live catalogue rather than against the migration text; and the two-column
- *       upsert exercised in both directions.</li>
+ *       upsert exercised in both directions and under two writers reaching one row at once.
+ *       Refactoring Rationale: this bullet named a class {@code AuthFraudRepositoryIT} that has
+ *       never existed. The class beside this charter is named for the writer it exercises, because
+ *       the fraud write is one native statement declared on {@code AuthFraudUpserter} rather than a
+ *       derived query on the repository, and a charter naming a file nobody can open leaves a reader
+ *       unable to tell a missing test from a misspelt reference.</li>
  *   <li>{@code OutboxRepositoryIT} -- selection of publishable rows from
  *       {@code auth_reply_outbox}, their ordering, and idempotent marking. The two partial indexes
  *       {@code idx_auth_reply_outbox_unpublished} and {@code idx_auth_reply_outbox_group} fix what
  *       those queries must look like: both are restricted to rows whose {@code published_at} is
  *       null, ordering is by the identity column {@code outbox_id} and never by
- *       {@code created_at}, and a claim is taken per {@code order_group_token} rather than
+ *       {@code created_at}, and a claim is taken per {@code order_group_id} rather than
  *       globally.</li>
  * </ul>
  *
@@ -51,11 +76,13 @@
  *
  * <h2>Why this package exists at all, given the charter one tree above</h2>
  *
- * <p>Refactoring Rationale: the module's test-root charter records eight test packages and states
- * that there is no repository test package, because the one integration test this module then held
- * sat with the fixture tests that supply its rows. That census was accurate when it was written and
- * this package is the ninth, so the correction is recorded here rather than left to be rediscovered
- * from the mismatch. The reason this package is added is <b>not</b> that a production package of the
+ * <p>Refactoring Rationale: the module's test-root charter used to record eight test packages and to
+ * state that there was no repository test package, because the one integration test this module then
+ * held sat with the fixture tests that supply its rows. That census was accurate when it was written and
+ * this package is the ninth. The correction was recorded here first, which was necessary and was not
+ * sufficient: a reader consults the ROOT charter before any leaf charter and has no reason to open the
+ * charter of a package the root says does not exist. The root census is now a marker line the build
+ * measures, and it names this package. The reason this package is added is <b>not</b> that a production package of the
  * same name exists -- the root charter rules that out explicitly, and rightly, since mirroring is
  * not a reason to stand up a test package. It is that four persistence contracts had no assertion
  * anywhere in the module: the summary key's arity, the detail key's composition, the fraud path's
@@ -276,7 +303,7 @@
  *
  * <p>Assumptions: one convention here is inherited rather than invented. The existing suite requires
  * the create-versus-update branch of a balance row to be exercised <b>both ways</b>, and
- * {@code AuthFraudRepositoryIT} applies that same convention to the upsert: the path that
+ * {@code AuthFraudUpserterIT} applies that same convention to the upsert: the path that
  * inserts and the path that updates are separately provoked and separately asserted. Exercising only
  * the branch that happens to run first passes while leaving half the statement unproven, and which
  * half that is depends on fixture order rather than on anything the test states.

@@ -117,10 +117,11 @@
  * classes that currently satisfy it.</p>
  *
  * <p><strong>Access control.</strong>
- * {@code com.carddemo.authorization.config.SecurityConfig} owns the
- * {@code carddemo-admin} route guard for fraud marking.
- * {@code FraudMarkingService} documents the required authority at its entry point but does
- * not reproduce the HTTP security rule.</p>
+ * {@code com.carddemo.authorization.config.SecurityConfig} owns the route guard for fraud marking,
+ * which admits either business group -- the authority the baseline grants, an ordinary user reaching
+ * the write from main-menu option 11. It was {@code carddemo-admin} and the reversal is argued at
+ * {@code SecurityConfig.fraudAccess()}. {@code FraudMarkingService} documents the required authority at
+ * its entry point but does not reproduce the HTTP security rule.</p>
  *
  * <p><strong>Messaging.</strong>
  * {@code com.carddemo.authorization.config.SqsConfig} owns the
@@ -165,8 +166,12 @@
  *
  * <p><strong>Row protection.</strong> Service methods declare transaction boundaries but
  * no JPA lock mode. The current listener obtains summary-row protection through the
- * repository-owned {@code findWithLockByAccountId} method, whose
- * {@code PESSIMISTIC_WRITE} declaration remains on the repository boundary. No additional
+ * repository-owned atomic accumulation statements, which perform the arithmetic in the database
+ * rather than reading, mutating and writing back. A {@code PESSIMISTIC_WRITE} declaration stood on
+ * that boundary and has been withdrawn: it was concurrency machinery the reference system does not
+ * have, since {@code cpy/IMSFUNCS.cpy} declares three get-hold function codes at L19, L21 and L23
+ * and no reference program passes any of them. What it protected -- four members that are
+ * INCREMENTED rather than assigned -- is now safe by construction. No additional
  * lock declaration or lock-policy duplication belongs in this package.</p>
  *
  * <p><strong>Bounded-context data.</strong> Account, customer, card, and card-cross-reference
@@ -204,10 +209,28 @@
  *
  * <p>No {@code BatchConfig} or Spring Batch {@code JobRepository} belongs to this context.
  * The parent manages the {@code spring-boot-starter-batch} version, while
- * {@code batch-service} alone consumes it. {@code PurgeJob}, {@code LoadService}, and
- * {@code UnloadService} are scheduled service methods or Step Functions-invoked entry
- * points, not Spring Batch jobs, so this module does not acquire a restart repository or a
- * second transaction owner.</p>
+ * {@code batch-service} alone consumes it. {@code PurgeJob}, {@code LoadService} and
+ * {@code UnloadService} are plain services, not Spring Batch jobs, so this module acquires
+ * neither a restart repository nor a second transaction owner.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously described the first two as
+ * "scheduled service methods or Step Functions-invoked entry points", and NEITHER was true
+ * of either. There was no schedule, no controller, no runner and no state in the batch
+ * state machine, so both were reachable only from their own tests -- and the expiry purge
+ * is the only thing that bounds the growth of this schema's two largest tables, so in a
+ * deployment that trusted this sentence those tables grew without limit. The correction is
+ * both to the sentence and to the code: {@link com.carddemo.authorization.task} now holds
+ * a process entry point that resolves either job by name and ends on an exit status, and
+ * the actual invocation is a container started with {@code --job=purge-authorizations
+ * --business-date=YYYY-MM-DD} or {@code --job=load-authorizations} with its two staged
+ * extract paths.</p>
+ *
+ * <p>Assumptions: the purge is deliberately NOT a state in the nightly batch state machine,
+ * and that is an alignment with the plan rather than an omission. The plan fixes that
+ * machine at eleven states and names the job each one replaces; this purge is not among
+ * them, and the reference has no job-control driver for it either. It is an operationally
+ * scheduled job in its own right, which is why it is a task entry point rather than a
+ * twelfth state.</p>
  *
  * <p>No {@code module-info.java} exists in this source tree. The three online services are
  * called by controllers planned under

@@ -1,14 +1,5 @@
 package com.carddemo.authorization.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
@@ -18,16 +9,30 @@ import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Limit;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Drives {@link PurgeJob} over the selection, reversal, ordering, cadence and failure behaviour it carries.
@@ -133,17 +138,26 @@ class PurgeJobTest {
      * @param stored the summaries the walk can see
      */
     private void givenSummaries(List<PendingAuthSummary> stored) {
-        when(this.summaries.findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any()))
+        when(this.summaries.findAccountIdsAboveOrderByAccountIdAsc(any(), any()))
                 .thenAnswer(invocation -> {
                     long after = invocation.<Long>getArgument(0).longValue();
                     Limit limit = invocation.getArgument(1);
                     return stored.stream()
-                            .filter(summary -> summary.getAccountId().longValue() > after)
-                            .sorted((left, right) ->
-                                    Long.compare(left.getAccountId(), right.getAccountId()))
+                            .map(PendingAuthSummary::getAccountId)
+                            .filter(accountId -> accountId.longValue() > after)
+                            .sorted()
                             .limit(limit.max())
                             .toList();
                 });
+        // WHY : Assumptions: the walk answers KEYS and the locking read answers the summary, because that
+        //       is the order the service performs them in and the double has to be able to disagree with
+        //       itself. A single stub answering summaries from the walk could not express the case below
+        //       where a key is returned and its row is then gone, which is the state a concurrent purge
+        //       leaves behind and the one arm of this loop that has no reference equivalent to copy.
+        when(this.summaries.findByAccountId(any()))
+                .thenAnswer(invocation -> stored.stream()
+                        .filter(summary -> summary.getAccountId().equals(invocation.getArgument(0)))
+                        .findFirst());
     }
 
     /**
@@ -152,8 +166,44 @@ class PurgeJobTest {
      * @param children the authorizations the inner walk returns
      */
     private void givenChildren(List<PendingAuthDetail> children) {
-        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
-                .thenReturn(children);
+        // WHY : Refactoring Rationale: the double answers the BOUNDED first chunk and the strict keyset
+        //       continuation, and the unbounded read it answered before is gone. The purge now walks one
+        //       account's authorizations in keyset chunks instead of materialising every one of them, so
+        //       a double that returned the whole set to any call would let a purge which had gone back
+        //       to reading everything still pass -- and unboundedness there is exactly the defect.
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any()))
+                .thenAnswer(invocation -> chunk(children, null, null, invocation.getArgument(1)));
+        // WHY : Assumptions: the continuation stub is LENIENT because a fixture smaller than one chunk is
+        //       answered entirely by the first call, which comes back short and ends the walk. It is still
+        //       declared so the cases whose fixtures do span a chunk are answered correctly, and so a
+        //       reader can see the double models the whole walk rather than only its first step.
+        Mockito.lenient().when(this.details.findOlderThan(any(), any(), any(), any()))
+                .thenAnswer(invocation -> chunk(children, invocation.getArgument(1),
+                        invocation.getArgument(2), invocation.getArgument(3)));
+    }
+
+    /**
+     * Returns the bounded slice of a fixed child set that follows a stated keyset position.
+     *
+     * <p>Assumptions: the comparison is the STRICT descending pair the production query uses -- an earlier
+     * date, or the same date and an earlier time -- so the double reproduces the boundary the real query
+     * has rather than a looser one that would hide an off-by-one in the caller's position handling.</p>
+     *
+     * @param children the whole child set, already in the order the query returns
+     * @param afterDate the authorization date of the last row handled, or {@code null} for the first chunk
+     * @param afterTime the authorization time of the last row handled, or {@code null} for the first chunk
+     * @param limit the greatest number of rows to return
+     * @return the slice, never {@code null}
+     */
+    private static List<PendingAuthDetail> chunk(List<PendingAuthDetail> children, Integer afterDate,
+            Integer afterTime, Limit limit) {
+        return children.stream()
+                .filter(child -> afterDate == null
+                        || child.getId().getAuthDate() < afterDate
+                        || (child.getId().getAuthDate().equals(afterDate)
+                                && child.getId().getAuthTime() < afterTime))
+                .limit(limit.max())
+                .toList();
     }
 
     /**
@@ -264,12 +314,18 @@ class PurgeJobTest {
 
         assertThat(outcome.detailsRead()).isEqualTo(4);
         assertThat(outcome.detailsDeleted()).isEqualTo(4);
-        assertThat(parent.getApprovedAuthCount()).isZero();
-        assertThat(parent.getDeclinedAuthCount()).isZero();
-        assertThat(parent.getApprovedAuthAmount()).isEqualByComparingTo(ZERO);
-        assertThat(parent.getDeclinedAuthAmount()).isEqualByComparingTo(ZERO);
-        assertThat(parent.getCreditBalance()).isEqualByComparingTo(FIXTURE_CREDIT_BALANCE);
-        assertThat(parent.getCashBalance()).isEqualByComparingTo(ZERO);
+        // WHY : Refactoring Rationale: the reversal is asserted as ONE arithmetic statement carrying all
+        //       four figures, and not as the state of the loaded entity. Mutating the entity per child made
+        //       the write a read-modify-write over a row this walk holds no lock on, so two purges -- or a
+        //       purge and a live authorization -- could each apply a reversal to the same starting value
+        //       and lose one of them. Asserting the CALL is what holds the fix: a single statement, issued
+        //       once per account, whose four arguments are the exact totals the expired children carried.
+        //       Assumptions: neither balance appears in the statement, which preserves divergence
+        //       D-PURGE-BALANCE -- the reference releases no balance here -- and asserting the absence is
+        //       what keeps a later reader from "completing" the reversal by adding one.
+        verify(this.summaries, times(1)).reverseExpiredAuthorizations(eq(ACCOUNT_ID), eq(2),
+                argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0), eq(2),
+                argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0));
         assertThat(outcome.summariesDeleted()).isEqualTo(1);
     }
 
@@ -297,8 +353,14 @@ class PurgeJobTest {
                 PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(5)));
 
         assertThat(outcome.detailsDeleted()).isEqualTo(2);
-        assertThat(parent.getApprovedAuthCount()).isZero();
-        assertThat(parent.getDeclinedAuthCount()).isEqualTo((short) 2);
+        // WHY : Assumptions: the declined side of the statement is asserted to be ZERO rather than simply
+        //       left unasserted. The two live declined children must not be reversed, and a statement that
+        //       reversed them would be indistinguishable from one that did not unless the argument is
+        //       named -- while the summary's own counters can no longer be read for this, because the
+        //       reversal is an arithmetic update against the row rather than a change to the instance.
+        verify(this.summaries, times(1)).reverseExpiredAuthorizations(eq(ACCOUNT_ID), eq(2),
+                argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0), eq(0),
+                argThat(amount -> amount.signum() == 0));
         assertThat(outcome.summariesDeleted()).isZero();
         verify(this.summaries, never()).delete(any());
     }
@@ -356,7 +418,12 @@ class PurgeJobTest {
                 PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(5)));
 
         assertThat(outcome.detailsDeleted()).isEqualTo(2);
-        assertThat(parent.getApprovedAuthCount()).isZero();
+        // WHY : Assumptions: the reversal counts BOTH children, which is what this case is about -- a
+        //       matched authorization expires and is reversed exactly like a pending one. The count is
+        //       read off the statement because the reversal no longer touches the loaded entity.
+        verify(this.summaries, times(1)).reverseExpiredAuthorizations(eq(ACCOUNT_ID), eq(2),
+                argThat(amount -> amount.signum() > 0), eq(0),
+                argThat(amount -> amount.signum() == 0));
     }
 
     /**
@@ -486,7 +553,7 @@ class PurgeJobTest {
     @Test
     @DisplayName("a failed run reports exit status sixteen, keeps the cause, and reports no statistics")
     void aFailedRunReportsTheAbendExitStatus() {
-        when(this.summaries.findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any()))
+        when(this.summaries.findAccountIdsAboveOrderByAccountIdAsc(any(), any()))
                 .thenThrow(new IllegalStateException("summary read failed"));
 
         PurgeJob job = job();
@@ -509,8 +576,13 @@ class PurgeJobTest {
      *
      * <p>Assumptions: the reversal and the delete are ONE unit of work, so a failure inside the window
      * discards both. The reference commits only at its checkpoint, so a failure between two checkpoints
-     * discards everything since the last one; here the boundary is the transaction and the proof is that
-     * the manager is asked to roll that boundary back and is never asked to commit it. Alternatives
+     * discards everything since the last one. What THIS case establishes is narrower than that: the
+     * service ASKS for the boundary to be discarded, the manager being told to roll back and never told
+     * to commit. That the engine then keeps nothing is a different claim, and a mocked manager cannot
+     * carry it; it is established against a real database in
+     * {@link PurgeWindowRollbackRepositoryIT#aFailedWindowDiscardsEveryWriteItMade()}, which also covers
+     * the durability of an earlier window across a later failure. Reading this case as the durability
+     * proof is the misreading the pair exists to prevent. Alternatives
      * Considered: asserting the status is marked rollback-only. Rejected because the template discards a
      * failed boundary by calling the MANAGER's rollback rather than by flagging the status, so against a
      * stubbed manager that assertion is vacuously false whatever the service did. Asserting on the
@@ -538,5 +610,197 @@ class PurgeJobTest {
         verify(this.transactionManager).rollback(status);
         verify(this.transactionManager, never()).commit(status);
         verify(this.summaries, never()).delete(any());
+    }
+    /**
+     * Every summary is read before anything beneath it is read, reversed or removed.
+     *
+     * <p>Purpose: the reversal at {@code cbl/CBPAUP0C.cbl} L287 to L292 is per-child arithmetic over four
+     * counters the online decision path also adds to, so the order in which this run issues its reads is
+     * what decides which counters the deletion is judged against. This asserts that order: the walk
+     * answers keys, the summary is loaded by its own read, and only then is the authorization chunk issued
+     * and the child removed.
+     *
+     * <p>Assumptions: the UNBOUNDED child walk is asserted never to be used from this path, and that
+     * assertion is the point of the test rather than a decoration. Both overloads are declared on the same
+     * repository and either compiles here, so nothing but an assertion prevents a later edit restoring the
+     * one that loads an account's entire authorization history inside a transaction whose size nothing
+     * bounds. The unbounded overload remains declared because the unload path legitimately uses it -- it
+     * copies rows out and writes nothing -- so its presence is not evidence of a defect and its absence
+     * cannot be the guard.
+     *
+     * <p>Refactoring Rationale: this case asserted a LOCKING summary read here and asserted the unlocked
+     * one never happened. The lock is withdrawn -- the lost update it guarded is closed instead by
+     * reversing the four counters in ONE statement computed in the database, which is the reason
+     * {@code PendingAuthSummaryRepository} publishes no locking read at all -- so the ordering property is
+     * restated against the reads that survive, and the guard is moved onto the axis that still has two
+     * candidates. Left as it was, its two verifications contradicted each other outright: one required the
+     * summary read the other forbade, so whichever Mockito evaluated first decided the result.
+     *
+     * <p>Alternatives Considered: asserting only that each read was called. Rejected because the failure
+     * being closed is an ORDERING failure: issuing the child walk before the summary is loaded satisfies a
+     * presence assertion while deciding the deletion from counters read after the children were already in
+     * hand.
+     */
+    @Test
+    @DisplayName("the summary row is read before its children are read, reversed or removed")
+    void theSummaryIsHeldBeforeAnythingBeneathItIsTouched() {
+        givenSummaries(List.of(fixtureParent(ACCOUNT_ID)));
+        givenChildren(List.of(child(AUTH_DATE, 91_500_000, APPROVED, "100.00", "100.00")));
+
+        PurgeJob job = job();
+        job.purge(PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(10)));
+
+        InOrder order = inOrder(this.summaries, this.details);
+        order.verify(this.summaries).findAccountIdsAboveOrderByAccountIdAsc(any(), any());
+        order.verify(this.summaries).findByAccountId(ACCOUNT_ID);
+        order.verify(this.details)
+                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(eq(ACCOUNT_ID), any());
+        order.verify(this.details).delete(any());
+        verify(this.summaries, never()).findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any());
+        verify(this.details, never()).findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any());
+    }
+
+    /**
+     * A key whose summary is gone by the time its own read runs is skipped, and the walk still advances.
+     *
+     * <p>Purpose: the two reads can disagree, because a row removed between them is exactly what a
+     * concurrent purge of the same window leaves behind. This asserts the arm that has no reference
+     * equivalent to copy: the missing summary contributes nothing to the statistics, no authorization walk
+     * is issued for it, and the position advances past its key so the walk terminates.
+     *
+     * <p>Assumptions: the walk is asserted to have advanced by inspecting the position the SECOND call
+     * seeks above, which must be the LAST key of the first page and not the last key a summary read
+     * resolved. A position that skipped back to the resolved key would re-seek the missing one on every
+     * call and the run would not end, so the assertion is on the value that makes termination true rather
+     * than on the absence of an exception.
+     *
+     * <p>Assumptions: the missing summary is not counted as read. The statistics are what the run reports
+     * as its work, and the reference walk would never have returned a row that is not there, so counting
+     * it would overstate the run against a program that could not have produced the count.
+     */
+    @Test
+    @DisplayName("a summary removed between the walk and its read is skipped without stalling the walk")
+    void aSummaryRemovedBeforeItsOwnReadIsSkipped() {
+        PendingAuthSummary survivor = fixtureParent(ACCOUNT_ID);
+        Long vanishedAccountId = Long.valueOf(ACCOUNT_ID.longValue() + 1L);
+        // WHY : Assumptions: the two reads are stubbed HERE rather than through the shared helper, because
+        //       the state under test is a row present to one read and absent to the other, and the helper
+        //       answers both from one list so they cannot disagree. Re-stubbing the helper's walk instead
+        //       would also re-enter the helper's own answer with null arguments, which is how Mockito
+        //       evaluates the inner call of a second when(...) over an already-stubbed method.
+        when(this.summaries.findAccountIdsAboveOrderByAccountIdAsc(any(), any()))
+                .thenAnswer(invocation -> {
+                    long after = invocation.<Long>getArgument(0).longValue();
+                    return List.of(ACCOUNT_ID, vanishedAccountId).stream()
+                            .filter(accountId -> accountId.longValue() > after)
+                            .toList();
+                });
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(survivor));
+        when(this.summaries.findByAccountId(vanishedAccountId)).thenReturn(Optional.empty());
+        givenChildren(List.of(child(AUTH_DATE, 91_500_000, APPROVED, "100.00", "100.00")));
+
+        // WHY : Assumptions: the window is sized to exactly the two keys the walk returns, so the page is
+        //       FULL and the run must seek again. At the default window of five a two-key page is short,
+        //       which ends the walk after one call and leaves the position unobservable -- the assertion
+        //       below would then be asserting against a call the run had no reason to make.
+        PurgeJob.PurgeOutcome outcome = job().purge(
+                new PurgeJob.PurgeParameters(AUTHORIZED_ON.plusDays(10), 5, 2, 10));
+
+        assertThat(outcome.summariesRead()).isEqualTo(1);
+        assertThat(outcome.detailsRead()).isEqualTo(1);
+        assertThat(outcome.detailsDeleted()).isEqualTo(1);
+        verify(this.summaries).findByAccountId(vanishedAccountId);
+        // WHY : Assumptions: the overload named here is the BOUNDED one the purge actually issues.
+        //       Naming the unbounded overload instead would pass against a run that walked the missing
+        //       account's children in full, because that call is not the one being forbidden -- an
+        //       absence assertion aimed at a method the subject never calls cannot fail.
+        verify(this.details, never()).findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(vanishedAccountId), any());
+        verify(this.summaries, times(1))
+                .findAccountIdsAboveOrderByAccountIdAsc(vanishedAccountId, Limit.of(2));
+    }
+    /**
+     * Each run parameter is refused above the width its position on the reference card can express.
+     *
+     * <p>Purpose: only the lower half of each range was checked, so this type accepted values the reference
+     * parameter card cannot hold at all -- an expiry of a thousand days in a two-digit field, a frequency of
+     * a million in a five-character one. Both halves of each range are now asserted, on the widest accepted
+     * value and on the first refused one, because a bound tested only from far away is a bound whose edge is
+     * unknown.
+     *
+     * <p>Assumptions: the accepted side is asserted as well as the refused side. A check written one off --
+     * refusing at the width rather than above it -- would pass a test that only tried an obviously
+     * oversized value, and it would refuse the largest value an operator can legitimately configure.
+     *
+     * <p>Assumptions: the widths are read from the card layout recorded on {@link PurgeJob.PurgeParameters}
+     * and are asserted through the published constants rather than as literals, so the test and the check
+     * cannot disagree about which number is the bound. Their VALUES are asserted separately below, which is
+     * what keeps this from being a test that would pass whatever the constants held.
+     *
+     * <p>Assumptions: the expiry consequence is worth stating because it is why this bound matters more than
+     * it looks. An unbounded expiry turns the run into a no-op -- no authorization is old enough to qualify
+     * -- and a completed purge that deleted nothing is indistinguishable from a correct one with nothing to
+     * delete, so the failure is silent rather than loud.
+     */
+    @Test
+    @DisplayName("each run parameter is refused above the width its card position can express")
+    void eachParameterIsRefusedAboveItsCardWidth() {
+        assertThat(PurgeJob.MAX_EXPIRY_DAYS)
+                .as("the expiry field is two digits on the reference card")
+                .isEqualTo(99);
+        assertThat(PurgeJob.MAX_CARD_FREQUENCY)
+                .as("both frequency fields are five characters on the reference card")
+                .isEqualTo(99_999);
+
+        assertThatCode(() -> new PurgeJob.PurgeParameters(
+                AUTHORIZED_ON, PurgeJob.MAX_EXPIRY_DAYS, PurgeJob.MAX_CARD_FREQUENCY,
+                PurgeJob.MAX_CARD_FREQUENCY))
+                .as("the widest value each field holds must be accepted, not refused")
+                .doesNotThrowAnyException();
+
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> new PurgeJob.PurgeParameters(
+                        AUTHORIZED_ON, PurgeJob.MAX_EXPIRY_DAYS + 1, 5, 10))
+                .withMessageContaining("expiryDays must be between 1 and 99");
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> new PurgeJob.PurgeParameters(
+                        AUTHORIZED_ON, 5, PurgeJob.MAX_CARD_FREQUENCY + 1, 10))
+                .withMessageContaining("checkpointFrequency must be between 1 and 99999");
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> new PurgeJob.PurgeParameters(
+                        AUTHORIZED_ON, 5, 5, PurgeJob.MAX_CARD_FREQUENCY + 1))
+                .withMessageContaining("progressLogFrequency must be between 1 and 99999");
+    }
+
+    /**
+     * A failed window names the window it stopped in and not the account it had reached.
+     *
+     * <p>Purpose: the abend message is carried into the log by the stack trace whether or not the raising
+     * site intended that, so an identifier in the message is an identifier in the log for every failed
+     * purge. This asserts the message locates the run by window ordinal and carries no account.
+     *
+     * <p>Assumptions: the account asserted absent is the one the fixture actually uses, so the assertion
+     * can fail. Asserting the absence of an arbitrary number would pass against a message carrying a
+     * different account, which is the same defect.
+     *
+     * <p>Assumptions: the exit status is asserted alongside, because the two properties travel together --
+     * an orchestrator acts on the status and an operator reads the message -- and a change that dropped the
+     * account by dropping the message would satisfy the absence assertion alone.
+     */
+    @Test
+    @DisplayName("a failed window is reported by its ordinal, carrying no account identifier")
+    void aFailedWindowNamesItsOrdinalRatherThanTheAccount() {
+        when(this.summaries.findAccountIdsAboveOrderByAccountIdAsc(any(), any()))
+                .thenThrow(new IllegalStateException("summary read failed"));
+
+        PurgeJob job = job();
+        PurgeJob.PurgeParameters parameters = PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON);
+
+        assertThatExceptionOfType(PurgeJob.PurgeAbendException.class)
+                .isThrownBy(() -> job.purge(parameters))
+                .withMessageContaining("window 1")
+                .withMessageNotContaining(String.valueOf(ACCOUNT_ID))
+                .satisfies(thrown ->
+                        assertThat(thrown.exitStatus()).isEqualTo(PurgeJob.ABEND_EXIT_STATUS));
     }
 }

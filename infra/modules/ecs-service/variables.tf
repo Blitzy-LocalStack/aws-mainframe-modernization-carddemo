@@ -5,9 +5,11 @@
 #   The complete input contract of the reusable `ecs-service` module -- the
 #   one module in infra/ that exists in order to be instantiated many times
 #   rather than once. Each of the two environment roots, infra/envs/dev and
-#   infra/envs/prod, calls it eight times, once per bounded context: auth,
-#   account, card, transaction, reference, batch, authorization and
-#   reporting. Sixteen module instances across the two roots are therefore
+#   infra/envs/prod, calls it nine times, once per workload: the eight Java
+#   services -- auth, account, card, transaction, reference, batch,
+#   authorization and reporting -- plus the data-migration ETL, which needs a
+#   task definition and no service. Eighteen module instances across the two
+#   roots are therefore
 #   configured entirely through the declarations below, and nothing else in
 #   the module accepts a value from a caller.
 #
@@ -29,11 +31,11 @@
 #   values this file describes travel inward, from caller to module.
 #
 # Exceptions or errors:
-#   - Nine variables declare no `default`, which makes each one a hard
+#   - Eleven variables declare no `default`, which makes each one a hard
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Forty-three variables carry fifty `validation` blocks between them, so a
+#   - Forty-nine variables carry sixty-one `validation` blocks between them, so a
 #     bad value is rejected before the AWS API sees it. The checks cover
 #     identifiers and ARN shapes, Fargate CPU/memory and network contracts,
 #     HTTPS health checks, deployment/autoscaling bounds, CloudWatch retention,
@@ -56,18 +58,18 @@
 #     states its own coupling because none is inferable from the boolean type.
 #
 # WHY (non-obvious design decisions):
-#   - Alternatives Considered: eight per-service module copies, one per
-#     bounded context, instead of one parameterised module with this input
+#   - Alternatives Considered: nine per-workload module copies, one per
+#     workload, instead of one parameterised module with this input
 #     surface. Rejected on the evidence of app/csd/CARDDEMO.CSD rather than
 #     on taste: all 18 `DEFINE TRANSACTION` stanzas (L306-L488) are
 #     attribute-identical -- ISOLATE(YES), TASKDATAKEY(USER),
 #     ACTION(BACKOUT), PRIORITY(1), RESTART(NO), PROFILE(DFHCICST) and
 #     TRANCLASS(DFHTCL00) each occur exactly 18 times -- so the CICS region
 #     already expressed 18 workloads as one repeated template differing only
-#     in transaction name and target program. Eight copies would fork that
-#     template eight ways, and any later change to the health-check or
-#     deployment contract would then have to land in eight files to keep the
-#     eight services behaving alike.
+#     in transaction name and target program. Nine copies would fork that
+#     template nine ways, and any later change to the health-check or
+#     deployment contract would then have to land in nine files to keep the
+#     nine workloads behaving alike.
 #   - Trade-offs: every `description` is written as a heredoc rather than as
 #     a single-line string. One line cannot carry what a value is for, which
 #     resource consumes it AND where the caller obtains it without running
@@ -80,8 +82,8 @@
 #     signs that follow it, and `terraform fmt -check -recursive infra/` is
 #     gating.
 #   - Refactoring Rationale: three of this module's postures are decided by
-#     its DEFAULTS rather than by its callers, because seven of the eight
-#     instantiations pass no value for any of them -- so for those seven the
+#     its DEFAULTS rather than by its callers, because not one of the nine
+#     instantiations passes a value for any of them -- so for all nine the
 #     default is the configuration, and a permissive default is a permissive
 #     fleet. All three were corrected together for that reason.
 #     (a) readonly_root_filesystem now defaults to true, with the writable
@@ -107,10 +109,10 @@
 # -----------------------------------------------------------------------------
 # TIER 1 -- REQUIRED INPUTS. Every variable in this tier omits `default`.
 #
-# WHY : Alternatives Considered: ordering all fifty-one variables strictly
+# WHY : Alternatives Considered: ordering all fifty-eight variables strictly
 #       alphabetically, which is the obvious scheme and does help a reader
 #       hunting for one name already known. Rejected because it interleaves
-#       the nine inputs a caller MUST supply with the thirty-nine it may
+#       the eleven inputs a caller MUST supply with the forty-seven it may
 #       ignore, so a new `module` block could only be written correctly by
 #       reading every block in the file to discover which ones lack a
 #       default. Required-first answers the question a caller actually
@@ -122,7 +124,7 @@
 # -----------------------------------------------------------------------------
 
 # WHY : Assumptions: no `default` deliberately. This is the only input that
-#       tells the eight instantiations apart, so a default would let two
+#       tells the nine instantiations apart, so a default would let two
 #       `module` blocks in one root compose the same ECS service name, log
 #       group and target-group name and then collide during apply. The
 #       charset bound is not cosmetic either -- the value is composed into the
@@ -188,7 +190,7 @@ variable "cluster_arn" {
   description = <<-EOT
     ARN of the ECS Fargate cluster that will host this service, consumed by
     the `cluster` argument of aws_ecs_service. Comes from the ecs-cluster
-    module's output; all eight instantiations in a root share one cluster.
+    module's output; all nine instantiations in a root share one cluster.
   EOT
   type        = string
 
@@ -404,8 +406,10 @@ variable "ecr_repository_arn" {
 # TIER 2 -- OPTIONAL INPUTS. Every variable below carries a `default`, so a
 # caller may omit all of them and still get a working service.
 #
-# WHY : Assumptions: each default is chosen to be the value seven of the eight
-#       instantiations want, so a root's `module` block stays short and the
+# WHY : Assumptions: each default is chosen to be the value seven of the nine
+#       instantiations want -- the two task-only workloads have no service,
+#       target group or autoscaling for most of them to apply to -- so a root's
+#       `module` block stays short and the
 #       lines it does write are the ones that genuinely differ. Three axes
 #       are expected to diverge between dev and prod -- task count, CPU and
 #       memory, and log retention -- and those defaults are the ones most
@@ -671,7 +675,7 @@ variable "task_memory" {
 #       filesystem cannot be written is one where a process that reaches code
 #       execution cannot leave a modified binary, a cron entry, a shared object
 #       on the loader path, or an altered configuration file behind for the next
-#       task to load. Eight services times every task in every environment ran
+#       task to load. Nine workloads times every task in every environment ran
 #       without that property for the sake of one temporary directory.
 #       Assumptions: this pairs with the read-only default rather than standing
 #       alone. main.tf emits one Fargate ephemeral volume and one mount point per
@@ -681,8 +685,8 @@ variable "task_memory" {
 #       writable path -- which is the state that would break every task at start.
 #       Alternatives Considered: leaving the default false and documenting that a
 #       root may harden it. Rejected because a security posture reached only by a
-#       caller opting in is the posture nobody has: seven of the eight
-#       instantiations pass this module's defaults, so the default IS the
+#       caller opting in is the posture nobody has: all nine instantiations
+#       take this module's default here, so the default IS the
 #       configuration. Also considered: keeping it false for the batch
 #       instantiation specifically, on the theory that a batch step writes more
 #       than a service does. Rejected as unfounded -- batch output goes to the
@@ -694,7 +698,7 @@ variable "task_memory" {
 variable "readonly_root_filesystem" {
   description = <<-EOT
     Sets readonlyRootFilesystem on the container definition. Defaults to true,
-    which is the intended posture for all eight instantiations: writable paths
+    which is the intended posture for all nine instantiations: writable paths
     the JVM needs are supplied as Fargate ephemeral volumes through
     writable_mount_paths rather than by leaving the whole root filesystem
     writable. The module rejects false because this is a fleet-wide invariant.
@@ -805,8 +809,8 @@ variable "writable_mount_paths" {
 #       the details that must not differ between how a service and a batch
 #       step are packaged: the non-root user, the log-group naming, and the
 #       execution role's resource-scoped pull and decrypt permissions.
-#       Trade-offs: the cost is three booleans that seven of the eight callers
-#       never mention, accepted so one module covers both shapes and the four
+#       Trade-offs: the cost is three booleans whose non-default value only two
+#       of the nine callers need, accepted so one module covers both shapes and the four
 #       shared resources are defined exactly once.
 # -----------------------------------------------------------------------------
 
@@ -929,7 +933,7 @@ variable "target_protocol" {
   #       redundant and is not. Someone debugging a target group whose members
   #       will not turn healthy reaches for the protocol first; with no input to
   #       set, the next step is an edit to main.tf, which changes the hop for all
-  #       eight services and appears in no review of the environment root. A
+  #       nine workloads and appears in no review of the environment root. A
   #       variable that refuses the change states the reason at the moment it is
   #       attempted. The same pattern is used for the ETL's TLS mode in
   #       data-migration/src/carddemo_migration/config.py, for the same reason.
@@ -973,7 +977,7 @@ variable "health_check_matcher" {
 #       value. Probing less often lets a wedged task keep receiving requests
 #       for more consecutive probes before unhealthy_threshold is reached;
 #       probing more often multiplies probe traffic against every task of
-#       every service, and this module is instantiated eight times per root.
+#       every service, and this module is instantiated nine times per root.
 #       The pairing that matters is with unhealthy_threshold, since the two
 #       together are what decide when a bad task is pulled, so a root
 #       changing either should look at both.
@@ -1691,16 +1695,15 @@ variable "log_retention_in_days" {
 variable "log_group_kms_key_arn" {
   description = <<-EOT
     ARN of a customer-managed KMS key to encrypt the service's log group with.
-    The dev and prod roots pass the KMS module's S3 data-domain key; leave null
-    only in a standalone test root to use CloudWatch Logs service-managed
-    encryption.
+    Required unless allow_service_managed_log_encryption is explicitly set true,
+    which is the opt-out reserved for planning this module in isolation without
+    the kms module. Both environment roots pass the KMS module's S3 data-domain
+    key.
   EOT
   type        = string
   default     = null
 
-  # WHY : Assumptions: null means the log group uses the CloudWatch Logs service key,
-  #       and that path must stay expressible, so the check is written as an
-  #       explicit null test. When a value IS supplied it has to be a KMS key ARN:
+  # WHY : Assumptions: when a value IS supplied it has to be a KMS key ARN:
   #       a key id or an alias name type-checks as a string, plans cleanly, and is
   #       rejected by CloudWatch Logs at apply -- after the log group exists, which
   #       leaves a group encrypted with the service key while the configuration
@@ -1709,6 +1712,43 @@ variable "log_group_kms_key_arn" {
     condition     = var.log_group_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.log_group_kms_key_arn))
     error_message = "log_group_kms_key_arn must be null, or a KMS key ARN beginning arn:<partition>:kms:. A bare key id or an alias name is accepted by Terraform here and then rejected by CloudWatch Logs at apply."
   }
+
+  # WHY : Refactoring Rationale: this validation is NEW and it reverses how the null
+  #       default behaves. The block above previously reasoned that null was a path
+  #       that "must stay expressible" for a standalone test root, which made
+  #       service-managed encryption the SILENT outcome of simply not passing the
+  #       input. That is a control that fails OPEN: a caller who forgets the key gets
+  #       a log group encrypted with the CloudWatch Logs service key and no diagnostic
+  #       anywhere, and this module's log group carries application request logs. The
+  #       requirement is now explicit and the escape hatch has to be asked for by name.
+  #       Alternatives Considered: dropping the default so the input becomes required
+  #       outright. Rejected because it removes the isolated-plan path entirely, which
+  #       the sibling network module keeps for the same reason -- planning one module
+  #       without instantiating kms is a legitimate development action.
+  #       Assumptions: neither environment root sets the opt-out, and both pass a real
+  #       key, so this changes nothing about a correct deployment and rejects only the
+  #       configurations that were previously silent.
+  validation {
+    condition     = var.log_group_kms_key_arn != null || var.allow_service_managed_log_encryption
+    error_message = "log_group_kms_key_arn is required: this service's log group carries application request logs and must be encrypted with a customer-managed key. Pass the kms module's key ARN. To plan this module in isolation without the kms module, set allow_service_managed_log_encryption = true explicitly, which is not a supported configuration for either environment root."
+  }
+}
+
+# WHY : Assumptions: this input exists ONLY so that the fail-closed requirement on
+#       log_group_kms_key_arn has an explicit escape hatch, and it is declared as its
+#       own variable so that using the hatch is a visible line in a caller's module
+#       block rather than an absence a reviewer has to notice. It mirrors
+#       allow_service_managed_flow_log_encryption in the sibling network module
+#       deliberately: the same defect existed in both, so the same remedy is spelled
+#       the same way and a reader who has understood one has understood both.
+# WHY : Trade-offs: a bool rather than reusing a broader "test mode" flag. A single
+#       coarse flag would couple this encryption decision to every other
+#       isolation-only concession, so relaxing one would silently relax the rest.
+variable "allow_service_managed_log_encryption" {
+  description = "Explicit opt-out permitting the service log group to fall back to CloudWatch Logs service-managed encryption when log_group_kms_key_arn is null. Intended only for planning this module in isolation without the kms module; neither environment root sets it."
+  type        = bool
+  default     = false
+  nullable    = false
 }
 
 # WHY : Refactoring Rationale: every service already exposes Micrometer metrics
@@ -1735,21 +1775,78 @@ variable "enable_telemetry_collector" {
 #       Linux image, and the explicit tag is part of the reproducible runtime
 #       contract. A floating tag would let an unrelated task-definition apply
 #       pull different collector code without a repository diff.
+# WHY : Refactoring Rationale: the validation REQUIRED a `public.ecr.aws`
+#       reference, and that requirement made every task unstartable rather than
+#       merely public. infra/modules/network enumerates the application tier's
+#       egress instead of allowing 0.0.0.0/0, and the public registry has neither
+#       an interface endpoint nor a managed prefix list, so the sidecar image
+#       could not be pulled at all -- and because the sidecar is created for every
+#       workload by default, no task in the environment could start while
+#       `terraform plan` reported nothing. A PRIVATE registry reference is now
+#       admissible and is what both roots pass, from the mirror repository
+#       infra/modules/ecr provisions.
+#       Assumptions: the public form is still admitted, deliberately. A caller
+#       that has its own controlled egress -- or a local plan that never runs a
+#       task -- can keep the upstream reference, so this input widens rather than
+#       switches. What is NOT admitted is an unpinned reference, in either form.
+#       Alternatives Considered: hard-requiring the private form, which would
+#       have made the module unusable outside this deployment's network shape.
+#       Rejected because a module input should not encode one root's egress
+#       policy; the roots express that by what they pass.
 variable "telemetry_collector_image" {
   description = <<-EOT
     Pinned AWS Distro for OpenTelemetry collector image used by the telemetry
-    sidecar. The value must include an explicit non-latest tag so collector
-    upgrades remain reviewed task-definition changes.
+    sidecar. Either a private Amazon ECR reference -- which is what both
+    environment roots pass, from the mirror repository the ecr module provisions,
+    because the application tier's egress is enumerated and admits no public
+    registry -- or the upstream public reference for a caller whose egress
+    reaches it. The value must carry an explicit non-latest tag or an image
+    digest so collector upgrades remain reviewed task-definition changes.
   EOT
   type        = string
   default     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
 
   validation {
     condition = (
-      can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector:[A-Za-z0-9._-]+$", var.telemetry_collector_image)) &&
+      (
+        can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector:[A-Za-z0-9._-]+$", var.telemetry_collector_image)) ||
+        can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.telemetry_collector_image))
+      ) &&
       !endswith(lower(var.telemetry_collector_image), ":latest")
     )
-    error_message = "telemetry_collector_image must be the public AWS observability collector image with an explicit tag other than latest."
+    error_message = "telemetry_collector_image must be either the public AWS observability collector image or a private Amazon ECR reference, in both cases with an explicit tag other than latest or with an image digest."
+  }
+}
+
+# WHY : Assumptions: this is a SECOND repository ARN rather than a widening of
+#       ecr_repository_arn, and the separation is the least-privilege point. The
+#       task execution role must pull two images when the sidecar is enabled --
+#       the service's own and the mirrored collector -- and the alternative was to
+#       accept a list and let a caller pass any number of repositories. A named
+#       second input says exactly which second image the role may fetch, and the
+#       statement in main.tf compacts a null away, so a caller that supplies no
+#       mirror grants no second repository.
+# WHY : Assumptions: nullable with a null default, because the collector may be
+#       disabled and because a caller keeping the public reference has no
+#       repository to name. Requiring it would force every caller into the
+#       mirrored shape this deployment happens to use.
+variable "telemetry_collector_repository_arn" {
+  description = <<-EOT
+    ARN of the Amazon ECR repository holding the mirrored telemetry collector
+    image, added to the task execution role's image-pull statement so the sidecar
+    can be fetched. Null when the collector is disabled or when
+    telemetry_collector_image names a registry this role needs no grant for, in
+    which case no second repository is authorized.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition = (
+      var.telemetry_collector_repository_arn == null ||
+      can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.telemetry_collector_repository_arn))
+    )
+    error_message = "telemetry_collector_repository_arn must be null or an ECR repository ARN of the form arn:<partition>:ecr:<region>:<account>:repository/<name>; a repository name or an image URI produces an IAM statement matching no repository, so the sidecar fails to pull."
   }
 }
 
@@ -1800,7 +1897,7 @@ variable "telemetry_success_sample_percentage" {
 #       audience than the secret store's read policy, and nothing reports the
 #       difference. The three validations below turn the paragraph into a
 #       plan-time gate: the first fixes the shape, the second admits only the
-#       key namespaces the eight services actually read, and the third refuses a
+#       key namespaces the nine workloads actually read, and the third refuses a
 #       name that says it carries a secret.
 variable "environment_variables" {
   description = <<-EOT
@@ -2017,7 +2114,7 @@ variable "secret_arns" {
 # -----------------------------------------------------------------------------
 
 # WHY : Alternatives Considered: composing the policy inside this module as the
-#       union of what the eight services need -- queue access for the
+#       union of what the nine workloads need -- queue access for the
 #       authorization consumer, state-machine execution for reporting, object
 #       storage for batch. Rejected outright, because a union grants every
 #       service every other service's permissions: the reporting service could
@@ -2113,6 +2210,52 @@ variable "sqs_receive_queue_arns" {
       can(regex("^arn:[a-z0-9-]+:sqs:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$", arn))
     ])
     error_message = "Every sqs_receive_queue_arns entry must be a full SQS queue ARN. Queue URLs, wildcards and partial ARNs are refused because this set becomes an IAM Resource allowlist."
+  }
+}
+
+# WHY : Refactoring Rationale: this input exists because the online-write gate was
+#       WIRED BUT UNREADABLE. Both environment roots create the read-only flag the
+#       AAP's QuiesceOnlineWrites and ResumeOnlineWrites states toggle around the
+#       batch window, and both already inject its NAME as
+#       CARDDEMO_ONLINE_WRITES_PARAMETER. But the only ssm action this module granted
+#       was ssm:GetParameters on the EXECUTION role, which the ECS agent uses to
+#       inject parameter values once at task start. A running task reads the flag per
+#       request under the TASK role, and the task role held no ssm permission at all,
+#       so a service that read the flag would have been denied and "quiesce" stopped
+#       no writes. Supplying the ARN here is what lets the module grant that one read.
+# WHY : Alternatives Considered: (1) requiring the caller to include the statement in
+#       task_role_policy_json. Rejected because that document is assembled from
+#       sibling-module outputs and is therefore UNKNOWN at plan time, so no validation
+#       here could confirm the grant was present -- the pairing would be a convention
+#       rather than a contract. (2) Composing the statement into that same document.
+#       Rejected for the reason the sibling queue policy is kept separate: a caller
+#       must not be able to widen or replace a fixed boundary while supplying
+#       unrelated permissions. This input instead selects a module-composed inline
+#       policy whose action and resource the caller cannot influence.
+# WHY : Assumptions: it is an ARN rather than a name because an IAM Resource element
+#       cannot be a bare parameter name, and it is a SINGLE value rather than a set
+#       because there is exactly one flag for the whole environment -- a set would
+#       invite granting a task read access to parameters that have nothing to do with
+#       the batch window.
+variable "online_write_gate_parameter_arn" {
+  description = <<-EOT
+    ARN of the single Parameter Store entry carrying the environment's
+    online-writes flag, which every write-gated service reads at request time to
+    decide whether mutating requests are currently accepted. When set, the module
+    attaches an inline task-role policy granting exactly ssm:GetParameter on this
+    one ARN and nothing else. Null for a workload that is not write-gated -- the
+    batch workload in particular must keep writing while online writes are
+    quiesced, because it is the workload the quiesce exists to protect.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.online_write_gate_parameter_arn == null || can(regex(
+      "^arn:[a-z0-9-]+:ssm:[a-z0-9-]+:[0-9]{12}:parameter/[A-Za-z0-9_.\\-/]+$",
+      var.online_write_gate_parameter_arn
+    ))
+    error_message = "online_write_gate_parameter_arn must be a full SSM parameter ARN of the form arn:<partition>:ssm:<region>:<account>:parameter/<name>. A bare parameter name, a wildcard and a partial ARN are all refused because this value becomes an IAM Resource element."
   }
 }
 # WHY : Assumptions: a resource-scoped parameter-read or secret-read permission

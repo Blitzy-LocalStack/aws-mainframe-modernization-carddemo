@@ -2,18 +2,44 @@
 
 Purpose
 -------
-Turn the disclosure group reference extract into decoded records the Aurora loaders
-and the verification passes can consume, one record at a time, from either of the two forms the
-baseline ships: the
-line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield the same
-decoded shape, so a caller can swap corpora and compare the two without adapting to a second
-contract.
+Turn the disclosure group reference extract into decoded records the Aurora loaders and the
+verification passes can consume, one record at a time, from either of the two forms the baseline
+ships: the line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield
+the same decoded shape, so a caller can swap corpora and compare the two without adapting to a
+second contract.
 
 This module follows the contract ``carddemo_migration.readers.account`` established and differs
 from it only in which record descriptor it names. Where the reasoning behind a step is identical
 to that module's it is referenced rather than restated, because two copies of one justification
 drift apart and then one of them is wrong; where this record differs, the difference is recorded
 here at the point it matters.
+
+Parameters
+----------
+None
+    A module takes no argument. Every published callable states its own parameters at its own
+    definition, and this module reads no argument, option or environment variable while being
+    imported.
+
+Returns
+-------
+None
+    Importing binds names only: :data:`LOADED_FIELDS` and :data:`DROPPED_FIELD_NAMES` are derived
+    from the record descriptor, and nothing else is computed. No dataset is opened, no database
+    connection is made, no environment variable is read and no network is reached at import time,
+    so importing this module is safe on a bare checkout with no credential configured.
+
+Raises
+------
+LayoutError
+    At import, from ``carddemo_migration.copybook.layouts``, which this module imports for its
+    record descriptor: that module validates every declared layout's geometry and both disclosure
+    allowlists as it loads, and refuses to import if any of them disagree. The failure belongs to
+    that module and is neither caught nor re-worded here. At call time, from the two masked
+    renderings, if ``CARDDEMO_MASK_HMAC_KEY`` is set to material this package refuses -- anything
+    that is not canonical base64 of at least thirty-two distinct-valued bytes -- because a
+    guessable key returns the redaction tag to the confirmable digest it replaced. Leaving the
+    variable unset is supported and is not an error.
 
 What this module reads
 ---------------------
@@ -25,8 +51,16 @@ read-only.
 
 Fifty-one records is correct, and it is not an off-by-one
 ---------------------------------------------------------
-Assumptions: every other base master in this corpus seeds FIFTY rows, and this one seeds
-**fifty-one**. That is a property of the data, not a fence-post error in a reader or a test,
+Assumptions: this record seeds **fifty-one** rows where the five masters it most resembles seed
+fifty. The comparison is stated precisely, because a loose one has already misled a reader here:
+the account, card, customer, cross-reference and category-balance masters each seed exactly fifty
+rows, and the rest of the corpus does not -- the daily transaction feed seeds 300, the transaction
+category 18, the transaction type 7 and the security file 10, all measured on the shipped files
+(``wc -l`` on ``app/data/ASCII`` and byte size divided by record length on ``app/data/EBCDIC``).
+So fifty is the population of one GROUP of masters and not a corpus-wide convention, and this
+record's fifty-one is one more than that group rather than one more than everything.
+
+That extra row is a property of the data, not a fence-post error in a reader or a test,
 and both shipped forms say so independently: the ASCII seed is 2601 bytes at 51 rows of 50
 data bytes plus one terminator each (``51 * 51``), and the EBCDIC dataset is 2550 bytes, which
 is ``2550 / 50 = 51`` with remainder zero. The extra row is the mandatory ``DEFAULT``
@@ -168,6 +202,11 @@ from carddemo_migration.copybook.layouts import (
     mask_record,
 )
 from carddemo_migration.copybook.zoned import decode_zoned_field
+from carddemo_migration.readers.source import (
+    data_region_width,
+    iter_seed_lines,
+    require_exact_record_width,
+)
 
 __all__ = [
     "DISGROUP_LAYOUT",
@@ -243,6 +282,15 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in DISGROUP_LAYOUT.fields if _is_padding_field(field)
 )
+
+
+# WHY : Assumptions: the boundary between a value and the trailing pad is DERIVED from
+#   the published field tuple and is never written here as a number. Bytes at or beyond it
+#   are the pad a text conversion may legitimately have dropped, so supplying them by
+#   padding restores what was discarded and changes no published value; bytes BEFORE it
+#   belong to a field this reader publishes, so supplying those would not restore anything
+#   -- it would invent a value the source never carried and hand a loader a row to key on.
+_DATA_REGION_WIDTH: Final[int] = data_region_width(LOADED_FIELDS)
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -515,18 +563,22 @@ def record_key(record: str) -> str:
     Raises
     ------
     RecordLengthError
-        If the record is shorter than the declared width, which would make the sliced key short.
+        If the record is not exactly the declared width. Raised by the shared width guard: a short
+        record would yield a short key that collides with a sibling row, and an over-long one means
+        the source was cut on the wrong boundary, so neither is accepted.
     """
     # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
     #   never by a literal. Writing the width here would be a second statement of it, and a key
     #   sliced one character short still looks like a key -- it collides with a sibling record
     #   instead of raising, which a loader would resolve as an upsert onto the wrong row.
-    if len(record) < DISGROUP_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"a {DISGROUP_LAYOUT.name} record of {len(record)} characters is shorter than the"
-            f" declared {DISGROUP_LAYOUT.reclen}, so its"
-            f" {DISGROUP_LAYOUT.key_length}-character key cannot be sliced"
-        )
+    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
+    #   now EXACT. This function used to accept any record at least the declared width,
+    #   which its own docstring and every decoder in this module contradict, and the
+    #   over-long case is the more dangerous of the two: the key sliced from it comes from
+    #   the right offsets of the WRONG record -- two rows concatenated, most plausibly --
+    #   so it looks entirely well formed and a loader upserts on it. Delegating also means
+    #   the eight flat readers cannot drift apart on a test they all have to make.
+    require_exact_record_width(record, DISGROUP_LAYOUT)
     start = DISGROUP_LAYOUT.key_offset
     return record[start : start + DISGROUP_LAYOUT.key_length]
 
@@ -652,7 +704,20 @@ def iter_ascii_disclosure_groups(
     #   with blanks -- is inherited deliberately. Every row of this dataset's seed is
     #   already full width, so the tolerance never engages here, and overriding it would
     #   fork the contract for one reader.
-    records = iter_ascii_text_records(source, DISGROUP_LAYOUT.reclen)
+    # WHY : Refactoring Rationale: the record cut is bounded by `_DATA_REGION_WIDTH`, and the bound
+    #   closes a data-integrity defect rather than tightening a nicety. The shared iterator
+    #   right-pads a short line -- which is what lets a seed whose trailing pad the conversion
+    #   dropped be read at all -- and it padded a line of ANY length, so a line that stopped
+    #   part-way through a field this reader PUBLISHES was completed with manufactured blanks and
+    #   returned as a well-formed record. Nothing raised: the invented characters are
+    #   indistinguishable from real ones. The bound is the end of the last published field, derived
+    #   from `LOADED_FIELDS` rather than written here, and it is compared against the SOURCE line
+    #   before any padding, which is the only place the comparison is exact.
+    # WHY : Assumptions: the descriptor is passed for DIAGNOSTICS only, so a refusal can name the
+    #   record and the field the line stopped inside. It cannot change which lines are accepted.
+    records = iter_ascii_text_records(
+        source, DISGROUP_LAYOUT.reclen, min_data_width=_DATA_REGION_WIDTH, layout=DISGROUP_LAYOUT
+    )
 
     # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory is
     #   constant in the record count. The cost is a single forward pass -- a caller wanting a
@@ -707,20 +772,23 @@ def read_ascii_disclosure_groups(path: pathlib.Path) -> Iterator[DecodedDisclosu
     #   match would either sweep the placeholder in or load a dataset twice -- and a doubled image
     #   still divides by the record length with remainder zero, so nothing downstream would catch
     #   it and every money total would come out doubled.
-    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that is
-    #   total over all 256 byte values rather than through a strict ASCII decode. Both reject a
-    #   non-conforming file but differ in WHERE: a strict decode fails inside the interpreter's
-    #   reader with an untyped encoding error, which would make the single-byte guard above
-    #   unreachable, whereas a total page maps each byte to one character so the failure surfaces
-    #   as this package's own record-length error naming the offset.
-    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the shared
-    #   iterator's own whole-text scanner, so streaming this handle line by line and passing the
-    #   whole text produce identical records. Leaving the default in place would let the
-    #   interpreter translate and split on a carriage return as well, moving terminator policy out
-    #   of the module that owns it -- which matters for this corpus specifically, because three of
-    #   the nine ASCII seeds carry carriage returns on some rows and not others.
-    with path.open("r", encoding="latin-1", newline="\n") as handle:
-        yield from iter_ascii_disclosure_groups(handle)
+    # WHY : Refactoring Rationale: the open is DELEGATED to `readers.source.iter_seed_lines` and
+    #   is no longer a `Path.open` here, which closes two faults this reader shared with its seven
+    #   siblings. `Path.open` is a BLOCKING open, so a named pipe or a character device named where
+    #   a seed file was expected did not fail -- it waited, indefinitely and with no diagnostic, in
+    #   a step an operator is watching for a load to finish. And iterating a text handle reads to
+    #   the next separator with NO bound at all, so a file whose first separator lies far past the
+    #   record length was materialised in full before any width check could refuse it: the check
+    #   that would have rejected it ran after the allocation that made it a problem. The shared
+    #   reader opens with O_NONBLOCK, proves the descriptor is a regular file with fstat before a
+    #   byte is read, and bounds each line by the declared width plus its terminators.
+    # WHY : Trade-offs: the code page and the terminator policy move WITH the open, so this module
+    #   no longer names either. That is the point -- eight modules each naming them is eight
+    #   chances to disagree, and a disagreement would be invisible, because a reader that validated
+    #   a file slightly differently from its siblings still returns well-formed records for every
+    #   ordinary input. The accepted cost is one more module to read to see how a file is opened;
+    #   `readers.source` records the full reasoning for both decisions in one place.
+    yield from iter_ascii_disclosure_groups(iter_seed_lines(path, DISGROUP_LAYOUT.reclen))
 
 
 def decode_ebcdic_disclosure_group(

@@ -98,6 +98,7 @@ from carddemo_migration.copybook.layouts import (
 __all__ = [
     "EBCDIC_DATASET_PREFIX",
     "FORBIDDEN_LOADER_STATEMENTS",
+    "SENTINEL_ALPHABET",
     "SYNTHETIC_PASSWORD_FILL",
     "FakeAuroraConnection",
     "FakeAuroraCopy",
@@ -109,6 +110,7 @@ __all__ = [
     "FixtureCorpus",
     "SecUserRecordBuilder",
     "SeedCorpus",
+    "SentinelRecordBuilder",
     "aurora_settings",
     "fake_aurora",
     "fake_object_store",
@@ -116,6 +118,7 @@ __all__ = [
     "repo_root",
     "secuser_builder",
     "seed_corpus",
+    "sentinel_record_builder",
     "staging_settings",
     "workspace",
 ]
@@ -1428,6 +1431,81 @@ class SecUserRecordBuilder:
         return self.build(**parts).encode(encoding)
 
 
+# WHY : Assumptions: each field is filled with ONE character used by no other field of the same
+# record, and the alphabet deliberately excludes every character a redaction can emit -- the
+# hexadecimal digits, the angle brackets, the asterisk and the space. That exclusion is what
+# makes "this field's span appears nowhere in the masked record" a falsifiable statement: with a
+# multi-character marker, a two-byte field's marker can occur inside a wider neighbour's
+# repetition, and the assertion then fails on a record that leaked nothing. It is equally what
+# makes a sentinel surviving into a redaction tag unambiguous evidence of a leak rather than a
+# coincidence, since no character here can be produced by a base64 or hexadecimal rendering.
+SENTINEL_ALPHABET: Final[str] = "GHIJKLMNOPQRSTUVWXYZghijklmnopqrstuvwxyz"
+
+
+class SentinelRecordBuilder:
+    """Builder for records whose every field carries a sentinel unique to its position.
+
+    Purpose
+    -------
+    Assemble one record of declared length in which each field's span is filled with a
+    character no other field of that record uses, so a disclosure test can attribute a leak to
+    the field that leaked instead of merely detecting that something leaked. Every negative
+    disclosure assertion in this suite is made on rendered OUTPUT rather than on the
+    ``sensitive`` flag, and that is only decidable when each span is distinguishable.
+
+    Assumptions: the sentinel is chosen by the field's ORDINAL and not by its name, because a
+    name-derived marker would let a leak of one field be mistaken for a leak of a similarly
+    named one -- ``TRAN-MERCHANT-ZIP`` and ``TRNX-MERCHANT-ZIP`` share a suffix. An ordinal is
+    unique within the record by construction.
+
+    Refactoring Rationale: this lived as a private ``_sentinel_record`` function in BOTH
+    ``test_corpus_disclosure.py`` and ``test_mask_key_material.py``, byte-identically, which
+    gave two places for one rule to disagree -- and the corpus module's own charter names that
+    as the reason it does not duplicate assertions. It is single-sourced here because
+    ``conftest.py`` is this suite's one folder-wide channel for shared builders, alongside
+    :class:`SecUserRecordBuilder`; importing one test module from another was rejected as it
+    makes collection order load-bearing and gives a helper two homes with only one owner.
+
+    Trade-offs: the executable body was MOVED rather than rewritten while being moved, and it is
+    unchanged apart from two mechanical differences: the alphabet is referenced by its now-public
+    name, and the statements are indented as a method. Only the ordinal rationale moved, from an
+    inline comment into the paragraph above. That keeps the single-sourcing reviewable as an
+    identity against either former copy, and it is also why the capacity check below stays a
+    plain ``assert`` instead of adopting
+    :class:`FakeClientContractError` as the sibling builder does: changing the raised type in
+    the same edit that relocates the code would make the move unverifiable by comparison, and
+    the bound is not currently reachable -- the widest declared record, ``PENDING-AUTH-DETAIL``,
+    holds 28 fields against this alphabet's 40 characters.
+    """
+
+    def build(self, layout: RecordSpec) -> str:
+        """Build a record of declared length whose every field carries a unique sentinel.
+
+        Parameters
+        ----------
+        layout : RecordSpec
+            The record whose geometry the sentinels are laid out against.
+
+        Returns
+        -------
+        str
+            Exactly ``layout.reclen`` characters, each field's span filled with a character
+            unique to that field's ordinal position within the record.
+
+        Raises
+        ------
+        AssertionError
+            If the record declares more fields than the sentinel alphabet can distinguish.
+        """
+        assert len(layout.fields) <= len(SENTINEL_ALPHABET), (
+            f"record {layout.name} declares {len(layout.fields)} fields, more than the sentinel"
+            " alphabet can keep distinct"
+        )
+        return "".join(
+            SENTINEL_ALPHABET[ordinal] * field.length for ordinal, field in enumerate(layout.fields)
+        )
+
+
 def _reject_float(value: object, *, context: str) -> object:
     """Refuse a binary floating-point value anywhere a money value can travel.
 
@@ -1678,7 +1756,12 @@ class FakeAuroraCursor:
         )
         self.connection.database.record_statement(statement, bound)
         self.rows = list(self.connection.database.rows_for(statement))
-        self.rowcount = len(self.rows)
+        # WHY : Assumptions: an explicitly arranged affected-row count wins over the row count,
+        #   so a statement that returns no rows can still report how many it affected. Without
+        #   this, every INSERT reported zero and the loader's merge path could not be tested for
+        #   the difference between inserting every staged row and inserting none of them.
+        arranged = self.connection.database.affected_for(statement)
+        self.rowcount = len(self.rows) if arranged is None else arranged
         return self
 
     def fetchall(self) -> list[tuple[object, ...]]:
@@ -2152,6 +2235,14 @@ class FakeAuroraDatabase:
         self.rollbacks = 0
         self.transactions_opened = 0
         self._arranged_rows: list[tuple[str, tuple[tuple[object, ...], ...]]] = []
+        # WHY : Assumptions: an affected-row count is arranged SEPARATELY from a result set,
+        # because the two are different answers to different statements. A query answers with
+        # rows and its count follows from them; an INSERT answers with no rows at all and its
+        # count is the only thing it reports. Deriving the count from the arranged rows -- which
+        # is what this double did before the merge path existed -- makes every unarranged INSERT
+        # report zero, so a loader that inserted every row and one that inserted none would be
+        # indistinguishable here.
+        self._arranged_affected: list[tuple[str, int]] = []
 
     def connect(self, **params: object) -> FakeAuroraConnection:
         """Acquire a connection from connection parameters, validating the TLS keywords.
@@ -2278,6 +2369,68 @@ class FakeAuroraDatabase:
             for row in rows
         )
         self._arranged_rows.append((statement_fragment.casefold(), checked))
+
+    def arrange_affected_rows(self, statement_fragment: str, count: int) -> None:
+        """Arrange the affected-row count a later statement containing a text fragment reports.
+
+        Purpose
+        -------
+        Let a test that exercises the loader's stage-and-merge path state how many rows the
+        merge inserted, which is the one number the statement itself reports and which no
+        result set can carry.
+
+        Parameters
+        ----------
+        statement_fragment : str
+            Text that identifies the statement, matched case-insensitively as a substring.
+        count : int
+            The affected-row count to report.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the most recently arranged matching fragment wins.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the fragment is blank, or the count is negative. A negative count is refused
+            because the driver uses it to mean "no count available", and a test arranging it
+            would be arranging an absence rather than a number.
+        """
+        if not statement_fragment.strip():
+            raise FakeClientContractError("an affected-row fragment must be non-blank")
+        if count < 0:
+            raise FakeClientContractError(
+                f"an affected-row count must not be negative, but {count} was arranged;"
+                " a negative count is the driver's way of reporting no count at all"
+            )
+        self._arranged_affected.append((statement_fragment.casefold(), count))
+
+    def affected_for(self, statement: str) -> int | None:
+        """Return the affected-row count arranged for a statement, or ``None`` when unarranged.
+
+        Parameters
+        ----------
+        statement : str
+            The SQL text being executed.
+
+        Returns
+        -------
+        int | None
+            The count of the most recently arranged fragment contained in the statement, or
+            ``None`` when nothing matches -- which is distinct from zero and is why the return
+            is optional rather than defaulting.
+
+        Raises
+        ------
+        None
+        """
+        folded = statement.casefold()
+        for fragment, count in reversed(self._arranged_affected):
+            if fragment in folded:
+                return count
+        return None
 
     def rows_for(self, statement: str) -> tuple[tuple[object, ...], ...]:
         """Return the rows arranged for a statement, or none when nothing matches.
@@ -3503,6 +3656,36 @@ def secuser_builder() -> SecUserRecordBuilder:
         Propagated from the builder if the descriptor declares a non-character field.
     """
     return SecUserRecordBuilder()
+
+
+@pytest.fixture(scope="session")
+def sentinel_record_builder() -> SentinelRecordBuilder:
+    """Return a builder for records whose fields carry position-unique sentinels.
+
+    Parameters
+    ----------
+    None
+        The builder resolves each record's geometry from the descriptor it is handed.
+
+    Returns
+    -------
+    SentinelRecordBuilder
+        A builder whose ``build`` method returns one record of declared length. Session-scoped
+        because the builder is stateless, matching :func:`secuser_builder`.
+
+    Raises
+    ------
+    AssertionError
+        Propagated from the builder if a descriptor declares more fields than the sentinel
+        alphabet can keep distinct.
+    """
+    # WHY : Assumptions: the BUILDER arrives through this fixture while its TYPE NAME is imported
+    # under a type-checking guard by each consumer, which is the split ``test_verification`` and
+    # ``test_aurora_loader`` already use for the Aurora double. Importing the class unconditionally
+    # is reserved for the modules that instantiate or assert against it directly --
+    # ``test_shared_doubles`` and ``test_doubles`` -- because only they need the object at run
+    # time and can justify tying their collection to this file being importable.
+    return SentinelRecordBuilder()
 
 
 @pytest.fixture

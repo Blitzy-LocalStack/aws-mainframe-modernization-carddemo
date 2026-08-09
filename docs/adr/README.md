@@ -193,8 +193,19 @@ What these records claim, and what they do not:
   existing z/OS and AWS Mainframe Modernization deployment paths remain exactly
   as they are.
 - **The infrastructure is authored and statically validated** — format check,
-  validate, plan, lint and policy scan. `terraform apply` against a live account
-  is an operator action outside this scope. No record claims a live environment
+  validate, lint and policy scan, all of which run on every change **without
+  credentials** and gate it. A real `terraform plan` is **not** part of that set: it
+  needs credentials and remote state, so it runs only as an **operator-triggered,
+  conditional** job (`workflow_dispatch` with `run_plan` selected), and no change is
+  gated on it. `terraform apply` against a live account is an operator action outside
+  this scope. *WHY (Refactoring Rationale):* `plan` was previously listed inline with
+  the four credential-free gates, which read as though all five run alike on every
+  change. They do not, and the difference is the load-bearing one: the four are
+  credential-free and gating, while `plan` requires credentials and is opt-in, so
+  citing it as routine validation overstates what has actually been exercised against
+  a backend. [`.github/workflows/infra-ci.yml`](../../.github/workflows/infra-ci.yml)
+  draws exactly this distinction in its own header — every static gate is gating, the
+  plan job is conditional — so this index was the looser of the two. No record claims a live environment
   exists, and **nothing has been benchmarked or load-tested**; where a record
   discusses throughput or latency it reasons from a documented service
   characteristic, never from a measurement taken here.

@@ -460,19 +460,20 @@ class TransactionApiContractTest {
     }
 
     /**
-     * Asserts that the page envelope declares and requires exactly the four members the shared
+     * Asserts that the page envelope declares and requires exactly the five members the shared
      * response type carries, so no generated client receives an accessor for a member no service
      * emits and no strict client rejects a valid response for a member no service sends.
      *
-     * <p>Assumptions: the four are read from the shared type rather than restated as a literal list
+     * <p>Assumptions: the five are read from the shared type rather than restated as a literal list
      * where the type can be reached, because the whole defect this asserts against was a contract that
      * named members the type does not declare.</p>
      */
     @Test
-    @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
+    @DisplayName("the page envelope declares and requires exactly the shared envelope's five members")
     void pageEnvelopeDeclaresExactlyTheSharedEnvelopeMembers() {
         assertThat(strings(schema("TransactionPage"), "required"))
-                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
+                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext",
+                        "hasPrevious");
     }
 
     /**

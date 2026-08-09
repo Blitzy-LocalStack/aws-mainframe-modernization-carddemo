@@ -1,3 +1,29 @@
+/**
+ * @file The card detail screen, migrated from `app/cbl/COCRDSLC.cbl` and its mapset
+ * `app/bms/COCRDSL.bms` (31 `DFHMDF` fields), reached at the card detail route.
+ *
+ * Purpose
+ * -------
+ * Render one card as a read-only record view and offer the single transition the reference screen
+ * offers, into the update screen. It replaces CICS transaction CCDL, which `app/csd/CARDDEMO.CSD`
+ * L347-L348 binds to that program, and it publishes the field labels and guidance strings the
+ * screen tests assert against.
+ *
+ * Mandatory-versus-optional selector
+ * ----------------------------------
+ * Assumptions: this screen's selector is MANDATORY where the browse screen's narrowings are
+ * optional, and the difference is read off the reference rather than decided here: `COCRDSLC`
+ * pre-sets its edit flags to NOT-OK at its L648 and L688, while `COCRDLIC` pre-sets its own to
+ * BLANK. A selector that is absent or not of the published shape therefore renders the guidance
+ * result rather than issuing a request.
+ *
+ * Composition
+ * -----------
+ * Assumptions: the record is rendered with antd `Descriptions` rather than a form, because the
+ * reference fields are all protected on this screen; using inputs would offer an affordance the
+ * transaction does not have.
+ */
+
 import { Button, Descriptions, Flex, Result, Spin, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';

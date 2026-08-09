@@ -1,5 +1,5 @@
 /**
- * Negative probes for the TypeScript documentation gate declared in `ui/eslint.config.js`.
+ * @file Negative probes for the TypeScript documentation gate declared in `ui/eslint.config.js`.
  *
  * Purpose
  * -------
@@ -8,9 +8,15 @@
  * works. That evidence is one-sided: a run reports what the configuration DID find and says
  * nothing about what it CANNOT find. Every gate defect this file was written in response to was
  * of the second kind -- the gate was green while a module-private function carried no
- * docstring, while a `@param` carried no type, and while an `eslint-disable` comment switched
- * the whole thing off for a file. Each probe below asserts that ONE prohibited shape is
- * reported, so a future relaxation of the configuration fails here instead of passing silently.
+ * docstring, while a `@param` carried no type, while an `eslint-disable` comment switched
+ * the whole thing off for a file, and while nine modules carried no module-entry docstring at
+ * all. Each probe below asserts that ONE prohibited shape is reported, so a future relaxation of
+ * the configuration fails here instead of passing silently.
+ *
+ * Refactoring Rationale: the module-entry clause is the newest of those four and the reason the
+ * last three probes exist. It was for a time left to review rather than to the linter, and review
+ * did not catch it -- which is the general case this file argues from, so the probes were added
+ * with the rule rather than after it.
  *
  * Why this belongs in the test suite rather than in review
  * -------------------------------------------------------
@@ -98,10 +104,15 @@ const PROBE_DIR = 'src/__documentation_gate_probe__';
 /**
  * The probe sources, keyed by file name, each held as one array entry per line.
  *
- * Assumptions: the map is a module constant rather than six inline literals so that
+ * Assumptions: the map is a module constant rather than nine inline literals so that
  * {@link beforeAll} can write every one of them before the first lint, which the parser's
  * once-per-process project resolution requires. Each entry is annotated with the single rule it
  * exists to provoke.
+ *
+ * Assumptions: every negative probe carries a conforming `@file` block of its own, even though
+ * none of them is measuring the module-entry rule except the three that say so. Without it each
+ * probe would report two rules -- the one it exists to provoke and a missing module overview --
+ * and a probe that reports two findings no longer isolates the one it names.
  */
 const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
   // jsdoc/require-jsdoc on a module-private function. Assumptions: the helper is referenced by an
@@ -110,6 +121,10 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'privateFunction.ts',
     [
+      '/**',
+      ' * @file Probe: a module-private function that carries no docstring.',
+      ' */',
+      '',
       'function normalise(value: string): string {',
       '  return value.trim();',
       '}',
@@ -125,6 +140,10 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'anonymousCallback.ts',
     [
+      '/**',
+      ' * @file Probe: an anonymous callback argument that carries no docstring.',
+      ' */',
+      '',
       '/**',
       ' * Maps every entry to its trimmed form.',
       ' *',
@@ -144,6 +163,10 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
     'untypedParam.ts',
     [
       '/**',
+      ' * @file Probe: a documented parameter whose tag carries no type.',
+      ' */',
+      '',
+      '/**',
       ' * Doubles a number.',
       ' *',
       ' * @param value - The number to double.',
@@ -159,6 +182,10 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'untypedReturn.ts',
     [
+      '/**',
+      ' * @file Probe: a documented return value whose tag carries no type.',
+      ' */',
+      '',
       '/**',
       ' * Doubles a number.',
       ' *',
@@ -176,6 +203,10 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'inlineDisable.ts',
     [
+      '/**',
+      ' * @file Probe: an inline disable directive aimed at the docstring gate.',
+      ' */',
+      '',
       '/* eslint-disable jsdoc/require-jsdoc */',
       'function normalise(value: string): string {',
       '  return value.trim();',
@@ -185,12 +216,75 @@ const PROBE_SOURCES: ReadonlyMap<string, readonly string[]> = new Map([
     ],
   ],
 
-  // The positive control. Assumptions: this is what makes the five negative probes meaningful --
+  // jsdoc/require-file-overview, `mustExist`: a module whose functions are fully documented but
+  // which carries no module overview. Assumptions: the leading block is an untagged DESCRIPTION
+  // rather than no comment at all, because that is the exact shape the gate was once left off
+  // for -- `src/messages/messages.ts` opened this way -- so the probe measures the decision that
+  // reversed it rather than a straw man. Every function here is documented, so the only clause
+  // this file can breach is the module-entry one.
+  [
+    'missingFileOverview.ts',
+    [
+      '/**',
+      ' * An overview that reads like one and carries no tag.',
+      ' */',
+      '',
+      '/**',
+      ' * Trims a value.',
+      ' *',
+      ' * @param {string} value - The value to trim.',
+      ' * @returns {string} The trimmed value.',
+      ' */',
+      'export function trimOne(value: string): string {',
+      '  return value.trim();',
+      '}',
+    ],
+  ],
+
+  // jsdoc/require-file-overview, `initialCommentsOnly`: the tag exists but does not head the file.
+  // Assumptions: an exported constant precedes it rather than a function, so `jsdoc/require-jsdoc`
+  // cannot report this file instead and let the probe pass for the wrong reason.
+  [
+    'lateFileOverview.ts',
+    [
+      'export const PROBE_VERSION = 1;',
+      '',
+      '/**',
+      ' * @file An overview that arrives after the first statement.',
+      ' */',
+    ],
+  ],
+
+  // jsdoc/require-file-overview, `preventDuplicates`: two module overviews in one file, which is
+  // two answers to one question and therefore no answer.
+  [
+    'duplicateFileOverview.ts',
+    [
+      '/**',
+      ' * @file The first overview.',
+      ' */',
+      '',
+      '/**',
+      ' * @file The second overview, disagreeing with the first by existing.',
+      ' */',
+      '',
+      'export const PROBE_MARKER = 1;',
+    ],
+  ],
+
+  // The positive control. Assumptions: this is what makes the eight negative probes meaningful --
   // a configuration that failed every file would satisfy all of them while enforcing nothing
-  // usable, and only a clean run on conforming source rules that out.
+  // usable, and only a clean run on conforming source rules that out. It carries the module
+  // overview as well as the function ones, so it is also the positive side of the module-entry
+  // gate: the three probes above prove the rule reports each way of getting the tag wrong, and
+  // this one proves it accepts the tag done right.
   [
     'conforming.ts',
     [
+      '/**',
+      ' * @file Probe: a module that satisfies every clause the gate decides.',
+      ' */',
+      '',
       '/**',
       ' * Trims every entry of a list.',
       ' *',
@@ -336,7 +430,52 @@ async function ignoresAnInlineDisableDirective(): Promise<void> {
 }
 
 /**
+ * Asserts a module carrying no module-entry overview is reported.
+ *
+ * Assumptions: the probe's own functions are fully documented, so a report here can only be the
+ * module-entry clause. This is the probe that pins the decision to switch `require-file-overview`
+ * on: the rule was once off because a leading untagged description was thought to be enough, and
+ * this asserts that the shape which prompted that reasoning is now reported.
+ *
+ * @returns {Promise<void>} Resolves once the assertion has run.
+ */
+async function reportsAModuleWithNoOverview(): Promise<void> {
+  expect(await lintProbe('missingFileOverview.ts')).toContain('jsdoc/require-file-overview');
+}
+
+/**
+ * Asserts a module overview that does not head its file is reported.
+ *
+ * Assumptions: this pins `initialCommentsOnly`, which is the sub-check that keeps the tag a MODULE
+ * overview rather than a comment that happens to appear somewhere in the module. Without it a tag
+ * buried beneath the code would satisfy the rule while documenting nothing a reader opens the file
+ * to find.
+ *
+ * @returns {Promise<void>} Resolves once the assertion has run.
+ */
+async function reportsAnOverviewThatDoesNotHeadTheFile(): Promise<void> {
+  expect(await lintProbe('lateFileOverview.ts')).toContain('jsdoc/require-file-overview');
+}
+
+/**
+ * Asserts a second module overview in one file is reported.
+ *
+ * Assumptions: this pins `preventDuplicates`. Two overviews are two answers to the question the
+ * rule asks, and they are free to drift apart, so the rule treats the second as a defect rather
+ * than as extra documentation.
+ *
+ * @returns {Promise<void>} Resolves once the assertion has run.
+ */
+async function reportsADuplicateModuleOverview(): Promise<void> {
+  expect(await lintProbe('duplicateFileOverview.ts')).toContain('jsdoc/require-file-overview');
+}
+
+/**
  * Asserts a fully documented module is reported clean.
+ *
+ * Assumptions: this is the positive side of every gate this file measures, the module-entry rule
+ * included -- the probe carries its own `@file` block, so a clean result proves the rule accepts a
+ * correct overview rather than merely reporting every file it sees.
  *
  * @returns {Promise<void>} Resolves once the assertion has run.
  */
@@ -379,6 +518,21 @@ function theDocumentationGateRejectsEveryProhibitedShape(): void {
   it(
     'ignores an inline disable directive and reports it as inert',
     ignoresAnInlineDisableDirective,
+    PROBE_TIMEOUT_MS,
+  );
+  it(
+    'reports a module that carries no module-entry overview',
+    reportsAModuleWithNoOverview,
+    PROBE_TIMEOUT_MS,
+  );
+  it(
+    'reports a module overview that does not head its file',
+    reportsAnOverviewThatDoesNotHeadTheFile,
+    PROBE_TIMEOUT_MS,
+  );
+  it(
+    'reports a duplicate module-entry overview',
+    reportsADuplicateModuleOverview,
     PROBE_TIMEOUT_MS,
   );
   it('accepts a fully documented module', acceptsAConformingModule, PROBE_TIMEOUT_MS);

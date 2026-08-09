@@ -16,8 +16,8 @@
  * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
  *
  * <p>Purpose: this package is the persistence boundary of the auth bounded
- * context. It declares one Spring Data type, {@code UserRepository}, and that
- * type reaches the {@code auth.users} table in three ways and in no fourth way.
+ * context. It declares two Spring Data types. The first, {@code UserRepository},
+ * reaches the {@code auth.users} table in three ways and in no fourth way.
  * The first is keyed access through the primary key: find by identifier,
  * existence check, save and delete. The second is keyset browsing: exactly three
  * queries -- an opening read bounded only by row count, one reading forward from
@@ -26,6 +26,21 @@
  * exclusions are as much the charter as the inclusions are, because each of them
  * is load bearing rather than an oversight: no offset pagination of any kind, no
  * page number, no total count, and no third browse DIRECTION.</p>
+ *
+ * <p>The second type is {@code IdentitySyncTaskRepository}, over
+ * {@code auth.identity_sync_task}, and it reaches that table in exactly two ways
+ * beyond the keyed operations its base interface supplies: the pending entries for
+ * one named user in ledger order, and the oldest pending entries across all users
+ * in the same order. Both take an explicit row limit and neither takes an offset.
+ * Refactoring Rationale: this type was added to the charter rather than smuggled in
+ * beside it, following the ruling above, because the table it serves has no baseline
+ * counterpart at all -- it exists because the migrated context writes to two stores
+ * where the baseline wrote to one, and the provider is not a transaction participant.
+ * Assumptions: the second read is deliberately NOT filtered by user, because it
+ * serves the reconciliation pass, whose whole purpose is to find work no request is
+ * going to come back for. Trade-offs: an unfiltered read of a work table is the shape
+ * that most easily becomes unbounded, so the limit is a required parameter rather than
+ * a default -- a caller cannot ask for the whole table by omitting it.</p>
  *
  * <p>Refactoring Rationale: the second way was closed at two queries and is
  * widened here to three, by revising the charter rather than adding a member

@@ -1,6 +1,7 @@
 package com.carddemo.reporting.api;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -16,10 +17,12 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CursorToken;
+import com.carddemo.common.web.PageResponse;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.dto.ReportTotalsResponse;
 import com.carddemo.reporting.dto.TransactionReportLineResponse;
+import com.carddemo.reporting.repository.TransactionReportRepository;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.TransactionReportService;
 import java.nio.charset.StandardCharsets;
@@ -285,11 +288,27 @@ class ReportControllerTest {
                 "Groceries                    ",
                 "POS       ",
                 Money.of("-1234.56"));
-        when(reports.composeDetailLines(LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31)))
-                .thenReturn(List.of(line));
-        when(reports.composeTotals(List.of(line))).thenReturn(List.of(
-                new ReportTotalsResponse(
-                        ReportTotalsResponse.Band.GRAND, "Grand Total", Money.of("-1234.56"))));
+        // WHY : Refactoring Rationale: the lines read is stubbed on readDetailLinePage rather than on
+        //       composeDetailLines, and the envelope it returns is the SERVICE's own rather than one
+        //       this method assembles from a list. The previous stub returned a bare list and let the
+        //       controller wrap it, which is exactly the ordinal-slicing shape the handler no longer
+        //       has: asserting through it would have kept passing after the handler stopped being able
+        //       to produce the body it asserted.
+        when(reports.readDetailLinePage(
+                eq(LocalDate.of(2022, 7, 1)), eq(LocalDate.of(2022, 7, 31)),
+                eq(null), eq(false), any()))
+                .thenAnswer(invocation -> {
+                    TransactionReportRepository.CursorSealer sealer = invocation.getArgument(4);
+                    return PageResponse.ofRows(List.of(line),
+                            sealer.seal("0000000000000001", true),
+                            sealer.seal("0000000000000001", false),
+                            false,
+                            false);
+                });
+        when(reports.composeTotals(LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31)))
+                .thenReturn(List.of(
+                        new ReportTotalsResponse(
+                                ReportTotalsResponse.Band.GRAND, "Grand Total", Money.of("-1234.56"))));
 
         mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
                         .principal(PRINCIPAL)
@@ -299,6 +318,7 @@ class ReportControllerTest {
                 .andExpect(jsonPath("$.items[0].transactionId").value("0000000000000001"))
                 .andExpect(jsonPath("$.items[0].amount").value("-1234.56"))
                 .andExpect(jsonPath("$.hasNext").value(false))
+                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andExpect(jsonPath("$.firstKey").isNotEmpty())
                 .andExpect(jsonPath("$.lastKey").isNotEmpty());
 
@@ -323,8 +343,9 @@ class ReportControllerTest {
     @Test
     @DisplayName("a monetary amount reaches the wire quoted")
     void aMonetaryAmountReachesTheWireQuoted() throws Exception {
-        when(reports.composeDetailLines(any(), any())).thenReturn(List.of());
-        when(reports.composeTotals(List.of())).thenReturn(List.of());
+        when(reports.readDetailLinePage(any(), any(), any(), eq(false), any()))
+                .thenReturn(PageResponse.empty());
+        when(reports.composeTotals(any(), any())).thenReturn(List.of());
 
         String lines = mockMvc.perform(
                         get(ReportController.BASE_PATH + ReportController.LINES_PATH)
@@ -369,7 +390,168 @@ class ReportControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("startDate"));
 
-        verify(reports, never()).composeDetailLines(any(), any());
+        verify(reports, never()).readDetailLinePage(any(), any(), any(), anyBoolean(), any());
+    }
+
+    // WHY : Assumptions: the refusal is asserted through the HANDLER rather than through the service.
+    //       The service refuses a backward step with no cursor too, but it refuses with an
+    //       IllegalArgumentException, which would reach a caller as a 500; only the handler's own check
+    //       produces the 400 the contract publishes, so a test that reached the service would assert a
+    //       status no client ever sees.
+    /**
+     * Asserts that a paging direction sent without a cursor answers 400 and reads nothing.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a paging direction with no cursor answers 400 naming the cursor")
+    void aDirectionWithoutACursorAnswersBadRequest() throws Exception {
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-07-31")
+                        .param("direction", ReportController.PREVIOUS_DIRECTION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("cursor"));
+
+        verify(reports, never()).readDetailLinePage(any(), any(), any(), anyBoolean(), any());
+    }
+
+    // WHY : Assumptions: the token is opened by a REAL sealer bound to a REAL principal, so this case
+    //       proves the binding rather than the plumbing. A cursor minted for one operator and replayed
+    //       by another has to be refused, and with a mocked sealer both requests would succeed and the
+    //       test would prove nothing about who may redeem a page boundary.
+    /**
+     * Asserts that a boundary token minted for one caller cannot be redeemed by another.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a boundary token minted for one caller is refused for another")
+    void aBoundaryTokenIsRefusedForAnotherCaller() throws Exception {
+        when(reports.readDetailLinePage(any(), any(), any(), eq(false), any()))
+                .thenAnswer(invocation -> {
+                    TransactionReportRepository.CursorSealer sealer = invocation.getArgument(4);
+                    return PageResponse.ofRows(List.of(),
+                            sealer.seal("0000000000000001", true),
+                            sealer.seal("0000000000000009", false), true, false);
+                });
+
+        String issued = REQUEST_MAPPER.readTree(
+                        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                                        .principal(PRINCIPAL)
+                                        .param("startDate", "2022-07-01")
+                                        .param("endDate", "2022-07-31"))
+                                .andExpect(status().isOk())
+                                .andReturn()
+                                .getResponse()
+                                .getContentAsString())
+                .get("lastKey").asString();
+
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(() -> "99999999-8888-7777-6666-555555555555")
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-07-31")
+                        .param("cursor", issued))
+                .andExpect(status().isBadRequest());
+    }
+
+    // WHY : Assumptions: the DIRECTION is part of the binding too, and this case is what makes the
+    //       published contract sentence true rather than aspirational -- reporting-api.yaml states that
+    //       the direction a position was issued for is sealed into it, so replaying a trailing position
+    //       backward is refused rather than answered with the wrong page. Answering it would walk the
+    //       caller past rows it never saw, which is invisible from the response.
+    /**
+     * Asserts that a trailing boundary token cannot be replayed as a backward step.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a trailing boundary token is refused when replayed backward")
+    void aTrailingTokenIsRefusedWhenReplayedBackward() throws Exception {
+        when(reports.readDetailLinePage(any(), any(), any(), eq(false), any()))
+                .thenAnswer(invocation -> {
+                    TransactionReportRepository.CursorSealer sealer = invocation.getArgument(4);
+                    return PageResponse.ofRows(List.of(),
+                            sealer.seal("0000000000000001", true),
+                            sealer.seal("0000000000000009", false), true, false);
+                });
+
+        String body = mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-07-31"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String trailing = REQUEST_MAPPER.readTree(body).get("lastKey").asString();
+        String leading = REQUEST_MAPPER.readTree(body).get("firstKey").asString();
+
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-07-31")
+                        .param("cursor", trailing)
+                        .param("direction", ReportController.PREVIOUS_DIRECTION))
+                .andExpect(status().isBadRequest());
+
+        // WHY : Assumptions: the LEADING token is asserted to be accepted backward in the same case, so
+        //       the refusal above cannot pass by refusing every backward step. A one-sided assertion
+        //       would be satisfied by an implementation that had broken backward paging outright.
+        // WHY : Assumptions: this second stub is written in the doReturn form, and the difference is not
+        //       stylistic. The when form INVOKES the method it is describing, and during that invocation
+        //       Mockito supplies each matcher's default -- false for the boolean -- so the call matches
+        //       the forward stub registered above and runs its answer with a null sealer. The doReturn
+        //       form registers without invoking.
+        org.mockito.Mockito.doReturn(PageResponse.empty()).when(reports)
+                .readDetailLinePage(any(), any(), any(), eq(true), any());
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-07-31")
+                        .param("cursor", leading)
+                        .param("direction", ReportController.PREVIOUS_DIRECTION))
+                .andExpect(status().isOk());
+    }
+
+    // WHY : Assumptions: the range is part of the binding too, so a token issued over one range cannot
+    //       be replayed over another. Without that, a caller holding a boundary from a narrow range
+    //       could widen the range and keep walking from a position that means something different in
+    //       the wider one.
+    /**
+     * Asserts that a boundary token issued over one range is refused over another.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a boundary token issued over one range is refused over another")
+    void aBoundaryTokenIsRefusedOverAnotherRange() throws Exception {
+        when(reports.readDetailLinePage(any(), any(), any(), eq(false), any()))
+                .thenAnswer(invocation -> {
+                    TransactionReportRepository.CursorSealer sealer = invocation.getArgument(4);
+                    return PageResponse.ofRows(List.of(),
+                            sealer.seal("0000000000000001", true),
+                            sealer.seal("0000000000000009", false), true, false);
+                });
+
+        String issued = REQUEST_MAPPER.readTree(
+                        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                                        .principal(PRINCIPAL)
+                                        .param("startDate", "2022-07-01")
+                                        .param("endDate", "2022-07-31"))
+                                .andExpect(status().isOk())
+                                .andReturn()
+                                .getResponse()
+                                .getContentAsString())
+                .get("lastKey").asString();
+
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", "2022-07-01")
+                        .param("endDate", "2022-08-31")
+                        .param("cursor", issued))
+                .andExpect(status().isBadRequest());
     }
 
     /**

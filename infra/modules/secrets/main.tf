@@ -409,8 +409,20 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 #   whose security matcher names exact method-and-path pairs and nothing else,
 #   enumerated in InternalApiSecurityConfig.internalPaths(). Its
 #   key material is the internal-identity entry the environment roots create and
-#   inject into exactly those two task definitions as
-#   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY.
+#   inject into exactly THREE task definitions as
+#   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY: authorization and transaction, which
+#   each MINT a token through their own InternalIdentityConfig, and account, which
+#   VERIFIES it. The key is symmetric, so the verifying side holds the same value
+#   the signing sides do -- which is why the holder count is three rather than the
+#   two callers, and why no further holder may be added: any additional holder
+#   could mint a token the account context accepts on its internal reads.
+#
+#   Refactoring Rationale: this sentence said "exactly those two task
+#   definitions", counting the signing pair and silently omitting the verifier,
+#   while the environment roots gate the same secret on three names. An
+#   understated trust inventory is the dangerous direction to be wrong in: a
+#   reader auditing who can mint an internally-trusted token would have checked
+#   two task definitions and stopped.
 #
 # Assumptions: the withdrawn form's one advantage is not lost. It bound the
 #   method and the path INTO the signature, so a captured credential could not be

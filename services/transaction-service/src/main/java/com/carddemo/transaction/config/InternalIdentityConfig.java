@@ -42,7 +42,8 @@ import org.springframework.context.annotation.Configuration;
  *
  * <p>Assumptions: this key is separate from the extract-transform-load masking key and from the
  * pending-authorization context's messaging derivation key. All three are keyed HMAC secrets and none may
- * substitute for another: this one authenticates a caller, the messaging key derives an opaque queue identity,
+ * substitute for another: this one authenticates a caller, the messaging key derives an opaque
+ * per-authorization identity,
  * and the masking key derives a redaction tag. Sharing any pair would mean that holding one capability granted
  * another, and would make rotating either require coordinating both.</p>
  *
@@ -61,8 +62,13 @@ public class InternalIdentityConfig {
      * service called it rather than merely that an internal caller did. It is a constant rather than a
      * configured value because a service that could describe itself as something else would make that audit
      * record untrustworthy.</p>
+     *
+     * <p>Refactoring Rationale: the value is now taken from the shared kernel rather than written here as a
+     * literal, for the reason its sibling minter records: the verifier admits a closed set of subjects, so
+     * two literals that must match are the shape in which a rename on one side becomes a 401 on the other,
+     * discoverable only at run time and only on this path.</p>
      */
-    public static final String TOKEN_SUBJECT = "carddemo-transaction-service";
+    public static final String TOKEN_SUBJECT = InternalServiceToken.SUBJECT_TRANSACTION_SERVICE;
 
     /**
      * The default lifetime of a minted token.
@@ -90,12 +96,12 @@ public class InternalIdentityConfig {
      */
     @Bean
     public InternalServiceToken internalServiceToken(
-            @Value("${carddemo.internal-identity.signing-key}") String key,
+            @Value("${carddemo.internal-identity.transaction-signing-key}") String key,
             @Value("${carddemo.internal-identity.token-lifetime-seconds:60}") long lifetimeSeconds,
             Clock clock) {
         if (key == null || key.isBlank()) {
             throw new IllegalStateException(
-                    "carddemo.internal-identity.signing-key must be supplied: without it this service can"
+                    "carddemo.internal-identity.transaction-signing-key must be supplied: without it this service can"
                             + " present no credential to the account context, so every transaction add and"
                             + " every bill payment would report its dependency as unavailable");
         }

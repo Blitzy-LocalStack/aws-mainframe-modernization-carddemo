@@ -110,18 +110,14 @@
  * rather than in a blanket sentence, so a reader meeting a green run can
  * tell what the run proved from what it did not reach.
  *
- * <p>Refactoring Rationale: this passage previously declared the list a target
- * contract rather than a measurement, recorded that exactly one of four
- * classes was authored, and named a fifth-file canon with
- * {@code BillPaymentServiceTest} in place of the class that landed. All of
- * it is superseded and is replaced rather than annotated. The declaration
- * was correct discipline while the directory was empty -- a charter has to
+ * <p>Refactoring Rationale: the list above is a MEASUREMENT of the directory and
+ * not a target contract, and the distinction is load-bearing. A charter has to
  * exist before a sibling class in the same directory can clear the
- * {@code validate} phase, so this file necessarily landed first -- but
- * keeping the disclaimer once the classes arrived inverted its purpose: it
- * went on telling a reader to distrust an inventory that had become
- * accurate, and it kept a class name that no file carries, which is the one
- * kind of error a reader cannot correct from the charter alone.
+ * {@code validate} phase, so this file necessarily lands ahead of the classes it
+ * inventories -- but a charter that keeps telling a reader to distrust its own
+ * inventory once those classes exist inverts its purpose, and a charter naming a
+ * class no file carries is the one kind of error a reader cannot correct from the
+ * charter alone. Each entry is therefore stated as a name that resolves.
  *
  * <p>Assumptions: the four production classes named in the next section are
  * likewise present, and their own charter at
@@ -161,7 +157,8 @@
  * <p>Every test class here exercises one annotated service class of the
  * production package of the same name, and between them the five cover four:
  * {@code TransactionViewService}, {@code TransactionListService},
- * {@code TransactionAddService} and {@code BillPaymentService}. None of the
+ * {@code TransactionAddService} and {@code BillPaymentService}. Five classes
+ * cover four units because the paged browse is covered by two. None of the
  * four has an interface declared for it, so a test instantiates the class
  * itself rather than a stand-in for it, and a reader looking for the code
  * under test has one place to look.
@@ -171,20 +168,11 @@
  * {@code RestAccountContextClient}. Neither is a unit under test here: the port
  * is a COLLABORATOR of two of the four services and is mocked, and its
  * implementation is exercised where a real HTTP exchange can be stood up rather
- * than in a Mockito test. The distinction is stated because the sentence above
- * once read that no interface existed in the package at all, which a reader
- * meeting {@code AccountContextClient} would have had to treat as either a
- * stale charter or a layering breach, with nothing here to say which.
- *
- * <p>Assumptions: five test classes exercise those four units, because the paged
- * browse is covered by two. The production package does hold one interface,
- * {@code AccountContextClient}, and its own charter records why: it abstracts the
- * OUTBOUND call this module makes into the account context, so a test can supply
- * a stub for a collaborator that lives in another service rather than for the
- * unit under test. That is the opposite direction from the stand-in this paragraph
- * rules out, and the earlier wording -- "no interface declared beside any of
- * them" -- said something measurably false about that directory while meaning
- * this.
+ * than in a Mockito test. The distinction is stated because a reader meeting
+ * {@code AccountContextClient} in that directory has to be able to tell an
+ * intended outbound port from a layering breach, and the sentence above --
+ * which says the four UNITS have no interface -- does not answer that on its
+ * own.
  *
  * <p>Assumptions: that shape is settled by the production charter at
  * {@code services/transaction-service/src/main/java/com/carddemo/transaction/service/package-info.java},
@@ -488,15 +476,12 @@
  * recorded so that a reader can tell a charter that is missing from one that
  * was never intended.
  *
- * <p>Refactoring Rationale: an earlier enumeration of that canon named five
- * leaf subpackages, for six charters in all, and it was superseded when
- * {@code dto} and {@code domain} were added as kinds of test that fitted none
- * of the original five; the parent charter carries its own reasoning for the
- * growth. The earlier figure is recorded here as superseded rather than left
- * unmentioned, because a reader who meets six in an older note and eight in the
- * parent charter would otherwise have no way to tell which is current, and a
- * closed set that excludes a package which exists reads as governance while the
- * governed thing sits outside it.
+ * <p>Assumptions: {@code dto} and {@code domain} are in that enumeration because
+ * each is a kind of test that fits none of the others, and the parent charter is
+ * the authority for the set's extent. The enumeration is repeated here rather than
+ * only in the parent because a closed set that excludes a package which exists
+ * reads as governance while the governed thing sits outside it, so a reader
+ * comparing this list against the directory is the intended check.
  *
  * <p>Assumptions: NO charter exists at
  * {@code services/transaction-service/src/test/java}, at

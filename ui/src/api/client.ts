@@ -1,3 +1,34 @@
+/**
+ * @file The single shared HTTP client every typed API module in this package reaches the services
+ * through, and the one place the cross-cutting request and response concerns are applied.
+ *
+ * Purpose
+ * -------
+ * Construct and memoise one axios instance carrying five boundaries that must be identical on every
+ * request, so no per-operation client can implement any of them differently:
+ *
+ * - Authentication: the bearer token is attached by a request interceptor from the one
+ *   session-storage key this module owns. No other module writes that key.
+ * - Correlation: every request carries a correlation identifier whose length and alphabet match
+ *   what `CorrelationIdFilter` in `services/common-lib` accepts, so a browser-named request and a
+ *   service-named one are indistinguishable in shape and a trace spans both sides.
+ * - Timeout: a bounded, clamped read timeout, so a stalled gateway surfaces as a failed request
+ *   rather than a screen that never leaves its loading state.
+ * - Exact money: responses are parsed so that a monetary value stays the STRING the service sent.
+ *   A JSON number would be parsed into an IEEE-754 double at this boundary, which is the one place
+ *   in the browser where fixed-point exactness can be lost silently.
+ * - Server clock: the response date is recorded for the header band, so the instant a screen paints
+ *   comes from the service rather than from the operator's workstation.
+ *
+ * Boundary
+ * --------
+ * Assumptions: this module knows no endpoint. Every path is supplied by a caller derived from a
+ * service's OpenAPI contract, which is what keeps `ui/src/api/contracts.test.ts` able to compare
+ * the two. It also stores no credential other than the access token: a password, a refresh token
+ * and a challenge session travel in request bodies owned by `ui/src/api/auth.ts` and are never
+ * held here.
+ */
+
 import axios from 'axios';
 import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 

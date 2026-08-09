@@ -241,6 +241,59 @@
     </dependency>
 
     <!--
+     `OnlineWriteGate` reads the one Parameter Store entry the nightly batch
+     state machine toggles around its write window, so this module needs a
+     Systems Manager client on its compile classpath. Until this dependency
+     was added, this module carried NO AWS SDK at all, and that absence is
+     what the gate's design had to be reconciled with rather than worked
+     around.
+
+     Alternatives Considered, and why each was rejected:
+
+       * Injecting the flag's VALUE as an environment variable, which needs
+         no SDK. Rejected because the value would then be frozen at task
+         start: a task that started while the window was closed would keep
+         refusing writes until it was replaced, and a task that started
+         before a quiesce would keep accepting them straight through it. The
+         gate has to be able to observe a CHANGE, which means reading at
+         request time, which means a live client. This is also why the task
+         definition carries the parameter's NAME and not its value.
+       * `spring-cloud-aws-starter-parameter-store`, which the aggregator
+         already version manages. Rejected because that starter's purpose is
+         to import parameters into the Spring Environment during context
+         refresh, which is the same freeze-at-start behaviour in a different
+         place, and it would additionally pull a configuration-import
+         mechanism into a library whose consumers configure themselves.
+       * Holding the gate in each service instead, so that only the gated
+         services carry the SDK. Rejected because the fail-closed decision
+         would then exist in seven copies, and seven copies of a safety
+         control is seven chances for one of them to be subtly fail-open.
+
+     Assumptions: no `<version>` is declared, deliberately. The aggregator
+     imports `software.amazon.awssdk:bom` in its `dependencyManagement`, so
+     the version resolves from that single pin and this module cannot drift
+     away from the version every other module resolves.
+
+     Trade-offs: this dependency is NOT optional, unlike the four starters
+     above, and the reason is a safety one rather than a convenience one. If
+     it were optional, a service that is meant to be gated would have to
+     remember to declare it; forgetting would leave the gate's classes absent
+     and the gate itself either crashing the context or silently not applying
+     — and a silently absent write gate is precisely the fail-open outcome the
+     gate exists to prevent. Making it non-optional means the classes are
+     always present and the ONLY thing that decides whether the gate is
+     active is the `carddemo.control.online-writes.parameter-name` property,
+     which the infrastructure injects into exactly the online workloads. The
+     cost is that a consumer with no write window to respect carries an
+     unused client; that is a small artifact against a control that cannot be
+     accidentally omitted.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>ssm</artifactId>
+    </dependency>
+
+    <!--
      `MoneyModule` is a Jackson module: it is what makes money serialise as
      a JSON string, so that no client parses an exact fixed point amount
      into an IEEE 754 double and loses cents at the boundary the user

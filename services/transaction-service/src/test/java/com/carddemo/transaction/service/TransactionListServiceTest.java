@@ -1064,7 +1064,7 @@ class TransactionListServiceTest {
                 .thenReturn(rows(1, TransactionMapper.PAGE_SIZE));
         PageResponse<TransactionListItemResponse> withinBounds = list(request(null, null, null));
         PageResponse<TransactionListItemResponse> empty =
-                new PageResponse<>(List.of(), null, null, false);
+                new PageResponse<>(List.of(), null, null, false, false);
         String cursor = seal(tranId(1));
 
         assertThat(service.boundaryMessage(
@@ -1498,7 +1498,7 @@ class TransactionListServiceTest {
     @DisplayName("the boundary-string selector requires both of its arguments")
     void theBoundaryStringSelectorRequiresBothArguments() {
         PageResponse<TransactionListItemResponse> empty =
-                new PageResponse<>(List.of(), null, null, false);
+                new PageResponse<>(List.of(), null, null, false, false);
 
         assertThatThrownBy(() -> service.boundaryMessage(null, empty))
                 .as("the request is required")

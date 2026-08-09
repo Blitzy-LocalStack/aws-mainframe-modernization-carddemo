@@ -550,8 +550,16 @@ class ReferenceApiContractTest {
         Map<String, Object> responses = mapping(
                 mapping(mapping(this.contract, "paths"), "/api/v1/reference/maintenance-actions"),
                 "post");
+        // WHY : Refactoring Rationale: 503 was added to this set when the online-write gate was
+        //       wired, and it does NOT weaken what this assertion was written for. The load-bearing
+        //       claim is the continued absence of a batch-level 404 and 409 -- those would describe
+        //       an all-or-nothing run the baseline does not have. A 503 says nothing about the batch
+        //       at all: it reports that the environment is not accepting mutating work, so the
+        //       operation was refused before any action was read and no outcome exists to report per
+        //       action. The set is still asserted exactly rather than loosened to "contains", because
+        //       an exact set is what would catch a 409 being added here later.
         assertThat(mapping(responses, "responses").keySet())
-                .containsExactlyInAnyOrder("200", "400", "401", "403", "500");
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "500", "503");
     }
 
     /**

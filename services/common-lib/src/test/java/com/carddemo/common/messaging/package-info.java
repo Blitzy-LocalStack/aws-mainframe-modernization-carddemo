@@ -4,7 +4,21 @@
  *
  * <h2>What is exercised here</h2>
  *
- * <p>One contract is under test and it has two halves that pull against each other. A correlation
+ * <p>Three production types live in the package under test and each has a test class here:
+ * {@code MessagingCorrelationIdTest} and {@code MessageExpiryTest} cover the two value rules described
+ * below, and {@code QueueClientBudgetTest} covers the arithmetic relating a queue client's time bounds to
+ * the visibility period of the message its handler holds. The first two are about what a single value may
+ * contain; the third is about how three values must be ordered against one another, which is why it is
+ * stated as its own class rather than as further cases on either of the others.</p>
+ *
+ * <p>Refactoring Rationale for the third: the budget rule was originally going to be written once per
+ * service, inside each queue client's configuration class. Stating it here instead means the comparison
+ * that prevents two consumers acting on one message -- a whole-call bound that must expire before the
+ * queue can redeliver -- is asserted in one place at the boundary values, rather than three times at
+ * whatever value each service happened to configure. The rule deliberately holds no client type, so it is
+ * testable without a broker or a software development kit on the classpath.</p>
+ *
+ * <p>The remaining contract under test has two halves that pull against each other. A correlation
  * identity arriving on a queue attribute must be echoed back to the requester verbatim, because that
  * value is the only thing pairing an answer with its question -- so the rule admitting it has to be
  * WIDE enough for every rendering a requester can produce from the reference baseline's twenty-four

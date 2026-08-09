@@ -1,3 +1,17 @@
+/**
+ * @file Component tests for the sign-on screen in `ui/src/screens/signon/index.tsx`.
+ *
+ * Purpose
+ * -------
+ * Assert the reference screen's observable contract: the two fields at their copybook widths, the
+ * password field rendered non-display, each of the five `COSGN00C` messages rendered verbatim, the
+ * PF-key actions bound to real key events, and the onward branch taken from the group claim rather
+ * than from any field the client supplied.
+ *
+ * Assumptions: the identity exchange is stubbed, so these cases measure the screen and not the
+ * identity provider. Every credential literal below is fabricated.
+ */
+
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
 import { ConfigProvider } from 'antd';

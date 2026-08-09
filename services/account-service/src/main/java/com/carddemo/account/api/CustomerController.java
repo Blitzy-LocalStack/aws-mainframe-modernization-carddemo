@@ -1,10 +1,13 @@
 package com.carddemo.account.api;
 
+import com.carddemo.account.dto.CustomerLookupRequest;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.account.service.AccountViewService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
@@ -13,7 +16,8 @@ import java.util.Objects;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -39,11 +43,10 @@ import org.springframework.web.bind.annotation.RestController;
  * contract, and {@code app/cpy/CUSTREC.cpy} -- which exists -- is not, because nothing in this reference
  * names it.</p>
  *
- * <p>Trade-offs: no projection is injected or invoked here, and the direction of that dependency is
- * stated affirmatively because the projection's own descriptor lists this adapter among its callers and
- * that listing is superseded. The migration plan fixes this package as the REST layer, carrying request
- * validation and wiring and no business logic, so the projection is invoked from the service layer and
- * reached from here only through the type it returns. The boundary is mechanised rather than trusted:
+ * <p>Trade-offs: no projection is injected or invoked here. The migration plan fixes this package as
+ * the REST layer, carrying request validation and wiring and no business logic, so the projection is
+ * invoked from the service layer and reached from here only through the type it returns. The boundary
+ * is mechanised rather than trusted:
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
  * refuses a web type inside a domain package, and this adapter accepts and returns transfer records only,
  * so no stored row appears in a signature, a local or an import here.</p>
@@ -76,6 +79,13 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping(CustomerController.BASE_PATH)
+@OnlineWriteGateExempt(reason =
+        "Both operations this controller publishes are READS. Each is a POST only so that the"
+        + " nine-digit customer identifier travels in a request body instead of a path segment,"
+        + " where the load balancer composes it into an access record no application code can"
+        + " withdraw it from. Refusing either during the batch window would stop an internal caller"
+        + " resolving a customer context while the chain runs, and this migration's quiesce closes"
+        + " writes rather than reads.")
 public class CustomerController {
 
     /**
@@ -87,14 +97,23 @@ public class CustomerController {
     public static final String BASE_PATH = "/api/v1/customers";
 
     /**
-     * The path the keyed read sits at, relative to {@link #BASE_PATH}.
+     * The sub-path of the customer existence check, beneath {@link #BASE_PATH}.
      *
-     * <p>Assumptions: the keyed read is NOT published at {@code /{customerId}} even though that is the
-     * address a representation of one customer would ordinarily occupy. That address already carries the
-     * presence probe below, whose contract is a status and no body on either answer, and the
-     * pending-authorization context depends on exactly that shape. One address cannot carry both a
-     * status-only contract and a representation without making the response shape depend on something
-     * other than the address, so the read is given a segment of its own.</p>
+     * <p>Assumptions: exposed as a constant because {@code InternalApiSecurityConfig} builds its request
+     * matcher from this value, so the authority the operation requires and the operation itself cannot come
+     * to disagree by an edit to one of them.</p>
+     */
+    public static final String LOOKUP_PATH = "/lookup";
+
+    /**
+     * The sub-path of the keyed customer record read, beneath {@link #BASE_PATH}.
+     *
+     * <p>Assumptions: the keyed read is NOT published at the collection address itself even though a
+     * representation of one customer would ordinarily occupy a keyed address. Both this read and the
+     * existence check beside it carry their key in a body rather than in the target, so neither has a keyed
+     * address to occupy, and the two must still be distinguishable -- their responses differ in shape, one
+     * being a status with no body and the other a whole record. A segment of its own is what keeps the
+     * response shape a property of the address rather than of the request.</p>
      *
      * <p>Alternatives Considered: naming the segment {@code /view}, which is the segment the sibling
      * account adapter uses for its human read. It is not used, because in this module's vocabulary that
@@ -102,8 +121,12 @@ public class CustomerController {
      * carries no {@code EXEC CICS} verb. The segment is named for what the reference actually writes --
      * {@code DISPLAY CUSTOMER-RECORD} at L78, over the group item {@code 01 CUSTOMER-RECORD.} declared at
      * L4 of {@code app/cpy/CVCUS01Y.cpy}.</p>
+     *
+     * <p>Refactoring Rationale: the segment was {@code /{customerId}/record} and the path variable is gone.
+     * The reason is recorded on {@link CustomerLookupRequest} and applies to the whole of this controller's
+     * keyed surface rather than to one operation of it.</p>
      */
-    public static final String RECORD_PATH = "/{customerId}/record";
+    public static final String RECORD_PATH = "/record";
 
     /**
      * The read path this controller binds requests onto.
@@ -141,30 +164,47 @@ public class CustomerController {
      * reference's own use of the record is limited to whether the read succeeded, and the eighteen fields
      * the copybook declares at L5 through L22 include two identifiers there is no reason to move.</p>
      *
-     * <p>Assumptions: the operation is declared as a {@code GET} and the consumer calls it with
-     * {@code HEAD}. The framework routes a {@code HEAD} to the matching {@code GET} handler and discards
-     * the body, so declaring both would be two handlers whose behaviour had to be kept identical.
-     * Declaring the {@code GET} means the contract has one operation, and the consumer's choice of method
-     * is what makes the exchange bodyless on the wire as well as in the handler.</p>
+     * <p>Refactoring Rationale: this check was reachable as {@code GET} and {@code HEAD} on
+     * {@code /api/v1/customers/{customerId}} and is now a single {@code POST} on {@value #LOOKUP_PATH}
+     * carrying the identifier in a body. Two facts made the move necessary rather than tidy. The
+     * consuming context had ALREADY moved -- {@code authorization-service}'s
+     * {@code RestAccountContextClient} addresses {@code /api/v1/customers/lookup} with a JSON body -- so
+     * while this controller published only the keyed form, every existence check reached this service as a
+     * dispatcher 404, which the caller cannot distinguish from "no such customer" and would read as a
+     * legitimate decision input. And the reason the caller moved is the one {@link CustomerLookupRequest}
+     * records: the load balancer composes its access record from the request line before any application
+     * code runs, so a customer identifier in a path segment lands in a durable log that nothing inside a
+     * service can withdraw it from.</p>
+     *
+     * <p>Assumptions: the two methods collapse into ONE operation and nothing is lost. Both were already
+     * served by this single handler -- the framework answers a {@code HEAD} from a {@code GET} mapping by
+     * discarding the body -- and both declared the same two status codes, so the contract described one
+     * behaviour twice. The answer was never in a body, so a caller that wanted only presence still
+     * transfers no body back.</p>
      *
      * <p>Assumptions: absence is 404 and presence is 204 rather than 200. A 200 announces a body that
      * this operation never has, and a client library reading a 200 with a zero-length body may report a
      * decoding failure rather than a successful call. 204 states the shape exactly.</p>
      *
-     * @param customerId the nine-digit customer identifier, the key {@code CUST-ID} declares at L5 of
-     *     {@code app/cpy/CVCUS01Y.cpy}
+     * @param request the lookup request carrying the customer identifier, the key {@code CUST-ID} declares
+     *     at L5 of {@code app/cpy/CVCUS01Y.cpy}; must satisfy its declared constraints
      * @return 204 with no body when the row exists, 404 with no body when it does not; never
      *     {@code null}
+     * @throws org.springframework.web.bind.MethodArgumentNotValidException if the bound request violates
+     *     a declared constraint, which the shared advice renders as a 400 naming the field
+     * @throws NullPointerException if {@code request} is {@code null}, which the binding layer does not
+     *     produce for a required body and which therefore signals a direct call rather than a request
      */
-    @GetMapping("/{customerId}")
-    public ResponseEntity<Void> exists(@PathVariable long customerId) {
+    @PostMapping(path = LOOKUP_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Void> lookup(@Valid @RequestBody CustomerLookupRequest request) {
         // WHY : Assumptions: this handler answers with a ResponseEntity rather than throwing the
         //   not-found exception the sibling operations throw, and the difference is required rather
         //   than stylistic. The shared advice renders a not-found as a problem DOCUMENT, and this
-        //   operation is bodyless by contract -- a consumer calling it with HEAD would receive a
-        //   Content-Length announcing a body the method strips, which is the one response shape an
-        //   HTTP client is entitled to treat as malformed.
-        return this.reads.customerExists(customerId)
+        //   operation is bodyless by contract -- a consumer that reads the status alone would receive a
+        //   Content-Length announcing a body it never asked for, and the absence answer would then carry
+        //   a customer identifier back out in a problem document that is itself logged.
+        Objects.requireNonNull(request, "request must not be null");
+        return this.reads.customerExists(request.customerId())
                 ? ResponseEntity.noContent().build()
                 : ResponseEntity.notFound().build();
     }
@@ -207,21 +247,46 @@ public class CustomerController {
      * from the other side: {@code app/cbl/COACTUPC.cbl} declares the validation condition
      * {@code 88 FLG-CITY-NOT-OK} at L301 for a field its record layout never declares.</p>
      *
-     * @param customerId the nine-digit customer identifier, the key {@code CUST-ID} declares at L5 of
-     *     {@code app/cpy/CVCUS01Y.cpy}
+     * <p>Refactoring Rationale: this read moved from {@code GET /api/v1/customers/{customerId}/record} to
+     * {@code POST} on {@value #RECORD_PATH} with the identifier in a body, for the reason
+     * {@link CustomerLookupRequest} records for the existence check beside it -- an identifier in a path
+     * segment is composed into the load balancer's access record before any application code runs. The
+     * request record is shared with that check rather than duplicated, because the two constrain the same
+     * nine-digit key to the same range and a second record would be the same three constraints in a second
+     * place.</p>
+     *
+     * <p>Refactoring Rationale: this operation and the master scan beside it now require
+     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_MASTER_READ}, where both
+     * previously answered to the same
+     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_READ} as the
+     * single-key decision reads. That was an escalation rather than an imprecision: the two contexts that
+     * hold the decision scope mint it in order to resolve one card number, and while this read shared it,
+     * a token issued for that lookup could return all eighteen fields of any customer record. The scope
+     * boundary is drawn by what a token can read, and the reasoning is recorded once on the scope constant
+     * rather than restated at each operation it governs.</p>
+     *
+     * @param request the lookup request carrying the customer identifier, the key {@code CUST-ID} declares
+     *     at L5 of {@code app/cpy/CVCUS01Y.cpy}; must satisfy its declared constraints
      * @return the customer with both stored identifiers masked, a {@link CustomerResponse}, never
      *     {@code null}
      * @throws NoSuchElementException if the customer master holds no such row, which the shared advice
-     *     renders as HTTP 404 carrying the reference sentence for that outcome
+     *     renders as HTTP 404; the body carries the advice's own fixed absence sentence rather than the
+     *     reference one, because the advice passes a carried sentence through only when it ends in an
+     *     ellipsis -- its proof that the text came from this repository's catalogue -- and the customer
+     *     absence condition at L133 with L134 of {@code app/cbl/COACTVWC.cbl} has none. The reference
+     *     wording survives in the raised exception and in the advice's log line, and a client needing it
+     *     takes it from its own message catalogue keyed by the originating copybook
      */
-    @GetMapping(path = RECORD_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
-    public CustomerResponse readRecord(@PathVariable long customerId) {
+    @PostMapping(path = RECORD_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public CustomerResponse readRecord(@Valid @RequestBody CustomerLookupRequest request) {
         // WHY : Assumptions: the transaction boundary and the not-found decision both sit on the service
         //   method this handler calls, so neither is restated here. The reference's own terminal failure
         //   path is a language-environment abend -- Z-ABEND-PROGRAM. at L154 of app/cbl/CBCUS01C.cbl
         //   calling CEE3ABD at L158 -- which in the target is an ordinary exception propagating to the
         //   single shared advice, so this handler catches nothing and converts nothing.
-        return this.reads.readCustomer(customerId);
+        return this.reads.readCustomer(request.customerId());
     }
 
     /**

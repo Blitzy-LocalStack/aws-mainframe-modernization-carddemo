@@ -61,8 +61,14 @@ import jakarta.validation.constraints.Size;
  * uses {@code Z}-suppressed masks; unsigned {@code 9(nn)} fields preserve leading zeros; the
  * statement uses trailing-sign, non-comma masks {@code 9(9).99-} at
  * {@code app/cbl/CBSTM03A.CBL} L113 and {@code Z(9).99-} at L137; and the API carries
- * {@link Money} at scale two under {@code RoundingMode.HALF_UP} as quoted plain decimal text. One
- * Java numeric representation cannot reproduce all four display contracts.</p>
+ * {@link Money} at scale two under {@code Money.GENERAL_ROUNDING}, which is
+ * {@code RoundingMode.HALF_UP}, as quoted plain decimal text. One Java numeric representation cannot
+ * reproduce all four display contracts.</p>
+ *
+ * <p>Assumptions: the general mode is the one named here because no amount on this path is an
+ * interest accrual. {@link Money} fixes truncation for that one operation and half up for every
+ * other, so a report line that named the type's rounding without naming which of the two applies
+ * would leave a reader to guess.</p>
  *
  * <p>Alternatives Considered: emitting {@code amount} as a JSON number was rejected in favour of
  * the quoted string written by {@code com.carddemo.common.money.MoneyModule}. Most clients parse a

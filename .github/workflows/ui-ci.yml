@@ -25,6 +25,13 @@
 #     dependency is accepted because npm ci still verifies the reviewed lock.
 #   - Alternatives Considered: uploading ui/dist from CI. Rejected because this
 #     workflow validates only; deploy.yml rebuilds and publishes the artifact.
+#   - Assumptions: the run is TWO jobs, and the split is a privilege boundary
+#     rather than an organisational one. `ui` executes repository and dependency
+#     code and holds `contents: read`; `publish-ui-reports` holds the single
+#     `checks: write` scope and executes none, taking the artifact as its only
+#     input. Refactoring Rationale: both lived in one job, which meant the
+#     check-writing token was present while npm ci, ESLint, Vitest and Vite ran.
+#     The full argument is at the two `permissions` blocks below.
 # =============================================================================
 
 name: CardDemo UI CI
@@ -81,23 +88,35 @@ jobs:
     name: Lint, type-check, test and build the CardDemo SPA
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    # WHY (least privilege): `contents: read` is for actions/checkout and
-    # `checks: write` is for the advisory Vitest JUnit publisher below, which uses
-    # it to create the check run carrying the annotations. `pull-requests: write` is
-    # deliberately absent: that publisher receives `report_paths`, `check_name` and
-    # `fail_on_failure` only, so it posts no pull-request comment, and a check run
-    # reaches the pull request through the checks tab without any pull-request
-    # scope. Granting write access to pull-request bodies, comments, labels and
-    # reviews for annotations the check run already carries would widen the token
-    # for no behaviour.
-    # Assumptions: this job mutates nothing outside the runner -- it installs from
-    # the committed lock, lints, type-checks, tests and builds -- so read access to
-    # the tree plus the single check-run scope is the whole of what it legitimately
-    # needs. Anything added later that writes beyond the runner must request its
-    # scope here deliberately rather than inherit one.
+    # Assumptions: least privilege -- `contents: read` for actions/checkout and
+    # nothing else. This job runs repository-controlled and dependency-controlled
+    # code from its second step onward: `npm ci` executes install scripts from the
+    # committed graph, and TypeScript, ESLint, Vitest and Vite each load
+    # configuration and plugins out of that graph. Everything it needs it needs only
+    # to READ, so no write scope belongs here.
+    # Refactoring Rationale: `checks: write` used to be granted here, for the
+    # advisory Vitest publisher that was the job's last step, and that arrangement
+    # was unsafe in a way step ordering cannot fix. A job's token is present for
+    # every step in the job, not from the step that uses it onward, so the
+    # check-run-creating scope was reachable from `npm ci`, from any lifecycle
+    # script in the installed graph, and from every ESLint and Vite plugin loaded
+    # after it -- a compromised dependency could have recovered a token able to
+    # forge check runs on this repository. The publisher therefore moved into
+    # `publish-ui-reports` below, which checks nothing out and installs nothing, so
+    # the narrowing is structural rather than positional. This is the same split
+    # `services-ci.yml` already applies to its own reactor job for the same reason.
+    # Assumptions: `pull-requests: write` is absent from BOTH jobs, which is a
+    # narrower grant than `services-ci.yml`'s equivalent publisher takes. The
+    # publisher receives `report_paths`, `check_name` and `fail_on_failure` only, so
+    # it posts no pull-request comment, and a check run reaches the pull request
+    # through the checks tab without any pull-request scope. Write access to
+    # pull-request bodies, comments, labels and reviews would widen the token for no
+    # behaviour this workflow uses.
+    # Assumptions: anything added later that writes beyond the runner must request
+    # its scope deliberately -- and in the job that actually performs the write,
+    # not in this one.
     permissions:
       contents: read
-      checks: write
     defaults:
       run:
         working-directory: ui
@@ -105,8 +124,22 @@ jobs:
     steps:
       # Assumptions: full-SHA action pins cannot be moved to attacker-controlled
       # code while this job's token remains trusted (CWE-1357).
+      # Assumptions: CWE-522, `persist-credentials: false` -- by default checkout
+      # leaves the job's `GITHUB_TOKEN` in `.git/config` as an extraheader for the
+      # remainder of the job, so every later step would run with a usable credential
+      # sitting on disk. That matters more in this job than in most: the steps after
+      # this one execute install scripts, an ESLint plugin graph, a Vitest
+      # environment and a Vite build, all resolved from the dependency tree, and none
+      # of them needs git credentials at all. Nothing here pushes, tags or comments
+      # through git. Removing the credential after the fetch therefore costs the job
+      # nothing and takes the token out of reach of everything that follows.
+      # Trade-offs: a future step that genuinely needs to push would have to
+      # re-authenticate explicitly instead of inheriting a credential silently, which
+      # is the point -- it makes that a visible edit here rather than a default.
       - name: Check out the reviewed revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       # Assumptions: Node 22.23.1 matches the pinned UI build-stage line. The ACTION
       # major and the Node version it installs are independent: setup-node v7 runs
@@ -205,6 +238,10 @@ jobs:
       # vulnerable `form-data` 4.0.0; the full measurement and the runner
       # requirement are recorded once at the setup-java pin in services-ci.yml and
       # deliberately not restated. The three inputs below are unchanged by the move.
+      # Assumptions: this upload is the GATING report-presence check and the only
+      # channel by which the test results leave this job. `if-no-files-found: error`
+      # is what makes a silently absent Vitest report fail here, which is why the
+      # publisher job downstream is allowed to tolerate a missing artifact.
       - name: Upload Vitest reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -213,8 +250,64 @@ jobs:
           path: ui-reports/**
           if-no-files-found: error
 
-      # Trade-offs: check annotations are convenient but non-authoritative; a
-      # publisher outage cannot turn a passing or failing Vitest result around.
+  # Assumptions: this job exists to hold the one write scope the advisory JUnit
+  # publisher needs, in a job that runs NO repository-controlled and no
+  # dependency-controlled code. It checks nothing out, installs no package and
+  # builds nothing; its only input is the artifact the job above uploaded. That is
+  # what makes `contents: read` in `ui` a real narrowing rather than a positional
+  # one -- the token able to create a check run is never present in a job where
+  # `npm ci`, an ESLint plugin or a Vite plugin executes.
+  # Assumptions: `needs` plus `if: always()` -- annotations matter most when a gate
+  # failed, so this must run after a failed build as well as a passing one. `needs`
+  # orders it after the build without making it a gate: the authoritative status was
+  # already decided by the gating steps above and nothing in this job can change it.
+  publish-ui-reports:
+    name: Publish the UI test annotations
+    needs: ui
+    if: always()
+    runs-on: ubuntu-24.04
+    # Assumptions: a short ceiling -- this job downloads one artifact and calls one
+    # action, so anything beyond a few minutes is a hang rather than a slow run.
+    timeout-minutes: 10
+    # Assumptions: least privilege -- exactly the one scope the publisher uses, and
+    # no `contents` scope at all, because it never reads the repository. `checks:
+    # write` creates the check run that carries the annotations; the reason
+    # `pull-requests: write` is not requested is recorded at the build job above.
+    permissions:
+      checks: write
+
+    steps:
+      # Assumptions: CWE-1357 -- immutable full-SHA pin, the same supply-chain
+      # rationale as every other pin in this workflow family. The SHA is the commit
+      # the `v8.0.1` tag of `actions/download-artifact` resolves to, and the version
+      # differs from this file's `upload-artifact` pin because the two actions ship
+      # from separate repositories on separate cadences.
+      # ADVISORY. Trade-offs: `continue-on-error` is required because `if: always()`
+      # also runs this job when the build job was skipped or cancelled, in which case
+      # no artifact exists and a hard download failure would red a run whose build
+      # never executed. Tolerating it costs nothing, because the GATING existence
+      # check lives in the build job: its upload step is declared
+      # `if-no-files-found: error`, so a missing report already fails there.
+      - name: Download the UI test reports
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: carddemo-ui-reports
+          path: ui-reports
+
+      # ADVISORY -- permitted to fail without consequence. Trade-offs:
+      # `continue-on-error` plus `fail_on_failure: false` means a publisher outage
+      # cannot red an otherwise-passing run, and equally cannot green a failing one.
+      # Annotation is added visibility and must never become the thing that decides
+      # the result.
+      # Assumptions: CWE-1357 -- this is a THIRD-party action, so the immutable
+      # full-SHA pin matters more here than anywhere else: a maintainer-account
+      # takeover or a tag move would otherwise execute attacker code with this job's
+      # token, and this is the one job in the file whose token can write.
+      # Assumptions: the glob matches the artifact's own layout. `upload-artifact`
+      # roots an archive at the least common ancestor of what it matched, so
+      # `ui-reports/**` uploads `vitest.xml` at the archive root and the download
+      # above restores it to `ui-reports/vitest.xml`.
       - name: Publish UI JUnit annotations
         if: always()
         continue-on-error: true

@@ -5,6 +5,7 @@ import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.account.service.AccountViewService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
@@ -21,8 +22,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-// WHAT: the REST entry point for the card cross-reference, carrying both of the record's access paths --
-//       the one keyed on the card number and the one keyed on the account.
 // WHY : Assumptions: the two paths are not a design choice made here, they are the two access paths the
 //       reference system itself provides over one physical file. app/cbl/CBACT03C.cbl L32 declares
 //       RECORD KEY IS FD-XREF-CARD-NUM, so the base cluster answers by card and by card alone;
@@ -158,6 +157,12 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping(CardXrefController.BASE_PATH)
+@OnlineWriteGateExempt(reason =
+        "All three operations this controller publishes are READS of the cross-reference, expressed"
+        + " as POSTs so that the card number or account identifier they are keyed by travels in a"
+        + " request body rather than in the request line. They are the lookups the authorization and"
+        + " transaction contexts make to resolve an account context, so refusing them during the"
+        + " batch window would break decision reads the window is not meant to affect.")
 public class CardXrefController {
 
     /**

@@ -193,7 +193,7 @@ public class AuthorizationMessageMapper {
      * The purpose the diagnostic event key is tokenised under.
      *
      * <p>Assumptions: the value follows the same three-part shape as the purposes
-     * {@code CsvAuthCodec} declares for the queue identities -- {@code carddemo/pauth/correlation},
+     * {@code CsvAuthCodec} declares -- {@code carddemo/pauth/correlation},
      * {@code carddemo/pauth/order-group} and {@code carddemo/pauth/deduplication} -- so the whole set is
      * readable as one namespace and a reader can see at a glance that four purposes exist and what each
      * is for.</p>
@@ -522,18 +522,29 @@ public class AuthorizationMessageMapper {
      * happened. The mirror ordering, sending before committing, is rejected for the opposite outcome: a
      * requester told a card was authorized when the row recording it was rolled back. Writing the row
      * first and sending afterwards can only ever duplicate a send, and a duplicate is the one failure
-     * the reply queue already suppresses on the deduplication token below.</p>
+     * the reply queue already suppresses on the deduplication identity below.</p>
      *
-     * <p>Assumptions: the queue identities are the keyed TOKENS the reply carries, never the values
-     * behind them. Ordering is grouped by card and duplicates are suppressed by the card and
-     * transaction pair, which is what preserves the per-card sequence the reference system gets from a
-     * single-threaded consumer; but a group or deduplication identity becomes message METADATA at
-     * publication, and metadata sits outside the body that server-side encryption covers. Publishing
-     * the raw values would put a primary account number and the acquirer's transaction identifier into
-     * queue telemetry and into the trace of every send, so
-     * {@link AuthReply#orderGroup(OpaqueIdentifier)} and
-     * {@link AuthReply#deduplicationKey(OpaqueIdentifier)} are used, each of which is equal for equal
-     * inputs and different for different ones -- the only property ordering and suppression need.</p>
+     * <p>Assumptions: the queue identities are the reply's own CARD NUMBER and TRANSACTION IDENTIFIER,
+     * taken from the reply verbatim. Ordering is grouped by card, which preserves the per-card sequence
+     * the reference system gets from a single-threaded consumer, and duplicates are suppressed by the
+     * transaction, which names one authorization exactly once however its bytes are rendered.</p>
+     *
+     * <p>Refactoring Rationale: both identities were keyed, purpose-scoped tokens derived from those
+     * values. Sections 0.4.1.8 and 0.7.6 of the technical specification freeze them as the literals --
+     * {@code MessageGroupId = card_num} and {@code MessageDeduplicationId = transaction_id} -- and the
+     * specification is the frozen agreement rather than a default. The derivation held each semantic
+     * within this producer alone: any other party computing an identity from the frozen contract would
+     * compute a different one, so a second publisher would place one card's replies in a different group
+     * and a consumer or replay tool would fail to recognise a duplicate of one authorization. Both
+     * guarantees only hold if every party derives the identity the same way, and the specification is
+     * what makes that agreement expressible.</p>
+     *
+     * <p>Trade-offs: both identities become message METADATA at publication, which the queue's
+     * server-side encryption of a body does not cover, so the card number reaches queue telemetry and the
+     * trace of every send. That exposure is bounded by the deployment -- customer-managed-key encryption
+     * on the queue, an interface endpoint inside the private network, and read access scoped to task
+     * roles -- and the judgement that the frozen identity is worth it belongs to the specification. This
+     * class states the consequence so that nobody has to rediscover it.</p>
      *
      * <p>Assumptions: the payload is the encoded reply exactly as the wire carries it, sixty-three
      * characters. The reference program assembles it at {@code cbl/COPAUA0C.cbl} L722 to L731 with a
@@ -561,27 +572,23 @@ public class AuthorizationMessageMapper {
      * @param reply the decided reply to be published; must not be {@code null}
      * @param routing the destination, correlation identity and deadline taken from the request being
      *     answered; must not be {@code null}
-     * @param tokeniser the keyed tokeniser every producer and consumer of the reply queue shares, so
-     *     that one card's messages derive one group identity; must not be {@code null}
      * @return the publication to be committed alongside the decision, never {@code null}
-     * @throws NullPointerException if {@code reply}, {@code routing} or {@code tokeniser} is
-     *     {@code null}, or if the routing carries no reply destination
+     * @throws NullPointerException if {@code reply} or {@code routing} is {@code null}, or if the routing
+     *     carries no reply destination
      * @throws IllegalArgumentException if the routing's destination or correlation identity is wider
      *     than the column that stores it, or if the destination is blank
      */
-    public OutboxMessage toOutboxMessage(AuthReply reply, ReplyRouting routing,
-            OpaqueIdentifier tokeniser) {
+    public OutboxMessage toOutboxMessage(AuthReply reply, ReplyRouting routing) {
         Objects.requireNonNull(reply, "reply wire record must not be null");
         Objects.requireNonNull(routing, "reply routing must not be null");
-        Objects.requireNonNull(tokeniser, "messaging tokeniser must not be null");
 
-        // WHY : Assumptions: both tokens are derived HERE, while the deciding transaction is still
-        //       open, rather than at publication. The sender then holds no key material at all, and a
-        //       row whose payload could not later be parsed remains publishable -- which is precisely
-        //       the case where sending an answer matters most. Deriving them at publication was the
-        //       alternative and would put key material into the component least able to protect it.
+        // WHY : Refactoring Rationale: this took a keyed tokeniser and derived both identities from the
+        //       reply. The parameter is withdrawn rather than merely unused, because a signature that
+        //       still accepted it would invite a caller to believe the identities were still derived and
+        //       would leave the withdrawn dependency looking like an oversight. The reply itself carries
+        //       both values, so no collaborator is needed to state them.
         return OutboxMessage.csvReply(routing.replyQueueUrl(), routing.correlationId(),
-                reply.orderGroup(tokeniser), reply.deduplicationKey(tokeniser),
+                reply.cardNum(), reply.transactionId(),
                 CsvAuthCodec.encodeReply(reply), routing.expiresAt());
     }
 

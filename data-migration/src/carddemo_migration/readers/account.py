@@ -111,6 +111,11 @@ from carddemo_migration.copybook.layouts import (
     mask_record,
 )
 from carddemo_migration.copybook.zoned import decode_zoned_field
+from carddemo_migration.readers.source import (
+    data_region_width,
+    iter_seed_lines,
+    require_exact_record_width,
+)
 
 __all__ = [
     "ACCOUNT_LAYOUT",
@@ -187,6 +192,15 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in ACCOUNT_LAYOUT.fields if _is_padding_field(field)
 )
+
+
+# WHY : Assumptions: the boundary between a value and the trailing pad is DERIVED from
+#   the published field tuple and is never written here as a number. Bytes at or beyond it
+#   are the pad a text conversion may legitimately have dropped, so supplying them by
+#   padding restores what was discarded and changes no published value; bytes BEFORE it
+#   belong to a field this reader publishes, so supplying those would not restore anything
+#   -- it would invent a value the source never carried and hand a loader a row to key on.
+_DATA_REGION_WIDTH: Final[int] = data_region_width(LOADED_FIELDS)
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -412,7 +426,9 @@ def record_key(record: str) -> str:
     Raises
     ------
     RecordLengthError
-        If the record is shorter than the declared width, which would make the sliced key short.
+        If the record is not exactly the declared width. Raised by the shared width guard: a short
+        record would yield a short key that collides with a sibling row, and an over-long one means
+        the source was cut on the wrong boundary, so neither is accepted.
     """
     # WHY : Refactoring Rationale: this reader published no key accessor while every sibling
     #   reader publishes one, so a loader keying this record had to slice it itself -- which is
@@ -421,12 +437,15 @@ def record_key(record: str) -> str:
     #   a loader resolves that as an upsert onto the wrong row.
     # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
     #   never by a literal, so this function states no width of its own.
-    if len(record) < ACCOUNT_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"a {ACCOUNT_LAYOUT.name} record of {len(record)} characters is shorter than the"
-            f" declared {ACCOUNT_LAYOUT.reclen}, so its"
-            f" {ACCOUNT_LAYOUT.key_length}-character key cannot be sliced"
-        )
+    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
+    #   now EXACT, matching the eight sibling readers. It used to accept any record at least
+    #   the declared width, which this module's own decoder contradicts two functions below
+    #   -- that one tests for equality -- and the over-long case is the more dangerous of the
+    #   two: the key sliced from it comes from the right offsets of the WRONG record, two
+    #   rows concatenated most plausibly, so it looks entirely well formed and a loader
+    #   upserts on it. Leaving this reader lax while its siblings were tightened would be the
+    #   inconsistency the shared guard exists to remove.
+    require_exact_record_width(record, ACCOUNT_LAYOUT)
     start = ACCOUNT_LAYOUT.key_offset
     return record[start : start + ACCOUNT_LAYOUT.key_length]
 
@@ -542,7 +561,20 @@ def iter_ascii_accounts(source: str | Iterable[object]) -> Iterator[DecodedAccou
     #   right cannot move a field that is present; the characters added are precisely the pad
     #   the text form omitted. Every row of this dataset's seed is already full width, so the
     #   tolerance never engages here, and overriding it would fork the contract for one reader.
-    records = iter_ascii_text_records(source, ACCOUNT_LAYOUT.reclen)
+    # WHY : Refactoring Rationale: the record cut is bounded by `_DATA_REGION_WIDTH`, and the bound
+    #   closes a data-integrity defect rather than tightening a nicety. The shared iterator
+    #   right-pads a short line -- which is what lets a seed whose trailing pad the conversion
+    #   dropped be read at all -- and it padded a line of ANY length, so a line that stopped
+    #   part-way through a field this reader PUBLISHES was completed with manufactured blanks and
+    #   returned as a well-formed record. Nothing raised: the invented characters are
+    #   indistinguishable from real ones. The bound is the end of the last published field, derived
+    #   from `LOADED_FIELDS` rather than written here, and it is compared against the SOURCE line
+    #   before any padding, which is the only place the comparison is exact.
+    # WHY : Assumptions: the descriptor is passed for DIAGNOSTICS only, so a refusal can name the
+    #   record and the field the line stopped inside. It cannot change which lines are accepted.
+    records = iter_ascii_text_records(
+        source, ACCOUNT_LAYOUT.reclen, min_data_width=_DATA_REGION_WIDTH, layout=ACCOUNT_LAYOUT
+    )
 
     # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory
     #   is constant in the record count. The cost is a single forward pass -- a caller wanting
@@ -594,24 +626,28 @@ def read_ascii_accounts(path: pathlib.Path) -> Iterator[DecodedAccount]:
     #   the account master's by one character, so a pattern match over the directory would
     #   sweep up both and load the wrong dataset while reporting success. A zero-byte file is
     #   legitimately a dataset with no records and is not an error.
-    # WHY : Alternatives Considered: the file is decoded through a single-byte code page
-    #   that is total over all 256 byte values, rather than through a strict ASCII decode.
-    #   Both reject a non-conforming file, but they differ in WHERE and HOW. A strict decode
-    #   would fail inside the interpreter's reader with an encoding error, which is untyped
-    #   with respect to this package and would make the explicit single-byte guard above
-    #   unreachable. A total single-byte page instead maps each byte to exactly one character,
-    #   so the character count the shared iterator checks provably equals the byte count, and
-    #   the failure surfaces as this package's own record-length error naming the offset. Both
-    #   non-conforming shapes then land on that one typed error: a multi-byte sequence widens
-    #   the row past the declared width and the iterator rejects it, while a single high byte
-    #   leaves the width intact and the guard rejects it.
-    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the
-    #   shared iterator's own whole-text scanner exactly, so streaming this handle line by
-    #   line and passing the whole text produce identical records. Leaving the default in
-    #   place would let the interpreter translate and split on a carriage return as well,
-    #   which would move terminator policy out of the module that owns it.
-    with path.open("r", encoding="latin-1", newline="\n") as handle:
-        yield from iter_ascii_accounts(handle)
+    # WHY : Refactoring Rationale: the open is DELEGATED to `readers.source.iter_seed_lines` and
+    #   is no longer a `Path.open` here, matching every sibling reader. Two faults closed.
+    #   `Path.open` is a BLOCKING open, so a named pipe or a character device named where a
+    #   seed file was expected did not fail -- it waited, indefinitely and with no diagnostic,
+    #   in a step an operator is watching for a load to finish. And iterating a text handle
+    #   reads to the next separator with NO bound at all, so a file whose first separator lies
+    #   far past the record length was materialised in full before any width check could refuse
+    #   it. The shared reader opens with O_NONBLOCK, proves the descriptor is a regular file
+    #   with fstat before a byte is read, and bounds each line by the declared width plus its
+    #   terminators.
+    # WHY : Trade-offs: the code page and the terminator policy move WITH the open, so this module
+    #   no longer names either, and the reasoning it used to state here is now stated once in
+    #   `readers.source`: the decode is a single-byte page total over all 256 byte values rather
+    #   than a strict one, so the character count the shared iterator checks provably equals the
+    #   byte count and a non-conforming file surfaces as this package's own typed record-length
+    #   error rather than as an untyped encoding error from inside the interpreter's reader; and
+    #   line splitting is pinned to the separator alone so the carriage return stays ATTACHED to
+    #   each row and the delegated per-row rule is the code that removes it. Eleven modules each
+    #   naming those two decisions was eleven chances to disagree, invisibly -- a reader that
+    #   validated a file slightly differently from its siblings still returns well-formed records
+    #   for every ordinary input.
+    yield from iter_ascii_accounts(iter_seed_lines(path, ACCOUNT_LAYOUT.reclen))
 
 
 def decode_ebcdic_account(record: bytes | bytearray | memoryview) -> DecodedAccount:

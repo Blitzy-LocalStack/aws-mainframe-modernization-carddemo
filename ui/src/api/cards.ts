@@ -1,3 +1,33 @@
+/**
+ * @file Typed client for the card bounded context, written against
+ * `services/card-service/src/main/resources/openapi/card-api.yaml`.
+ *
+ * Purpose
+ * -------
+ * Cover the five operations that contract publishes -- the keyset-paged browse and the lookup
+ * replacing `app/cbl/COCRDLIC.cbl`, the detail read replacing `app/cbl/COCRDSLC.cbl`, and the
+ * fetch-then-replace pair replacing `app/cbl/COCRDUPC.cbl` -- and nothing else. Every request
+ * target is derived from the operation manifest below rather than written as a literal, for the
+ * reason recorded in `ui/src/api/types.ts`.
+ *
+ * Ownership of the shared page envelope
+ * -------------------------------------
+ * Assumptions: `PageResponse` and `PageDirection` are RE-EXPORTED from `./types` rather than owned
+ * here, because all five browser-facing contracts publish the same envelope and the same direction
+ * pair. The re-export keeps this module's public surface unchanged for the three card screens that
+ * import both names from it, while the declarations and their rationale live in one place. The
+ * detail is argued at the re-export itself.
+ *
+ * Selector discipline
+ * -------------------
+ * Assumptions: a card is addressed on the wire by an opaque SELECTOR, never by its number, and the
+ * guards enforcing that are imported from `../routes/cards` rather than restated here. A primary
+ * account number written into a path would be recorded in the edge access log and in the browser's
+ * history before any application code ran, and neither store is reachable by anything this module
+ * could add. The one operation that accepts a number, the lookup, sends it in a query the contract
+ * declares for that purpose and returns the selector the other four use.
+ */
+
 import { getApiClient } from './client';
 import { requestPath } from './types';
 import type { ContractOperation, PageDirection, PageResponse } from './types';

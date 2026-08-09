@@ -91,7 +91,9 @@ terraform {
     # upgrade stays a deliberate, reviewable edit instead of arriving with the
     # next `init`. The 6.56 floor is a package-wide pin rather than a need of
     # this module: a sibling module requires a provider new enough to accept a
-    # zero minimum Aurora Serverless capacity (floor 5.81.0), and every
+    # zero minimum Aurora Serverless capacity (floor 5.80.0) and the auto-pause
+    # argument it makes mandatory (floor 5.81.0), so the pair floors at 5.81.0,
+    # and every
     # directory under infra/ carries the same constraint so they all resolve
     # one provider version. 6.56 clears that floor with room to spare.
     aws = {

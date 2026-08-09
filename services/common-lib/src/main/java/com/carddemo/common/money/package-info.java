@@ -68,63 +68,73 @@
  * search of either file for those type names returns nothing, so the two are consistent by
  * construction rather than by coincidence.</p>
  *
- * <h2>Contract two: one rounding mode, and why it is not two</h2>
+ * <h2>Contract two: two rounding modes, one per operation, and why it is not one</h2>
  *
- * <p>Every reduction of a monetary result to cents in this package uses scale 2 with
- * {@code RoundingMode.HALF_UP}. There is one mode and there are no exceptions -- not for balances,
- * not for bill payment, and not for interest accrual. The accrual path differs from the others only
- * in the <em>order</em> of its operations, described below; it does not differ in its rounding.</p>
+ * <p>Every reduction of a monetary result to cents in this package uses scale 2, and which mode
+ * performs it is a property of the operation rather than of the caller. Reducing a supplied amount,
+ * general multiplication and general division use {@code RoundingMode.HALF_UP}, exposed as
+ * {@code Money.GENERAL_ROUNDING}. Interest accrual uses {@code RoundingMode.DOWN}, exposed as
+ * {@code Money.BASELINE_INTEREST_ROUNDING}. Neither is reachable from any signature, so a call site
+ * cannot select between them and cannot be asked to. The accrual path differs from the others in
+ * both the <em>order</em> of its operations, described below, and its rounding.</p>
  *
- * <p>Assumptions: the single mode is fixed by transformation rule T3 of the migration plan, which
- * states the money contract as {@code NUMERIC(p,2)} in the database, {@code BigDecimal} at scale 2
- * with {@code RoundingMode.HALF_UP} in Java, {@code Decimal} in the extract-transform-load code and
- * a JSON string on the wire; the plan's file-by-file entry for {@code Money} restates it as
- * "{@code BigDecimal} scale-2 arithmetic with {@code HALF_UP}; multiply-before-divide helper for the
- * interest formula", which is the same sentence naming both halves and assigning the exception to
- * the ORDER rather than to the mode. That plan is the frozen contract this migration is measured
- * against, so it is what the code is aligned to. Every sibling descriptor in this repository and the
- * illustrative Java example at line 226 of {@code docs/CODE_DOCUMENTATION_STANDARD.md} -- which
- * applies half-up to a monthly-interest return value specifically -- state the same mode, so the
- * whole tree now agrees rather than carrying one package that does not.</p>
- *
- * <p>Assumptions: the reference accrual path truncates toward zero, and that derivation is recorded
- * here because it is the reason the divergence has to be registered rather than merely dropped.
- * Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the
- * accrual paragraph, whose statement is
+ * <p>Assumptions: the split follows the reference source, and it is the asymmetry rather than the
+ * modes that carries the meaning. The baseline performs exactly one monetary computation, and the
+ * accrual quotient is it. Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the accrual
+ * paragraph, whose statement is
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. The receiving field is
  * declared at line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.},
  * so the result is stored at exactly two decimal places and surplus precision has to go somewhere;
  * and the statement carries no {@code ROUNDED} phrase, nor does any other statement in the program,
  * because a search for that phrase across all 652 lines returns no match. A store into a
  * fixed-scale field without that phrase discards the surplus digits rather than rounding them, so
- * the <em>baseline</em> behaviour is truncation toward zero. The target implements half-up
- * regardless, because the plan requires it, and the resulting one-cent difference is a documented
- * behavioural divergence rather than a defect: it is registered as <b>C-ROUNDING</b> in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which is the migration's register of
- * every intentional divergence, alongside the three baseline defects that are likewise not
- * reproduced. A divergence recorded there is auditable; a package contract that contradicted the
- * plan would not be.</p>
+ * the baseline behaviour is truncation toward zero, and that is what the accrual mode reproduces.
+ * The three general operations have no reference statement at all -- they are target arithmetic with
+ * no baseline counterpart -- so nothing constrains their mode and transformation rule T3's half-up
+ * applies to them unopposed.</p>
  *
- * <p>Trade-offs: the accepted cost is precisely one cent, and only on the vectors where a quotient
- * lands exactly on a half cent. The size of it is worth stating so that nobody mistakes the
- * divergence for a rounding-mode question still open for debate. On the vectors the reference
- * fixtures actually carry the two modes agree: the happy-path interest fixture supplies a category
- * balance of {@code 1000.00} and a disclosure-group rate of {@code 15.00}, the formula yields
- * {@code 12.5000} exactly and both modes return {@code 12.50}; at a rate of {@code 2.50} against
- * the same balance the quotient is {@code 2.08333...} and both modes return {@code 2.08}. They part
- * company only on an exact half cent, as with a balance of {@code 1000.80} at a rate of
- * {@code 2.50}: the quotient is {@code 2.0850} exactly, truncation returns {@code 2.08} and half-up
- * returns {@code 2.09}. What is bought with that cent is a single arithmetic surface -- one mode, no
- * caller having to know which of two reductions applies, and one architecture rule that can be
- * asserted mechanically instead of a rule with a carve-out that a future caller could apply to the
- * wrong path.</p>
+ * <p>Refactoring Rationale: this package applied half-up to the accrual as well, and registered the
+ * resulting cent as a documented divergence identified {@code C-ROUNDING}. That disposition is
+ * withdrawn and the divergence is closed; the identifier is retained only as a withdrawal record in
+ * {@code docs/architecture/cobol-to-service-traceability.md} so that it still resolves for a reader
+ * who meets it in an older comment. Reading rule T3's "half up for the whole money path" as covering
+ * the accrual put the letter of a transformation rule above the requirement it exists to serve: the
+ * plan requires observable behaviour to be unchanged, names the exact interest formula among the
+ * rules that must be preserved, and admits a behavioural change only as an explicitly authorised
+ * divergence. What T3 actually forbids -- binary floating point in the money path, and a
+ * caller-selectable mode -- is still forbidden here and is still asserted mechanically: the mode is
+ * fixed at the type, unreachable from every signature, and applied to an exact decimal.</p>
  *
- * <p>Alternatives Considered: exposing a truncating mode for the accrual and letting the caller
+ * <p>Refactoring Rationale: the cent was not the whole of the cost, and understating it is what made
+ * the divergence look acceptable. The accrual is one of the business rules the reference test suite
+ * asserts verbatim, so a cent of drift in it is a functional-parity failure in the most heavily
+ * asserted computation in the system. It also compounds rather than staying local: line 467 of
+ * {@code app/cbl/CBACT04C.cbl} adds each row's reduced result into the account total and line 352
+ * adds that total to the account balance once per account, so a cent gained per transaction category
+ * reaches the balance the next over-limit comparison is made against, and that comparison is
+ * inclusive.</p>
+ *
+ * <p>Trade-offs: two modes cost a reader having to know which operation is governed by which, where
+ * one mode cost nothing to explain and a cent in the one computation that matters most. The cost is
+ * paid down three ways: exactly one operation sits on the truncating side, each constant is named
+ * for the operation it governs rather than for a general policy, and the vector that discriminates
+ * the two is asserted rather than described. On the vectors the reference fixtures actually carry
+ * the two modes agree, which is why a discriminating test has to be constructed deliberately: the
+ * happy-path interest fixture supplies a category balance of {@code 1000.00} and a disclosure-group
+ * rate of {@code 15.00}, the formula yields {@code 12.5000} exactly and both modes return
+ * {@code 12.50}; at a rate of {@code 2.50} against the same balance the quotient is
+ * {@code 2.08333...} and both return {@code 2.08}. They part company on an exact half cent, as with
+ * a balance of {@code 1000.80} at a rate of {@code 2.50}: the quotient is {@code 2.0850} exactly,
+ * truncation returns {@code 2.08} and half-up returns {@code 2.09}.</p>
+ *
+ * <p>Alternatives Considered: exposing the mode as a parameter on the accrual and letting the caller
  * select it. Rejected because the choice would then live at the call site, where the next
- * accrual-adjacent caller would face a decision with no basis for making it, and because the
- * architecture test could no longer assert a single money rounding contract at all. Also considered:
- * amending the migration plan to admit truncation. Rejected outright -- the plan is frozen and is the
- * agreed contract, so overriding it here would relocate the disagreement rather than resolve it.</p>
+ * accrual-adjacent caller would face a decision with no basis for making it, and because two call
+ * sites computing the same accrual could disagree by a cent with nothing in either one signalling
+ * that they had chosen differently. Also considered: amending the migration plan to admit
+ * truncation. Rejected outright -- the plan is frozen and is the agreed contract. Neither is
+ * necessary: fixing the mode per operation satisfies the plan's parity requirement and its
+ * prohibitions at the same time, without relocating the decision to a caller or to the plan.</p>
  *
  * <p>Assumptions: the multiply-before-divide order is part of the same contract and is not an
  * implementation detail, per transformation rule T4. The reference statement multiplies the balance
@@ -133,7 +143,7 @@
  * consumes it: on the balance and rate just given, multiplying first yields {@code 2.0850} while
  * dividing first at an intermediate scale of two yields {@code 2.0750}, a difference of two cents
  * from reordering alone, and no rounding mode recovers it. The order is therefore preserved
- * literally, and the single half-up reduction happens after the division and nowhere else.</p>
+ * literally, and the one reduction happens after the division and nowhere else.</p>
  *
  * <h2>Contract three: a JSON string on the wire</h2>
  *
@@ -213,30 +223,30 @@
  * no fourth file here and none is to be added: the arithmetic contract and its wire-format
  * companion are the whole of the concern, and a third type would be either a second money
  * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
- * whole the module holds six production classes in {@code codec}, seven in {@code error}, two in
- * {@code messaging}, two in {@code money}, three in {@code observability}, eight in
- * {@code security}, one in {@code time}, two in {@code validation} and three in {@code web}, the
- * package root contributing one -- the auto-configuration class that registers this package's codec
+ * whole the module holds six production classes in {@code codec}, four in {@code control}, seven in
+ * {@code error}, three in {@code messaging}, two in {@code money}, three in {@code observability},
+ * eight in {@code security}, one in {@code time}, two in {@code validation} and three in
+ * {@code web}, the package root contributing one -- the auto-configuration class that registers this package's codec
  * module, and the {@code Clock}, the cursor-token signer, the correlation filter, the meter filter
  * and the error advice, in every service. The two totals that follow are each kept whole on one line
  * so that either can be checked by eye, matched by a search without a line break splitting it, and
  * read back by the drift test named below:</p>
  *
  * <pre>
- * production classes:  1 + 6 + 7 + 2 + 2 + 3 + 8 + 1 + 2 + 3 = 35
- * compilation units:   35 production + 10 package descriptors = 45
+ * production classes:  1 + 6 + 4 + 7 + 3 + 2 + 3 + 8 + 1 + 2 + 3 = 40
+ * compilation units:   40 production + 11 package descriptors = 51
  * </pre>
  *
- * <p>The ten descriptors are one for the package root and one for each of its nine subpackages.
+ * <p>The eleven descriptors are one for the package root and one for each of its ten subpackages.
  * The figures are recorded so that a class absent from the module stays distinguishable from one
  * the module never held.</p>
  *
  * <p>Refactoring Rationale: every figure above was previously a TARGET rather than a measurement,
  * and the paragraph that said so argued that a target "keeps this paragraph true at every point in
  * that sequence". That reasoning held only while the tree was a subset of the target. It is not: the
- * module now holds thirty-five production classes against a target of twenty-one, and one whole
- * subpackage -- {@code messaging}, with {@code MessageExpiry} and
- * {@code MessagingCorrelationId} -- that the target never named at all. A target that the delivery
+ * module now holds forty production classes against a target of twenty-one, and one whole
+ * subpackage -- {@code messaging}, with {@code MessageExpiry}, {@code MessagingCorrelationId} and
+ * {@code QueueClientBudget} -- that the target never named at all. A target that the delivery
  * has overshot is not a forgiving description of the delivery; it is a false one, and it fails in
  * the direction that matters, because a reader consults this block to learn whether a type they
  * cannot find is missing or was never admitted, and an under-stated inventory answers "never

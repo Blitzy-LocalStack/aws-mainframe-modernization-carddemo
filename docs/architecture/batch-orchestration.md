@@ -203,7 +203,7 @@ section therefore describe the authored resource graph; they still do not descri
 a *deployed* state machine, because applying the package to a live account is an
 operator action outside this repository's scope.
 
-*Refactoring Rationale:* this paragraph said the module's `main.tf` was absent and
+Refactoring Rationale: this paragraph said the module's `main.tf` was absent and
 that the table specified what a future resource graph must implement. Both halves
 were overtaken when the module landed. The distinction worth keeping is the other
 one — authored versus deployed — so the correction narrows the caveat to that
@@ -577,7 +577,7 @@ prefixes are NOT passed as overrides: each task composes its own prefix from tha
 bucket name and the family it is writing, so a family added to the module needs no
 change at the orchestration boundary.
 
-*Refactoring Rationale:* this paragraph named an output, `generation_retention_by_family`,
+Refactoring Rationale: this paragraph named an output, `generation_retention_by_family`,
 that the module does not declare — its retention output is `noncurrent_version_retention` —
 and reported the environment roots as "missing". Both roots exist and both wire the
 bucket. The prefix-versus-bucket distinction is stated explicitly because the
@@ -635,7 +635,7 @@ they protect and expire repeated writes of the same object key. Terraform's
 current keys beneath `gen=0001/`, `gen=0002/` and so on. The shared
 `noncurrent_version_retention` value keeps the writer's logical-prefix count and
 the lifecycle's same-key revision count under one configuration authority without
-claiming they are the same mechanism. *Refactoring Rationale:* this sentence named
+claiming they are the same mechanism. Refactoring Rationale: this sentence named
 the value `generation_retention_by_family`, which the module does not declare; the
 output it does declare is `noncurrent_version_retention`, and the naming error was
 the same one corrected earlier in this document.
@@ -1050,6 +1050,45 @@ read-only condition the flag lets a service report deliberately. The retirement
 of the mechanism is registered in
 `docs/architecture/cobol-to-service-traceability.md` once that register is
 authored.
+
+**The application half of the bracket.** The two states set a flag; what makes the
+flag mean anything to a running service is
+[`OnlineWriteGate`](../../services/common-lib/src/main/java/com/carddemo/common/control/OnlineWriteGate.java)
+in the shared kernel, applied to every mutating request by
+[`OnlineWriteGateInterceptor`](../../services/common-lib/src/main/java/com/carddemo/common/control/OnlineWriteGateInterceptor.java).
+A refused request is answered **`503` with code `CARDDEMO-0503`**, carrying the
+sentence a caller sees and the statement that nothing was applied; the status is
+declared as the shared `ServiceUnavailable` response in all seven published
+contracts. Four properties of it are worth knowing before diagnosing anything
+against it:
+
+- **It fails closed.** If the flag cannot be read at all — the parameter is
+  missing, the task role lacks `ssm:GetParameter`, the call times out — the gate
+  refuses the write. An unknown window is not evidence of an open one, and a write
+  interleaved with posting is not recoverable the way a refused one is. The
+  distinction between a deliberate quiesce and a broken read is visible only in the
+  service's own log, which is why the gate logs the read failure at warning level
+  with the parameter named.
+- **The flag is read, not injected.** The task definition carries the parameter's
+  NAME; a value injected at start would freeze the answer for the life of the task.
+  A short cache — five seconds by default — sits in front of the read, so a quiesce
+  takes effect up to one cache period late.
+- **Reads keep working.** Only the unsafe HTTP methods are gated, and the several
+  operations that are a `POST` because their identifier travels in a body rather
+  than in a request line declare themselves reads with
+  `@OnlineWriteGateExempt`, each carrying its own stated reason. Sign-on is among
+  them, which is a deliberate **narrowing** of the reference bracket: `CLOSEFIL.jcl`
+  L30 closed `USRSEC` outright, so the reference denied sign-on for the duration of
+  the chain, whereas the target closes writes only — and nobody can read without
+  signing on first. User maintenance, which does write, is gated.
+- **The queue consumers are deliberately not gated.** None of them writes data this
+  bracket protects: the account and date inquiries persist nothing, and the
+  authorization consumer writes the `authorization` schema, which the posting chain
+  does not touch. Refusing a queued message would also be a deferral rather than a
+  refusal — redelivery ends at the dead-letter queue on the fifth receive — so a
+  closed window would turn legitimate authorization traffic into a backlog needing a
+  manual redrive. The reasoning is recorded at the listener itself and in the
+  `control` package charter.
 
 ### The bracket is a conditional lease, not the flag
 

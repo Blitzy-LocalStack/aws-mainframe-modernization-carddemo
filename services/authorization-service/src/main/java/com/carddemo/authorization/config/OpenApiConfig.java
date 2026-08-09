@@ -20,7 +20,6 @@ import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.util.AntPathMatcher;
 
 /**
  * Supplies the document-level OpenAPI 3.1 metadata this module publishes, together with the authority
@@ -281,9 +280,10 @@ public class OpenApiConfig {
     private static final String TAG_DESCRIPTION = """
             Every operation of the pending credit-card authorization context: listing an account's \
             pending authorizations by key, reading one of them, and setting the fraud state of one \
-            of them. The first two carry x-required-authority carddemo-user; the third carries \
-            carddemo-admin, and that difference is the reason the field exists rather than being \
-            implied by this one tag.\
+            of them. All three carry x-required-authority carddemo-user, which admits either group. \
+            The field is published per operation regardless, because the fraud route is the only \
+            state-changing one here and is therefore the one whose authority a deployment is most \
+            likely to narrow -- a marker implied by this tag could not then say so per operation.\
             """;
 
     // WHY : Alternatives Considered: the group an operation requires is published as a specification
@@ -397,7 +397,8 @@ public class OpenApiConfig {
      * generated document would omit a field the committed contract declares, so the two would
      * disagree on a member for a reason that is not drift.</p>
      *
-     * @param adminGroupName the Cognito group name required by the fraud operation, bound from
+     * @param adminGroupName the Cognito group name the authority vocabulary enumerates alongside the
+     *     ordinary one; no operation this context publishes requires it, bound from
      *     {@code carddemo.security.cognito.admin-group-name}; the same property
      *     {@code SecurityConfig} binds to guard that route
      * @param userGroupName the Cognito group name required by the read operations, bound from
@@ -419,7 +420,7 @@ public class OpenApiConfig {
         return document -> {
             document.addExtension(AUTHORITY_MODEL_EXTENSION,
                     authorityModel(adminGroupName, userGroupName));
-            stampRequiredAuthority(document, adminGroupName, userGroupName);
+            stampRequiredAuthority(document, userGroupName);
         };
     }
 
@@ -489,9 +490,16 @@ public class OpenApiConfig {
      * field may carry, and names the class in which the field is enforced, so a reader who doubts the
      * marker can go and read the rule rather than trusting the document.</p>
      *
-     * @param adminGroupName the Cognito group name the fraud operation requires; must not be
+     * <p>Assumptions: the vocabulary enumerates BOTH group names although every operation this context
+     * publishes now requires the ordinary one, which since the fraud route was restored to the baseline's
+     * authority means either group. The enumeration is the field's DOMAIN and not a census of the values
+     * in use, so a reader parsing the marker knows what it may hold; narrowing it to the one value in use
+     * would make the field's meaning depend on which routes happen to exist.</p>
+     *
+     * @param adminGroupName the Cognito group name the vocabulary's second value carries, enumerated so
+     *     a reader knows the field's domain even though no operation here requires it; must not be
      *     {@code null}
-     * @param userGroupName the Cognito group name the read operations require; must not be
+     * @param userGroupName the Cognito group name every operation here requires; must not be
      *     {@code null}
      * @return an unmodifiable, insertion-ordered mapping of the authority model's three members;
      *     never {@code null}
@@ -514,45 +522,40 @@ public class OpenApiConfig {
     /**
      * Marks every operation of the generated document with the single authority its route requires.
      *
-     * <p>The marker is derived from the same path pattern the filter chain in this package guards, so
-     * a change to that pattern moves the published marker with it. Nothing is stamped when the
-     * publishing library discovered no path, which is the state a context holding no request handler
-     * would be in.</p>
+     * <p>Every operation this context publishes requires the same authority -- either business group --
+     * so one value is stamped on all of them. The value names the class in which the rule is enforced
+     * through the document-level model, so a reader who doubts the marker can go and read the rule.</p>
      *
-     * @param document the generated document to mark, already carrying whatever paths the publishing
-     *     library discovered; must not be {@code null}
-     * @param adminGroupName the Cognito group name to publish on the fraud route; must not be
-     *     {@code null}
-     * @param userGroupName the Cognito group name to publish on every other route; must not be
-     *     {@code null}
+     * <p>Refactoring Rationale: this method used to stamp the ADMINISTRATIVE group on the fraud route and
+     * the ordinary one elsewhere, deciding which by matching each published path against the same pattern
+     * the filter chain guards. The discrimination is withdrawn because the rule it described has been
+     * withdrawn: the fraud route now admits either business group, which is the authority the baseline
+     * grants, and the reversal is argued at {@code SecurityConfig.fraudAccess()}. A document that kept
+     * advertising an administrative restriction the chain no longer applies would be the more dangerous of
+     * the two possible disagreements -- a caller would build an operator role around a restriction that is
+     * not enforced.
+     *
+     * <p>Alternatives Considered: keeping the path match and stamping the same value from both arms, so the
+     * mechanism stayed in place for a future re-narrowing. Rejected because a comparison whose two arms are
+     * identical is a statement a reader has to decode before discovering it says nothing, and the seam for
+     * re-narrowing is already where it belongs -- one method in the security configuration, with the
+     * baseline evidence written beside it. A re-narrowing has to restore this stamp as well, which is
+     * recorded there.
+     *
+     * <p>Assumptions: nothing is stamped when the publishing library discovered no path, which is the state
+     * a context holding no request handler would be in.
+     *
+     * @param document the generated document to stamp; must not be {@code null}
+     * @param userGroupName the Cognito group name every operation requires, the marker's own convention
+     *     being that this name means EITHER group; must not be {@code null}
      */
-    private static void stampRequiredAuthority(OpenAPI document, String adminGroupName,
-            String userGroupName) {
+    private static void stampRequiredAuthority(OpenAPI document, String userGroupName) {
         if (document.getPaths() == null) {
             return;
         }
-        // WHY : Alternatives Considered: the fraud route is recognised by matching each documented
-        //       path against SecurityConfig.FRAUD_PATH_PATTERN, the very constant the filter chain
-        //       matches on. Two alternatives were weighed. Writing the fraud path as a literal here
-        //       was rejected because the marker and the rule would then be two independent spellings
-        //       of one route, and the failure mode is silent in the dangerous direction: a document
-        //       that keeps advertising an administrative restriction after the guarded pattern has
-        //       moved reads exactly like a correct one. Keying off the handler's declaring class was
-        //       rejected because it would bind this class to the controller package, which is the
-        //       coupling the layering rules exist to prevent, and it would still not describe the
-        //       route the chain actually guards. The remaining risk is inverted rather than removed:
-        //       if the pattern ever stops matching the published path, every operation is published as
-        //       requiring the ordinary group, which under-claims the restriction instead of
-        //       over-claiming it and so cannot mislead a caller into believing a route is guarded when
-        //       it is not.
-        AntPathMatcher matcher = new AntPathMatcher();
-        for (Map.Entry<String, PathItem> published : document.getPaths().entrySet()) {
-            String requiredAuthority =
-                    matcher.match(SecurityConfig.FRAUD_PATH_PATTERN, published.getKey())
-                            ? adminGroupName
-                            : userGroupName;
-            for (Operation operation : published.getValue().readOperations()) {
-                operation.addExtension(REQUIRED_AUTHORITY_EXTENSION, requiredAuthority);
+        for (PathItem published : document.getPaths().values()) {
+            for (Operation operation : published.readOperations()) {
+                operation.addExtension(REQUIRED_AUTHORITY_EXTENSION, userGroupName);
             }
         }
     }

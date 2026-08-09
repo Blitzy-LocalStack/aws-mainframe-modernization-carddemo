@@ -123,9 +123,16 @@
  * reason. Four corrections bear on anything a reader might do in this package:
  *
  * <ul>
- *   <li>There is no {@code repository} test package in this module, so the schema and index assertions the
- *       plan assigned to one live where the list above places them instead. Its {@code RepositoryIT}
- *       suffix survives and is load-bearing, but it is carried by a class in {@code fixtures}.</li>
+ *   <li>There IS a {@code repository} test package in this module, and it owns the schema, key and index
+ *       assertions the plan assigned to one. Refactoring Rationale: this entry read "there is no
+ *       {@code repository} test package in this module", which was accurate when the module's only
+ *       container-backed test was {@code fixtures.PendingAuthFraudDomainRepositoryIT} and is not accurate
+ *       now. That class is still in {@code fixtures} and still belongs there, because its subject is a
+ *       recorded byte image and the check constraint that refuses it; what moved into
+ *       {@code repository} is the catalogue-shape work -- key arity, constraint domains, index direction
+ *       and the look-ahead row. The {@code RepositoryIT} suffix is load-bearing in both places, because
+ *       it is the suffix the failsafe configuration includes, and it names the TIER rather than the
+ *       package.</li>
  *   <li>The {@code dto}, {@code domain} and {@code config} test packages were named as packages that must
  *       not exist. All three exist, all three are load-bearing, and one of them owns the authority matrix
  *       described above. Publishing the planned wording would have told three real packages to delete

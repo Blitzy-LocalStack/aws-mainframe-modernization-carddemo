@@ -1328,7 +1328,7 @@ class TransactionMapperTest {
         String lastKeyToken = sealed("0000000000000003");
 
         PageResponse<TransactionListItemResponse> page =
-                this.mapper.toListPage(displayOrdered, firstKeyToken, lastKeyToken, true);
+                this.mapper.toListPage(displayOrdered, firstKeyToken, lastKeyToken, true, false);
 
         assertThat(page.items()).hasSameSizeAs(displayOrdered);
         assertThat(identifiersOf(page))
@@ -1362,14 +1362,14 @@ class TransactionMapperTest {
     @DisplayName("an exhausted page carries no rows, no boundary and no further page")
     void anExhaustedPageReportsNoFurtherPageAndNoBoundary() {
         PageResponse<TransactionListItemResponse> exhausted =
-                this.mapper.toListPage(List.of(), null, null, false);
+                this.mapper.toListPage(List.of(), null, null, false, false);
 
         assertThat(exhausted.items()).isEmpty();
         assertThat(exhausted.firstKey()).isNull();
         assertThat(exhausted.lastKey()).isNull();
         assertThat(exhausted.hasNext()).isFalse();
 
-        assertThatThrownBy(() -> this.mapper.toListPage(List.of(), null, null, true))
+        assertThatThrownBy(() -> this.mapper.toListPage(List.of(), null, null, true, false))
                 .as("COTRN00C line 315 denies a further page whenever the fill read nothing")
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("hasNext");
@@ -1395,7 +1395,7 @@ class TransactionMapperTest {
     void aRawKeysetCursorIsRefusedAsABoundary() {
         assertThat(CursorToken.hasSealedShape("0000000000000001")).isFalse();
         assertThatThrownBy(() -> this.mapper.toListPage(threeRowsAscending(),
-                "0000000000000001", "0000000000000003", false))
+                "0000000000000001", "0000000000000003", false, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("CursorToken");
     }

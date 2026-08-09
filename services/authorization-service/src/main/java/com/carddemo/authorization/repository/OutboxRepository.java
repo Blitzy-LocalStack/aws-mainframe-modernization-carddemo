@@ -67,8 +67,15 @@ import org.springframework.data.repository.query.Param;
  * the migration unchanged, because a reply put before the write cannot be withdrawn when the write
  * does not commit. Taking this route converts a phantom reply into an at-least-once DELAYED reply,
  * which is the only direction that preserves the invariant that a reply implies a committed decision:
- * a duplicate is discarded by the reply queue on the deduplication token stored on the row, whereas a
- * reply for a decision that never committed is not recoverable by anything downstream. This is
+ * a duplicate is discarded by the reply queue on the deduplication identity stored on the row WHEN IT
+ * ARRIVES INSIDE THAT QUEUE'S DEDUPLICATION INTERVAL, which is five minutes, whereas a
+ * reply for a decision that never committed is not recoverable by anything downstream. Refactoring
+ * Rationale: that qualification was absent and the sentence read as though duplicate suppression were
+ * unconditional. It is not, and the difference is load-bearing rather than pedantic: a row whose sends
+ * fail for longer than five minutes -- an unreachable queue, a permissions change, a claim that keeps
+ * losing its race -- can be delivered twice once the queue is reachable again, so the requester carries
+ * a real obligation to suppress by the transaction identifier the reply itself carries. Stating
+ * suppression as absolute here would have told a requester it had no such obligation. This is
  * divergence D-5 in {@code docs/architecture/cobol-to-service-traceability.md}. Its companion is D-6,
  * the elimination of commit coordination across two resource managers, which follows from the pending
  * detail and the fraud row now living in one schema and is what
@@ -97,7 +104,7 @@ import org.springframework.data.repository.query.Param;
  * {@code MOVE MQFMT-STRING TO MQMD-FORMAT}, which is {@code text/csv} here; because the payload is
  * declared as a string format, the field order and the delimiter ARE the interface, which is a second
  * reason this layer must not reformat it. The reply deadline comes from L750, and the ordering and
- * deduplication tokens carry the card number and the transaction identity respectively, the first
+ * deduplication identities ARE the card number and the transaction identifier respectively, the first
  * preserving per-card ordering and the second giving exactly-once acceptance at the queue.
  *
  * <p>Assumptions: the reply deadline is a column on this table and never a field inside the payload,
@@ -138,25 +145,47 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
     /**
      * Claims the oldest unpublished reply of each ordering group, oldest group first.
      *
-     * <p>Assumptions: the claim is an atomic STATUS TRANSITION and not a selection under a lock. One
-     * statement moves each row it takes from the attempt count it was observed at to the next one, and
+     * <p>Assumptions: the claim is an atomic STATUS TRANSITION expressed on the row's CLAIM TOKEN. One
+     * statement moves each row it takes from the token value it was observed at to the next one, and
      * returns only the rows whose transition it actually performed, so the row a caller receives has
      * already been claimed by the time it arrives. A second claim running at the same moment observes
-     * the same candidate at its old count, tries the same transition and finds the comparison no longer
-     * true, so it receives that row not at all rather than receiving it a second time. Single delivery
-     * is therefore a property of the data rather than of anything held open while the reply is sent.
+     * the same candidate at its old token, tries the same transition and finds the comparison no longer
+     * true, so it receives that row not at all rather than receiving it a second time.
      *
-     * <p>Alternatives Considered: taking a pessimistic row lock as part of the selection and stepping
-     * over rows another transaction already holds, or requesting the same lock through the persistence
-     * annotation that expresses it on a query method. Rejected on evidence from the source rather than
-     * on preference. {@code cpy/IMSFUNCS.cpy} DECLARES all three get-hold retrieval codes --
-     * {@code FUNC-GHU} at L19, {@code FUNC-GHN} at L21 and {@code FUNC-GHNP} at L23 -- and no program
-     * anywhere in the reference tree passes any of the three to a data-language call; the retrieval
-     * verbs actually used are the non-hold ones, and both unload views run with the get-only processing
-     * option, at {@code ims/PAUTBUNL.PSB} L18 and {@code ims/DLIGSAMP.PSB} L18. The reference system
-     * holds no locks on this path, so the concrete consequence of the rejected alternative is lock-wait
-     * queueing and deadlock-victim rollback where there is neither today, on a path whose failure mode
-     * would appear only under concurrency and so would not surface while testing one caller.
+     * <p>Refactoring Rationale: the token is {@code claim_version} and it was {@code attempts}. Sharing
+     * the attempt counter made the transition move for reasons that were not claims -- a recorded send
+     * failure advanced it, and so did retiring an expired row that was never sent -- so a concurrent
+     * claim of an untouched row could be refused by a change another pass's reporting had made, and the
+     * counter's own value answered no question. {@code V2__authorization_outbox_claim_version.sql} adds
+     * the dedicated token and records the overflow this sharing also caused.
+     *
+     * <p>Trade-offs: single delivery within one pass is a property of the DATA, but it is not the only
+     * mechanism at work and the second one has to be stated or a reader will size a connection pool
+     * wrongly. The claiming statement is an UPDATE, so it takes an ordinary row write lock on every row
+     * it changes and holds that lock, and the connection, until the surrounding transaction ends -- which
+     * for {@code OutboxPublisher.drain} is after every send of the pass has returned. A concurrent
+     * publisher therefore BLOCKS on the row rather than merely observing a stale token, and only then
+     * finds the comparison no longer true. The token is what makes the outcome correct; the write lock is
+     * what makes a second publisher wait for it.
+     *
+     * <p>Alternatives Considered: taking a pessimistic row lock as part of the SELECTION and stepping
+     * over rows another transaction already holds -- {@code for update skip locked} -- or requesting the
+     * same lock through the persistence annotation that expresses it on a query method. Rejected, but
+     * NOT on the ground that it would introduce locking where there is none: the statement below is an
+     * UPDATE, so it takes an ordinary row write lock on every row it changes and a concurrent claim
+     * waits for it. Refactoring Rationale: this paragraph asserted "lock-wait queueing and
+     * deadlock-victim rollback where there is neither today", and the first half of that was false. The
+     * true grounds are two. First, correctness here does not DEPEND on the lock -- the token comparison
+     * decides, so a claim that waited and then found the token changed receives the row not at all,
+     * whereas a skip-locked selection makes the lock itself the arbiter and therefore has to be
+     * configured correctly to be safe. Second, deadlock is unreachable rather than merely unlikely,
+     * because every claim orders its candidates by {@code outbox_id} ascending and so acquires in one
+     * global order; a skip-locked variant would still need that ordering and would gain nothing from it.
+     * The reference evidence remains relevant to the SHAPE rather than to the presence of locking:
+     * {@code cpy/IMSFUNCS.cpy} declares all three get-hold retrieval codes at L19, L21 and L23 and no
+     * program in the reference tree passes any of them to a data-language call, while both unload views
+     * run get-only at {@code ims/PAUTBUNL.PSB} L18 and {@code ims/DLIGSAMP.PSB} L18 -- so the reference
+     * never asked for a hold, and neither does this statement.
      *
      * <p>Alternatives Considered: draining without a bound, which would let one pass empty the whole
      * backlog. Rejected because a single cycle would then hold a transaction of arbitrary size and
@@ -178,7 +207,7 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      * orders messages within a group only after it has accepted them, so the sequence a publisher sends
      * in is the sequence the group is delivered in; a pass holding two rows of one group whose earlier
      * send did not succeed while the drain continued would place the later reply ahead of the earlier
-     * one, reversing two answers for one card, which is the single guarantee the group token exists to
+     * one, reversing two answers for one card, which is the single guarantee the group identity exists to
      * provide. A group therefore stays at its own head until that head reaches a terminal state.
      *
      * <p>Assumptions: the statement names its table unqualified and resolves it through the connection
@@ -188,14 +217,28 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      * same-named table and return rows. Its column names are those
      * {@code src/main/resources/db/migration/V1__authorization.sql} declares for this table.
      *
-     * <p>Trade-offs: a claim advances the attempt counter, so the counter reads as attempts BEGUN and a
-     * pass that also records a failure reason against the row advances it a second time. That is
-     * accepted because no decision anywhere is taken on the counter's value -- it is read only as a
-     * reported field -- and it is the counter that makes the transition observable, which is what
-     * replaces the rejected lock. A concurrent claim may also return fewer rows than its bound, up to
-     * none at all, because the candidates it observed were taken by the pass it raced; those rows are
-     * pending still and the next pass takes them, so the cost is a pass that does less work rather than
-     * a reply that goes unsent.
+     * <p>Refactoring Rationale: a claim advances the attempt counter EXACTLY ONCE and moves the row's
+     * next-attempt instant to the caller's lease, and both corrections are recorded because an earlier
+     * revision of this statement did neither. It incremented on the claim and the publisher incremented
+     * again when it recorded a failure reason, so a failed publication was counted twice; and it left
+     * the next-attempt instant alone, so the row stayed immediately eligible and the only thing keeping
+     * a second publisher off it was the uncommitted row write -- which forced the caller to hold its
+     * transaction open across the network send. Setting the instant forward makes the claim durable
+     * instead, so the caller can commit and release its connection before it sends anything.
+     *
+     * <p>Refactoring Rationale: the candidate ordering is (next_attempt_at, outbox_id) rather than
+     * outbox_id alone, and the abandonment and attempt-ceiling predicates are new. Ordering by identity
+     * alone made the ready set the globally oldest pending rows, so a handful of permanently failing
+     * heads were reselected on every poll and, at a batch of that size, every healthy group behind them
+     * was STARVED -- a liveness failure retrying could not clear, because the failing rows never stopped
+     * being the oldest. A failed row's backoff now pushes its instant forward, which yields its place to
+     * a group whose instant has arrived; and a row that has exhausted the caller's attempt ceiling, or
+     * that the caller has abandoned, leaves the ready set altogether.
+     *
+     * <p>Trade-offs: a concurrent claim may return fewer rows than its bound, up to none at all, because
+     * the candidates it observed were taken by the pass it raced; those rows are leased to that pass and
+     * a later pass takes them once their lease lapses, so the cost is a pass that does less work rather
+     * than a reply that goes unsent.
      *
      * <p>Trade-offs: the statement is NATIVE rather than expressed in the query language, because a
      * transition that returns the rows it changed has no portable equivalent there. The accepted cost
@@ -204,44 +247,59 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      *
      * @param batchSize the greatest number of ordering groups to claim a head row from in this pass,
      *     as a positive count; the reference consumer's own per-invocation figure is 500
-     * @return the rows this call has ALREADY CLAIMED, one per ordering group and oldest group first, so
-     *     a caller publishes them and does not claim them again; empty when nothing is pending or when
-     *     a concurrent pass took every candidate this one observed
+     * @param now the instant readiness is judged against, in coordinated universal time; a row whose
+     *     next-attempt instant is after it is not a candidate; must not be {@code null}
+     * @param leaseUntil the instant each claimed row's next attempt is deferred to, which is how long
+     *     this pass owns the row if it neither completes nor fails it; must not be {@code null}
+     * @param maxAttempts the attempt count at or above which a row is no longer a candidate, so a
+     *     permanently failing reply leaves the ready set instead of being retried forever
+     * @return the rows this call has ALREADY CLAIMED, one per ordering group and oldest-ready group
+     *     first, so a caller publishes them and does not claim them again; empty when nothing is ready
+     *     or when a concurrent pass took every candidate this one observed
      * @throws org.springframework.dao.DataAccessException when the statement cannot be executed, for
      *     instance because the connection's search path does not resolve the table
      */
     @Query(value = """
             with head as (
-                select h.outbox_id, h.attempts
+                select h.outbox_id, h.claim_version
                   from auth_reply_outbox h
                  where h.published_at is null
+                   and h.abandoned_at is null
+                   and h.next_attempt_at <= :now
+                   and h.attempts < :maxAttempts
                    and h.outbox_id = (select min(g.outbox_id)
                                         from auth_reply_outbox g
                                        where g.published_at is null
-                                         and g.order_group_token = h.order_group_token)
-                 order by h.outbox_id
+                                         and g.abandoned_at is null
+                                         and g.order_group_id = h.order_group_id)
+                 order by h.next_attempt_at, h.outbox_id
                  limit :batchSize
             ),
             claimed as (
                 update auth_reply_outbox o
-                   set attempts = o.attempts + 1
+                   set claim_version = o.claim_version + 1,
+                       attempts = o.attempts + 1,
+                       next_attempt_at = :leaseUntil
                   from head
                  where o.outbox_id = head.outbox_id
-                   and o.attempts = head.attempts
+                   and o.claim_version = head.claim_version
                    and o.published_at is null
+                   and o.abandoned_at is null
                 returning o.*
             )
             select * from claimed order by outbox_id
             """, nativeQuery = true)
-    List<AuthReplyOutbox> claimGroupHeads(@Param("batchSize") int batchSize);
+    List<AuthReplyOutbox> claimGroupHeads(@Param("batchSize") int batchSize,
+            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil,
+            @Param("maxAttempts") int maxAttempts);
 
     /**
      * Claims the next unpublished replies of one ordering group, above the identity just handled.
      *
      * <p>Assumptions: this carries the same transition discipline as the head claim above -- the same
-     * comparison against the observed attempt count, the same absence of any lock, the same unqualified
-     * table name resolved through the pinned search path -- and those rulings are not restated here.
-     * What differs is only which rows are candidates.
+     * comparison against the observed claim token, the same write lock that comparison's UPDATE takes,
+     * the same unqualified table name resolved through the pinned search path -- and those rulings are
+     * not restated here. What differs is only which rows are candidates.
      *
      * <p>Alternatives Considered: not offering this method at all, and letting a group advance by one
      * reply per claim of its head. Rejected because per-group claiming would then bound a group's
@@ -249,22 +307,28 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      * characteristic the reference consumer does not have: it processes up to its own batch limit within
      * one invocation. Advancing within a pass is safe against reordering for a specific reason -- the
      * rows are claimed in ascending identity order and each send is awaited before the next is issued --
-     * so the ordering guarantee the group token carries is not weakened by draining further.
+     * so the ordering guarantee the group identity carries is not weakened by draining further.
      *
      * <p>Assumptions: the candidate set is bounded BELOW by the identity just handled rather than by
      * re-reading the group's head, and that lower bound is what makes the method independent of when a
      * caller's pending in-memory changes reach the database. A row this pass has already handled sits at
      * or below the bound and cannot be a candidate whatever its stored state currently says, so the
-     * method cannot hand the same row back twice within one pass. The predicate is the group token and
+     * method cannot hand the same row back twice within one pass. The predicate is the group identity and
      * the identity over unpublished rows only, which is exactly the key and the condition of the second
      * partial index the migration declares for this table, so it is an index scan rather than a scan of
      * the whole pending set.
      *
-     * @param orderGroupToken the ordering group to advance, as the purpose-scoped keyed token stored on
-     *     the row rather than the card number behind it; must not be {@code null}
+     * @param orderGroupId the ordering group to advance, which is the card number stored on the row as
+     *     the technical specification freezes the group identity; must not be {@code null}
      * @param afterOutboxId the identity of the row just handled, as the exclusive lower bound; only
      *     higher identities of the same group are candidates
      * @param batchSize the greatest number of follow-on rows to claim in this call, as a positive count
+     * @param now the instant readiness is judged against, in coordinated universal time; a row whose
+     *     next-attempt instant is after it is not a candidate; must not be {@code null}
+     * @param leaseUntil the instant each claimed row's next attempt is deferred to, which is how long
+     *     this pass owns the row if it neither completes nor fails it; must not be {@code null}
+     * @param maxAttempts the attempt count at or above which a row is no longer a candidate, so a
+     *     permanently failing reply leaves the ready set instead of being retried forever
      * @return the rows this call has ALREADY CLAIMED, in ascending identity order, so a caller publishes
      *     them and does not claim them again; empty when the group holds no further pending row or when
      *     a concurrent pass took the candidates this one observed
@@ -273,27 +337,35 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      */
     @Query(value = """
             with follower as (
-                select f.outbox_id, f.attempts
+                select f.outbox_id, f.claim_version
                   from auth_reply_outbox f
                  where f.published_at is null
-                   and f.order_group_token = :orderGroupToken
+                   and f.abandoned_at is null
+                   and f.next_attempt_at <= :now
+                   and f.attempts < :maxAttempts
+                   and f.order_group_id = :orderGroupId
                    and f.outbox_id > :afterOutboxId
                  order by f.outbox_id
                  limit :batchSize
             ),
             claimed as (
                 update auth_reply_outbox o
-                   set attempts = o.attempts + 1
+                   set claim_version = o.claim_version + 1,
+                       attempts = o.attempts + 1,
+                       next_attempt_at = :leaseUntil
                   from follower
                  where o.outbox_id = follower.outbox_id
-                   and o.attempts = follower.attempts
+                   and o.claim_version = follower.claim_version
                    and o.published_at is null
+                   and o.abandoned_at is null
                 returning o.*
             )
             select * from claimed order by outbox_id
             """, nativeQuery = true)
-    List<AuthReplyOutbox> claimGroupFollowers(@Param("orderGroupToken") String orderGroupToken,
-            @Param("afterOutboxId") long afterOutboxId, @Param("batchSize") int batchSize);
+    List<AuthReplyOutbox> claimGroupFollowers(@Param("orderGroupId") String orderGroupId,
+            @Param("afterOutboxId") long afterOutboxId, @Param("batchSize") int batchSize,
+            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil,
+            @Param("maxAttempts") int maxAttempts);
 
     /**
      * Deletes replies that were published before a stated cut-off instant.
@@ -318,19 +390,45 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      * callback, and the accepted alternative would read a retention window's worth of payloads -- each
      * of which carries a primary account number -- into memory purely to delete them one at a time.
      *
+     * <p>Refactoring Rationale: the statement deletes a BOUNDED, ORDERED CHUNK rather than everything
+     * matching the cut-off, and it is native rather than expressed in the query language because the
+     * ordered-and-limited sub-select has no portable equivalent there. An earlier revision deleted the
+     * whole matching population in one statement, which is unbounded by construction -- the published
+     * side of this table is the part that grows without limit -- so a sweep that had not run for a while,
+     * or a widened window, took a table-wide lock footprint and a transaction whose duration nothing
+     * bounded. Deleting oldest-first in fixed slices lets the caller loop until a pass deletes fewer
+     * rows than the slice, with each slice its own short transaction. The predicate is also served by
+     * {@code idx_auth_reply_outbox_published}, which was added with this change; the two partial indexes
+     * over the pending side exclude these rows by their own predicate, so before it this delete was a
+     * sequential scan of the whole table on every pass.
+     *
+     * <p>Assumptions: an ABANDONED reply is excluded, so the sweep never removes one. An abandoned row
+     * is a reply the committed decision says was owed and that was never delivered; deleting it on an
+     * operational timer would destroy the only evidence of that, so it is retained until an operator
+     * who has read it removes it.
+     *
      * @param cutoff the instant a published row must precede to be deleted, in coordinated universal
      *     time; must not be {@code null}
-     * @return how many rows were deleted, which is zero when nothing published precedes the cut-off
+     * @param chunkSize the greatest number of rows to delete in this call, as a positive count, so one
+     *     transaction's work is bounded however large the eligible population is
+     * @return how many rows were deleted, which is zero when nothing published precedes the cut-off and
+     *     is the chunk size when more rows remain eligible than one call removes
      * @throws org.springframework.dao.DataAccessException when the statement cannot be executed, for
      *     instance because the runtime role holds no delete privilege on the table
      */
     @Modifying
-    @Query("""
-            delete from AuthReplyOutbox r
-             where r.publishedAt is not null
-               and r.publishedAt < :cutoff
-            """)
-    int deletePublishedBefore(@Param("cutoff") LocalDateTime cutoff);
+    @Query(value = """
+            delete from auth_reply_outbox
+             where outbox_id in (select d.outbox_id
+                                   from auth_reply_outbox d
+                                  where d.published_at is not null
+                                    and d.published_at < :cutoff
+                                    and d.abandoned_at is null
+                                  order by d.published_at, d.outbox_id
+                                  limit :chunkSize)
+            """, nativeQuery = true)
+    int deletePublishedBefore(@Param("cutoff") LocalDateTime cutoff,
+            @Param("chunkSize") int chunkSize);
 
     /**
      * Counts the replies still awaiting publication.

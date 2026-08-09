@@ -387,7 +387,7 @@ repeats in the type's own Javadoc.
 
 | Class | Responsibility | Source authority |
 |---|---|---|
-| `Money` | `BigDecimal` scale-2 arithmetic with `RoundingMode.HALF_UP`; exposes the multiply-then-divide interest helper | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 |
+| `Money` | `BigDecimal` scale-2 arithmetic under two fixed modes — `HALF_UP` for general operations, `DOWN` for the accrual; exposes the multiply-then-divide interest helper | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 |
 | `MoneyModule` | Jackson module serialising money as a JSON **string** | §5.1 |
 | `CopybookLayout` | The layout descriptor — offset, length and type per field; one descriptor, many readers | `app/cpy/**` record copybooks |
 | `FixedWidthCodec` | Record ⇄ field-map by offset and length | all base record copybooks |
@@ -635,44 +635,79 @@ not a reduced sum. Accumulating at full precision and reducing once at the end
 produces a different total, because rounding does not distribute over addition.
 Reduce each term, then add.
 
-#### 5.3.1 One rounding contract, and the divergence it accepts
+#### 5.3.1 Two rounding modes, one per operation, neither selectable
 
-Transformation rule T3 of the migration plan states scale-2 `HALF_UP` for the whole
-money path, without exception. `GENERAL_ROUNDING` is therefore the only mode this
-module declares, and it governs `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy`
-and `monthlyInterest` alike. **No entry point takes a rounding mode**, so no call
-site can select a different one.
+This module declares **two** rounding modes, and which one applies is a property of
+the operation rather than of the caller:
 
-The baseline accrual truncates instead: the statement at
-[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field declared
-with two decimal places at line 168 and carries **no `ROUNDED` phrase** — and no
-statement anywhere in that program's 652 lines carries one either. A COBOL store
-into a fixed-scale item without `ROUNDED` discards the surplus digits.
+| Mode | Value | Operations it governs |
+|---|---|---|
+| `GENERAL_ROUNDING` | `HALF_UP` | `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy` |
+| `BASELINE_INTEREST_ROUNDING` | `DOWN` | `monthlyInterest` and nothing else |
 
-**Where the two behaviours part company.** On every vector the reference fixtures
-carry they agree, which is precisely why a test using only those vectors would not
-detect a wrong mode:
+**No entry point takes a rounding mode**, so no call site can select either one.
 
-| Balance | Annual rate | Quotient | This module | Reference truncation | Discriminating? |
+Assumptions: the split follows the reference source, and the asymmetry is the point.
+The baseline performs exactly one monetary computation and the accrual quotient is
+it — the statement at [`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient
+into a field declared with two decimal places at line 168 and carries **no `ROUNDED`
+phrase**, and no statement anywhere in that program's 652 lines carries one either.
+A COBOL store into a fixed-scale item without `ROUNDED` discards the surplus digits,
+which is truncation toward zero. The three general operations have no reference
+statement at all, so nothing constrains their mode and transformation rule T3's
+half up applies to them unopposed.
+
+**Where the two modes part company.** On every vector the reference fixtures carry
+they agree, which is precisely why a test using only those vectors would not detect
+a wrong mode:
+
+| Balance | Annual rate | Quotient | `monthlyInterest` | Half-up counterfactual | Discriminating? |
 |---|---|---|---|---|---|
 | `1000.00` | `25.00` | `20.8333…` | `20.83` | `20.83` | no |
 | `1000.00` | `2.50` | `2.0833…` | `2.08` | `2.08` | no |
-| `1000.00` | `2.71` | `2.2583…` | **`2.26`** | **`2.25`** | **yes** |
-| `1000.80` | `2.50` | `2.0850` exactly | **`2.09`** | **`2.08`** | **yes** |
+| `1000.00` | `2.71` | `2.2583…` | **`2.25`** | **`2.26`** | **yes** |
+| `1000.80` | `2.50` | `2.0850` exactly | **`2.08`** | **`2.09`** | **yes** |
+| `-1000.00` | `2.71` | `-2.2583…` | **`-2.25`** | **`-2.26`** | **yes** |
 
-The difference is **at most one cent**, and only where the quotient lands on or
-above a half cent. `MoneyTest` asserts both discriminating vectors against the API
-and against the reference arithmetic computed alongside it, so the cent is pinned
+`MoneyTest` asserts each discriminating vector three ways — against the API, against
+independently computed reference truncation, and against a half-up counterfactual
+that **must differ** — so the mode is pinned rather than described. The negative
+vector additionally asserts against a `FLOOR` counterfactual, because `DOWN` and
+`FLOOR` agree on every positive input and part company only there, and the
+exact-quotient claim is asserted with `RoundingMode.UNNECESSARY` so it throws rather
+than passing if a future edit makes the vector inexact.
+
+**Refactoring Rationale: this section described one mode and a divergence it
+accepted.** `monthlyInterest` reduced with `HALF_UP` and the resulting cent was
+registered as documented divergence `C-ROUNDING`. That disposition is withdrawn and
+the divergence is closed; the identifier survives only as a withdrawal record in
+[§7.5 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md).
+Reading rule T3's "one mode for the money path" as covering the accrual put the
+letter of a transformation rule above the requirement it exists to serve — the plan
+requires observable behaviour to be unchanged, names the exact interest formula
+among the rules that must be preserved, and admits a behavioural change only as an
+authorised divergence. The accrual is also one of the business rules the reference
+test suite asserts verbatim, so the cent was a parity failure in the most heavily
+asserted computation in the system. And it compounded: line 467 adds each reduced
+term into the account total and line 352 adds that total to the account balance, so
+a cent gained per transaction category reached the balance the next **inclusive**
+over-limit comparison is made against. What rule T3 actually forbids — binary
+floating point, and a caller-selectable mode — is still forbidden and still asserted
+mechanically.
+
+**Why there is still no mode parameter.** Alternatives Considered: keeping the mode
+on the accrual entry point so a parity caller could ask for truncation while other
+callers kept half up. Rejected because a selectable mode is a second money contract
+in disguise — two call sites computing the same accrual could disagree by a cent
+with nothing in either one signalling that they had chosen differently. Fixing the
+mode per operation yields the same arithmetic with none of that exposure.
+
+Trade-offs: two modes cost a reader having to know which operation is governed by
+which, where one mode cost nothing to explain and a cent in the one computation that
+matters most. The cost is paid down by there being exactly one operation on the
+truncating side, by each constant being named for the operation it governs rather
+than for a general policy, and by the discriminating vectors above being asserted
 rather than described.
-
-**Why there is no mode parameter.** Alternatives Considered: keeping the mode on
-the accrual entry point so a parity caller could ask for truncation. Rejected
-because a selectable mode is a second money contract in disguise — two call sites
-computing the same accrual could disagree by a cent with nothing in either one
-signalling that they had chosen differently. The reference truncation is preserved
-where it belongs, as documented divergence **`C-ROUNDING`** in
-[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md),
-with its measured vectors, rather than as an API a caller can reach.
 
 ---
 
@@ -1328,8 +1363,9 @@ need justifying.
 
 | Decision | Category or categories | What the comment must say |
 |---|---|---|
-| `Money` scale 2 with `HALF_UP`, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
-| The accrual carrying no rounding-mode parameter | `Alternatives Considered:` + `Trade-offs:` | Name the mode-taking form and reject it: a selectable mode is a second money contract in disguise, so two call sites could disagree by a cent unnoticed — see §5.3.1 and divergence `C-ROUNDING` |
+| `Money` scale 2, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
+| `GENERAL_ROUNDING` half up for general operations, `BASELINE_INTEREST_ROUNDING` truncation for the accrual | `Assumptions:` + `Trade-offs:` | State which operation each governs and why the accrual differs: the reference statement carries no `ROUNDED` phrase, and the three general operations have no reference statement at all — see §5.3.1 |
+| The accrual carrying no rounding-mode parameter | `Alternatives Considered:` + `Trade-offs:` | Name the mode-taking form and reject it: a selectable mode is a second money contract in disguise, so two call sites could disagree by a cent unnoticed — see §5.3.1 |
 | Money serialised as a JSON string | `Alternatives Considered:` | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
 | `ZonedDecimalCodec`'s explicit EBCDIC sign mode | `Assumptions:` | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
 | `PackedDecimalCodec` existing at all | `Assumptions:` | The ten base masters are zoned, not packed — two regimes, two codecs; packed appears only in `CVEXPORT.cpy` and the two authorization segments |

@@ -207,6 +207,25 @@ import java.util.List;
  * to the query and the subject it was issued for. The physical key described above still governs what
  * is sealed inside the token; it is simply no longer the token.
  *
+ * <p>Refactoring Rationale: backward availability is now its own component rather than being read off
+ * {@code firstKey}, and the change fixes a defect the earlier arrangement could not express. Every page
+ * that returned rows names its leading boundary, so deriving "a page precedes this one" from the
+ * presence of {@code firstKey} made every non-empty page -- the very first one included -- advertise a
+ * previous page. A client that honoured the advertisement received an empty page in place of the rows it
+ * was already showing, which is the opposite of what the reference does: at lines 1301 and 1302 of
+ * {@code app/cbl/COCRDLIC.cbl} a backward request from the first page redisplays that page and reports
+ * that no earlier record exists, rather than blanking the screen. The two questions are genuinely
+ * independent -- {@code firstKey} answers "where would I seek from", {@code hasPrevious} answers "is
+ * there anything there" -- and only the caller that ran the probe read can answer the second.
+ *
+ * <p>Trade-offs: the cost is a fifth component and a probe read in the backward direction on pages
+ * where a service previously performed none. That cost is bounded and deliberate: the probe is one row,
+ * it is the same device already used forward, and the alternative -- letting a client discover
+ * emptiness by requesting a page that does not exist -- spends a whole round trip and a screen repaint
+ * to learn the same fact. Services that genuinely cannot probe backward (a query whose ordering is not
+ * invertible) pass {@code false}, which understates availability and can never mislead a caller into a
+ * request that returns nothing.
+ *
  * @param <T> the element type of the rows this page carries; the envelope never inspects a row, so
  *     any type a service can serialise is admissible, and no reference-baseline entity is named here
  * @param items the rows of this page, in the query's ordering, never {@code null}; an exhausted page
@@ -227,15 +246,21 @@ import java.util.List;
  *     the page and observing whether that row exists, and never from any tally of how many rows or
  *     pages exist altogether; it is admitted as {@code true} only alongside a present
  *     {@code lastKey}, so a caller told to continue always holds the position to continue from
+ * @param hasPrevious whether a page precedes this one, established the same way in the other
+ *     direction -- by requesting one row before the page and observing whether that row exists -- and
+ *     never inferred from the presence of {@code firstKey}; it is admitted as {@code true} only
+ *     alongside a present {@code firstKey}, so a caller told it may step back always holds the
+ *     position to step back from
  */
 public record PageResponse<T>(
         List<T> items,
         String firstKey,
         String lastKey,
-        boolean hasNext) {
+        boolean hasNext,
+        boolean hasPrevious) {
 
     /**
-     * Validates and normalises the four components so that every instance in existence already obeys
+     * Validates and normalises the five components so that every instance in existence already obeys
      * this type's cursor contract.
      *
      * <p>Refactoring Rationale: the baseline had nowhere to put a check like this. Its cursor lived
@@ -253,14 +278,17 @@ public record PageResponse<T>(
      *     mean absent, all three of which are stored as {@code null}
      * @param hasNext whether a further page follows, which is accepted as given because only the
      *     caller that issued the query beyond the page can know it
+     * @param hasPrevious whether a page precedes this one, accepted as given for the same reason and
+     *     never derived from {@code firstKey}, whose presence answers a different question
      * @throws NullPointerException if {@code items} is {@code null}, or if any element of
      *     {@code items} is {@code null}; a {@code null} row would serialise as a hole in the page and
      *     leave a caller unable to tell an absent row from a row of absent values
      * @throws IllegalArgumentException if {@code items} is non-empty while either boundary token is
      *     absent, because every returned page must be navigable away from; if {@code hasNext} is
-     *     {@code true} while {@code lastKey} is absent, because that is the one state a caller cannot
-     *     act on -- told to continue with nowhere to continue from; or if either present token is not
-     *     a token sealed by {@link CursorToken}
+     *     {@code true} while {@code lastKey} is absent, or {@code hasPrevious} is {@code true} while
+     *     {@code firstKey} is absent, because those are the two states a caller cannot act on -- told
+     *     to move with nowhere to move from; or if either present token is not a token sealed by
+     *     {@link CursorToken}
      */
     public PageResponse {
         // Alternatives Considered: letting a null list through and treating it as an empty page was
@@ -324,6 +352,21 @@ public record PageResponse<T>(
                             + "from");
         }
 
+        // Refactoring Rationale: the backward direction gets the same one-sided implication the
+        //   forward direction has, and for the same reason. What is refused is reporting an earlier
+        //   page without the position a backward request is issued from. What is admitted -- a
+        //   present firstKey while hasPrevious is false -- is the FIRST page of every set, and
+        //   admitting it is the whole point of the new component: the earlier arrangement had to read
+        //   backward availability off firstKey, so the first page could not say "you are at the
+        //   beginning" without also erasing the position a later page would need.
+        if (hasPrevious && firstKey == null) {
+            throw new IllegalArgumentException(
+                    "hasPrevious=true requires a firstKey, because an earlier page must be reported "
+                            + "together with the position a backward request is issued from; reporting "
+                            + "one without the other tells a caller it may step back with nowhere to "
+                            + "step back from");
+        }
+
         // Refactoring Rationale: both cursor components are now required to be SEALED tokens, and
         //   this check is the enforcement this type previously lacked. It described them as opaque from
         //   the outset and nothing held a caller to it, so the raw key a keyset query
@@ -382,10 +425,10 @@ public record PageResponse<T>(
      * @param <T> the element type the caller's page is declared over, inferred from the assignment
      *     context, so that an exhausted page composes with a populated one of the same type
      * @return an exhausted page whose rows are empty and unmodifiable, whose two boundary tokens are
-     *     both {@code null}, and which reports no further page
+     *     both {@code null}, and which reports neither a further page nor an earlier one
      */
     public static <T> PageResponse<T> empty() {
-        return new PageResponse<>(List.of(), null, null, false);
+        return new PageResponse<>(List.of(), null, null, false, false);
     }
 
     /**
@@ -401,31 +444,31 @@ public record PageResponse<T>(
      * two tokens crossed would produce an envelope that pages in the wrong direction while remaining
      * perfectly valid.</p>
      *
-     * <p>Trade-offs: forward availability stays a parameter rather than being derived from the tokens,
-     * because it is not knowable from the page's own contents: it comes from the probe read -- one row
-     * beyond the page, per the two cited programs -- which only the caller that issued the query
-     * performed. Backward availability takes no parameter at all, because on a page that returned rows
-     * a backward step is always expressible from {@code firstKey}, which this factory requires;
-     * whether that step yields rows is a question only the store can answer, and the reference answers
-     * it the same way, reporting a further page on its backward path unconditionally at line 1287 of
-     * {@code app/cbl/COCRDLIC.cbl}.</p>
+     * <p>Trade-offs: BOTH availability flags are parameters rather than being derived from the tokens,
+     * because neither is knowable from the page's own contents: each comes from a probe read -- one row
+     * beyond the page in the direction concerned, per the two cited programs -- which only the caller
+     * that issued the query performed. An earlier revision took no backward parameter and derived
+     * backward availability from the required {@code firstKey}, which made every page including the
+     * first advertise an earlier page that did not exist; that is corrected here, and the type-level
+     * rationale records what the client saw when it followed the false advertisement.</p>
      *
      * @param <T> the element type of the rows this page carries
      * @param items the rows returned, which must not be {@code null} and must not be empty; use
-     *     {@link #empty()} or {@link #ofFilteredEmpty(String, String)} for a page with no rows
+     *     {@link #empty()} or {@link #ofFilteredEmpty(String, String, boolean)} for a page with no rows
      * @param firstKey the token identifying the first returned row, which must be present
      * @param lastKey the token identifying the last returned row, which must be present
      * @param hasNext whether the probe read found a row beyond this page
+     * @param hasPrevious whether the probe read found a row before this page
      * @return a page carrying the rows supplied, naming both of its boundaries, and reporting a further
-     *     page exactly as {@code hasNext} states
+     *     page and an earlier page exactly as the two flags state
      * @throws NullPointerException if {@code items} is {@code null} or contains a {@code null} element
      * @throws IllegalArgumentException if either boundary token is absent while rows are present, or if
-     *     {@code hasNext} is {@code true} while {@code lastKey} is absent, both of which the canonical
-     *     constructor rejects
+     *     {@code hasNext} is {@code true} while {@code lastKey} is absent, or {@code hasPrevious} is
+     *     {@code true} while {@code firstKey} is absent, all of which the canonical constructor rejects
      */
     public static <T> PageResponse<T> ofRows(
-            List<T> items, String firstKey, String lastKey, boolean hasNext) {
-        return new PageResponse<>(items, firstKey, lastKey, hasNext);
+            List<T> items, String firstKey, String lastKey, boolean hasNext, boolean hasPrevious) {
+        return new PageResponse<>(items, firstKey, lastKey, hasNext, hasPrevious);
     }
 
     /**
@@ -454,19 +497,25 @@ public record PageResponse<T>(
      *     {@code null} when nothing remains ahead; a further page is reported exactly when this is
      *     present
      * @param backwardPosition the key at which the backward scan stopped, stored as {@code firstKey}, or
-     *     {@code null} when nothing remains behind; a backward step is expressible exactly when this is
-     *     present
+     *     {@code null} when nothing remains behind; it is where a backward request would be issued from
+     * @param hasPrevious whether an earlier page exists, which the caller establishes the same way it
+     *     establishes the forward answer and which is NOT inferred from {@code backwardPosition}: on a
+     *     page whose every row was filtered away, holding a position to seek from says nothing about
+     *     whether a row waits there
      * @return a page carrying no rows and whichever continuation positions were supplied, in the two
      *     boundary components
      * @throws IllegalArgumentException if either supplied position is not a token sealed by
-     *     {@link CursorToken}, which the canonical constructor rejects
+     *     {@link CursorToken}, or if {@code hasPrevious} is {@code true} while {@code backwardPosition}
+     *     is absent, both of which the canonical constructor rejects
      */
-    public static <T> PageResponse<T> ofFilteredEmpty(String forwardPosition, String backwardPosition) {
+    public static <T> PageResponse<T> ofFilteredEmpty(
+            String forwardPosition, String backwardPosition, boolean hasPrevious) {
         return new PageResponse<>(
                 List.of(),
                 backwardPosition,
                 forwardPosition,
-                absentWhenBlank(forwardPosition) != null);
+                absentWhenBlank(forwardPosition) != null,
+                hasPrevious);
     }
 
     /**

@@ -74,10 +74,12 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # Floor: this infrastructure package needs at least provider 5.81.0,
-    # which is the first release accepting a zero minimum capacity on Aurora
-    # Serverless v2 -- relied on by the sibling aurora-postgresql module to
-    # let the dev environment scale to zero. 6.56 clears that comfortably.
+    # Floor: this infrastructure package needs at least provider 5.81.0. Two
+    # releases set that: 5.80.0 first accepted a zero minimum capacity on Aurora
+    # Serverless v2, and 5.81.0 added the auto-pause-seconds argument a zero
+    # minimum then makes mandatory -- both relied on by the sibling
+    # aurora-postgresql module to let the dev environment scale to zero, so the
+    # floor is the later of the two. 6.56 clears that comfortably.
     # Every module in the package declares this same constraint so that a
     # root resolves one `aws` provider version for its entire module graph
     # and a single lock file per root stays authoritative.

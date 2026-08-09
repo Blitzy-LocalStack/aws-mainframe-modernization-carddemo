@@ -1,11 +1,12 @@
 package com.carddemo.card.service;
 
 import com.carddemo.card.domain.Card;
+import com.carddemo.card.dto.AdminCardDetail;
 import com.carddemo.card.dto.CardDetail;
 import com.carddemo.card.mapper.CardMapper;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,18 +33,28 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Assumptions: the masked rendering is present alongside the full one, which the contract requires
  * so that a client holding one type renders either response. That is why this class composes the
  * ordinary detail shape and adds one member rather than composing a different shape.</p>
+ *
+ * <h2>Why this service is the only administrative read</h2>
+ *
+ * <p>Refactoring Rationale: this bean existed and nothing called it. The controller behind the
+ * administrative route reached a second implementation on {@code CardListService} instead, so the
+ * disclosure path this class documents at length was not the path that ran, and the class-level claim
+ * above -- that only the controller method behind the administrative route holds a reference to this
+ * type -- was false in the direction that matters: no controller method held one at all. The controller
+ * is now wired here and the duplicate on the list service is withdrawn, so there is exactly one
+ * implementation of the disclosure and the reasoning on this class describes code that executes.</p>
  */
 @Service
 public class CardAdminViewService {
 
     /**
-     * The response member carrying the unmasked primary account number.
+     * The logger this service records each disclosure through.
      *
-     * <p>Assumptions: the name matches the {@code cardNumber} property of the {@code AdminCardDetail}
-     * schema in {@code openapi/card-api.yaml}. It is a constant rather than a literal at the point of
-     * use so that the contract name and the emitted name have one source.</p>
+     * <p>Assumptions: a disclosure is the one event in this context worth an INFO record, because it is
+     * the only response that renders a full primary account number and an audit reader has to be able to
+     * establish that it happened.</p>
      */
-    public static final String CARD_NUMBER_MEMBER = "cardNumber";
+    private static final Logger LOG = LoggerFactory.getLogger(CardAdminViewService.class);
 
     /**
      * The resolver that turns a selector into a stored row.
@@ -72,12 +83,20 @@ public class CardAdminViewService {
     /**
      * Reads the card a selector stands for, with the account number rendered in full.
      *
-     * <p>Assumptions: the response is assembled as an insertion-ordered map rather than as a record.
-     * The contract composes {@code AdminCardDetail} as the shared core plus one member, and a record
-     * would have to restate all six core members in a second type -- two shapes that must agree, which
-     * is how they come to disagree. Building from the core shape means a member added to
-     * {@link CardDetail} appears here without an edit, and the insertion order keeps the rendered
-     * member order equal to the core shape's own.</p>
+     * <p>Refactoring Rationale: the response was assembled as an insertion-ordered
+     * {@code Map<String, Object>}, defended on the grounds that a record would have to restate the six
+     * core members in a second type. That second type already exists: {@link AdminCardDetail} is what
+     * {@code openapi/card-api.yaml} publishes for this operation and what the controller method returns,
+     * so the map was not avoiding a duplicate shape -- it WAS the duplicate, and the one of the two that
+     * no schema described. A map also cannot carry the contract: {@code Map<String, Object>} documents
+     * as a free-form object, so a member renamed or dropped here would not fail any contract check.
+     * Returning the record restores one shape with one schema, and the member order the map's insertion
+     * order was protecting is now the record's component order, which is fixed by its declaration.</p>
+     *
+     * <p>Assumptions: the disclosure is recorded by the SELECTOR and never by the number it stands for.
+     * An audit reader needs to know that a disclosure happened and which row it concerned; writing the
+     * disclosed value would put it in a durable record and make the log a second copy of exactly what
+     * the route's authority exists to restrict.</p>
      *
      * @param selector the opaque selector this service minted for the card; must not be {@code null}
      * @return the card's core state plus its full sixteen-digit account number, never {@code null}
@@ -88,28 +107,16 @@ public class CardAdminViewService {
      * @throws NullPointerException if {@code selector} is {@code null}
      */
     @Transactional(readOnly = true)
-    public Map<String, Object> viewForAdministrator(String selector) {
+    public AdminCardDetail viewForAdministrator(String selector) {
         Objects.requireNonNull(selector, "selector must not be null");
 
         Card card = this.cardView.loadBySelector(selector);
         CardDetail core = this.mapper.toDetail(card);
 
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("key", core.key());
-        response.put("displayCardNumber", core.displayCardNumber());
-        response.put("accountId", core.accountId());
-        response.put("embossedName", core.embossedName());
-        response.put("expirationDate", core.expirationDate());
-        response.put("activeStatus", core.activeStatus());
-        response.put("version", core.version());
+        LOG.info("event=card.admin.disclosed key={}", core.key());
 
-        // WHY : Assumptions: the disclosure is the LAST member added, so the rendered order is the core
-        //       shape's order followed by the one administrative addition. That ordering is what makes
-        //       the two responses diffable against each other in a review or a capture: the shared
-        //       prefix is byte-identical and the difference is a single trailing member, rather than one
-        //       member interleaved somewhere a reader has to search for.
-        response.put(CARD_NUMBER_MEMBER, this.mapper.discloseCardNumberToAdministrator(card));
-
-        return response;
+        return new AdminCardDetail(core.key(),
+                this.mapper.discloseCardNumberToAdministrator(card), core.accountId(),
+                core.embossedName(), core.expirationDate(), core.activeStatus(), core.version());
     }
 }

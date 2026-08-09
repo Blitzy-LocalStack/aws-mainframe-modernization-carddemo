@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -118,8 +119,12 @@ class InquiryMessageListenerTest {
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("m-1").build());
 
+        // Assumptions: the transaction manager is substituted, so the read template runs its callback and
+        //   commits nothing. What the cases below assert is which store is touched and in what order, not
+        //   that a database committed, and a read-only lookup has nothing to commit in any case.
         this.listener = new InquiryMessageListener(this.accounts, new AccountInquiryReplyMapper(),
-                this.sqs, REPLY_QUEUE, ERROR_QUEUE, Clock.fixed(NOW, ZoneOffset.UTC));
+                this.sqs, REPLY_QUEUE, ERROR_QUEUE, Clock.fixed(NOW, ZoneOffset.UTC),
+                mock(PlatformTransactionManager.class));
     }
 
     /**
@@ -318,7 +323,15 @@ class InquiryMessageListenerTest {
         assertThat(captureSend().messageAttributes())
                 .containsOnlyKeys(InquiryMessageListener.ATTRIBUTE_CONTENT_TYPE)
                 .extractingByKey(InquiryMessageListener.ATTRIBUTE_CONTENT_TYPE)
-                .satisfies(value -> assertThat(value.stringValue()).isEqualTo("text/csv"));
+                // WHY : Refactoring Rationale: the expected value is text/plain where it was text/csv,
+                //   and the literal is written out here rather than read from the class under test so
+                //   that a change to the published media type fails this case instead of moving with it.
+                //   Nothing this listener publishes is comma-separated: the reply is the labelled
+                //   fixed-width block located by offset and framed to the declared message length, and a
+                //   consumer trusting a text/csv label would split on commas and find one field, or
+                //   would split a free-text value containing a comma into two. text/csv is reserved for
+                //   the authorization request and reply, which genuinely are comma-separated.
+                .satisfies(value -> assertThat(value.stringValue()).isEqualTo("text/plain"));
     }
 
     /**
@@ -494,12 +507,14 @@ class InquiryMessageListenerTest {
         AccountInquiryReplyMapper mapper = new AccountInquiryReplyMapper();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 
+        PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                " ", ERROR_QUEUE, clock))
+                " ", ERROR_QUEUE, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.reply-queue");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                REPLY_QUEUE, "", clock))
+                REPLY_QUEUE, "", clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.error-queue");
     }

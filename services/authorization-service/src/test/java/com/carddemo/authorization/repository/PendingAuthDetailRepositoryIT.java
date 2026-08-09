@@ -266,8 +266,26 @@ class PendingAuthDetailRepositoryIT {
     //       parent summary image carries, and the year-boundary children are documented as pairing
     //       with that parent, so the pairing is read out of the image rather than restated as a
     //       literal -- which is what makes the pairing itself assertable.
+    /** The account of the idempotency-lookup case, holding one authorization. */
+    private static final long IDEMPOTENCY_ACCOUNT = 10_000_000_211L;
+
+    /** The account of the batched presence-probe case, holding one authorization. */
+    private static final long PRESENCE_ACCOUNT = 10_000_000_212L;
+
     /** Account deliberately absent from the summary table, for the parentage refusal. */
     private static final long ORPHAN_ACCOUNT = 10_000_000_299L;
+
+    /** Account used by the insert-if-absent tolerance and refusal assertions. */
+    private static final long INSERT_IF_ABSENT_ACCOUNT = 10_000_000_211L;
+
+    /** Transaction identifier the first insert-if-absent row carries, fifteen characters as declared. */
+    private static final String FIRST_TRANSACTION_ID = "TXNIFA000000001";
+
+    /** Transaction identifier the taken-key attempt carries, so a merge would be visible. */
+    private static final String SECOND_TRANSACTION_ID = "TXNIFA000000002";
+
+    /** The uniqueness rule over the card and the acquirer transaction identifier. */
+    private static final String CARD_TRANSACTION_UNIQUE = "uq_pending_auth_detail_card_transaction";
 
     /** Customer identifier attached to every parent summary this class inserts. */
     private static final long CUSTOMER_ID = 451L;
@@ -657,6 +675,93 @@ class PendingAuthDetailRepositoryIT {
     }
 
     /**
+     * The insert-if-absent statement tolerates a taken key and refuses a taken card-and-transaction pair.
+     *
+     * <p>Purpose: the extract loader writes through one statement whose conflict target is the PRIMARY KEY,
+     * and that narrowness is the whole point. This table carries a second uniqueness rule --
+     * {@code uq_pending_auth_detail_card_transaction} -- and the two collisions mean different things: a
+     * repeated key is the ordinary duplicate the reference program counts and passes over at
+     * {@code cbl/PAUDBLOD.CBL} L329 to L331, whereas two distinct keys claiming one card-and-transaction
+     * pair means the extract disagrees with itself. Only an engine can show that one is absorbed and the
+     * other raised.
+     *
+     * <p>Assumptions: the taken-key attempt carries a DIFFERENT transaction identifier from the row already
+     * stored, so the assertion that nothing was merged can fail. Re-offering an identical row would satisfy
+     * an equality assertion whatever the statement did on conflict.
+     *
+     * <p>Assumptions: the third attempt varies the KEY and repeats the card and transaction identifier,
+     * which is the only combination that reaches the second constraint. It is asserted by the CONSTRAINT the
+     * engine names rather than by an exception arriving, because a duplicate key and a duplicate pair would
+     * be indistinguishable to an assertion that only required a failure -- and an implementation that had
+     * left the conflict target implicit would absorb the pair silently and fail no weaker assertion.
+     *
+     * @throws SQLException if the parent summary cannot be seeded, which is setup rather than the property
+     *     under test
+     */
+    @Test
+    @DisplayName("insert-if-absent absorbs a repeated key and refuses a repeated card-and-transaction pair")
+    void insertIfAbsentAbsorbsTheKeyConflictAndRefusesThePairConflict() throws SQLException {
+        Map<String, Object> fields = decode(bytes(CANONICAL));
+        insertParent(INSERT_IF_ABSENT_ACCOUNT);
+        TransactionTemplate commit = new TransactionTemplate(transactionManager);
+
+        PendingAuthDetail first = entity(fields, INSERT_IF_ABSENT_ACCOUNT, 24_100, 91_500_000,
+                FIRST_TRANSACTION_ID);
+        int freshWrite = commit.execute(status -> Integer.valueOf(
+                this.repository.insertDetailIfAbsent(first)));
+        assertThat(freshWrite).as("a fresh key is written and the statement says so").isEqualTo(1);
+
+        PendingAuthDetail sameKey = entity(fields, INSERT_IF_ABSENT_ACCOUNT, 24_100, 91_500_000,
+                SECOND_TRANSACTION_ID);
+        int takenKeyWrite = commit.execute(status -> Integer.valueOf(
+                this.repository.insertDetailIfAbsent(sameKey)));
+        assertThat(takenKeyWrite)
+                .as("a taken key writes no row, which is what the loader counts as already present")
+                .isEqualTo(0);
+        assertThat(read(() -> List.of(this.repository
+                .findById(new PendingAuthDetailKey(INSERT_IF_ABSENT_ACCOUNT, 24_100, 91_500_000))
+                .orElseThrow())))
+                .singleElement()
+                .extracting(PendingAuthDetail::getTransactionId)
+                .as("the conflict must merge nothing, so the first row's transaction identifier stands")
+                .isEqualTo(FIRST_TRANSACTION_ID);
+
+        PendingAuthDetail samePair = entity(fields, INSERT_IF_ABSENT_ACCOUNT, 24_100, 91_500_001,
+                FIRST_TRANSACTION_ID);
+        Throwable raised = catchThrowable(() -> commit.execute(status -> Integer.valueOf(
+                this.repository.insertDetailIfAbsent(samePair))));
+        assertThat(raised)
+                .as("a second key claiming one card-and-transaction pair is a different fault entirely")
+                .isNotNull();
+        assertThat(engineDetailOf(raised).getConstraint())
+                .as("the refusal must name the card-and-transaction rule, not be absorbed as a duplicate")
+                .isEqualTo(CARD_TRANSACTION_UNIQUE);
+    }
+
+    /**
+     * Unwraps a provider or framework failure down to the engine's own error detail.
+     *
+     * <p>Assumptions: the chain is walked rather than a fixed depth being unwrapped, because a repository
+     * call passes through the data-access translation layer and the provider before the driver's exception
+     * is reached, and how many frames that is belongs to those libraries rather than to this assertion.
+     *
+     * @param raised the failure a repository call produced; must not be {@code null}
+     * @return the engine's error detail, carrying both the state and the constraint name
+     * @throws AssertionError if no engine failure appears anywhere in the chain, which means the call
+     *     failed for a reason that is not a refusal and the case's own assertion would be misleading
+     */
+    private static ServerErrorMessage engineDetailOf(Throwable raised) {
+        for (Throwable candidate = raised; candidate != null; candidate = candidate.getCause()) {
+            if (candidate instanceof PSQLException engineFailure) {
+                ServerErrorMessage detail = engineFailure.getServerErrorMessage();
+                assertThat(detail).as("the refusal carried no server error detail").isNotNull();
+                return detail;
+            }
+        }
+        throw new AssertionError("no engine failure in the chain of " + raised);
+    }
+
+    /**
      * Saves entities in one transaction and returns nothing.
      *
      * <p>Assumptions: a template is used rather than a transactional annotation on the test method,
@@ -678,6 +783,21 @@ class PendingAuthDetailRepositoryIT {
      * @return whatever that call returned, never {@code null}
      */
     private List<PendingAuthDetail> read(Supplier<List<PendingAuthDetail>> read) {
+        return new TransactionTemplate(transactionManager).execute(status -> read.get());
+    }
+
+    /**
+     * Runs one single-row read inside a transaction and hands back what it found.
+     *
+     * <p>Assumptions: this exists beside the list-returning helper rather than replacing it with one
+     * generic helper, because a generic return type would leave the assertion entry point's overloads
+     * ambiguous at every call site -- the lambda would have no target type. Two narrow helpers cost one
+     * method and remove that entirely.
+     *
+     * @param read the read to run
+     * @return whatever it found, which may be empty
+     */
+    private Optional<PendingAuthDetail> readOne(Supplier<Optional<PendingAuthDetail>> read) {
         return new TransactionTemplate(transactionManager).execute(status -> read.get());
     }
 
@@ -1323,6 +1443,153 @@ class PendingAuthDetailRepositoryIT {
 
         assertThat(rowCount(MILLISECOND_ACCOUNT)).as("both rows survived the composite key")
                 .isEqualTo(2);
+    }
+
+    /**
+     * Paging backward from a cursor returns strictly newer rows, oldest first, and never the cursor row.
+     *
+     * <p>Purpose: this is the backward half of the browse, and it was the one custom read on this
+     * repository with no live coverage at all. Its ordering is the REVERSE of the forward read's --
+     * ascending, so that the rows nearest the cursor arrive first and the caller reverses the retained
+     * window -- and a query that returned the newest rows of the account instead would still return
+     * newer rows and still be strictly bounded, so the ordering has to be asserted rather than assumed.
+     *
+     * <p>Refactoring Rationale: this case and the three below are additions. Before them the class
+     * covered the forward read, its look-ahead and its exhaustion, while the backward read, the
+     * idempotency lookup and the batched presence probe were exercised only against mocks -- and a mock
+     * answers whatever it was told to, so a predicate that admitted the cursor row, an ordering that ran
+     * the wrong way and a probe that answered rows it was never asked about were all invisible.
+     *
+     * <p>Assumptions: the four seeded rows share one Julian date, so the strictness this asserts is
+     * strictness on the TIME component of the composite. The equal-date-different-time boundary is the
+     * one the query's second disjunct exists for, and it is where an implementation written with
+     * {@code >=} instead of {@code >} shows itself; the equal-date-EQUAL-time case is the cursor row and
+     * is asserted absent in the same reading.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("paging backward from a cursor returns strictly newer rows, oldest of them first")
+    void pagingBackwardFromACursorReturnsStrictlyNewerRows() {
+        List<Integer> newestFirst = seedFourChildren();
+        int cursorTime = newestFirst.get(2);
+
+        List<PendingAuthDetail> previous = read(() -> repository.findNewerThan(PAGING_ACCOUNT, 24_110,
+                cursorTime, Limit.of(4)));
+
+        assertThat(previous.stream().map(row -> row.getId().getAuthTime()).toList())
+                .as("the rows strictly newer than the cursor, ascending so the nearest arrives first")
+                .containsExactly(newestFirst.get(1), newestFirst.get(0));
+        assertThat(previous.stream().map(row -> row.getId().getAuthTime()))
+                .as("the cursor row itself is excluded, the bound being strict")
+                .doesNotContain(cursorTime);
+        assertThat(previous.stream().map(row -> row.getId().getAuthTime()))
+                .as("and so is the row older than it")
+                .doesNotContain(newestFirst.get(3));
+    }
+
+    /**
+     * The backward read is bounded by its limit and answers nothing at the newest row.
+     *
+     * <p>Purpose: two properties in one case, because each is a different way for the same query to be
+     * wrong at a page boundary. An unbounded read would return the whole account on a first backward
+     * step, and a read that answered rows at the newest cursor would let the browse walk past the top of
+     * the account and report a previous page that does not exist.
+     *
+     * <p>Assumptions: exhaustion is an EMPTY result rather than a refusal, which is what lets the caller
+     * report the boundary on the screen. The reference program does the same: it sets its end-of-data
+     * condition and shows a message rather than abandoning the screen.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the backward read honours its limit and answers nothing at the newest row")
+    void theBackwardReadIsBoundedAndEmptyAtTheNewestRow() {
+        List<Integer> newestFirst = seedFourChildren();
+
+        List<PendingAuthDetail> boundedToOne = read(() -> repository
+                .findNewerThan(PAGING_ACCOUNT, 24_110, newestFirst.get(3), Limit.of(1)));
+        List<PendingAuthDetail> atTheTop = read(() -> repository
+                .findNewerThan(PAGING_ACCOUNT, 24_110, newestFirst.get(0), Limit.of(4)));
+
+        assertThat(boundedToOne.stream().map(row -> row.getId().getAuthTime()).toList())
+                .as("three rows are newer than the oldest cursor and the limit takes the nearest one")
+                .containsExactly(newestFirst.get(2));
+        assertThat(atTheTop)
+                .as("nothing is newer than the newest row, so the backward step is exhausted")
+                .isEmpty();
+    }
+
+    /**
+     * The idempotency lookup finds a stored authorization by its card and transaction pair.
+     *
+     * <p>Purpose: this is the read that makes a redelivered request republish its recorded answer
+     * instead of deciding again, so what it has to get right is that BOTH components qualify the row. A
+     * query matching on the card alone would treat every later authorization of one card as a redelivery
+     * of the first and answer a stale decision; one matching on the transaction alone would collide
+     * across cards, whose identifiers are the external authorizer's and not unique here.
+     *
+     * <p>Assumptions: the two negative readings vary ONE component each from a pair that is known to
+     * match. Varying both at once would leave a query that ignored one of them still passing.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the idempotency lookup qualifies on the card and the transaction together")
+    void theIdempotencyLookupQualifiesOnBothComponents() {
+        Map<String, Object> fields = decode(bytes(CANONICAL));
+        insertParent(IDEMPOTENCY_ACCOUNT);
+        PendingAuthDetail stored = entity(fields, IDEMPOTENCY_ACCOUNT, decodedDate(fields),
+                decodedTime(fields), text(fields, "PA-TRANSACTION-ID"));
+        saveAll(List.of(stored));
+        String cardNum = stored.getCardNum();
+        String transactionId = stored.getTransactionId();
+
+        Optional<PendingAuthDetail> found = readOne(() -> repository
+                .findByCardNumAndTransactionId(cardNum, transactionId));
+        Optional<PendingAuthDetail> otherTransaction = readOne(() -> repository
+                .findByCardNumAndTransactionId(cardNum, "TX0000000009999"));
+        Optional<PendingAuthDetail> otherCard = readOne(() -> repository
+                .findByCardNumAndTransactionId("4000000000000000", transactionId));
+
+        assertThat(found).as("the stored pair is found").isPresent();
+        assertThat(found.orElseThrow().getId()).isEqualTo(stored.getId());
+        assertThat(otherTransaction)
+                .as("the same card with another transaction is a different authorization")
+                .isEmpty();
+        assertThat(otherCard)
+                .as("the same transaction on another card is a different authorization")
+                .isEmpty();
+    }
+
+    /**
+     * The batched presence probe answers exactly the keys it was handed that exist.
+     *
+     * <p>Purpose: this is the query that replaced one probe per record in the extract load, so its
+     * contract is a subset of its argument: a stored key returned, an absent key not, and no key
+     * returned that was not asked about. A probe that answered every key handed in would make the load
+     * skip every record as already present, which is silent data loss rather than a failure.
+     *
+     * <p>Assumptions: the absent key differs from the stored one in its TIME component alone, so the
+     * probe is shown to compare the whole composite rather than the account it shares.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the batched presence probe answers only the keys that exist")
+    void theBatchedPresenceProbeAnswersOnlyStoredKeys() {
+        Map<String, Object> fields = decode(bytes(CANONICAL));
+        insertParent(PRESENCE_ACCOUNT);
+        PendingAuthDetail stored = entity(fields, PRESENCE_ACCOUNT, decodedDate(fields),
+                decodedTime(fields), text(fields, "PA-TRANSACTION-ID"));
+        saveAll(List.of(stored));
+        PendingAuthDetailKey absent = new PendingAuthDetailKey(PRESENCE_ACCOUNT,
+                stored.getId().getAuthDate(), stored.getId().getAuthTime() + 1);
+
+        List<PendingAuthDetailKey> present = new TransactionTemplate(transactionManager).execute(
+                status -> repository.findExistingIds(List.of(stored.getId(), absent)));
+
+        assertThat(present).containsExactly(stored.getId());
     }
 
     /**

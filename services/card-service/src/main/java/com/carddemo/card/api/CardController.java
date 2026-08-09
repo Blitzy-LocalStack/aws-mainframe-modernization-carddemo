@@ -6,12 +6,16 @@ import com.carddemo.card.dto.CardLookupRequest;
 import com.carddemo.card.dto.CardPageQuery;
 import com.carddemo.card.dto.CardSummary;
 import com.carddemo.card.dto.CardUpdateRequest;
+import com.carddemo.card.service.CardAdminViewService;
 import com.carddemo.card.service.CardListService;
 import com.carddemo.card.service.CardUpdateService;
+import com.carddemo.card.service.CardViewService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.web.PageResponse;
 import jakarta.validation.Valid;
+import java.security.Principal;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import org.springframework.http.MediaType;
@@ -194,6 +198,22 @@ public class CardController {
     /** Serves the browse, the two detail reads and the lookup. */
     private final CardListService reads;
 
+    /**
+     * Serves the two masked single-card reads.
+     *
+     * <p>Assumptions: this is the transcription of the reference detail program, so it and not the browse
+     * service owns the field-state gates and the verbatim sentences those reads report.</p>
+     */
+    private final CardViewService views;
+
+    /**
+     * Serves the one read that renders a full primary account number.
+     *
+     * <p>Assumptions: the reference is held as its own type rather than reached through {@link #views},
+     * so the disclosure is visible in this class's wiring instead of hidden behind an argument.</p>
+     */
+    private final CardAdminViewService adminViews;
+
     /** Serves the one edit this context publishes. */
     private final CardUpdateService writes;
 
@@ -205,13 +225,26 @@ public class CardController {
      * argument here rather than on first use is what makes a wiring mistake a startup failure naming the
      * missing collaborator, instead of a request-time failure naming a line inside a handler.</p>
      *
-     * @param reads the service serving the browse, the detail reads and the lookup; must not be
-     *     {@code null}
+     * <p>Refactoring Rationale: two collaborators became four. The single-card reads were served by
+     * methods on the browse service, while {@code CardViewService} and {@code CardAdminViewService} --
+     * the transcriptions of the reference detail program, carrying its field-state gates and its verbatim
+     * sentences -- had no caller at all. The two were not equivalent: the browse service answered a
+     * card-number miss with the ACCOUNT-path sentence rather than the search-condition one, so the wrong
+     * message reached a caller. Wiring the view services and withdrawing the duplicates leaves one
+     * implementation of each read, and it is the implementation whose messages match the reference.</p>
+     *
+     * @param reads the service serving the browse; must not be {@code null}
+     * @param views the service serving the two masked single-card reads; must not be {@code null}
+     * @param adminViews the service serving the one read that discloses a full account number; must not
+     *     be {@code null}
      * @param writes the service serving the edit; must not be {@code null}
-     * @throws NullPointerException if either argument is {@code null}
+     * @throws NullPointerException if any argument is {@code null}
      */
-    public CardController(CardListService reads, CardUpdateService writes) {
+    public CardController(CardListService reads, CardViewService views,
+            CardAdminViewService adminViews, CardUpdateService writes) {
         this.reads = Objects.requireNonNull(reads, "reads");
+        this.views = Objects.requireNonNull(views, "views");
+        this.adminViews = Objects.requireNonNull(adminViews, "adminViews");
         this.writes = Objects.requireNonNull(writes, "writes");
     }
 
@@ -281,18 +314,42 @@ public class CardController {
      * {@code docs/architecture/cobol-to-service-traceability.md}, and this operation's own page notices
      * are the separate ones {@link CardListService#pageMessage(PageResponse)} carries.
      *
+     * <p>Assumptions: the authenticated caller is accepted as a {@link Principal} and passed to the read
+     * service, because a cursor of this browse is bound to the caller it was issued to and to the
+     * direction it was issued for. This parameter is NOT part of the published operation and adding it
+     * changed nothing in {@code openapi/card-api.yaml}: the framework resolves it from the security
+     * context established by the filter chain, so it travels in no body, no query string, no path segment
+     * and no header a client controls. A rationale previously recorded on the read service claimed the
+     * opposite -- that carrying a subject was "published in openapi/card-api.yaml and is not this class's
+     * to change alone" -- and it was wrong twice over, since the contract had already published the
+     * direction binding this enables.
+     *
+     * <p>Assumptions: the principal is dereferenced without a null check, and that is safe rather than
+     * optimistic. This module's {@code SecurityConfig} ends in {@code anyRequest().denyAll()} and admits
+     * this path only to a named group, so an unauthenticated request is refused by the chain and never
+     * reaches this method. A defensive branch here would be unreachable code standing in for a
+     * configuration guarantee.
+     *
      * @param query the criteria -- an optional account narrowing, an optional cursor and an optional
      *     direction. An absent body lists the whole collection one page at a time, which is the list
      *     screen's initial state
-     * @return one page of masked summaries, at most seven, with its boundary cursors and its
-     *     further-page indicator; never {@code null}
+     * @param principal the authenticated caller, supplied by the filter chain; its name is what every
+     *     cursor this page mints is bound to, so a cursor cannot be carried between callers
+     * @return one page of masked summaries, at most seven, with its boundary cursors and both
+     *     availability indicators; never {@code null}
      * @throws ClientInputException if the account narrowing is outside the published domain, or the
-     *     cursor is not one this browse sealed, either of which the shared advice renders as HTTP 400
+     *     cursor is not one this browse sealed for this caller, this narrowing and this direction,
+     *     either of which the shared advice renders as HTTP 400
      */
+    @OnlineWriteGateExempt(reason =
+            "A paged READ of the card master. It is a POST because its narrowing carries an account"
+            + " identifier and its position carries a sealed cursor, neither of which may appear in a"
+            + " request line. Browsing cards changes nothing, so it stays available while the window"
+            + " is closed; the card update on this same controller is a PUT and is not exempt.")
     @PostMapping(path = SEARCH_PATH, consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public PageResponse<CardSummary> listCards(
-            @Valid @RequestBody(required = false) CardPageQuery query) {
+            @Valid @RequestBody(required = false) CardPageQuery query, Principal principal) {
 
         CardPageQuery criteria = query == null ? EMPTY_QUERY : query;
 
@@ -318,8 +375,14 @@ public class CardController {
         //       that minted a token knows which of those it holds, so parsing, validating the shape or
         //       rebuilding one here would bind this class to a representation it does not own, and a
         //       refusal raised from a guess would be indistinguishable from a genuine one.
+        // WHY : Assumptions: the authenticated name is taken from the security context rather than from
+        //       the request body, and it is what binds every cursor this page mints. A member on the body
+        //       was rejected outright: a caller supplying its own subject would be choosing the scope its
+        //       cursors are checked against, which is the opposite of a check. The filter chain has
+        //       already established the name by the time this method runs, so no cost attaches to using
+        //       it, and the framework raises before the handler if it is absent.
         return this.reads.list(account, criteria.cursor(),
-                DIRECTION_PREVIOUS.equals(criteria.direction()));
+                DIRECTION_PREVIOUS.equals(criteria.direction()), principal.getName());
     }
 
     /**
@@ -373,11 +436,16 @@ public class CardController {
      * @throws NoSuchElementException if the number is well formed but names no card, which the shared
      *     advice renders as HTTP 404
      */
+    @OnlineWriteGateExempt(reason =
+            "A READ of one card, a POST so that the sixteen-digit card number travels in a request"
+            + " body instead of a path segment. The number is the one identifier in this migration"
+            + " that must never reach an access record, which is why the read is shaped this way and"
+            + " why it needs an exemption at all.")
     @PostMapping(path = LOOKUP_PATH, consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public CardDetail lookupCard(@Valid @RequestBody CardLookupRequest request) {
 
-        return this.reads.lookup(request.cardNumber());
+        return this.views.viewByCardNumber(request.cardNumber());
     }
 
     /**
@@ -407,7 +475,7 @@ public class CardController {
     @GetMapping(path = CARD_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
     public CardDetail getCard(@PathVariable(name = "cardKey") String cardKey) {
 
-        return this.reads.readDetail(cardKey);
+        return this.views.viewBySelector(cardKey);
     }
 
     /**
@@ -484,6 +552,6 @@ public class CardController {
     @GetMapping(path = ADMIN_CARD_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
     public AdminCardDetail getAdminCardDetail(@PathVariable(name = "cardKey") String cardKey) {
 
-        return this.reads.readAdminDetail(cardKey);
+        return this.adminViews.viewForAdministrator(cardKey);
     }
 }

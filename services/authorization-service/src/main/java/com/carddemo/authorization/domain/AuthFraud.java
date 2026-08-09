@@ -140,14 +140,19 @@ import org.hibernate.type.SqlTypes;
  * also leaves room for the return description to say something the field declaration does not, such as
  * which values are absent on a row this type's own factory did not build.
  *
- * <p>Trade-offs: sixteen of the twenty-six columns are mapped but have no accessor, so this type stores
- * more than it publishes. The compromise is deliberate: the columns exist because the table has them and
- * the snapshot has to be written whole, whereas an accessor exists only where a caller reads one, and the
- * ones present are the identity, the fraud state and date, the two amounts, the acquirer transaction
- * identifier, the merchant name and the two identifiers the marking flow supplies. Publishing all
- * twenty-six would add surface no caller exercises, and each addition would then have to be kept
- * documented for its own sake. The cost is that a future reader wanting, say, the merchant city has to add
- * the accessor and say why, which is the point at which that need gets recorded rather than assumed.
+ * <p>Refactoring Rationale: every one of the twenty-six columns now has an accessor, and sixteen of them
+ * did not. The paragraph that stood here recorded the narrower surface as deliberate and set the
+ * discipline for widening it -- add the accessor and say why -- so this is that reason, written where the
+ * paragraph asked for it. The need is a single caller:
+ * {@code repository/AuthFraudRepository.insertFraudRowIfAbsent} binds this row's twenty-six values into a
+ * conflict-absorbing insert by expression, and an expression can only read a PUBLIC property. Two
+ * alternatives were available and both were worse. Binding twenty-six positional method parameters instead
+ * would put the column-to-field correspondence in a second place, in the one form -- positional -- where
+ * two columns of the same type transposed against each other compile, bind and write a real but wrong row.
+ * Binding from the AUTHORIZATION rather than from this projection would leave this type's own factory with
+ * no production caller, so the correspondence would live in the statement and the factory would become
+ * dead code carrying the documentation for it. Publishing the accessors keeps exactly one correspondence,
+ * the one in {@link #from} below.
  *
  * <p>Alternatives Considered: an optimistic-lock version column on this row, of the kind the migration
  * does place on the account, customer and card rows in other services. Declined on two grounds. Those
@@ -256,8 +261,11 @@ public class AuthFraud {
      * <p>Assumptions: exact fixed point at scale two, and never an approximate binary numeric type.
      * {@code ddl/AUTHFRDS.ddl} L12 declares {@code DECIMAL(12,2)}, which the target carries as
      * {@code NUMERIC(12,2)}; arithmetic on the value belongs to
-     * {@code com.carddemo.common.money.Money}, which rounds half up at scale two, and the value reaches a
-     * caller as a JSON string through {@code com.carddemo.common.money.MoneyModule} so that no client
+     * {@code com.carddemo.common.money.Money}, which reduces to scale two under
+     * {@code Money.GENERAL_ROUNDING} for the general operations this amount could take part in --
+     * truncation applies only to the interest accrual, which no authorization path performs -- and the
+     * value reaches a caller as a JSON string through {@code com.carddemo.common.money.MoneyModule} so
+     * that no client
      * parses a cent into an approximate representation of its own. An approximate type here would return
      * an amount that reads correctly and is wrong in its last place, and the discrepancy would then
      * surface at the far end of the pipeline rather than at the conversion that caused it. The prohibition
@@ -620,6 +628,7 @@ public class AuthFraud {
         return this.merchantName;
     }
 
+
     /**
      * Renders this row for a diagnostic without disclosing the primary account number.
      *
@@ -632,5 +641,262 @@ public class AuthFraud {
     public String toString() {
         return "AuthFraud[" + this.id + ", authFraud=" + this.authFraud
                 + ", fraudRptDate=" + this.fraudRptDate + ']';
+    }
+
+    // WHY : Refactoring Rationale: the SIXTEEN accessors below did not exist, and this class's own
+    //       Trade-offs paragraph named the condition on which they should: "a future reader wanting,
+    //       say, the merchant city has to add the accessor and say why, which is the point at which
+    //       that need gets recorded rather than assumed." This is that point, and this is the why.
+    //       The fraud write became a single atomic statement -- one
+    //       INSERT ... ON CONFLICT DO UPDATE, replacing a probe-then-write pair that lost concurrent
+    //       first marks to a primary-key violation -- and that statement binds every column of the
+    //       row it proposes. See AuthFraudUpserter for the concurrency reasoning.
+    // WHY : Assumptions: the need is a WRITE need, not a read need, which is why the accessors are
+    //       plain and carry no masking. Each returns the value the projection put there, so the
+    //       statement writes back exactly what AuthFraudMapper.toFraudRow decided -- the mapper
+    //       remains the single authority for which columns have exactly one legitimate source, and
+    //       nothing here reinterprets any of them.
+    // WHY : Alternatives Considered: (a) having the upsert statement SELECT its twenty-four snapshot
+    //       columns from pending_auth_detail instead of binding them, which needs no accessor at all.
+    //       Rejected because three of those columns are TRANSFORMED on the way in -- the processing
+    //       code's numeric-to-character form, the merchant name's blank handling and the fraud flag's
+    //       domain -- so the SQL would have to re-implement transformations the mapper documents, and a
+    //       second copy of a projection is two rows that can be written differently. (b) a
+    //       savepoint around the insert so a duplicate-key violation could be caught and turned into
+    //       the update, which is the most literal transcription of the reference SQLCODE test.
+    //       Rejected because it puts rollback-to-savepoint machinery on the COMMON path to recover
+    //       from a condition the engine avoids outright. (c) generating these from the fields.
+    //       Rejected for the reason recorded on the accessors above -- a generated accessor cannot
+    //       carry the docstring Rule 1 requires.
+    // WHY : Trade-offs: this type now publishes twenty-six columns where it published ten, so the
+    //       "stores more than it publishes" property above is weakened. What is preserved is the
+    //       reason it existed: every accessor here has a named consumer, and that consumer is one
+    //       statement in one class. None is read by a mapper, a controller or a response projection,
+    //       and the exposure rules that keep card and merchant detail off the wire are unchanged --
+    //       AuthFraudMapper.toView still publishes the account number reduced to its last four digits
+    //       and still publishes none of these sixteen.
+
+    /**
+     * Returns the authorization type as the acquirer sent it.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code auth_type} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the four-character authorization type, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getAuthType() {
+        return this.authType;
+    }
+
+    /**
+     * Returns the card expiry as it stood on the authorization.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code card_expiry_date} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the four-character expiry, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getCardExpiryDate() {
+        return this.cardExpiryDate;
+    }
+
+    /**
+     * Returns the acquirer message type.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code message_type} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the six-character message type, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMessageType() {
+        return this.messageType;
+    }
+
+    /**
+     * Returns the acquirer message source.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code message_source} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the six-character message source, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMessageSource() {
+        return this.messageSource;
+    }
+
+    /**
+     * Returns the authorization identification code the decision returned.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code auth_id_code} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the six-character identification code, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getAuthIdCode() {
+        return this.authIdCode;
+    }
+
+    /**
+     * Returns the response code the decision returned.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code auth_resp_code} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the two-character response code, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getAuthRespCode() {
+        return this.authRespCode;
+    }
+
+    /**
+     * Returns the response reason the decision returned.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code auth_resp_reason} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the four-character response reason, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getAuthRespReason() {
+        return this.authRespReason;
+    }
+
+    /**
+     * Returns the processing code in its stored character form.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code processing_code} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the six-character processing code, or {@code null} on a row this type's own factory did not build. The stored form is CHARACTER even though the segment holds it as a number, which {@code AuthFraudMapper.processingCodeColumn} is the single authority for
+     */
+    public String getProcessingCode() {
+        return this.processingCode;
+    }
+
+    /**
+     * Returns the merchant classification.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code merchant_category_code} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the four-character classification, blank-padded, or {@code null} on a row this type's own factory did not build. The target spelling corrects the baseline's {@code MERCHANT_CATAGORY_CODE}
+     */
+    public String getMerchantCategoryCode() {
+        return this.merchantCategoryCode;
+    }
+
+    /**
+     * Returns the acquirer country.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code acqr_country_code} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the three-character country code, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getAcqrCountryCode() {
+        return this.acqrCountryCode;
+    }
+
+    /**
+     * Returns the point-of-sale entry mode.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code pos_entry_mode} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the entry mode as a number, or {@code null} on a row this type's own factory did not build. This column is {@code SMALLINT} and is deliberately not a character code
+     */
+    public Short getPosEntryMode() {
+        return this.posEntryMode;
+    }
+
+    /**
+     * Returns the merchant identifier.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code merchant_id} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the fifteen-character merchant identifier, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMerchantId() {
+        return this.merchantId;
+    }
+
+    /**
+     * Returns the merchant city.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code merchant_city} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the thirteen-character city, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMerchantCity() {
+        return this.merchantCity;
+    }
+
+    /**
+     * Returns the merchant state.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code merchant_state} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the two-character state, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMerchantState() {
+        return this.merchantState;
+    }
+
+    /**
+     * Returns the merchant postal code.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code merchant_zip} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the nine-character postal code, blank-padded, or {@code null} on a row this type's own factory did not build
+     */
+    public String getMerchantZip() {
+        return this.merchantZip;
+    }
+
+    /**
+     * Returns the match status the authorization carried when it was reported.
+     *
+     * <p>Assumptions: this is one of the sixteen snapshot columns whose only consumer is the
+     * atomic upsert statement, which binds {@code match_status} from it. It is part of the frozen
+     * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
+     * second time still returns the first report's value here.</p>
+     *
+     * @return the single-character match status, or {@code null} on a row this type's own factory did not build. Its domain is the authorization's own, not this table's fraud domain
+     */
+    public String getMatchStatus() {
+        return this.matchStatus;
     }
 }

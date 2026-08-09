@@ -65,8 +65,15 @@ so a reader holding both open reads one contract rather than two. A divergence
 between them is not a style difference but a silent data defect, because both sides
 would keep returning well-formed values. Where this module carries MORE than the
 Java does -- alternate-index metadata, the export and authorization layouts, the
-record-boundary iterators and the masking helpers -- the additions are separately
-named and never disturb those nine and five core components.
+record-boundary iterators, the masking helpers and the ``suppressed`` marker -- the
+additions are separately named and never disturb those nine and five core components.
+
+Assumptions: ``suppressed`` is appended AFTER the nine rather than inserted among
+them, and it defaults to False, so the nine the Java declares keep their identity,
+their order and their meaning. It has no Java counterpart on purpose: it marks a
+field this migration never carries forward, which is a decision about the TARGET and
+so belongs on the side that reads the extract, not on the side that reads the
+database. The parity a reader checks is over the nine; the tenth is this side's own.
 
 Design decisions (WHY)
 ----------------------
@@ -223,6 +230,7 @@ __all__ = [
     "sensitive_packed",
     "sensitive_signed_zoned",
     "signed_zoned",
+    "suppressed_text",
     "text",
     "uint",
     "width_of",
@@ -809,12 +817,23 @@ class FieldSpec:
     nothing it does not: the field's name, where it starts, how wide it is, which storage
     regime holds it, how many digit positions it declares on either side of an implied
     decimal point, whether it carries a sign, whether it holds a run-generated timestamp,
-    and whether its bytes must be kept out of diagnostics.
+    whether its bytes must be kept out of diagnostics, and whether it is carried forward
+    into the target at all.
 
-    Assumptions: the nine components below are the nine the reference field descriptor at
-    ``tests/helpers/record_codec.py`` line 421 carries and the nine the Java parity anchor
-    declares, in the same order in all three, so a reader holding any two open reads one
-    contract rather than two.
+    Assumptions: the FIRST NINE components below are the nine the reference field
+    descriptor at ``tests/helpers/record_codec.py`` line 421 carries and the nine the Java
+    parity anchor declares, in the same order in all three, so a reader holding any two
+    open reads one contract rather than two.
+
+    Refactoring Rationale: :attr:`suppressed` is a tenth component appended after those
+    nine. It was added because the judgement it records -- that a declared field must never
+    be decoded at all -- previously existed only inside one hand-written reader module, as a
+    frozen set of names that module declared for itself. The generic reader built from this
+    descriptor could not see it, so the same record decoded through the two paths differed
+    in whether it materialised a cleartext password: the specialised path suppressed it, the
+    generic path published it, and the generic path is the one the command line uses. Moving
+    the judgement onto the descriptor makes it one fact that every path reads, which is the
+    only arrangement in which the two paths cannot disagree.
 
     Assumptions: instances are frozen because a layout is a constant transcribed from a
     copybook and the registry is a table every consumer shares. A mutable descriptor would
@@ -855,6 +874,13 @@ class FieldSpec:
     sensitive : bool
         Whether the field's raw bytes must be kept out of every log line and exception
         message. The flag MARKS the field and performs no masking itself.
+    suppressed : bool
+        Whether the field is withheld from every decoded record this package produces. A
+        suppressed field's span is still counted, so every later field keeps its offset, and
+        it is still validated as part of the record image; what does not happen is the
+        decode. This is strictly stronger than :attr:`sensitive`: a sensitive field is
+        decoded and then redacted when rendered, whereas a suppressed field is never turned
+        into a value at all, so there is nothing for a caller to mishandle.
 
     Returns
     -------
@@ -866,8 +892,8 @@ class FieldSpec:
     LayoutError
         If the name is blank or malformed, the kind is not a :class:`Kind`, the offset is
         negative, the length is below one, either digit count is negative, a non-numeric
-        field declares digit positions or a sign, or a numeric field's length disagrees
-        with the width its kind and digit counts imply.
+        field declares digit positions or a sign, a suppressed field is not also sensitive,
+        or a numeric field's length disagrees with the width its kind and digit counts imply.
     """
 
     name: str
@@ -879,9 +905,10 @@ class FieldSpec:
     signed: bool = False
     normalize_ts: bool = False
     sensitive: bool = False
+    suppressed: bool = False
 
     def __post_init__(self) -> None:
-        """Validate the nine components and reject any declaration the contract forbids.
+        """Validate the ten components and reject any declaration the contract forbids.
 
         Purpose
         -------
@@ -968,6 +995,24 @@ class FieldSpec:
                 f"field {self.name} of kind {self.kind.name} must be marked sensitive because its"
                 " interior is described by a layout this descriptor does not name, so no"
                 " diagnostic here can establish that rendering its bytes is safe"
+            )
+
+        # Assumptions: suppression IMPLIES sensitivity, and the constructor enforces the
+        #   implication rather than deriving one flag from the other. A field withheld from
+        #   every decoded record is withheld because its content must not be handled at all,
+        #   so a declaration that withheld it from records while admitting it to a rendered
+        #   diagnostic would leak by the one route still open, and would read as deliberate.
+        # Alternatives Considered: making `sensitive` a computed property that returns True
+        #   whenever `suppressed` is set. Rejected because the two flags are read by different
+        #   consumers -- the masking helpers read one, the readers read the other -- and a
+        #   computed flag would make a declaration's rendered behaviour depend on a component
+        #   it does not name, which is exactly the indirection this frozen descriptor avoids.
+        if self.suppressed and not self.sensitive:
+            raise LayoutError(
+                f"field {self.name} is marked suppressed but not sensitive; a field withheld from"
+                " every decoded record must also be withheld from every rendering, because"
+                " otherwise the value this declaration refuses to decode remains reachable"
+                " through a diagnostic"
             )
 
         # Assumptions: for the three numeric kinds the declared length and the digit
@@ -1175,6 +1220,48 @@ def sensitive_text(name: str, start: int, length: int) -> FieldSpec:
         one.
     """
     return FieldSpec(name, start, length, Kind.TEXT, sensitive=True)
+
+
+def suppressed_text(name: str, start: int, length: int) -> FieldSpec:
+    """Declare a character field that is never decoded into any record this package yields.
+
+    Purpose
+    -------
+    Build the descriptor for a ``PIC X(n)`` field whose span must be accounted for, so every
+    later field keeps its offset, but whose content this migration does not carry forward and
+    must not materialise as a value.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook declares it.
+    start : int
+        The ZERO-based byte offset of the field from the start of the record.
+    length : int
+        The declared character count, which for a character field is its byte width.
+
+    Returns
+    -------
+    FieldSpec
+        A character field descriptor marked both sensitive and suppressed.
+
+    Raises
+    ------
+    LayoutError
+        If the name is blank or malformed, the offset is negative, or the length is below
+        one.
+    """
+    # WHY : Alternatives Considered: dropping the field from the layout altogether, which
+    #   would also keep it out of every decoded record. Rejected because the layout is the
+    #   normative transcription of a copybook, and a field silently absent from it would make
+    #   the record's declared spans stop adding up to its declared length -- the geometry
+    #   check that catches a one-byte shift would then have to be relaxed, which is a far
+    #   worse trade than declaring the span and refusing to read it.
+    # WHY : Trade-offs: this is deliberately NOT expressed as a pad. A pad is filler with no
+    #   meaning, and treating a password span as filler would lose the reason it is withheld;
+    #   a reader reporting a dropped pad and a reader reporting a suppressed field are saying
+    #   two different things, and only the second one is auditable.
+    return FieldSpec(name, start, length, Kind.TEXT, sensitive=True, suppressed=True)
 
 
 def normalized_timestamp(name: str, start: int, length: int) -> FieldSpec:
@@ -1458,9 +1545,9 @@ def sensitive_packed(
     they redact the display-form amounts marked by :func:`sensitive_signed_zoned`.
 
     Refactoring Rationale: the corpus holds an account-borne amount in all three computational
-    and display regimes, and only the character and unsigned-display regimes had sensitive
-    constructors before this one and its two siblings were added. The export record declares the
-    account balance and the cash credit limit as ``S9(10)V99 COMP-3`` at
+    and display regimes, so each regime needs a sensitive constructor of its own; this one and
+    its two siblings cover the computational forms. The export record declares the account
+    balance and the cash credit limit as ``S9(10)V99 COMP-3`` at
     ``app/cpy/CVEXPORT.cpy`` lines 50 and 52 where the account master declares the same two
     amounts as zoned display, so classifying only the display form would have left the same
     value disclosable in one encoding and withheld in the other. The storage regime a field
@@ -2213,65 +2300,91 @@ class RecordSpec:
 # ---------------------------------------------------------------------------
 # Fail-closed diagnostic disclosure.
 # ---------------------------------------------------------------------------
-# Refactoring Rationale: sensitivity used to be declared ONE FIELD AT A TIME, by reaching
-#   for sensitive_text, sensitive_uint or sensitive_binary at a declaration site, and a
-#   per-field opt-in makes SILENCE MEAN DISCLOSE. A field transcribed with a plain factory --
-#   the ordinary case -- was returned verbatim by mask_field and echoed in full by every
-#   codec diagnostic. Measured across the twenty records that are not authorization segments,
-#   116 distinct field names were disclosable that way: every balance, credit limit and cycle
-#   total on the account master, every transaction and daily-transaction amount, the
-#   transaction-category balance, every merchant name, city, postal code and identifier, the
-#   customer credit score, the free-text transaction description, and the postal codes of
-#   both the account and the customer master. The two authorization segments had already been
-#   closed against an allowlist further down this module; the other twenty had not, so the
-#   corpus failed OPEN everywhere except the one place somebody had remembered to close it.
+# Refactoring Rationale: disclosure is decided per RECORD against an allowlist rather than
+#   per FIELD at each declaration site, because the two mechanisms fail in opposite
+#   directions. Reaching for sensitive_text, sensitive_uint or sensitive_binary field by
+#   field is a per-field opt-in, so SILENCE MEANS DISCLOSE: a field transcribed with a plain
+#   factory is returned verbatim by mask_field and echoed in full by every codec diagnostic,
+#   and the ordinary case -- somebody adds a field and reaches for the plain factory -- is
+#   the disclosing one. An allowlist inverts that: silence means withhold. The classes of
+#   field this protects are the ones a diagnostic would otherwise print in full -- every
+#   balance, credit limit and cycle total on the account master, every transaction and
+#   daily-transaction amount, the transaction-category balance, every merchant name, city,
+#   postal code and identifier, the customer credit score, the free-text transaction
+#   description, and the postal codes of both the account and the customer master.
 # Assumptions: the allowlist below is that same mechanism generalised to the rest of the
-#   corpus, and it admits a field for exactly one of the five reasons the authorization
-#   allowlist already established: the field is a date or a time; it is a code drawn from a
-#   small closed domain; it is a count or a sequence rather than a money value; it is an
-#   ACCOUNT identifier, which the published REST contracts render in full in their own paths
-#   and bodies; or it is the trailing pad, which carries no value at all. A field that is
-#   none of those five is withheld, so a field added to any record later is withheld until
+#   corpus, and it admits a field for exactly one of FOUR reasons: the field is a date or a
+#   time; it is a code drawn from a small closed domain; it is a count or a sequence rather
+#   than a money value; or it is the trailing pad, which carries no value at all. A field that
+#   is none of those four is withheld, so a field added to any record later is withheld until
 #   somebody deliberately names it here.
-# Assumptions: four classifications read as inconsistent one at a time and are
+# Refactoring Rationale: there was a FIFTH admission reason and it has been withdrawn. It
+#   admitted "an ACCOUNT identifier, which the published REST contracts render in full in
+#   their own paths and bodies", and it named seven fields under that reason: ACCT-ID,
+#   EXP-ACCT-ID, CARD-ACCT-ID, EXP-CARD-ACCT-ID, XREF-ACCT-ID, EXP-XREF-ACCT-ID and
+#   TRANCAT-ACCT-ID. The reason does not hold, and the mistake in it is worth naming because
+#   it is an easy one to make again: a REST path and an operator diagnostic are different
+#   surfaces with different audiences, and what a caller may be told about its OWN account
+#   says nothing about what may be written into a retained log store that a different
+#   population reads. The repository's operator-log contract, in
+#   docs/architecture/observability.md, settles it directly -- it names account identifiers
+#   among the values a diagnostic must OMIT rather than abbreviate, "not its content, not its
+#   length, and not a digest of it" -- and this allowlist is a diagnostic policy, so the
+#   contract governs it. The seven names are withdrawn, and the withdrawal also closes a
+#   standing PERMISSION: with the names present, a record transcribed later under one of them
+#   with a plain factory would have been admitted without anybody looking at it.
+# Assumptions: the withdrawal changed no rendering, and that is a property worth stating
+#   rather than a reason not to have made the change. All seven fields were ALREADY marked
+#   sensitive at their declaration sites by sensitive_uint, so the allowlist named them and
+#   the declarations withheld them, and the two disagreed. What the withdrawal fixes is the
+#   DECLARED policy -- the sentence a reader consults and the audit's admitted set -- which
+#   is exactly the kind of divergence a policy written in one place and applied in another
+#   accumulates silently. tests/test_corpus_disclosure.py now carries the seven names in
+#   _PROHIBITED_NAMES, so a future declaration that disclosed one fails a test rather than
+#   passing an audit.
+# Assumptions: three classifications read as inconsistent one at a time and are
 #   deliberate read together, so each is stated here rather than left to be rediscovered.
-#   (1) An account identifier is disclosed and a CUSTOMER identifier is withheld. The
-#   asymmetry is the authorization allowlist's own -- PA-ACCT-ID is named there and
-#   PA-CUST-ID is not -- and it follows the published contracts: an account identifier
-#   travels in a request path, whereas a customer identifier is only ever reached through one
-#   and is the join key to the record holding name, address, national identifier and date of
-#   birth. (2) A card expiry date is withheld although it IS a date, because it is a card
+#   (1) A card expiry date is withheld although it IS a date, because it is a card
 #   credential rather than a lifecycle fact -- it is the value a card-not-present
 #   authorization asks for alongside the number -- and PA-CARD-EXPIRY-DATE is withheld in the
 #   detail segment for that same reason. The account open, expiration and reissue dates stay
 #   disclosed, because none of them authenticates anything and the account expiration date is
-#   the value the posting reject-103 boundary turns on. (3) A postal code is withheld while a
+#   the value the posting reject-103 boundary turns on. (2) A postal code is withheld while a
 #   state code and a country code are disclosed, because the three differ in identifying
 #   power rather than in kind: a two-character state has fifty-odd values and a
-#   three-character country a few hundred, while a postal code narrows a household. (4) The
+#   three-character country a few hundred, while a postal code narrows a household. (3) The
 #   three pure reference records -- the disclosure group, the transaction type and the
 #   transaction category -- are disclosed in FULL, interest rate and description included,
 #   because every byte of them is seeded configuration shared by every account in a group and
 #   none of it is linked to a customer; withholding the rate would make the DEFAULT-group
 #   fallback diagnostic, which is the one thing that record exists to explain, unreadable.
+# Assumptions: the authorization allowlist further down this module still names PA-ACCT-ID,
+#   and the two policies therefore disagree about account identifiers. The disagreement is
+#   recorded rather than resolved here for one mechanical reason: that list is read out of this
+#   file field by field by AuthorizationDisclosurePolicyTest, under
+#   services/common-lib/src/test/java/com/carddemo/common/codec/,
+#   so it is a cross-language literal rather than a local decision, and
+#   tests/test_master_disclosure.py already pins the disagreement as a deliberate fact. This
+#   comment exists so that a reader who notices it does not "harmonise" the two by re-opening
+#   the seven names above.
 # Trade-offs: withholding a record's KEY costs real operational ground, and the cost is
-#   accepted with it stated. A masked customer master, daily transaction, posted transaction
-#   or statement-view record no longer names the row an operator would look up, so a failure
-#   has to be localised by the keyed tag -- which is stable for one value under one key, so
-#   two renderings can still be compared field by field and a diff still shows WHICH field
+#   accepted with it stated. Every account-keyed and identity-keyed record -- the account
+#   master, the card master, the cross-reference, the category balance, the customer master and
+#   all four transaction shapes -- no longer names the row an operator would look up, so a
+#   failure has to be localised by the keyed tag -- which is stable for one value under one key,
+#   so two renderings can still be compared field by field and a diff still shows WHICH field
 #   differs -- and then reproduced against the source dataset. The alternative was disclosing
 #   a card-linked transaction identifier and a customer identifier in every diagnostic, which
 #   is the disclosure this closure exists to end.
-# Alternatives Considered: (a) keeping the per-field factories and adding the four dozen
-#   missing sensitive markers, rejected because the failure mode of forgetting one is silent
-#   disclosure rather than a visible refusal, which is precisely how the corpus reached 116
-#   disclosable names; (b) a record-level withhold-everything flag, rejected because it would
-#   also withhold the reject reason code and its verbatim description -- the two values the
-#   posting reject stream exists to carry -- along with the dates and status codes needed to
-#   localise a load failure at all; (c) a name-pattern rule, for instance withholding every
-#   name ending in -AMT or containing MERCHANT, rejected because a pattern is a guess about
-#   names rather than a decision about fields, and the four asymmetries above are exactly the
-#   cases no pattern expresses.
+# Alternatives Considered: (a) marking each sensitive field at its declaration site, rejected
+#   because the failure mode of forgetting one is silent disclosure rather than a visible
+#   refusal, and there are some four dozen such markers to forget; (b) a record-level
+#   withhold-everything flag, rejected because it would also withhold the reject reason code
+#   and its verbatim description -- the two values the posting reject stream exists to carry --
+#   along with the dates and status codes needed to localise a load failure at all; (c) a
+#   name-pattern rule, for instance withholding every name ending in -AMT or containing
+#   MERCHANT, rejected because a pattern is a guess about names rather than a decision about
+#   fields, and the three asymmetries above are exactly the cases no pattern expresses.
 # Assumptions: like the authorization policy it generalises, this whole regime is a
 #   target-only addition -- a copybook declares widths and usages and has no notion of a
 #   field whose content may not be logged -- so it is registered as
@@ -2280,27 +2393,23 @@ class RecordSpec:
 #   with the baseline.
 _CORPUS_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        # Account master and its export projection: the account key, the status code, the
-        # three lifecycle dates and the disclosure-group code. The five money fields, both
+        # Account master and its export projection: the status code, the three lifecycle
+        # dates and the disclosure-group code. The account key, the five money fields, both
         # cycle totals and the postal code are withheld.
-        "ACCT-ID",
         "ACCT-ACTIVE-STATUS",
         "ACCT-OPEN-DATE",
         "ACCT-EXPIRAION-DATE",
         "ACCT-REISSUE-DATE",
         "ACCT-GROUP-ID",
-        "EXP-ACCT-ID",
         "EXP-ACCT-ACTIVE-STATUS",
         "EXP-ACCT-OPEN-DATE",
         "EXP-ACCT-EXPIRAION-DATE",
         "EXP-ACCT-REISSUE-DATE",
         "EXP-ACCT-GROUP-ID",
-        # Card master and its export projection: the account key it hangs from and the status
-        # code. The number, the verification value, the embossed name and the expiry date are
-        # all withheld.
-        "CARD-ACCT-ID",
+        # Card master and its export projection: the status code alone. The number, the
+        # account key it hangs from, the verification value, the embossed name and the expiry
+        # date are all withheld.
         "CARD-ACTIVE-STATUS",
-        "EXP-CARD-ACCT-ID",
         "EXP-CARD-ACTIVE-STATUS",
         # Customer master and its export projection: the two closed-domain address codes and
         # the primary-holder indicator. The identifier, the postal code and the credit score
@@ -2311,10 +2420,11 @@ _CORPUS_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
         "EXP-CUST-ADDR-STATE-CD",
         "EXP-CUST-ADDR-COUNTRY-CD",
         "EXP-CUST-PRI-CARD-HOLDER-IND",
-        # Card cross-reference and its export projection: the account key only. The card
-        # number was already withheld and the customer identifier now is.
-        "XREF-ACCT-ID",
-        "EXP-XREF-ACCT-ID",
+        # Card cross-reference and its export projection: NOTHING. Its three fields are a
+        # card number, a customer identifier and an account key, and all three are withheld,
+        # so only its trailing pad is disclosable. That is the correct outcome for a record
+        # whose every named field is an identifier: a masked cross-reference row is compared
+        # field by field through keyed tags rather than read.
         # The four transaction shapes -- daily, posted, statement view and export projection
         # -- each disclose the type code, the category code, the source and the two
         # timestamps. Each withholds its identifier, its description, its amount and all four
@@ -2353,9 +2463,8 @@ _CORPUS_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
         "TRAN-CAT-TYPE-DESC",
         "TRAN-TYPE",
         "TRAN-TYPE-DESC",
-        # The transaction-category balance record: its three key components. The balance
-        # itself is withheld, which is the only field of that record that is not a key.
-        "TRANCAT-ACCT-ID",
+        # The transaction-category balance record: the two closed-domain components of its
+        # key. The account component of the key and the balance are withheld.
         "TRANCAT-TYPE-CD",
         "TRANCAT-CD",
         # The security-user record: the eight-character user identifier, which the published
@@ -2446,8 +2555,18 @@ def _closed(fields: tuple[FieldSpec, ...]) -> tuple[FieldSpec, ...]:
     Assumptions: the two authorization segments use
     :func:`_close_authorization_disclosure` instead, against their own narrower allowlist,
     because that allowlist is read out of this file by a Java parity test and must stay a
-    literal of exactly those names. Both policies are enforced together by the import-time
-    audit at the end of this module, so neither can be skipped for a new record.
+    literal of exactly those names. Every other record in this module wraps here, so an
+    unwrapped corpus declaration is a defect rather than a choice.
+
+    Refactoring Rationale: this paragraph claimed the import-time audit meant neither policy
+    "can be skipped for a new record", and that overstated what the audit proves. The audit
+    tests each field against the UNION of the two allowlists, so it catches an unwrapped
+    record only when that record holds a field NO allowlist admits -- and XREF_LAYOUT and
+    EXPORT_CARD_XREF_LAYOUT were in fact unwrapped for exactly that reason, since their
+    non-sensitive fields are all admitted corpus-wide. Both are wrapped now, and the claim is
+    narrowed to what it can support: the audit refuses any field neither policy admits, and
+    the convention that every corpus record wraps here is what closes the remaining case of a
+    new field reusing a name another record discloses.
 
     Parameters
     ----------
@@ -2520,7 +2639,12 @@ SECUSER_LAYOUT: Final[RecordSpec] = RecordSpec(
             text("SEC-USR-ID", 0, 8),  # CSUSR01Y L18 PIC X(08)
             sensitive_text("SEC-USR-FNAME", 8, 20),  # CSUSR01Y L19 PIC X(20)
             sensitive_text("SEC-USR-LNAME", 28, 20),  # CSUSR01Y L20 PIC X(20)
-            sensitive_text("SEC-USR-PWD", 48, 8),  # CSUSR01Y L21 PIC X(08)
+            # WHY : the ONE suppressed field in the whole registry. `CSUSR01Y` L21 stores an
+            #   eight-character password in CLEAR, and the target `auth.users` declares no
+            #   password column at all because identity moved to a managed user pool. The span
+            #   is therefore declared so the two fields after it keep their offsets, and
+            #   refused so that no path in this package turns those eight bytes into a value.
+            suppressed_text("SEC-USR-PWD", 48, 8),  # CSUSR01Y L21 PIC X(08)
             text("SEC-USR-TYPE", 56, 1),  # CSUSR01Y L22 PIC X(01) 'A' or 'U'
             text("SEC-USR-FILLER", 57, 23),  # CSUSR01Y L23 PIC X(23) named trailing pad
         )
@@ -2566,15 +2690,14 @@ def _close_master_disclosure(
     list rather than by remembering to reach for :func:`sensitive_uint` or
     :meth:`FieldSpec.with_flags` at each declaration site.
 
-    Refactoring Rationale: these three records previously declared NO sensitive field at all,
-    which made :func:`mask_record` an identity function over them -- so
-    ``render_masked_account_record`` and ``render_masked_category_balance_record`` returned the
-    account identifier and every monetary amount verbatim while being named and documented as
-    privacy-safe renderings. A helper whose NAME promises redaction and whose behaviour is
-    plaintext is worse than no helper, because a caller reads the name and stops. Marking the
-    fields at the layout is the fix those functions' own comments prescribed: they already
-    recorded that "marking a field sensitive in the layout is the ONLY change ever needed to
-    redact it here".
+    Refactoring Rationale: sensitivity is marked at the LAYOUT rather than inside the rendering
+    helpers, which is what those helpers' own contracts require -- each records that "marking a
+    field sensitive in the layout is the ONLY change ever needed to redact it here". A record
+    that declares no sensitive field makes :func:`mask_record` an identity function over itself,
+    so ``render_masked_account_record`` and ``render_masked_category_balance_record`` would
+    return the account identifier and every monetary amount verbatim while being named and
+    documented as privacy-safe renderings. A helper whose NAME promises redaction and whose
+    behaviour is plaintext is worse than no helper, because a caller reads the name and stops.
 
     Assumptions: monetary amounts are sensitive, which is the policy the rest of this module
     already applies rather than a new position. Both authorization segments mark their limit,
@@ -2617,8 +2740,7 @@ def _close_master_disclosure(
     Raises
     ------
     LayoutError
-        Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes the
-        validating constructor.
+        Never in practice, for the reason given on :func:`_close_disclosure`.
     """
     return tuple(
         field
@@ -2746,16 +2868,37 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
 #   tokenise on whitespace RUNS rather than on fixed columns. The same file family also
 #   varies the indentation of its 05 items, so a fixed-column reader would mis-read the
 #   level number itself.
+# Refactoring Rationale: this field tuple is now wrapped in _closed like every other base
+#   master's, where it was previously passed through raw. The wrap changes NOTHING about the
+#   four fields declared today and that is the point: _closed leaves a field untouched when
+#   its name appears in _CORPUS_DISCLOSABLE_FIELDS and marks it sensitive otherwise, and all
+#   four here already resolve correctly -- the card number and the customer identifier are
+#   declared sensitive at the call site, while XREF-ACCT-ID and FILLER are on the allowlist.
+#   What the wrap buys is the DEFAULT for the next field somebody adds, in the one case the
+#   import-time audit cannot reach. That audit tests each field against the UNION of the two
+#   allowlists, so an unwrapped record whose new field carries an unlisted name does fail at
+#   import -- loudly, which is why the omission here was survivable. What it does NOT catch is
+#   a new field whose name is already on the allowlist because a DIFFERENT record discloses it:
+#   FILLER is admitted corpus-wide, and so are the ACCT- names, so an unwrapped record could
+#   gain a disclosable field with no diagnostic anywhere. Wrapping removes that gap by
+#   withholding first and requiring the allowlist edit to be about this record.
+#   Alternatives Considered: leaving these two as documented exceptions, on the grounds that a
+#   fifty-byte record of three key fields has nowhere to hide a new disclosure. Rejected
+#   because "this record cannot grow" is an assumption about the future rather than a property
+#   of the code, and because an exception a reader has to be told about is exactly what the
+#   one-token-per-declaration convention above exists to avoid.
 XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     "XREF",
     50,
     16,
     0,
-    (
-        sensitive_text("XREF-CARD-NUM", 0, 16),  # CVACT03Y L5 PIC X(16) primary key
-        sensitive_uint("XREF-CUST-ID", 16, 9),  # CVACT03Y L6 PIC 9(09)
-        sensitive_uint("XREF-ACCT-ID", 25, 11),  # CVACT03Y L7 PIC 9(11) alternate key
-        text("FILLER", 36, 14),  # CVACT03Y L8 PIC X(14) trailing pad
+    _closed(
+        (
+            sensitive_text("XREF-CARD-NUM", 0, 16),  # CVACT03Y L5 PIC X(16) primary key
+            sensitive_uint("XREF-CUST-ID", 16, 9),  # CVACT03Y L6 PIC 9(09)
+            sensitive_uint("XREF-ACCT-ID", 25, 11),  # CVACT03Y L7 PIC 9(11) alternate key
+            text("FILLER", 36, 14),  # CVACT03Y L8 PIC X(14) trailing pad
+        )
     ),
     (AlternateKeySpec("XREF-ACCT-ID", 25, 11),),
 ).validate_geometry()
@@ -3570,19 +3713,20 @@ EXPORT_HEADER_LAYOUT: Final[RecordSpec] = RecordSpec(
             binary("EXPORT-SEQUENCE-NUM", 27, 9, 0, signed=False),  # CVEXPORT L16 PIC 9(9) COMP
             text("EXPORT-BRANCH-ID", 31, 4),  # CVEXPORT L17 PIC X(4)
             text("EXPORT-REGION-CODE", 35, 5),  # CVEXPORT L18 PIC X(5)
-            # Refactoring Rationale: this area is declared OPAQUE and not text, and the
-            #   change closes a silent data-integrity and disclosure defect rather than tidying
-            #   a label. The copybook writes PIC X(460) at CVEXPORT L19, so text was the literal
-            #   reading -- but the same 460 bytes are redefined by the five branch overlays
-            #   below, which between them declare a primary account number at L92, a card
-            #   verification value as 9(03) COMP at L96, a national identifier at L36, a
-            #   government-issued identifier at L37, three COMP-3 amounts at L41, L50 and L52 and
-            #   seven COMP identifiers. Declared text, the whole area went through cp037 on the
-            #   generic record path and came back as a 460-character string: the record kept its
-            #   declared width, every later offset stayed valid, nothing raised, and payment data
-            #   had crossed the one transcoding boundary in the repository. Declared opaque, the
-            #   area leaves as raw bytes, is refused by the character entry point outright, and
-            #   is marked sensitive so a failure reports its geometry and never its bytes.
+            # Refactoring Rationale: this area is declared OPAQUE and not text, which is a
+            #   data-integrity and disclosure decision rather than a labelling one. The copybook
+            #   writes PIC X(460) at CVEXPORT L19, so text is the literal reading -- but the same
+            #   460 bytes are redefined by the five branch overlays below, which between them
+            #   declare a primary account number at L92, a card verification value as 9(03) COMP
+            #   at L96, a national identifier at L36, a government-issued identifier at L37,
+            #   three COMP-3 amounts at L41, L50 and L52 and seven COMP identifiers. Declared
+            #   text, the whole area would go through cp037 on the generic record path and come
+            #   back as a 460-character string: the record would keep its declared width, every
+            #   later offset would stay valid, nothing would raise, and payment data would have
+            #   crossed the one transcoding boundary in the repository -- a corruption with no
+            #   symptom. Declared opaque, the area leaves as raw bytes, is refused by the
+            #   character entry point outright, and is marked sensitive so a failure reports its
+            #   geometry and never its bytes.
             #   Alternatives Considered: leaving it text and relying on callers to use the
             #   payload constants instead of the generic decoder -- rejected, because a default
             #   that is safe only when nobody takes the obvious path is not a safe default. The
@@ -3707,16 +3851,24 @@ EXPORT_TRANSACTION_LAYOUT: Final[RecordSpec] = RecordSpec(
 #   Sixteen plus nine plus eight plus 427 is 460; at four bytes it would close at 456. This
 #   is the tier that would be easiest to get wrong, because the neighbouring nine-digit
 #   identifier on the line above it is four.
+# Refactoring Rationale: wrapped in _closed for the reason recorded at XREF_LAYOUT above --
+#   these two cross-reference layouts were the only members of this corpus passing their fields
+#   through raw, so the fail-closed default did not reach them. As there, the wrap alters none
+#   of the four fields declared today: the card number and the customer identifier are already
+#   sensitive at the call site and EXP-XREF-ACCT-ID and FILLER are on the allowlist. It is the
+#   next field added that the wrap governs.
 EXPORT_CARD_XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     "EXPORT-CARD-XREF-DATA",
     EXPORT_BRANCH_LENGTH,
     16,
     0,
-    (
-        sensitive_text("EXP-XREF-CARD-NUM", 0, 16),  # CVEXPORT L85 PIC X(16)
-        sensitive_uint("EXP-XREF-CUST-ID", 16, 9),  # CVEXPORT L86 PIC 9(09) display
-        sensitive_binary("EXP-XREF-ACCT-ID", 25, 11, 0, signed=False),  # L87 9(11) COMP = 8
-        text("FILLER", 33, 427),  # CVEXPORT L88 PIC X(427) trailing pad
+    _closed(
+        (
+            sensitive_text("EXP-XREF-CARD-NUM", 0, 16),  # CVEXPORT L85 PIC X(16)
+            sensitive_uint("EXP-XREF-CUST-ID", 16, 9),  # CVEXPORT L86 PIC 9(09) display
+            sensitive_binary("EXP-XREF-ACCT-ID", 25, 11, 0, signed=False),  # L87 9(11) COMP = 8
+            text("FILLER", 33, 427),  # CVEXPORT L88 PIC X(427) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3847,38 +3999,34 @@ def export_branch(record_type: str) -> RecordSpec:
 PA_ACCOUNT_STATUS_OCCURS: Final[int] = 5
 PA_ACCOUNT_STATUS_ELEMENT_LENGTH: Final[int] = 2
 
-# Refactoring Rationale: the two authorization segments used to mark exactly ONE field
-#   sensitive -- the primary account number -- and every other field's raw bytes were therefore
-#   renderable into a decode diagnostic. That was wrong on its own terms rather than merely
-#   conservative, because the SAME record content is classified far more widely one language
+# Refactoring Rationale: the two authorization segments are closed against an allowlist rather
+#   than by marking individual fields, because marking only the obviously identifying ones -- the
+#   primary account number, say -- leaves every other field's raw bytes renderable into a decode
+#   diagnostic, and that is narrower than this same record content is classified one language
 #   over: services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java holds
 #   SENSITIVE_FIELD_NAMES over the authorization wire and puts the card expiry date, the
 #   transaction amount, the approved amount, the merchant identity, name, city and postal code
 #   and the transaction identity in it alongside the card number. One record cannot be two
 #   sensitivities: an extract decoded by this package and a message decoded by that codec carry
-#   the same fields, so a malformed byte here could emit in full precisely what the Java refuses
-#   to emit at all. The two lists below reconcile that, and the reconciliation is expressed as an
-#   ALLOWLIST so the default direction is closed.
+#   the same fields, so a malformed byte here would otherwise emit in full precisely what the
+#   Java refuses to emit at all. The list below reconciles that, and the reconciliation is
+#   expressed as an ALLOWLIST so the default direction is closed.
 # Assumptions: this frozenset names every authorization field whose bytes MAY be rendered.
 #   Each name below is one of: a date or time, a code from a small closed domain, a count rather
 #   than a money value, an account identifier the published contracts render in full, or the
 #   trailing pad. Merchant STATE is here and merchant CITY, ZIP, NAME and ID are not, because a
 #   two-character state is a closed domain while the other four narrow to a place or a party.
-# Refactoring Rationale: this block used to claim the set "mirrors the Java set exactly" and that
-#   "the line it draws is the Java policy's own", naming CsvAuthCodec as that policy. Both
-#   statements were misleading, and the reason is that there were THREE policies rather than two.
+# Assumptions: THREE policies classify authorization content and only one of them is this
+#   set's counterpart, so the distinction is stated here rather than left to be rediscovered.
 #   CsvAuthCodec classifies the request and reply PAYLOADS, which carry no customer identifier
-#   and none of the summary segment's limits, balances or counters -- so on the summary segment it
-#   had no opinion to mirror at all, and "exactly" could not be true of it. The artifact this
-#   module actually mirrors is CopybookLayout.java, the Java transcription of the same two
-#   copybooks, and at the time of the claim that file marked one field sensitive in the detail
-#   segment and none in the summary. The claim was therefore false of the counterpart it should
-#   have named and unverifiable against the one it did name.
-# Assumptions: the parity is now REAL and is asserted rather than asserted-about.
+#   and none of the summary segment's limits, balances or counters, so it has no opinion at all
+#   about most of the summary segment and cannot be mirrored field for field. The artifact this
+#   set does mirror is CopybookLayout.java, the Java transcription of the same two copybooks.
+# Assumptions: that parity is asserted rather than asserted-about.
 #   CopybookLayout.AUTHORIZATION_DISCLOSABLE_FIELDS holds these same names, applied the same way
 #   through the same fail-closed helper, and a Java test reads THIS file and fails the build if
-#   the two sets differ by a single name. So the sentence above is checkable: adding a name here
-#   without adding it there breaks the Java build, and the reverse breaks it too.
+#   the two sets differ by a single name. So the claim is checkable: adding a name here without
+#   adding it there breaks the Java build, and the reverse breaks it too.
 # Trade-offs: an allowlist reads longer than the four extra sensitive markers it replaces, and
 #   that length is the point. With a denylist, a field added to either segment later would be
 #   disclosable until somebody remembered to mark it; with this allowlist it is withheld until
@@ -3950,16 +4098,14 @@ def _close_authorization_disclosure(
     today and a function that quietly cleared the flag would be wrong the moment one did.
     Reading and restoring costs nothing and removes that trap.
 
-    Refactoring Rationale: the loop that stood here is now :func:`_close_disclosure`, which
-    this function calls with its own allowlist, and the extraction was made because the same
-    fail-closed policy was generalised to the other twenty records under
-    :data:`_CORPUS_DISCLOSABLE_FIELDS`. Two hand-written copies of one three-line loop would
-    have been two places for the ``normalize_ts`` restoration to be forgotten in, and that
-    flag decides whether a comparison against a wall-clock record is deterministic at all.
-    This wrapper is KEPT rather than replaced by a direct call, because the authorization
-    allowlist is narrower than the corpus one and the difference is deliberate: naming the
-    policy at the two declaration sites is what stops the wider list being reached for there
-    by mistake.
+    Refactoring Rationale: the masking loop itself lives in :func:`_close_disclosure`, which
+    this function calls with its own allowlist, so the corpus policy and this one share a
+    single implementation. Two hand-written copies of that three-line loop would be two places
+    for the ``normalize_ts`` restoration to be forgotten in, and that flag decides whether a
+    comparison against a wall-clock record is deterministic at all. This wrapper is kept
+    rather than collapsed into a direct call, because the authorization allowlist is narrower
+    than the corpus one and the difference is deliberate: naming the policy at the two
+    declaration sites is what stops the wider list being reached for there by mistake.
 
     Parameters
     ----------
@@ -3975,8 +4121,7 @@ def _close_authorization_disclosure(
     Raises
     ------
     LayoutError
-        Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes
-        the validating constructor.
+        Never in practice, for the reason given on :func:`_close_disclosure`.
     """
     return _close_disclosure(fields, _AUTHORIZATION_DISCLOSABLE_FIELDS)
 
@@ -4086,21 +4231,16 @@ PENDING_AUTH_DETAIL_LAYOUT: Final[RecordSpec] = RecordSpec(
 # ---------------------------------------------------------------------------
 # The import-time disclosure audit.
 # ---------------------------------------------------------------------------
-# Refactoring Rationale: this audit did not exist, and without it the two allowlists above
-#   were fail-closed only for the records somebody had remembered to close. That is exactly how
-#   the corpus reached 116 disclosable names while the two authorization segments were tight: a
-#   declaration that simply omits the closure wrapper discloses every field it declares, and
-#   nothing anywhere reports the omission, because a disclosed field decodes and renders
-#   perfectly. The audit converts that silence into a refusal at IMPORT: a record declared in
-#   this module that leaves a field disclosable without either allowlist naming it stops the
-#   package from loading at all.
-# Assumptions: the audit walks the FINISHED records out of this module's own namespace
-#   rather than a hand-kept list of them, and that choice is the whole point. A list would be
-#   one more thing to extend alongside a new declaration, so the guard would have the same
-#   failure mode as the thing it guards. Reading the namespace means a new RecordSpec is
-#   audited because it exists, not because it was registered -- and it also catches a record
-#   that is closed at its declaration and then RE-OPENED by a derivation, because
-#   RecordSpec.with_field_flags writes both diagnostic flags at once.
+# Refactoring Rationale: without this audit the two allowlists above are fail-closed only for
+#   the records whose declarations actually invoke a closure wrapper, which makes the policy as
+#   easy to skip as the per-field markers it replaces. A declaration that omits the wrapper
+#   discloses every field it declares, and nothing reports the omission, because a disclosed
+#   field decodes and renders perfectly -- the failure has no symptom. The audit converts that
+#   silence into a refusal at IMPORT: a record declared in this module that leaves a field
+#   disclosable without either allowlist naming it stops the package from loading at all.
+# Assumptions: reading the namespace, as :func:`_declared_layouts` does for the reason given
+#   on it, also catches a record that is closed at its declaration and then RE-OPENED by a
+#   derivation, because RecordSpec.with_field_flags writes both diagnostic flags at once.
 # Trade-offs: the check runs at import and raises, rather than being left to the test
 #   suite, and the cost is that one mistake breaks every import of this package instead of one
 #   test. That cost is accepted because the failure it replaces is silent disclosure of payment
@@ -4195,6 +4335,61 @@ def _unnamed_disclosures(specs: Sequence[RecordSpec]) -> tuple[str, ...]:
     )
 
 
+def _ineffective_admissions(specs: Sequence[RecordSpec]) -> tuple[str, ...]:
+    """Return every allowlisted field occurrence that is nevertheless withheld.
+
+    Purpose
+    -------
+    Close the audit in the OTHER direction. :func:`_unnamed_disclosures` proves that nothing is
+    disclosed without being named; this proves that nothing is named without being disclosed, so
+    an allowlist entry either has the effect its comment claims or the module refuses to import.
+
+    Refactoring Rationale: this function is new, and it exists because the one-directional audit
+    could not see a real contradiction that stood in this module. Seven account identifiers were
+    named as disclosable and were sensitive at every occurrence anyway -- four because their own
+    declaration sites reached for a ``sensitive_*`` factory, three because their records are
+    closed by the narrower :func:`_close_master_disclosure` -- and every check that existed
+    passed, because each looked only for a field that was disclosed and unnamed. The
+    consequence was not a disclosure but something harder to notice: the allowlist and its
+    comments described a policy the module did not apply, so a reader auditing the corpus by
+    reading the list got the wrong answer about seven fields.
+
+    Assumptions: the two allowlists are checked as a UNION, matching :func:`_unnamed_disclosures`
+    exactly, and the reason is the same one stated there -- deciding which list applies to which
+    record would duplicate the choice already made at each declaration site. The union is also
+    what makes the one deliberate disagreement between the lists expressible: a name admitted by
+    either list must be effectively disclosed wherever it occurs, and no name occurs in both a
+    corpus-closed and an authorization-closed record.
+
+    Trade-offs: a name the corpus does not declare at all is NOT reported here. That case is a
+    stale entry rather than an ineffective one, and it is already covered by
+    ``data-migration/tests/test_corpus_disclosure.py``; reporting it in both places would make
+    one failure raise two different messages depending on import order.
+
+    Parameters
+    ----------
+    specs : Sequence of RecordSpec
+        The records to audit, ordinarily :func:`_declared_layouts`.
+
+    Returns
+    -------
+    tuple of str
+        One ``RECORD.FIELD`` entry per allowlisted-but-withheld occurrence, in record and then
+        field order. Empty when every admission takes effect.
+
+    Raises
+    ------
+    None
+    """
+    admitted = _CORPUS_DISCLOSABLE_FIELDS | _AUTHORIZATION_DISCLOSABLE_FIELDS
+    return tuple(
+        f"{spec.name}.{field.name}"
+        for spec in specs
+        for field in spec.fields
+        if field.sensitive and field.name in admitted
+    )
+
+
 _UNNAMED_DISCLOSURES: Final[tuple[str, ...]] = _unnamed_disclosures(_declared_layouts())
 if _UNNAMED_DISCLOSURES:
     raise LayoutError(
@@ -4203,6 +4398,18 @@ if _UNNAMED_DISCLOSURES:
         f" {_UNNAMED_DISCLOSURES}. Either add each name to _CORPUS_DISCLOSABLE_FIELDS with the"
         " reason it is safe to render, or wrap the record's field tuple in _closed() so the"
         " policy applies to it"
+    )
+
+_INEFFECTIVE_ADMISSIONS: Final[tuple[str, ...]] = _ineffective_admissions(_declared_layouts())
+if _INEFFECTIVE_ADMISSIONS:
+    raise LayoutError(
+        "every field an allowlist names as disclosable must actually be disclosed, so that the"
+        " list is a description of this module's behaviour rather than of an intention, but"
+        f" these are named and withheld anyway: {_INEFFECTIVE_ADMISSIONS}. A field is withheld"
+        " despite being named when its own declaration site reaches for a sensitive_* factory,"
+        " or when its record is closed by a narrower policy whose list omits it. Either remove"
+        " the name from the allowlist and record why the field is withheld, or change the"
+        " declaration and the record's policy so the admission takes effect"
     )
 
 
@@ -4216,21 +4423,17 @@ if _UNNAMED_DISCLOSURES:
 #   concerns -- while disclosing far too little to reconstruct the number. Every other
 #   sensitive field reveals nothing at all, because a name or a date of birth has no
 #   equivalent partial form that is useful without being identifying.
-# Refactoring Rationale: CUST-SSN stood in this set and is REMOVED, so the concession now
-#   covers card numbers only. The reasoning that admitted it -- that a national identifier is
-#   "routinely quoted by its last four digits" -- described a practice rather than a safe
-#   disclosure, and the two differ here in a way they do not for a card number. A card number
-#   is sixteen digits of which the last four leave twelve unknown; a nine-digit national
-#   identifier's last four leave five, and the leading five are the issuing area and group,
-#   which are derivable from where and roughly when the holder was issued one. So the same
-#   four characters that identify one card among many come close to completing this value, and
-#   the ETL has no operational need for them at all: it loads the field into an encrypted
-#   column and never matches on it, which is what makes withholding it free here where it
-#   would not be for the card number a browse is keyed on.
-# Assumptions: EXP-CUST-SSN was never in this set, so before this change the corpus
-#   treated the two national-identifier fields differently for no stated reason. Removing
-#   CUST-SSN resolves that inconsistency toward the safer of the two behaviours rather than
-#   adding its twin to the concession.
+# Assumptions: the concession covers card numbers only, and a national identifier is
+#   deliberately excluded even though operational practice quotes one by its last four digits
+#   too. Practice and safe disclosure diverge here in a way they do not for a card number. A
+#   card number is sixteen digits of which the last four leave twelve unknown; a nine-digit
+#   national identifier's last four leave five, and the leading five are the issuing area and
+#   group, derivable from where and roughly when the holder was issued one. So the same four
+#   characters that identify one card among many come close to completing that value. The ETL
+#   also has no operational need for them: it loads the field into an encrypted column and
+#   never matches on it, which is what makes withholding it free here where it would not be
+#   for the card number a browse is keyed on. Both national-identifier fields, CUST-SSN and
+#   EXP-CUST-SSN, are treated the same way for that one reason.
 # Trade-offs: the four card-number names are a DELIBERATE DIVERGENCE from the reference
 #   codec at tests/helpers/record_codec.py line 1589, which carries the same concession for
 #   five names including CUST-SSN. That file is the parity oracle and is reference-only, so it
@@ -4297,18 +4500,18 @@ ENV_MASK_ENVIRONMENT: Final[str] = "CARDDEMO_ENVIRONMENT"
 #   of a low-entropy value.
 _PROCESS_MASK_KEY: Final[bytes] = secrets.token_bytes(32)
 
-# Refactoring Rationale: a supplied key is now REQUIRED to be canonical base64 decoding to
-#   at least this many bytes, where any non-empty string was previously accepted and used as
-#   key material by its UTF-8 bytes. That acceptance made the enforcement contradict the
-#   documented contract in the worst possible direction: data-migration/README.md describes the
-#   variable as 32 random bytes, so an operator following the documentation got a strong key
-#   while an operator typing a memorable phrase got a five-byte one, and NOTHING reported the
+# Refactoring Rationale: a supplied key is REQUIRED to be canonical base64 decoding to at
+#   least this many bytes, rather than any non-empty string taken as key material by its UTF-8
+#   bytes. Accepting an arbitrary string would let the enforcement contradict the documented
+#   contract in the worst direction: data-migration/README.md describes the variable as 32
+#   random bytes, so an operator following the documentation supplies a strong key while an
+#   operator typing a memorable phrase supplies a five-byte one, and nothing reports the
 #   difference. The consequence is specific rather than theoretical. The tag exists to make a
 #   redacted card number, national identifier or date of birth unconfirmable, and that property
 #   rests entirely on the key being unguessable -- with a guessable key an adversary holding a
-#   candidate value simply computes the same HMAC under the same guessed key and compares, which
-#   is the exact confirmation attack keying was introduced to close. A weak key therefore does
-#   not weaken the tag gradually; it returns it to the unkeyed digest it replaced.
+#   candidate value computes the same HMAC under the same guessed key and compares, which is the
+#   exact confirmation attack keying exists to close. A weak key therefore does not weaken the
+#   tag gradually; it reduces it to an unkeyed digest.
 # Assumptions: 32 bytes is the floor because the construction is HMAC-SHA-256, whose block
 #   is 64 bytes and whose output is 32; a key shorter than the output size is the point below
 #   which the key, rather than the hash, bounds the work an attacker needs. Longer keys are
@@ -4347,6 +4550,32 @@ _PROCESS_MASK_KEY: Final[bytes] = secrets.token_bytes(32)
 #   D-ETL-MASK-KEY-STRENGTH in docs/architecture/cobol-to-service-traceability.md rather than
 #   presented as parity, and the operator-facing half of the rule lives in
 #   docs/runbooks/deploy.md because the secret's value is created outside this repository.
+# Refactoring Rationale: this constant and the function below it were declared TWICE in this
+#   module -- once here and once again roughly 165 lines further down, immediately after the
+#   redaction-tag constants -- and the second declaration is now deleted. The bodies were
+#   byte-identical, verified by diffing the two 126-line spans, so nothing behaved differently
+#   today; the hazard was entirely in what happened NEXT. Python binds a module-level name by
+#   executing its statements in order, so the later definition silently replaced this one and
+#   this one was dead code that still READ like the live one. A future strengthening of the key
+#   rule applied here -- raising the floor, adding a character-class check, changing the refusal
+#   message -- would have compiled, passed review, passed every test, and had no effect
+#   whatsoever, on the one control that decides whether the redaction tag is confirmable.
+# Trade-offs: the copy retained is the FIRST, because it is the one adjacent to its own
+#   rationale: the comment block above states why 32 bytes is the floor and why canonical base64
+#   is required, and it sits beside _PROCESS_MASK_KEY, the fallback the function returns when the
+#   variable is unset. The deleted copy carried no rationale at all and sat among constants that
+#   describe the tag's WIDTH, which is an unrelated concern. Keeping the documented one next to
+#   the material it governs is what makes the next reader change the live definition.
+# Assumptions: ruff did NOT report this, and that is a property of the rule rather than of the
+#   configuration -- F811 covers a redefinition of an unused name, and both of these were used,
+#   so the pair was invisible to the linter that gates this package. The gap is closed by an
+#   AST check in data-migration/tests/test_corpus_disclosure.py that walks this module's
+#   top-level statements and refuses any name bound more than once, so a re-introduced duplicate
+#   fails the suite rather than waiting for a reader to notice.
+# Trade-offs: the surviving definition now sits some distance above its single caller. That is
+#   accepted because a reader who reaches _redaction_tag needs the key's CONTRACT, stated in the
+#   docstring below, and not its resolution order; keeping it beside ENV_MASK_HMAC_KEY and
+#   _PROCESS_MASK_KEY instead puts the three parts of one decision where they are read together.
 _MASK_HMAC_KEY_MIN_BYTES: Final[int] = 32
 
 
@@ -4380,15 +4609,31 @@ def _mask_hmac_key() -> bytes:
     is right, because it means the value was wrapped or concatenated and is not the key the
     operator generated.
 
-    Assumptions: a value that is EMPTY, or whitespace only, is treated as unset and takes
-    the process key rather than being refused, and that is a decision rather than an
-    oversight. ``FOO=${BAR}`` renders an unset ``BAR`` as an empty string in every shell and
-    in a container task definition alike, so refusing empty would turn a variable that is
-    documented as optional into one that fails whenever a deployment references it
-    conditionally. The choice is safe in the direction that matters: the fallback is 32
-    cryptographically random bytes, so treating empty as unset can never SELECT weak
-    material -- it can only cost cross-run comparability, which is the documented
-    consequence of not supplying a key at all.
+    Refactoring Rationale: a value that is EMPTY, or whitespace only, is now REFUSED, where
+    it was previously treated as unset and took the process key. The earlier reasoning was
+    that ``FOO=${BAR}`` renders an unset ``BAR`` as an empty string, so refusing empty would
+    break a deployment that references the variable conditionally. That argument does not
+    hold for this variable: infra/modules/ecs-service requires
+    ``CARDDEMO_MASK_HMAC_KEY`` for the data-migration workload and for no other, as a
+    biconditional on the secret set, so the ETL task definition always carries it from
+    Secrets Manager and never conditionally; and an operator who wants the fallback leaves
+    the name out of the environment, which this function reads as absence. What the old
+    behaviour cost is specific. The one mode that NEEDS a supplied key is the verification
+    pass that compares a masked rendering produced yesterday against one produced today, and
+    an empty value is exactly what a failed secret projection or an empty secret version
+    delivers. That run then produced per-process tags, every field compared unequal, and
+    nothing anywhere reported that the key had not arrived -- the same "NOTHING reported the
+    difference" failure the strength floor above was introduced to close, arrived at from the
+    other direction. Trade-offs: a deployment that genuinely wants to pass the variable
+    through as possibly-empty must now omit the name instead, which is the change this
+    refusal imposes and the reason the message says so explicitly.
+    Assumptions: this now matches the rule the rest of this package already applies.
+    ``config._require_text`` refuses a present-but-blank setting on exactly this reasoning --
+    "Parameter Store and Secrets Manager both accept an empty or whitespace-only string, so
+    'present' is not the same question as 'usable'" -- and that function guards the database
+    host and password. A masking key delivered by the same two services through the same task
+    definition was the one setting in the package answering the emptiness question the other
+    way, which is what made the inconsistency a defect rather than a difference.
 
     Trade-offs: the canonicality re-encode is a second check on top of the decoder's own
     validation, and it is not redundant. ``validate=True`` refuses characters outside the
@@ -4424,12 +4669,17 @@ def _mask_hmac_key() -> bytes:
     Raises
     ------
     LayoutError
-        If the variable is set but does not hold standard base64, holds a non-canonical
-        encoding, decodes to fewer than :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes
-        to a single repeated byte value.
+        If the variable is present but empty or whitespace only, does not hold standard
+        base64, holds a non-canonical encoding, decodes to fewer than
+        :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes to a single repeated byte value.
     """
-    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "").strip()
-    if not supplied:
+    # WHY : Assumptions: ABSENCE and EMPTINESS are two different configurations and are
+    #       answered differently -- a name missing from os.environ takes the process key,
+    #       while a name PRESENT and holding nothing is refused. `os.environ.get(name)`
+    #       returning None is the only test that separates them, which is why the default
+    #       argument is dropped here rather than defaulting to "".
+    raw = os.environ.get(ENV_MASK_HMAC_KEY)
+    if raw is None:
         return _PROCESS_MASK_KEY
 
     generate = (
@@ -4437,6 +4687,17 @@ def _mask_hmac_key() -> bytes:
         " print(base64.b64encode(secrets.token_bytes("
         f'{_MASK_HMAC_KEY_MIN_BYTES})).decode())"'
     )
+
+    supplied = raw.strip()
+    if not supplied:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} is set but holds no key material. Leaving the variable"
+            " UNSET selects the process-scoped random key deliberately; setting it to an empty"
+            " or whitespace-only value instead means a key was expected and did not arrive, so"
+            " it is refused rather than silently replaced with a key that changes every run."
+            f" Unset the variable to run without one, or generate a key with: {generate}"
+        )
+
     try:
         # Assumptions: binascii.Error, which b64decode raises, is a subclass of ValueError,
         #   so one except clause covers both it and the TypeError-free string path. Catching
@@ -4513,134 +4774,6 @@ _FULL_REDACTION_TAG_WIDTH: Final[int] = (
 )
 _BRACKETED_TAG_OVERHEAD: Final[int] = len(_REDACTION_BRACKET_PREFIX) + len(_REDACTION_SUFFIX)
 _UNTERMINATED_TAG_WIDTH: Final[int] = _BRACKETED_TAG_OVERHEAD
-
-
-_MASK_HMAC_KEY_MIN_BYTES: Final[int] = 32
-
-
-def _mask_hmac_key() -> bytes:
-    """Return the HMAC key the redaction tag is derived with, refusing weak material.
-
-    Purpose
-    -------
-    Resolve :data:`ENV_MASK_HMAC_KEY` into key bytes, or fall back to the process-scoped
-    random key when the variable is unset, and refuse anything supplied that is not
-    canonical base64 of at least :data:`_MASK_HMAC_KEY_MIN_BYTES` distinct-valued bytes.
-
-    Assumptions: the variable stays OPTIONAL and only its CONTENT is constrained. Leaving
-    it unset is a supported mode -- a single command that prints one diagnostic needs only
-    within-run comparability, which the process key gives it -- so this function must
-    distinguish "no key configured", which is safe, from "a weak key configured", which is
-    not. Conflating the two would either force every command to carry a secret or accept
-    every string an operator supplies, and the whole point is that neither is necessary.
-
-    Assumptions: the value is read on every call rather than captured once, matching the
-    behaviour the callers below document. A command-line entry point parses its own
-    arguments before doing any work, so caching at import would make the variable's effect
-    depend on import order; and because the refusal depends only on configuration and never
-    on data, an invalid key fails on the first masked field of the run, before any value has
-    been rendered.
-
-    Trade-offs: whitespace at the two ends of the value is tolerated and interior
-    whitespace is not. A secret store or a shell here-document commonly appends a newline,
-    and refusing that would reject a correct key for a delivery artefact of the transport;
-    interior whitespace is not in the base64 alphabet and is refused by the decoder, which
-    is right, because it means the value was wrapped or concatenated and is not the key the
-    operator generated.
-
-    Assumptions: a value that is EMPTY, or whitespace only, is treated as unset and takes
-    the process key rather than being refused, and that is a decision rather than an
-    oversight. ``FOO=${BAR}`` renders an unset ``BAR`` as an empty string in every shell and
-    in a container task definition alike, so refusing empty would turn a variable that is
-    documented as optional into one that fails whenever a deployment references it
-    conditionally. The choice is safe in the direction that matters: the fallback is 32
-    cryptographically random bytes, so treating empty as unset can never SELECT weak
-    material -- it can only cost cross-run comparability, which is the documented
-    consequence of not supplying a key at all.
-
-    Trade-offs: the canonicality re-encode is a second check on top of the decoder's own
-    validation, and it is not redundant. ``validate=True`` refuses characters outside the
-    alphabet but accepts a trailing character whose unused low bits are non-zero, so two
-    different strings can decode to the same bytes. Without the re-encode a rotation that
-    changed only those bits would leave every tag identical while the configured value
-    looked different -- a change an operator would reasonably believe had taken effect.
-
-    Trade-offs: material whose bytes are all one value is refused, and that is a
-    STRUCTURAL floor rather than an entropy test. No test on a single sample can establish
-    that key material was randomly generated, so the check refuses only the class that is
-    both unmistakably weak and easy to produce by accident -- 32 NUL bytes, or the result of
-    base64-encoding a repeated character. Alternatives Considered: a compression-ratio or
-    byte-frequency heuristic, rejected because it would refuse some correctly generated keys
-    and still accept most badly chosen ones, which is the worst of both outcomes for a check
-    that stands between an operator and a working command.
-
-    Assumptions: no refusal message contains any part of the supplied value. Each names the
-    variable, states the rule and, where a length is the fault, reports the DECODED length
-    only -- so the message stays actionable in a log that may be aggregated anywhere while
-    disclosing nothing that would narrow a guess at the key.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    bytes
-        The decoded supplied key when the variable holds conforming material, otherwise
-        :data:`_PROCESS_MASK_KEY`.
-
-    Raises
-    ------
-    LayoutError
-        If the variable is set but does not hold standard base64, holds a non-canonical
-        encoding, decodes to fewer than :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes
-        to a single repeated byte value.
-    """
-    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "").strip()
-    if not supplied:
-        return _PROCESS_MASK_KEY
-
-    generate = (
-        'python3 -c "import base64,secrets;'
-        " print(base64.b64encode(secrets.token_bytes("
-        f'{_MASK_HMAC_KEY_MIN_BYTES})).decode())"'
-    )
-    try:
-        # Assumptions: binascii.Error, which b64decode raises, is a subclass of ValueError,
-        #   so one except clause covers both it and the TypeError-free string path. Catching
-        #   the base class rather than importing binascii keeps the refusal in one branch.
-        material = base64.b64decode(supplied, validate=True)
-    except ValueError as malformed:
-        raise LayoutError(
-            f"{ENV_MASK_HMAC_KEY} must hold standard base64 key material, but the value"
-            " supplied is not valid standard base64; the URL-safe alphabet and a raw passphrase"
-            f" are both refused deliberately. Generate a key with: {generate}"
-        ) from malformed
-
-    if base64.b64encode(material).decode("ascii") != supplied:
-        raise LayoutError(
-            f"{ENV_MASK_HMAC_KEY} must hold the CANONICAL base64 encoding of its key"
-            " material, but the value supplied re-encodes differently, which means two"
-            " different values would denote the same key and a rotation between them would"
-            f" change no tag. Generate a key with: {generate}"
-        )
-
-    if len(material) < _MASK_HMAC_KEY_MIN_BYTES:
-        raise LayoutError(
-            f"{ENV_MASK_HMAC_KEY} must decode to at least {_MASK_HMAC_KEY_MIN_BYTES} bytes of"
-            f" key material, which is the HMAC-SHA-256 output size, but the value supplied"
-            f" decodes to {len(material)}. Generate a key with: {generate}"
-        )
-
-    if len(set(material)) == 1:
-        raise LayoutError(
-            f"{ENV_MASK_HMAC_KEY} must decode to key material that is not a single repeated"
-            f" byte, but the value supplied decodes to {len(material)} copies of one byte,"
-            " which is guessable and returns the redaction tag to the unkeyed digest it"
-            f" replaced. Generate a key with: {generate}"
-        )
-
-    return material
 
 
 def _redaction_tag(field_name: str, chunk: str, width: int) -> str:
@@ -5051,16 +5184,15 @@ def count_fixed_length_records(size_bytes: int, reclen: int) -> int:
 # ---------------------------------------------------------------------------
 # Streaming: one record resident, never the whole dataset.
 # ---------------------------------------------------------------------------
-# Refactoring Rationale: both iterators below originally REQUIRED the complete extract as
-#   one in-memory object -- bytes for the byte mode, str for the text mode -- and the text mode
-#   then DUPLICATED it, because splitting on the separator materialises every line of the file
-#   into a second independent list before the first record is yielded. Resident memory
-#   therefore grew with the dataset rather than with a record, which does not survive contact
-#   with a production extract: the committed seeds under app/data are kilobytes, but the
-#   datasets these layouts describe are the full masters, and the transaction master alone is
-#   350 bytes a row with no bound whatever on the row count. Both functions now additionally
-#   accept a stream or an iterable of pieces, and what they retain is one PIECE -- one bounded
-#   read batch where they do the reading -- plus at most one partial record. That ceiling is
+# Refactoring Rationale: both iterators below accept a STREAM or an iterable of pieces and not
+#   only a complete in-memory extract, because requiring the whole extract as one object grows
+#   resident memory with the dataset rather than with a record. In the text mode it is worse than
+#   one copy: splitting on the separator materialises every line of the file into a second
+#   independent list before the first record is yielded. Neither survives contact with a
+#   production extract -- the committed seeds under app/data are kilobytes, but the datasets
+#   these layouts describe are the full masters, and the transaction master alone is 350 bytes a
+#   row with no bound whatever on the row count. Streaming, what they retain is one PIECE -- one
+#   bounded read batch where they do the reading -- plus at most one partial record. That ceiling is
 #   fixed rather than proportional, so a dataset larger than memory reads as a small one does.
 # Alternatives Considered: (a) requiring every caller to memory-map the dataset and pass
 #   a memoryview was rejected because a mapping cannot span a stream -- the staging step reads
@@ -5455,14 +5587,85 @@ def _strip_one_line_terminator(line: object, number: int) -> str:
     return stripped
 
 
-def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterator[str]:
-    """Iterate newline-delimited ASCII seed text as whole records, padding a short line.
+def _short_line_message(
+    number: int,
+    observed: int,
+    reclen: int,
+    min_data_width: int,
+    layout: RecordSpec | None,
+) -> str:
+    """Compose the refusal for a seed line that stopped before its data region closed.
+
+    Purpose
+    -------
+    Say exactly what is wrong with a truncated line -- which line, how short, how short it is
+    allowed to be, and which field it stopped inside -- while quoting no part of the line, so the
+    refusal is actionable and safe to log wherever its consumer sends it.
+
+    Parameters
+    ----------
+    number : int
+        The one-based line number within the source.
+    observed : int
+        The line's length once one trailing carriage return and separator are removed.
+    reclen : int
+        The declared record length.
+    min_data_width : int
+        The offset through which the source must carry data.
+    layout : RecordSpec | None
+        Supplied for diagnostics only; when present, the field containing the boundary is named.
+
+    Returns
+    -------
+    str
+        The refusal text.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Trade-offs: the message names the offending field's GEOMETRY through the descriptor and
+    #   quotes NO characters. A line that stops inside a field may stop inside a card number or an
+    #   account identifier, and a diagnostic cannot be un-logged once it has been sent. Naming the
+    #   field is enough to locate the defect, which is in the conversion that produced the line.
+    location = "the last field that carries data"
+    if layout is not None:
+        field = next(
+            (
+                candidate
+                for candidate in layout.fields
+                if candidate.start <= min_data_width - 1 < candidate.end
+            ),
+            None,
+        )
+        if field is not None:
+            location = f"field {field.describe()}"
+    record = "an ASCII seed record" if layout is None else f"record {layout.name}"
+    return (
+        f"ASCII seed line {number} of {record} is {observed} characters and stops inside"
+        f" {location}: the source must carry data through offset {min_data_width} of a declared"
+        f" {reclen}-character record. A line short by no more than the trailing pad is padded and"
+        " read, because the characters added are the pad the seed conversion dropped; a line"
+        " shorter than that is refused, because padding it would invent a value the source never"
+        " held rather than restore one it did"
+    )
+
+
+def iter_ascii_text_records(
+    text: str | Iterable[object],
+    reclen: int,
+    *,
+    min_data_width: int = 0,
+    layout: RecordSpec | None = None,
+) -> Iterator[str]:
+    """Iterate newline-delimited ASCII seed text as whole records, padding only the trailing pad.
 
     Purpose
     -------
     Read the nine committed seed files under ``app/data/ASCII``, which are line-oriented text
     rather than fixed-length images. Each line is separated on the newline, at most one
-    trailing carriage return and newline are removed, and the result is right-padded with
+    trailing carriage return and newline are removed, the line is refused if it stopped before
+    the caller's declared data region closed, and the result is right-padded with
     spaces to the declared record length.
 
     The source may be the whole text, which is scanned one line at a time rather than split
@@ -5480,6 +5683,34 @@ def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterat
     which is why ``cardxref.txt`` can be read at all -- its 50 lines are 36 characters each
     against a declared 50, the missing 14 being exactly its trailing ``FILLER PIC X(14)``.
 
+    Refactoring Rationale: the tolerance is now BOUNDED by ``min_data_width``, and its absence
+    was a data-integrity defect rather than a missing nicety. This function padded a short line
+    of ANY length, so a line that stopped part-way through a field the reader PUBLISHES was
+    completed with manufactured blanks and returned as a well-formed record. Four records made
+    that concrete and none of them raised anything: a transaction-type line ending before its
+    description produced an all-space key and description, because both are character fields; a
+    category line ending inside its fifty-character description produced a plausible truncated
+    row; and a daily or posted transaction line ending at offset 304 produced a blank processing
+    timestamp, which the timestamp policy legitimately accepts because an unwritten stamp IS
+    blank in the shipped feed. So the pad did not merely fill space -- it INVENTED values that
+    are indistinguishable from real ones.
+
+    Assumptions: the bound is checked against the SOURCE line's stripped length, before any
+    padding, and that is the only place it can be checked correctly. Inspecting the padded row
+    for a trailing space cannot work for this corpus: the daily transaction's last published
+    field is legitimately blank on all 300 shipped records, so a rule that refused a blank at the
+    end of the data region would refuse every one of them. Measuring the line is exact for both
+    cases -- a full-width line with a blank stamp passes, a line that stopped before the stamp
+    does not.
+
+    Trade-offs: the bound is a caller's PARAMETER rather than derived here from ``layout``, even
+    when a layout is supplied. The data region is the end of the last field the READER publishes,
+    and a reader may publish fewer fields than the record declares -- the security record
+    publishes fields on both sides of a span it suppresses -- so the descriptor alone does not
+    determine it. Passing it keeps one derivation, in
+    ``carddemo_migration.readers.source.data_region_width``, over the tuple each reader already
+    owns.
+
     Assumptions: a single trailing empty piece is dropped when the whole text is passed, because
     a file whose final record ends with a newline produces one. Dropping more than one would
     hide a genuinely blank line, which is corrupt input rather than formatting -- a blank line
@@ -5496,6 +5727,15 @@ def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterat
     reclen : int
         The declared record length in characters; one or more, normally obtained from
         :func:`reclen_of`.
+    min_data_width : int, keyword-only
+        The offset through which the source must carry data, normally the end of the last field
+        the caller publishes. A line shorter than this is refused rather than padded. Zero, the
+        default, restores the unbounded tolerance and is intended only for a caller that has no
+        published field set to derive a bound from.
+    layout : RecordSpec | None, keyword-only
+        Supplied for DIAGNOSTICS only: it lets a refusal name the record and the field the
+        boundary falls in. It is never consulted for a width, and passing it cannot change which
+        lines are accepted.
 
     Returns
     -------
@@ -5506,12 +5746,13 @@ def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterat
     ------
     LayoutError
         If ``text`` is a byte object, if it is neither text nor iterable, if any element it
-        produces is not a ``str`` or still holds an interior separator, or if ``reclen`` is
-        below one.
+        produces is not a ``str`` or still holds an interior separator, if ``reclen`` is
+        below one, or if ``min_data_width`` is negative or exceeds ``reclen``.
     RecordLengthError
-        If any line is longer than ``reclen`` characters once one trailing carriage return and
-        newline are removed. The message reports the line number, its observed length and the
-        declared length.
+        If any line is longer than ``reclen`` characters, or shorter than ``min_data_width``,
+        once one trailing carriage return and newline are removed. The message reports the line
+        number, its observed length and the declared width, and in the short case the field the
+        line stopped inside when a ``layout`` was supplied.
     """
     if isinstance(text, (bytes, bytearray, memoryview)):
         raise LayoutError(
@@ -5521,6 +5762,16 @@ def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterat
         )
     if reclen < 1:
         raise LayoutError(f"a record length must be at least one character, but reclen={reclen}")
+    # WHY : Assumptions: a bound WIDER than the record is refused as a caller error rather than
+    #   clamped, because clamping would silently turn a mistaken bound into the unbounded
+    #   behaviour this parameter exists to end -- and every line would then be refused or every
+    #   line accepted depending on which way the clamp went, with nothing reporting the mistake.
+    if min_data_width < 0 or min_data_width > reclen:
+        raise LayoutError(
+            f"the data-region bound must lie between zero and the declared record length, but"
+            f" min_data_width={min_data_width} against reclen={reclen}; a bound wider than the"
+            " record could never be satisfied and one below zero bounds nothing"
+        )
 
     if isinstance(text, str):
         lines: Iterable[object] = _iter_text_lines(text)
@@ -5540,6 +5791,10 @@ def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterat
                 f"ASCII seed line {number} is {len(stripped)} characters, which exceeds the"
                 f" declared record length of {reclen}; an over-long line means the field offsets"
                 " have moved, so it is rejected rather than truncated"
+            )
+        if len(stripped) < min_data_width:
+            raise RecordLengthError(
+                _short_line_message(number, len(stripped), reclen, min_data_width, layout)
             )
         yield stripped.ljust(reclen)
 

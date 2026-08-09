@@ -6,6 +6,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 /**
  * The sole data-access port onto {@code auth.users}, the identity record of the AUTH bounded context.
@@ -441,4 +444,54 @@ public interface UserRepository extends JpaRepository<User, String> {
     //       baseline finds one member with no source line; what is bought is that the audit reaches
     //       the recorded divergence instead of a fabricated citation.
     Optional<User> findByCognitoSub(UUID cognitoSub);
+
+    /**
+     * Inserts one identity row, letting the primary key refuse an identifier already taken.
+     *
+     * <p>Purpose: this is the relational form of the keyed {@code WRITE} at
+     * {@code app/cbl/COUSR01C.cbl} lines 240 to 248, whose duplicate-key and duplicate-record response
+     * arms at lines 260 and 261 are answers to the write itself and not to a prior read.
+     *
+     * @param userId the eight-character identifier the row is keyed by; must not be {@code null}
+     * @param firstName the user's first name at its declared width; must not be {@code null}
+     * @param lastName the user's last name at its declared width; must not be {@code null}
+     * @param userType the one-character type, {@code 'A'} or {@code 'U'}; must not be {@code null}
+     * @param cognitoSub the subject reference in canonical text form, cast to the native {@code uuid}
+     *     column type by the statement; must not be {@code null}
+     * @return the number of rows written, which is always one when the statement completes, the key
+     *     refusing the row otherwise
+     * @throws org.springframework.dao.DataIntegrityViolationException if the identifier or the subject
+     *     reference is already held by a row, which the caller answers as a conflict
+     */
+    // WHY : Refactoring Rationale: this member exists because the INHERITED save cannot express an
+    //       insert for this entity. User carries an ASSIGNED identifier and no version attribute, so
+    //       Spring Data's newness test reduces to "is the identifier null", which is false for every
+    //       row this context builds -- the save therefore reaches EntityManager.merge, and merge
+    //       against an identifier a row already holds loads that row and UPDATES it. The observable
+    //       consequence was that two callers racing one identifier did not collide at all: the later
+    //       one silently overwrote the earlier one's names and type and was answered as a successful
+    //       create. An insert states what the baseline write states, and the key gets to refuse it.
+    // WHY : Alternatives Considered: making the entity implement Persistable with a transient
+    //       newness flag, which would have routed the same save to persist. Rejected because that flag
+    //       has to be reset by lifecycle callbacks and is therefore load-bearing state on a persistent
+    //       type, and because it would change the meaning of every save in this module -- including the
+    //       update path, which relies on merge semantics against a managed row -- to fix one call site.
+    // WHY : Alternatives Considered: injecting an EntityManager into the service and calling persist
+    //       there. Rejected because it would move a persistence-provider call out of the one package
+    //       that owns data access, which is the boundary the module's layering test asserts.
+    // WHY : Assumptions: the subject reference is bound as text and cast by the statement rather than
+    //       bound as a UUID. A native statement gives the driver no column metadata to infer a
+    //       parameter type from, so an explicitly cast text parameter is the form that cannot depend on
+    //       inference; the canonical text form of a UUID is unambiguous, and the cast is what makes the
+    //       stored value the native type the unique index is built over.
+    @Modifying
+    @Query(value = """
+            insert into users (user_id, first_name, last_name, user_type, cognito_sub)
+            values (:userId, :firstName, :lastName, :userType, cast(:cognitoSub as uuid))
+            """, nativeQuery = true)
+    int insertUser(@Param("userId") String userId,
+            @Param("firstName") String firstName,
+            @Param("lastName") String lastName,
+            @Param("userType") String userType,
+            @Param("cognitoSub") String cognitoSub);
 }

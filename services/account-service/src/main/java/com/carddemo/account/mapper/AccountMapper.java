@@ -585,7 +585,6 @@ public class AccountMapper {
         return toAccountUpdateResponse(row, customer, ApiError.COACTUPC_RECORD_CHANGED, List.of());
     }
 
-
     /**
      * Applies the account region of a submitted update onto the row the caller loaded.
      *
@@ -781,7 +780,6 @@ public class AccountMapper {
                 request.primaryCardHolderIndicator());
     }
 
-
     /**
      * Answers whether a screen value is the shape the amount mask emits.
      *
@@ -970,7 +968,6 @@ public class AccountMapper {
         }
         return "0".repeat(ACCOUNT_IDENTIFIER_WIDTH - digits.length()) + digits;
     }
-
 
     /**
      * Answers whether three calendar parts compose a day that exists.
@@ -1176,7 +1173,6 @@ public class AccountMapper {
                 || "ACCT-EXPIRAION-DATE".equals(baselineFieldName)
                 || "ACCT-REISSUE-DATE".equals(baselineFieldName);
     }
-
 
     /**
      * Publishes a stored column amount as the shared fixed-point money type.
@@ -1435,4 +1431,3 @@ public class AccountMapper {
         return value;
     }
 }
-

@@ -491,6 +491,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /api/v1/reference/transaction-types/{typeCd}:
 
@@ -594,6 +596,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     delete:
       tags:
@@ -631,6 +635,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 
   /api/v1/reference/transaction-categories:
@@ -746,6 +752,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /api/v1/reference/transaction-categories/{typeCd}/{catCd}:
 
@@ -841,6 +849,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     delete:
       tags:
@@ -889,6 +899,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 
   /api/v1/reference/disclosure-groups/{acctGroupId}/{tranTypeCd}/{tranCatCd}:
@@ -1526,6 +1538,8 @@ paths:
         #       request.
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 
 components:
@@ -1667,9 +1681,13 @@ components:
         opening page. The value is opaque and must be echoed exactly as received;
         it is not a type code, a category code or a row ordinal, and it cannot be
         constructed, parsed or compared by a client. A cursor that cannot be
-        opened, or one replayed against a different filter, a different collection
-        or the direction it was not minted for, is reported as 400 rather than
-        answered with the wrong page.
+        opened, or one replayed by a different caller or against a different
+        filter, a different collection or the direction it was not minted for, is
+        reported as 400 rather than answered with the wrong page. A direction sent
+        WITHOUT a cursor is likewise a 400, keyed by the direction parameter: the
+        pair travels together or not at all, and answering the opening page for a
+        backward request would let a client loop over the first page while believing
+        it was retreating through the set.
       schema:
         $ref: '#/components/schemas/CursorToken'
 
@@ -1679,7 +1697,8 @@ components:
       required: false
       description: >-
         Which way to move from the supplied cursor. It is meaningful only
-        alongside a cursor, and the two are sent together or not at all. Reading
+        alongside a cursor, and the two are sent together or not at all -- sent
+        alone it is refused with 400 rather than silently ignored. Reading
         next takes rows from the cursor's position forward in ascending key order;
         reading previous takes rows before it in descending key order and presents
         them ascending, which is the migrated form of the backward cursor at
@@ -1837,8 +1856,10 @@ components:
       description: >-
         The request could not be accepted as supplied. This covers a malformed or
         out-of-range path or query value, a body that fails a declared constraint,
-        a cursor that cannot be opened or was replayed against the wrong filter,
-        collection or direction, a correlation header outside the published bound,
+        a cursor that cannot be opened or was replayed by another caller or against
+        the wrong filter, collection or direction, a paging direction sent without
+        the cursor it would move from, a correlation header outside the published
+        bound,
         and a write whose submitted values are identical to the ones already stored.
         The fieldErrors array names every offending field rather than only the first,
         for the reason recorded on the FieldError schema.
@@ -1908,6 +1929,37 @@ components:
         same pair the shared advice publishes for a denial decided by a
         method-security check, so a caller cannot tell from the response where in
         the stack the authority was checked.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -2554,18 +2606,19 @@ components:
     CursorToken:
       type: string
       maxLength: 256
-      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
       description: >-
         An opaque paging position minted by this service. It stands for a key in
-        the ordered set without disclosing it, and it is sealed to the collection,
-        the filters and the direction it was issued for, so replaying it against a
-        different collection, a changed filter or the opposite direction is refused
-        with 400 rather than answered with a page the caller did not ask for. Treat
+        the ordered set without disclosing it, and it is sealed to the CALLER, the
+        collection, the filters and the direction it was issued for, so replaying it
+        by another caller or against a different collection, a changed filter or the
+        opposite direction is refused with 400 rather than answered with a page the
+        caller did not ask for. It is therefore not transferable between sessions. Treat
         it as a value to echo back unchanged and never parse, construct or
         compare: no part of it is a type code, a category code or a row ordinal.
-        Every example of this type in this document carries a placeholder signature
+        Every example of this type in this document carries a placeholder ciphertext
         segment naming itself as redacted; no published example is a usable token,
-        the signature being computed over a key this service holds.
+        the payload being enciphered under a key this service holds.
 
     PageDirection:
       type: string
@@ -2946,23 +2999,27 @@ components:
 
 
     # WHY : Assumptions: every page envelope in this document carries exactly the
-    #       FOUR members the shared response type declares -- items, firstKey,
-    #       lastKey and hasNext, at
+    #       FIVE members the shared response type declares -- items, firstKey,
+    #       lastKey, hasNext and hasPrevious, at
     #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
-    #       -- in that order, and every one of them is required. Publishing a fifth
+    #       -- in that order, and every one of them is required. Publishing a sixth
     #       would describe a body this service cannot send: the shared type has no
     #       such component, so a serialisation of it omits the member, a generated
     #       client would receive an accessor that is always absent, and a strict
     #       client would reject every valid response for missing a member the
     #       contract declared. Absence of a boundary is spelled as a null value on
-    #       a present member, never as a missing member, which is why all four are
+    #       a present member, never as a missing member, which is why all five are
     #       required and not only items.
-    # WHY : Alternatives Considered: adding a hasPrev member beside hasNext, for
-    #       symmetry. Rejected because it would be derivable from firstKey being
-    #       non-null and would therefore be a second statement of one fact -- and
-    #       two members that must agree are exactly what allows a page to report a
-    #       direction it cannot actually supply. Backward availability is read from
-    #       firstKey; there is one source for it.
+    # WHY : Refactoring Rationale: this note said FOUR members and rejected adding a
+    #       backward-availability member for symmetry, on the ground that it would be
+    #       derivable from firstKey being non-null. The shared type now declares five
+    #       and the schemas below declare five, so the note contradicted the document
+    #       it annotates. The reasoning it carried was also wrong on its own terms:
+    #       firstKey answers WHERE a backward request would be issued from and every
+    #       page carrying rows supplies one, including the opening page, so deriving
+    #       availability from it made the first page advertise an earlier page and
+    #       answer a client that followed the advertisement with an empty page. The
+    #       two members do not have to agree, because they state different facts.
     # WHY : Alternatives Considered: a total row count or page count. Rejected
     #       because neither is knowable without a second query over the whole
     #       filtered set, and neither would stay true while it travelled: the set
@@ -2982,6 +3039,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3015,11 +3073,28 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a further page follows this one, settled by reading one row
-            beyond the page and observing whether that row exists, never from any
-            tally. When it is true, lastKey is present. When it is false, a caller
-            that presses forward anyway receives the baseline's own end-of-set
+            Whether a further page follows this one. On a forward walk it is settled
+            by reading one row beyond the page and observing whether that row exists,
+            never from any tally. On a page reached by paging BACKWARD it is always
+            true, because a caller can only page backward from a page it reached by
+            paging forward -- the baseline states the same thing unconditionally at
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1738, at the top of its
+            backward reader. When it is true, lastKey is present. When it is false, a
+            caller that presses forward anyway receives the baseline's own end-of-set
             wording, published on the ReferenceMessageCatalogue schema.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
       examples:
         - items:
             - typeCd: '01'
@@ -3028,8 +3103,8 @@ components:
             - typeCd: '02'
               description: Payment
               version: 1
-          firstKey: v1.dHJhbnNhY3Rpb24tdHlwZXM.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-F
-          lastKey: v1.dHJhbnNhY3Rpb24tdHlwZXM.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-L
+          firstKey: v2.dHJhbnNhY3Rpb24t.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-F
+          lastKey: v2.dHJhbnNhY3Rpb24t.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-L
           hasNext: true
 
     TransactionCategoryPage:
@@ -3044,6 +3119,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3071,16 +3147,30 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a further page follows, settled by reading one row beyond the
-            page.
+            Whether a further page follows. Settled on a forward walk by reading one
+            row beyond the page; always true on a page reached by paging backward, as
+            recorded in full on the transaction-type page.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
       examples:
         - items:
             - typeCd: '01'
               catCd: '0001'
               description: Regular Sales Draft
               version: 1
-          firstKey: v1.dHJhbnNhY3Rpb24tY2F0ZWdvcmllcw.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-F
-          lastKey: v1.dHJhbnNhY3Rpb24tY2F0ZWdvcmllcw.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-L
+          firstKey: v2.dHJhbnNhY3Rpb24t.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-F
+          lastKey: v2.dHJhbnNhY3Rpb24t.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-L
           hasNext: true
 
     UsPhoneAreaCodePage:
@@ -3094,6 +3184,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3118,13 +3209,28 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a further page of area codes follows.
+            Whether a further page of area codes follows. Settled on a forward walk by
+            reading one row beyond the page; always true on a page reached by paging
+            backward, as recorded in full on the transaction-type page.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
       examples:
         - items:
             - areaCd: '201'
               codeClass: G
-          firstKey: v1.dXMtcGhvbmUtYXJlYS1jb2Rlcw.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-F
-          lastKey: v1.dXMtcGhvbmUtYXJlYS1jb2Rlcw.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-L
+          firstKey: v2.dXMtcGhvbmUtYXJl.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-F
+          lastKey: v2.dXMtcGhvbmUtYXJl.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-L
           hasNext: true
 
     UsStatePage:
@@ -3137,6 +3243,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3161,13 +3268,28 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a further page of state codes follows.
+            Whether a further page of state codes follows. Settled on a forward walk by
+            reading one row beyond the page; always true on a page reached by paging
+            backward, as recorded in full on the transaction-type page.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
       examples:
         - items:
             - stateCd: AL
             - stateCd: AK
-          firstKey: v1.dXMtc3RhdGVz.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-F
-          lastKey: v1.dXMtc3RhdGVz.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-L
+          firstKey: v2.dXMtc3RhdGVzAAAA.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-F
+          lastKey: v2.dXMtc3RhdGVzAAAA.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-L
           hasNext: true
 
     UsStateZipPrefixPage:
@@ -3180,6 +3302,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3204,12 +3327,27 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a further page of combinations follows.
+            Whether a further page of combinations follows. Settled on a forward walk by
+            reading one row beyond the page; always true on a page reached by paging
+            backward, as recorded in full on the transaction-type page.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
       examples:
         - items:
             - stateZipCd: AL35
-          firstKey: v1.dXMtc3RhdGUtemlwLXByZWZpeGVz.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-F
-          lastKey: v1.dXMtc3RhdGUtemlwLXByZWZpeGVz.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-L
+          firstKey: v2.dXMtc3RhdGUtemlw.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-F
+          lastKey: v2.dXMtc3RhdGUtemlw.REDACTED-EXAMPLE-CIPHERTEXT-not-decipherable-L
           hasNext: true
 
 

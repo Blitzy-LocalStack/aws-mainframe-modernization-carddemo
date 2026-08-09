@@ -76,6 +76,28 @@ public class RestAccountContextClient implements AccountContextClient {
      */
     public static final String PATH_ACCOUNT_PAYMENT = "/api/v1/accounts/payments";
 
+    /**
+     * The address prefix of the cross-reference family, which the cross-reference read scope authorises.
+     *
+     * <p>Assumptions: each prefix is DERIVED from a path constant above rather than written again, by removing
+     * the final segment. Writing them as literals would let the two drift, and the symptom of a drift is a
+     * refusal on one operation while every other one keeps working.</p>
+     */
+    private static final String CARD_XREF_PATH_PREFIX = parentOf(PATH_CARD_XREF_LOOKUP);
+
+    /** The address prefix of the account family, which the account read scope authorises. */
+    private static final String ACCOUNT_PATH_PREFIX = parentOf(PATH_ACCOUNT);
+
+    /**
+     * Removes the final segment of a path, yielding the family prefix its siblings share.
+     *
+     * @param path one of the path constants above; must not be {@code null} and must contain a separator
+     * @return the path up to but excluding its final separator, never {@code null}
+     */
+    private static String parentOf(String path) {
+        return path.substring(0, path.lastIndexOf('/'));
+    }
+
     /** The request member the lookup keys on, spelled as the account context publishes it. */
     private static final String FIELD_CARD_NUMBER = "cardNumber";
 
@@ -103,7 +125,8 @@ public class RestAccountContextClient implements AccountContextClient {
      *
      * <p>Refactoring Rationale: every request carries a machine bearer token. The account context does
      * not admit an anonymous caller on these addresses -- its {@code InternalApiSecurityConfig} runs an
-     * earlier-ordered chain requiring {@code SCOPE_internal:account-context.read} and its user chain
+     * earlier-ordered chain requiring the authority of the operation family each address belongs to,
+     * one scope per family, and its user chain
      * refuses the cross-reference and customer subtrees outright -- so a client presenting nothing would
      * be answered 401 on every call. This seam carries no signed-on user to forward either: a bill
      * payment and a transaction add are authorized as the operator who submitted them, but the account
@@ -158,9 +181,44 @@ public class RestAccountContextClient implements AccountContextClient {
         return (request, body, execution) -> {
             request.getHeaders().setBearerAuth(machineIdentity.mint(
                     InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                    InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ));
+                    scopeFor(request.getURI().getPath())));
             return execution.execute(request, body);
         };
+    }
+
+    /**
+     * Selects the scope for one request, from the address it is bound for.
+     *
+     * <p>Refactoring Rationale: the interceptor used to mint ONE scope for every call, which was the whole
+     * internal surface of the callee. Deriving the scope from the address means a request carries only what
+     * its own operation needs, so a captured token authorises that operation and no other. The derivation is
+     * here rather than at each call site because the credential is applied by one interceptor: passing the
+     * scope down to it would mean threading a value through every method for the interceptor to read back.</p>
+     *
+     * <p>Assumptions: an address this method does not recognise raises rather than falling back to any scope.
+     * A fallback would be one of two wrong things -- the broadest scope, which reintroduces the excess reach
+     * this split removed, or the narrowest, which fails at the callee as a 403 that names no cause. Raising
+     * names the path, at the moment a new address is added without a scope decision being made for it.</p>
+     *
+     * @param path the request path, as the transport resolved it; must not be {@code null}
+     * @return the scope that address requires, never {@code null}
+     * @throws IllegalStateException if the path is not one this client addresses
+     */
+    private static String scopeFor(String path) {
+        if (path.startsWith(CARD_XREF_PATH_PREFIX)) {
+            return InternalServiceToken.SCOPE_CARD_XREF_READ;
+        }
+        if (path.startsWith(ACCOUNT_PATH_PREFIX)) {
+            return InternalServiceToken.SCOPE_ACCOUNT_READ;
+        }
+        // WHY : Assumptions: there is no customer branch here, and its absence is the point rather than an
+        //   omission. This context reads no customer record, so it is not permitted to carry the customer
+        //   scope at all -- the closed table in InternalServiceToken withholds it -- and a branch that
+        //   returned it would raise from the minter instead of from here, naming the scope rather than the
+        //   address. Raising here names the address, which is what a reader adding one needs to see.
+        throw new IllegalStateException("no internal scope is declared for '" + path
+                + "'; every address this client calls must be assigned one, because the account context"
+                + " authorises each family of addresses by its own scope");
     }
 
     /**

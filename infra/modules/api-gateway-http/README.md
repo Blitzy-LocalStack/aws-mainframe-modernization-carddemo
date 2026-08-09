@@ -38,23 +38,38 @@ Eleven resources that only make sense as a set, in the order they appear in
 2. `aws_apigatewayv2_authorizer.jwt` — the Cognito JWT authorizer, which takes
    the caller's bearer token from the `Authorization` header and validates it
    against the pool issuer and the accepted audience.
-3. `aws_security_group.vpc_link` — a security group dedicated to the VPC Link,
-   created here rather than shared with the application tasks.
-4. `aws_vpc_security_group_egress_rule.vpc_link_to_alb_https` — the link's only
-   egress: TCP 443 to the load balancer's group.
-5. `aws_vpc_security_group_ingress_rule.alb_from_vpc_link_https` — the matching
-   ingress on the load balancer, admitting that one group and nothing else.
-6. `aws_apigatewayv2_vpc_link.this` — the private path into the application
+3. `aws_vpc_security_group_egress_rule.vpc_link_to_alb_https` — the link's only
+   egress: TCP 443 within the load balancer's group, which the link shares.
+4. `aws_vpc_security_group_ingress_rule.alb_from_vpc_link_https` — the matching
+   ingress on that group, admitting that one group and nothing else.
+
+   *Refactoring Rationale:* this module used to create a dedicated
+   `aws_security_group.vpc_link` as well, described here as "created here rather
+   than shared with the application tasks". It is withdrawn. With the network
+   module's own group for the interface-endpoint ENIs, the delivered topology
+   carried **five** functional security groups against a design that freezes the
+   count at three (AAP section 0.5.1.12), and this module's group was one of the
+   two that broke it. The link now attaches to `var.alb_security_group_id`, so
+   the flow it needs is a self reference on that group. The property the old
+   comment was defending — that no link can be pointed at a group whose matching
+   destination rule is absent — is preserved, because both halves are still
+   declared here and the link is now attached to the very group carrying them.
+   *Trade-offs:* the link's ENIs inherit the ALB group's egress to the
+   application tier on the container port. They forward only to the configured
+   private integration, so that inherited permission reaches nothing they
+   initiate; the compensating control is that both roles of the group are named
+   in the network module's README flow table rather than left to be inferred.
+5. `aws_apigatewayv2_vpc_link.this` — the private path into the application
    subnets.
-7. `aws_apigatewayv2_integration.alb` — one `HTTP_PROXY` integration onto the
+6. `aws_apigatewayv2_integration.alb` — one `HTTP_PROXY` integration onto the
    internal listener, reached over TLS.
-8. `aws_apigatewayv2_route.service` — the authorizer-guarded routes, one
+7. `aws_apigatewayv2_route.service` — the authorizer-guarded routes, one
    instance per published route key.
-9. `aws_apigatewayv2_route.public` — the closed set of routes that must answer
+8. `aws_apigatewayv2_route.public` — the closed set of routes that must answer
    before a token exists (§1.1).
-10. `aws_cloudwatch_log_group.access` — the destination for the stage's access
+9. `aws_cloudwatch_log_group.access` — the destination for the stage's access
     log.
-11. `aws_apigatewayv2_stage.this` — the single stage, which binds access
+10. `aws_apigatewayv2_stage.this` — the single stage, which binds access
     logging and the throttle limits to everything above.
 
 The request path, end to end:
@@ -572,7 +587,6 @@ cites the baseline by path and line and changes nothing in it.
 | [aws_apigatewayv2_stage.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_stage) | resource |
 | [aws_apigatewayv2_vpc_link.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_vpc_link) | resource |
 | [aws_cloudwatch_log_group.access](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
-| [aws_security_group.vpc_link](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_vpc_security_group_egress_rule.vpc_link_to_alb_https](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.alb_from_vpc_link_https](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 
@@ -581,14 +595,13 @@ cites the baseline by path and line and changes nothing in it.
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_alb_listener_arn"></a> [alb\_listener\_arn](#input\_alb\_listener\_arn) | ARN of the internal ALB's HTTPS listener, produced by the `alb` module. Becomes the private integration's `integration_uri`, so it is the one destination every authenticated request is forwarded to across the VPC Link. Shaped `arn:<partition>:elasticloadbalancing:<region>:<aws-account-id>:listener/app/<lb-name>/<lb-id>/<listener-id>`. | `string` | n/a | yes |
-| <a name="input_alb_security_group_id"></a> [alb\_security\_group\_id](#input\_alb\_security\_group\_id) | Security group attached to the internal ALB. This module adds only the ingress rule from its dedicated VPC Link group on TCP 443. | `string` | n/a | yes |
+| <a name="input_alb_security_group_id"></a> [alb\_security\_group\_id](#input\_alb\_security\_group\_id) | Security group attached to the internal ALB, supplied by the network module. This module attaches the VPC Link to this same group and adds only the self-referencing TCP 443 rule pair the private integration needs, so the topology keeps the three security groups the design freezes rather than adding a fourth for the link. | `string` | n/a | yes |
 | <a name="input_cognito_app_client_ids"></a> [cognito\_app\_client\_ids](#input\_cognito\_app\_client\_ids) | Cognito app client ids whose tokens this API accepts, produced by the `cognito` module. Becomes the JWT authorizer's `jwt_configuration.audience`, so a token whose audience claim falls outside this set is rejected at the edge before any integration runs. | `list(string)` | n/a | yes |
 | <a name="input_cognito_issuer_uri"></a> [cognito\_issuer\_uri](#input\_cognito\_issuer\_uri) | OpenID Connect issuer URI of the Cognito user pool, produced by the `cognito` module and passed through by the environment root. Becomes the JWT authorizer's `jwt_configuration.issuer`, so it is what every request's token is validated against. Shaped `https://<cognito-issuer>/<user-pool-id>`. | `string` | n/a | yes |
 | <a name="input_environment"></a> [environment](#input\_environment) | Deployment environment this instance of the module belongs to, `dev` or `prod`. Composed into every resource name alongside `name_prefix`, and the axis along which the environment roots vary sizing and retention. | `string` | n/a | yes |
 | <a name="input_integration_tls_server_name"></a> [integration\_tls\_server\_name](#input\_integration\_tls\_server\_name) | Server name the private integration verifies against the certificate the internal ALB listener presents. REQUIRED with no default: main.tf always emits the integration's tls\_config from it, so every hop from this edge to the load balancer is TLS with the server identity checked. | `string` | n/a | yes |
 | <a name="input_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#input\_private\_app\_subnet\_ids) | Ids of the private application subnets the VPC Link places its network interfaces in, produced by the `network` module. They determine which availability zones the edge can reach the internal ALB from. | `list(string)` | n/a | yes |
 | <a name="input_spa_cors_allow_origins"></a> [spa\_cors\_allow\_origins](#input\_spa\_cors\_allow\_origins) | Exact origins permitted to call this API from a browser: the distribution serving the SPA, produced by the `cloudfront-spa` module. Becomes `cors_configuration.allow_origins`, so an origin outside this list fails the browser's preflight. Shaped `https://<distribution-domain>`. | `list(string)` | n/a | yes |
-| <a name="input_vpc_id"></a> [vpc\_id](#input\_vpc\_id) | VPC in which this module creates the dedicated API Gateway VPC Link security group, supplied by the network module. | `string` | n/a | yes |
 | <a name="input_access_log_kms_key_arn"></a> [access\_log\_kms\_key\_arn](#input\_access\_log\_kms\_key\_arn) | ARN of the customer-managed KMS key encrypting the stage's access-log group, produced by the `kms` module. Null selects the CloudWatch Logs service-managed key instead. | `string` | `null` | no |
 | <a name="input_cors_allow_headers"></a> [cors\_allow\_headers](#input\_cors\_allow\_headers) | Request headers a browser may send cross-origin. Becomes `cors_configuration.allow_headers`; every header the SPA sets on an authenticated JSON request has to appear here or the browser withholds the request after the preflight. | `list(string)` | <pre>[<br/>  "authorization",<br/>  "content-type",<br/>  "x-correlation-id"<br/>]</pre> | no |
 | <a name="input_cors_allow_methods"></a> [cors\_allow\_methods](#input\_cors\_allow\_methods) | HTTP methods advertised to the browser in the preflight response. Becomes `cors_configuration.allow_methods`; the default is the set the migrated services' contracts expose, plus OPTIONS for the preflight exchange itself. | `list(string)` | <pre>[<br/>  "GET",<br/>  "POST",<br/>  "PUT",<br/>  "DELETE",<br/>  "OPTIONS"<br/>]</pre> | no |

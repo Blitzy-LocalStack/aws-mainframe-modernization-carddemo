@@ -2,6 +2,7 @@ package com.carddemo.reference.api;
 
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import com.carddemo.reference.domain.TransactionType;
 import com.carddemo.reference.dto.PageDirection;
 import com.carddemo.reference.dto.TransactionTypeCreateRequest;
 import com.carddemo.reference.dto.TransactionTypeListRequest;
@@ -9,6 +10,9 @@ import com.carddemo.reference.dto.TransactionTypeResponse;
 import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
 import com.carddemo.reference.service.TransactionTypeService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.security.Principal;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -77,29 +81,48 @@ public class TransactionTypeController {
      * @param direction the paging direction, absent meaning forward
      * @param typeCode an exact type-code filter, absent meaning unfiltered
      * @param description a description filter, absent meaning unfiltered
+     * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
+     *     every position this page mints, so a position is not transferable between callers
      * @return one page of types with its sealed positions
      */
     @GetMapping
     public PageResponse<TransactionTypeResponse> listTransactionTypes(
-            @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
+            @RequestParam(name = PARAM_CURSOR, required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
             @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
-            @RequestParam(name = PARAM_TYPE_CODE, required = false) String typeCode,
-            @RequestParam(name = PARAM_DESCRIPTION, required = false) String description) {
+            @RequestParam(name = PARAM_TYPE_CODE, required = false)
+            @Size(min = TransactionTypeListRequest.TYPE_CODE_LENGTH,
+                    max = TransactionTypeListRequest.TYPE_CODE_LENGTH)
+            @Pattern(regexp = TransactionTypeListRequest.TYPE_CODE_PATTERN) String typeCode,
+            @RequestParam(name = PARAM_DESCRIPTION, required = false)
+            @Size(min = TransactionTypeListRequest.DESCRIPTION_MIN_LENGTH,
+                    max = TransactionTypeListRequest.DESCRIPTION_MAX_LENGTH) String description,
+            Principal principal) {
 
         return this.service.list(
                 new TransactionTypeListRequest(cursor, direction, typeCode, description),
-                this.cursorToken);
+                this.cursorToken, principal.getName());
     }
 
     /**
      * Answers one transaction type by its code.
+     *
+     * <p>Assumptions: the segment is constrained to the {@code TransactionTypeCode} schema its published
+     * path parameter references, so a code outside that domain is refused with the 400 the contract
+     * publishes rather than read for and reported absent. Unconstrained, a two-character value the domain
+     * excludes -- or a value of the wrong width entirely -- reached the keyed read, matched nothing, and was
+     * answered 404 'Transaction type NOT found...', which tells a caller the row is missing when what is
+     * actually wrong is the request.</p>
      *
      * @param typeCd the two-character code to read
      * @return the type as the contract publishes it
      */
     @GetMapping(path = ITEM_PATH)
     public TransactionTypeResponse getTransactionType(
-            @PathVariable(name = PARAM_TYPE_CD) String typeCd) {
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd) {
         return this.service.read(typeCd);
     }
 
@@ -125,7 +148,9 @@ public class TransactionTypeController {
      */
     @PutMapping(path = ITEM_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public TransactionTypeResponse replaceTransactionType(
-            @PathVariable(name = PARAM_TYPE_CD) String typeCd,
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd,
             @Valid @RequestBody TransactionTypeUpdateRequest request) {
         return this.service.replace(typeCd, request);
     }
@@ -140,7 +165,10 @@ public class TransactionTypeController {
      */
     @DeleteMapping(path = ITEM_PATH)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteTransactionType(@PathVariable(name = PARAM_TYPE_CD) String typeCd) {
+    public void deleteTransactionType(
+            @PathVariable(name = PARAM_TYPE_CD)
+            @Size(min = TransactionType.TYPE_CD_WIDTH, max = TransactionType.TYPE_CD_WIDTH)
+            @Pattern(regexp = TransactionType.TYPE_CD_PATTERN) String typeCd) {
         this.service.delete(typeCd);
     }
 }

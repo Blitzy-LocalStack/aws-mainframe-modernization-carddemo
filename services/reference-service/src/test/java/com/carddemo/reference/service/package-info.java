@@ -55,16 +55,23 @@
  *
  * <h2>What this directory holds as this charter is written</h2>
  *
- * <p>Two test classes are present, and between them they carry all five rules
- * above. {@code ReferenceWriteBehaviourTest} groups its cases under three
- * headings that correspond to three of those rules, the strict replace, the
- * maintenance batch and the rate lookup, so the transaction-type,
- * transaction-category, batch-update and disclosure-group assertions live
- * there. {@code DateInquiryMessageListenerTest} carries the date-conversion
- * reply rule, including the reply's exact bytes, the echoed correlation
- * identifier and the request dropped for having expired. With this charter that
- * is three files in this directory, and there is no subdirectory beneath
- * it.</p>
+ * <p>Three test classes are present, and between them they carry all five rules
+ * above. {@code ReferenceWriteBehaviourTest} groups its cases under four
+ * headings, the strict replace, the category replace, the maintenance batch and
+ * the rate lookup, so the transaction-type, transaction-category, batch-update
+ * and disclosure-group assertions live there.
+ * {@code DateInquiryMessageListenerTest} carries the date-conversion reply rule,
+ * including the reply's exact bytes, the echoed correlation identifier and the
+ * request dropped for having expired. {@code TransactionTypeBrowseTest} carries
+ * the keyset browse of the transaction-type table. With this charter that is
+ * four files in this directory, and there is no subdirectory beneath it.</p>
+ *
+ * <p>Refactoring Rationale: this section named two classes and three files while
+ * three classes and four sat in the directory, and it described the write class
+ * as having three headings after a fourth was added. The figures live in a
+ * different file from the thing they count, so the change that falsified them
+ * never touched them -- which is the structural reason the section is kept apart
+ * from the durable rules below rather than merged into them.</p>
  *
  * <p>Refactoring Rationale: the two preceding sections are deliberately kept
  * apart rather than merged into one list. The first states the rules this

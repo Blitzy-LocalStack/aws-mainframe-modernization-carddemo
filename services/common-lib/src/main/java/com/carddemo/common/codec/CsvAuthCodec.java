@@ -388,35 +388,38 @@ public final class CsvAuthCodec {
     /**
      * The purpose string every correlation token is scoped by.
      *
-     * <p>Assumptions: a token is scoped so that the correlation identity of a card-and-transaction pair
-     * and the queue-group identity of the same card produce unrelated tokens, which is what stops an
-     * observer who can see both a queue's metadata and an application log from joining them on a shared
-     * value. The string is a constant here rather than a caller's argument so that a request and its
-     * reply cannot be scoped differently and then fail to pair.</p>
+     * <p>Assumptions: a token is scoped so that two derivations over one authorization -- the correlation
+     * identity of a card-and-transaction pair and the per-card derivation of {@link #GROUP_PURPOSE} --
+     * produce unrelated values, which is what stops a holder of one from joining it to the other. The
+     * string is a constant here rather than a caller's argument so that a request and its reply cannot be
+     * scoped differently and then fail to pair.</p>
      */
     public static final String CORRELATION_PURPOSE = "carddemo/pauth/correlation";
 
     /**
-     * The purpose string a per-card ordering group is scoped by.
+     * The purpose string a per-card keyed derivation is scoped by.
      *
-     * <p>Assumptions: the reference messaging contract requires every message about one card to be
-     * delivered in the order it was sent, which a first-in-first-out queue expresses through a group
-     * identifier. The identifier therefore has to be stable per card and must not be the card number
-     * itself, because a group identifier is message metadata: it sits outside the encrypted body and is
-     * visible in queue telemetry. A keyed token over the card number is stable per card, so ordering is
-     * preserved exactly, while the number itself never becomes metadata.</p>
+     * <p>Refactoring Rationale: this purpose scoped the value published as the queue's
+     * {@code MessageGroupId}, and no longer does. Specification &sect;0.4.1.8 fixes that identity as the
+     * card number itself, and the derivation was withdrawn because a group identity orders one card's
+     * messages only while EVERY producer on the queue computes the same value for that card -- a value
+     * keyed from one consumer's secret is one only that consumer can compute. What the purpose still
+     * scopes is a stable, non-reversible per-card value for uses that are a single service's own to
+     * choose, such as a metric dimension or a diagnostic key; no publisher in this repository derives a
+     * queue identity through it.</p>
      */
     public static final String GROUP_PURPOSE = "carddemo/pauth/order-group";
 
     /**
-     * The purpose string a queue deduplication identity is scoped by.
+     * The purpose string a per-authorization keyed derivation is scoped by.
      *
-     * <p>Assumptions: a first-in-first-out queue suppresses a duplicate by comparing the identifier the
-     * producer supplied, so the identity has to be stable for one authorization and independent of the
-     * payload's bytes -- the card number and the transaction identifier together are exactly that. It is
-     * scoped by its own purpose rather than sharing the correlation purpose so that the two tokens over
-     * that one pair are unrelated: an observer who sees a deduplication identifier in queue telemetry
-     * cannot join it to a correlation identity for the same authorization recorded in a log.</p>
+     * <p>Refactoring Rationale: this purpose scoped the value published as the queue's
+     * {@code MessageDeduplicationId}, and no longer does. Specification &sect;0.4.1.8 fixes that identity
+     * as the transaction identifier itself, and the derivation was withdrawn because suppression compares
+     * an identity the REQUESTER may resend, so it has to be a value the requester can predict. What the
+     * purpose still scopes is a stable value over the card-and-transaction pair, separate from
+     * {@link #CORRELATION_PURPOSE} so that two derivations of one pair cannot be joined to each other; no
+     * publisher in this repository derives a queue identity through it.</p>
      */
     public static final String DEDUPLICATION_PURPOSE = "carddemo/pauth/deduplication";
 
@@ -932,26 +935,24 @@ public final class CsvAuthCodec {
                             REQUEST_FIELD_NAMES.get(17)));
         }
         /**
-         * Returns the keyed, opaque group identity that preserves per-card ordering on the wire.
+         * Returns a keyed, opaque per-card derivation of this request's card number.
          *
-         * <p>Assumptions: the reference messaging contract requires every authorization message about
-         * one card to be processed in the order it was sent, and a first-in-first-out queue expresses
-         * that through a group identifier: messages sharing one identifier are ordered, and messages in
-         * different groups proceed in parallel. The identity therefore has to be per card and stable,
-         * which a keyed token over the card number is.</p>
+         * <p>Refactoring Rationale: this was the value a producer published as the request queue's
+         * {@code MessageGroupId}, and it is no longer used for that. Specification &sect;0.4.1.8 states
+         * the identity literally -- {@code MessageGroupId = card_num} -- and the derivation was withdrawn
+         * because grouping is only an ordering guarantee while EVERY producer on the queue computes the
+         * same value for one card, which a value keyed from one consumer's secret cannot be. The
+         * exposure that decision accepts, a primary account number in queue metadata, is registered as
+         * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in the divergence register.</p>
          *
-         * <p>Refactoring Rationale: the card number itself is the obvious group identifier and is what
-         * the reference correlation implies, and it is refused here for one specific reason: a group
-         * identifier is message METADATA. It is not inside the encrypted message body, it appears in
-         * queue telemetry and in the trace of every send, and it is recorded by anything that observes
-         * the queue. Putting a primary account number there would defeat the body encryption for the one
-         * field that most needs it. A keyed token gives the queue exactly the property it needs -- equal
-         * for equal cards, different for different cards -- and gives an observer nothing.</p>
+         * <p>Assumptions: what remains is a derivation any single service may use where it needs a
+         * stable per-card value that discloses nothing -- a metric dimension or a diagnostic key, where
+         * only that service compares two values. No publisher in this repository calls it.</p>
          *
-         * @param tokeniser the keyed tokeniser, whose key material every producer of this queue shares
-         *     so that two producers put one card's messages in one group; must not be {@code null}
-         * @return the group identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe characters,
-         *     stable for this card and carrying no part of its number
+         * @param tokeniser the keyed tokeniser; two callers sharing key material derive one value for
+         *     one card; must not be {@code null}
+         * @return the derived identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
+         *     characters, stable for this card and carrying no part of its number
          * @throws NullPointerException if {@code tokeniser} is {@code null}
          */
         public String orderGroup(OpaqueIdentifier tokeniser) {
@@ -1114,31 +1115,26 @@ public final class CsvAuthCodec {
         }
 
         /**
-         * Returns the keyed, opaque group identity that preserves per-card ordering on the reply wire.
+         * Returns a keyed, opaque per-card derivation of this reply's card number.
          *
-         * <p>Assumptions: this returns the SAME token
-         * {@link AuthRequest#orderGroup(OpaqueIdentifier)} returns for the same card under the same
-         * key, because both derive it from the sixteen-character card number under
-         * {@link #GROUP_PURPOSE}. That identity is the point rather than a coincidence: a request and
-         * the reply about one card have to land in one first-in-first-out group, and they are produced
-         * by two different carriers at two different times, so the derivation has to be a function of
-         * the card alone.</p>
+         * <p>Assumptions: this returns the SAME value
+         * {@link AuthRequest#orderGroup(OpaqueIdentifier)} returns for the same card under the same key,
+         * because both derive it from the sixteen-character card number under {@link #GROUP_PURPOSE}.
+         * The equality is deliberate: a request and the reply about one card are two carriers of one
+         * fact, so a derivation over the card alone is the only one both can compute.</p>
          *
-         * <p>Refactoring Rationale: this accessor did not exist while the request carrier's did, and
-         * its absence is what left the reply path publishing a raw primary account number as its group
-         * identity. A group identifier is message METADATA -- it sits outside the message body, it
-         * appears in queue telemetry and in the trace of every send, and it is recorded by anything
-         * observing the queue -- so the reply path carried the exact exposure the request carrier's
-         * accessor was written to prevent, on the one path that always runs.</p>
+         * <p>Refactoring Rationale: this was the value the reply publisher put in the queue's
+         * {@code MessageGroupId}, and it is no longer used for that. Specification &sect;0.4.1.8 fixes
+         * that identity as {@code card_num}, and a derived group identity is equal for equal cards only
+         * WITHIN one producer, so a second producer built to the specification would have split one
+         * card's messages across two groups and lost the ordering guarantee. The metadata exposure the
+         * literal identity accepts is registered as
+         * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in the divergence register and bounded by the
+         * queue's encryption, network isolation and task-role scoping.</p>
          *
-         * <p>Alternatives Considered: having the reply publisher call the request carrier's accessor
-         * instead. Rejected because that publisher drains a stored row and holds no request: the reply
-         * is the only carrier it has, so requiring a request would make the group identity depend on
-         * eighteen fields the reply does not carry.</p>
-         *
-         * @param tokeniser the keyed tokeniser, whose key material every producer of this queue shares
-         *     so that one card's messages land in one group; must not be {@code null}
-         * @return the group identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
+         * @param tokeniser the keyed tokeniser; two callers sharing key material derive one value for
+         *     one card; must not be {@code null}
+         * @return the derived identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
          *     characters, stable for this card and carrying no part of its number
          * @throws NullPointerException if {@code tokeniser} is {@code null}
          */
@@ -1151,29 +1147,30 @@ public final class CsvAuthCodec {
         }
 
         /**
-         * Returns the keyed, opaque identity a first-in-first-out queue deduplicates this reply by.
+         * Returns a keyed, opaque derivation over this reply's card and transaction pair.
          *
-         * <p>Assumptions: the identity is the card number and the transaction identifier at their
-         * declared widths, which is the pair that names one authorization exactly once, so a reply sent
-         * twice inside the queue's deduplication interval is accepted once however its bytes differ. A
-         * content hash was the alternative and is refused because a re-published reply whose rendering
-         * changed would then be accepted as a second answer to one request.</p>
+         * <p>Assumptions: the input is the card number and the transaction identifier at their declared
+         * widths, which is the pair that names one authorization exactly once, so the derived value is
+         * stable for one authorization and independent of the payload's bytes.</p>
          *
-         * <p>Refactoring Rationale: the raw transaction identifier was used directly before this method
-         * existed, and it is replaced for the reason the group identity was: a deduplication identifier
-         * is message metadata. The acquirer's transaction identifier is not a primary account number,
-         * but it is the value that joins a queue observer's view to a cardholder's purchase in every
-         * other system that records it, so it is tokenised rather than published.</p>
+         * <p>Refactoring Rationale: this was the value the reply publisher put in the queue's
+         * {@code MessageDeduplicationId}, and it is no longer used for that. Specification &sect;0.4.1.8
+         * fixes that identity as {@code transaction_id}, and the derivation was withdrawn because
+         * suppression compares an identity the REQUESTER may resend: a value keyed from this consumer's
+         * secret is unpredictable to the requester, so an honest resend arriving by another path would be
+         * accepted as a second answer to one request -- the precise failure the derivation was meant to
+         * prevent. The registered consequence is
+         * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA}.</p>
          *
          * <p>Assumptions: the purpose string is {@link #DEDUPLICATION_PURPOSE} and NOT the correlation
-         * purpose, even though both tokenise the same pair. Two purposes yield two unrelated tokens, so
-         * an observer holding a deduplication identifier cannot join it to a correlation identity for
-         * the same authorization recorded elsewhere -- which is the linkage purpose separation exists to
-         * prevent.</p>
+         * purpose, even though both derive from the same pair. Two purposes yield two unrelated values,
+         * so a holder of one cannot join it to the other for the same authorization -- which is the
+         * linkage purpose separation exists to prevent. No publisher in this repository calls this
+         * method.</p>
          *
-         * @param tokeniser the keyed tokeniser, whose key material every publisher shares so that two
-         *     instances derive one identifier for one reply; must not be {@code null}
-         * @return the deduplication identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
+         * @param tokeniser the keyed tokeniser; two callers sharing key material derive one value for
+         *     one authorization; must not be {@code null}
+         * @return the derived identity, exactly {@link OpaqueIdentifier#TOKEN_LENGTH} URL-safe
          *     characters, carrying neither the card number nor the transaction identifier
          * @throws NullPointerException if {@code tokeniser} is {@code null}
          */
@@ -1502,8 +1499,10 @@ public final class CsvAuthCodec {
      * ten integer digits was rejected because it yields a materially smaller number that still looks
      * like money, and silent rounding of a value carrying more than two decimal places was rejected
      * because rounding is a business decision and this is a transport boundary. Rounding is delegated
-     * to {@link Money}, which applies scale {@value Money#SCALE} with {@code RoundingMode.HALF_UP} at
-     * the point a caller has decided that reducing the value is correct. What is accepted is that a
+     * to {@link Money}, which applies scale {@value Money#SCALE} under {@link Money#GENERAL_ROUNDING}
+     * for a general reduction -- its other mode governs the interest accrual alone, which no
+     * authorization payload carries -- at the point a caller has decided that reducing the value is
+     * correct. What is accepted is that a
      * caller holding a three-decimal intermediate has to route it through {@code Money} explicitly
      * rather than having this method decide for them.</p>
      *

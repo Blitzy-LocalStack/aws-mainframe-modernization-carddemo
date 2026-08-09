@@ -255,30 +255,30 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds 35 production classes and 10 package charter files,
- * for 45 compilation units in total. This package contributes 2 of those
+ * <p>The shared kernel holds 40 production classes and 11 package charter files,
+ * for 51 compilation units in total. This package contributes 2 of those
  * production classes -- {@code DateEditValidator} and {@code FieldValidationFlag},
  * both present in this directory -- and 1 of those charters. The arithmetic is
  * recorded so that a class absent from the module is distinguishable from one the
  * contract never admitted:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
  * </pre>
  *
  * <p>Cross-check by compilation unit, counting one charter per package plus that
  * package's production classes:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
  * </pre>
  *
  * <p>The root contributes its charter and the one auto-configuration class. And
- * 35 production classes plus 10 charters is 45. All three paths agree, and this
- * file is one of the ten charters.
+ * 39 production classes plus 11 charters is 50. All three paths agree, and this
+ * file is one of the eleven charters.
  *
- * <p>Assumptions: the authoritative totals are <strong>35 production classes and
- * 45 compilation units, 10 of them charters</strong>. The total is always stated
+ * <p>Assumptions: the authoritative totals are <strong>39 production classes and
+ * 50 compilation units, 11 of them charters</strong>. The total is always stated
  * beside a breakdown that re-derives it, which is why both are kept here instead
  * of the total alone: a figure that does not reproduce all three sums above is
  * rejected on sight rather than adopted.

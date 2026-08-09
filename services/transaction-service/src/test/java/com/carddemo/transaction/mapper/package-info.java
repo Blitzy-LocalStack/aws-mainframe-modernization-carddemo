@@ -105,7 +105,7 @@
  *   <li>{@code package-info.java} -- this charter. LANDED.</li>
  *   <li>{@code TransactionMapperTest} -- LANDED. Covers the mapper over the
  *       350-byte transaction record, whose length {@code app/cpy/CVTRA05Y.cpy}
- *       declares at its line 2, across 23 cases.</li>
+ *       declares at its line 2, across 26 cases.</li>
  *   <li>{@code BillPaymentMapperTest} -- LANDED. Covers the bill-payment
  *       conversions, the assembled acknowledgement text and the invariant
  *       members of the appended ledger row, across 33 cases.</li>
@@ -114,27 +114,15 @@
  *       fixes, across 6 cases.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: this inventory recorded {@code TransactionMapperTest}
- * as PLANNED after it had landed, and omitted {@code BillPaymentMappingTest}
- * altogether while declaring the set closed at three members. Both halves of that
- * are the same defect: a measured statement that stopped being re-measured. It
- * matters more here than a stale sentence usually would, because the paragraph
- * above invites a reader to trust the inventory OVER the directory -- so a reader
- * following the charter would have concluded the transaction mapper had no
- * executable consumer, which is exactly the gap {@code TransactionMapperTest}
- * exists to close, and would not have found the fourth file at all. The counts are
- * stated per member so that a future divergence is arithmetic rather than
- * impression.
- *
- * <p>Refactoring Rationale: a count above is a count of DECLARED cases -- methods
- * annotated as a test or as a parameterised test -- and not of the cases the test
- * engine reports having executed, which is the larger number a parameterised case
- * expands into. The metric is named because leaving it implicit is what let two of
- * these counts drift: a reader re-measuring against a run's reported total would
- * read an accurate figure as too low, and the next reader counting methods would
- * put it back. Both figures were re-measured against the directory when the
- * bill-payment count moved from 19 to 33, the same measurement that resolved the
- * transaction mapper's stated 26 to its declared 23.
+ * <p>Assumptions: a count above is a count of DECLARED cases -- methods annotated
+ * as a test or as a parameterised test -- and not of the cases the test engine
+ * reports having executed, which is the larger number a parameterised case expands
+ * into. The metric is named because the two figures differ by a wide margin: a
+ * reader re-measuring a count against a run's reported total would read an accurate
+ * figure as too low and correct it downward, and the next reader counting methods
+ * would put it back. The counts are stated per member so that a divergence is
+ * arithmetic rather than impression, and the member list itself is compared with
+ * this directory on every build.
  *
  * <p>Alternatives Considered: withholding this charter until every member of
  * that set exists, which would let the inventory be read as a plain listing and
@@ -149,12 +137,7 @@
  * subtree charter at
  * {@code services/transaction-service/src/test/java/com/carddemo/transaction/package-info.java}
  * carries the same paragraph for the same reason at its lines 43 to 62, so the
- * arrangement is the subtree's convention rather than a local preference. The
- * cost was that the inventory read as present tense while part of it was still a
- * target, which is why the paragraph above declared the distinction explicitly
- * for as long as it applied. That cost has now been discharged rather than
- * merely tolerated: every member has landed, so the inventory is a measurement
- * and is checked against this directory on every build.
+ * arrangement is the subtree's convention rather than a local preference.
  *
  * <p>Assumptions: three kinds of file are excluded from this directory
  * outright, and each exclusion has a mechanical reason rather than a stylistic
@@ -169,23 +152,16 @@
  * directory under a different source root, and it is the one location in this
  * module that the ruleset's companion suppression file narrows.
  *
- * <p>Refactoring Rationale: the previous revision of this charter recorded that
- * a second bill-payment class had been withdrawn in favour of the narrower
- * {@code BillPaymentMappingTest}, and named the withdrawn class as the one that
- * asserted a response shape this context does not publish. Measured against
- * {@code services/transaction-service/src/test/java/com/carddemo/transaction/mapper},
- * that reading is inverted: {@code BillPaymentMapperTest} is present and is the
- * broader of the two, and {@code BillPaymentMappingTest} is present beside it
- * asserting a strict subset of the same subjects -- the pre-payment figure the
- * response reports, the zero remainder the far side is left with, the two
- * zero-padded identifiers, the invariant posted discriminator, an absent
- * message reported as null, and a refused absent balance. A charter that names
- * the wrong survivor is worse than one that names neither, because a reader who
- * checks it against the directory and finds it inverted has no way to tell
- * which of its remaining claims are also inverted. Both classes are recorded
- * here as present, the narrower one is recorded as a subset rather than as a
- * second subject, and the target set above stays closed at three so that a
- * reviewer has a boundary to hold a proposed addition against.
+ * <p>Assumptions: both bill-payment classes are present and neither supersedes
+ * the other, so the relationship between them is stated here rather than left to
+ * be inferred from their names. {@code BillPaymentMapperTest} is the broader of
+ * the two. {@code BillPaymentMappingTest} sits beside it asserting a strict
+ * subset of the same subjects -- the pre-payment figure the response reports, the
+ * zero remainder the far side is left with, the two zero-padded identifiers, the
+ * invariant posted discriminator, an absent message reported as null, and a
+ * refused absent balance. The narrower one is therefore recorded as a subset and
+ * not as a second subject, and the target set above stays closed at three so that
+ * a reviewer has a boundary to hold a proposed addition against.
  *
  * <h2>What these tests exercise, and where it lives</h2>
  *
@@ -451,8 +427,8 @@
  * command blocks has no place inside a Javadoc block and there is no second
  * statement for a comment to sit beside. Prose is wrapped at 80 columns to
  * match the subtree charter's own note at its lines 600 to 604, even though
- * {@code config/checkstyle/checkstyle.xml} records at its line 599 that it
- * declares no line-length check. Every line that does exceed 80 is an inline
+ * {@code config/checkstyle/checkstyle.xml} records in its Scope statement at line
+ * 56 that it declares no line-length module. Every line that does exceed 80 is an inline
  * code span holding a path, and that is stated as a universal rather than as a
  * count of such lines so that citing one more path cannot falsify the sentence:
  * a path carries no space to break at, and a break inserted inside one would

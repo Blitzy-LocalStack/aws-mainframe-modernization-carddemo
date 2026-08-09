@@ -2,18 +2,44 @@
 
 Purpose
 -------
-Turn the daily transaction file extract into decoded records the Aurora loaders
-and the verification passes can consume, one record at a time, from either of the two forms the
-baseline ships: the
-line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield the same
-decoded shape, so a caller can swap corpora and compare the two without adapting to a second
-contract.
+Turn the daily transaction file extract into decoded records the Aurora loaders and the
+verification passes can consume, one record at a time, from either of the two forms the baseline
+ships: the line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield
+the same decoded shape, so a caller can swap corpora and compare the two without adapting to a
+second contract.
 
 This module follows the contract ``carddemo_migration.readers.account`` established and differs
 from it only in which record descriptor it names. Where the reasoning behind a step is identical
 to that module's it is referenced rather than restated, because two copies of one justification
 drift apart and then one of them is wrong; where this record differs, the difference is recorded
 here at the point it matters.
+
+Parameters
+----------
+None
+    A module takes no argument. Every published callable states its own parameters at its own
+    definition, and this module reads no argument, option or environment variable while being
+    imported.
+
+Returns
+-------
+None
+    Importing binds names only: :data:`LOADED_FIELDS` and :data:`DROPPED_FIELD_NAMES` are derived
+    from the record descriptor, and nothing else is computed. No dataset is opened, no database
+    connection is made, no environment variable is read and no network is reached at import time,
+    so importing this module is safe on a bare checkout with no credential configured.
+
+Raises
+------
+LayoutError
+    At import, from ``carddemo_migration.copybook.layouts``, which this module imports for its
+    record descriptor: that module validates every declared layout's geometry and both disclosure
+    allowlists as it loads, and refuses to import if any of them disagree. The failure belongs to
+    that module and is neither caught nor re-worded here. At call time, from the two masked
+    renderings, if ``CARDDEMO_MASK_HMAC_KEY`` is set to material this package refuses -- anything
+    that is not canonical base64 of at least thirty-two distinct-valued bytes -- because a
+    guessable key returns the redaction tag to the confirmable digest it replaced. Leaving the
+    variable unset is supported and is not an error.
 
 What this module reads
 ---------------------
@@ -47,14 +73,38 @@ similar.
 
 Daily-transaction exposure control
 ----------------------------------
-Two of this record's thirteen data fields are marked sensitive by the descriptor: the
-primary account number and the amount. Both are **emitted** in the decoded mapping,
-because the daily-transaction table stores both, and both are **redacted** in every
-diagnostic this module produces, with the account number revealing at most its trailing
-four digits. The remaining eleven fields stay verbatim, which is what lets an operator
-reconciling a reject stream see which transaction and which merchant a rejection
-concerns without the number or the amount being emitted. Diagnostics never echo record
-content of any kind, sensitive or otherwise.
+EIGHT of this record's thirteen data fields are marked sensitive by the descriptor, and the
+descriptor is the only place that decides it. They are ``DALYTRAN-ID``, ``DALYTRAN-DESC``,
+``DALYTRAN-AMT``, ``DALYTRAN-MERCHANT-ID``, ``DALYTRAN-MERCHANT-NAME``,
+``DALYTRAN-MERCHANT-CITY``, ``DALYTRAN-MERCHANT-ZIP`` and ``DALYTRAN-CARD-NUM``. The remaining
+FIVE -- ``DALYTRAN-TYPE-CD``, ``DALYTRAN-CAT-CD``, ``DALYTRAN-SOURCE``, ``DALYTRAN-ORIG-TS`` and
+``DALYTRAN-PROC-TS`` -- are disclosable, and the fourteenth field is the trailing pad, which is
+dropped rather than published.
+
+All thirteen data fields are **emitted** in the decoded mapping, because the daily-transaction
+table stores all thirteen and a loader that silently withheld a column would load a wrong row.
+The eight are **redacted** in every diagnostic this module produces, with the account number
+revealing at most its trailing four digits. Diagnostics never echo record content of any kind,
+sensitive or otherwise, so the redaction is a second line rather than the only one.
+
+Refactoring Rationale: an earlier form of this section claimed only TWO sensitive fields -- the
+account number and the amount -- with "the remaining eleven verbatim", and drew an operational
+conclusion from that count: that a redacted diagnostic still shows which transaction and which
+merchant a rejection concerns. Both the count and the conclusion were wrong against the
+descriptor this module actually reads. Under the effective policy a diagnostic shows NEITHER the
+transaction identifier NOR any merchant field, so an operator reconciling a reject stream
+correlates on the disclosable type, category and source codes and on the originating stamp, and
+resolves the identifier out of band. The prose is corrected rather than the policy, because the
+policy is the conservative one and it is what the transaction-master twin already applies.
+
+Trade-offs: the broad marking costs diagnostic legibility -- eight redactions in a fourteen-field
+record leave little to read -- and buys the property that no single field of a cardholder purchase
+(who, where, how much, or which authorisation) can be reassembled from a log. That trade is made
+once for the record, in ``carddemo_migration.copybook.layouts``, and every masking helper here
+merely honours it. Assumptions: the effective set is pinned by
+``tests/test_corpus_disclosure.py``, which requires every field of every record to be either
+admitted by name to a disclosure allowlist or marked sensitive, so changing the descriptor breaks
+a test before it can silently contradict this paragraph again.
 
 The two-timestamp asymmetry
 ---------------------------
@@ -111,7 +161,6 @@ Trade-offs:
 from __future__ import annotations
 
 import pathlib
-import string
 from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from typing import Final
@@ -122,6 +171,12 @@ from typing import Final
 #   broken quietly: a module moved between `readers/` and `loaders/` keeps importing successfully
 #   but against a different sibling, and this project's ruff configuration bans relative imports
 #   outright for that reason.
+# WHY : Assumptions: the shared timestamp authority is imported as a MODULE and its members
+#   reached through it, where every other import here names the members it wants. That is
+#   deliberate: `is_unwritten`, `is_admitted` and `canonical` are generic verbs, and unqualified
+#   they would read as though this reader owned the rule. Qualified, every use site says which
+#   module decides what a timestamp is -- the whole point of one module rather than three copies.
+from carddemo_migration.copybook import timestamp
 from carddemo_migration.copybook.ebcdic_codec import decode_record, iter_ebcdic_records
 from carddemo_migration.copybook.layouts import (
     DALYTRAN_LAYOUT,
@@ -134,6 +189,11 @@ from carddemo_migration.copybook.layouts import (
     mask_record,
 )
 from carddemo_migration.copybook.zoned import decode_zoned_field
+from carddemo_migration.readers.source import (
+    data_region_width,
+    iter_seed_lines,
+    require_exact_record_width,
+)
 
 __all__ = [
     "DALYTRAN_LAYOUT",
@@ -211,6 +271,15 @@ DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in DALYTRAN_LAYOUT.fields if _is_padding_field(field)
 )
 
+
+# WHY : Assumptions: the boundary between a value and the trailing pad is DERIVED from
+#   the published field tuple and is never written here as a number. Bytes at or beyond it
+#   are the pad a text conversion may legitimately have dropped, so supplying them by
+#   padding restores what was discarded and changes no published value; bytes BEFORE it
+#   belong to a field this reader publishes, so supplying those would not restore anything
+#   -- it would invent a value the source never carried and hand a loader a row to key on.
+_DATA_REGION_WIDTH: Final[int] = data_region_width(LOADED_FIELDS)
+
 # WHY : Assumptions: WHICH stamp is non-deterministic is read off the DESCRIPTOR's
 #   `normalize_ts` mark and is never re-derived from a field name written here. The asymmetry is
 #   load-bearing rather than incidental: `DALYTRAN-ORIG-TS` is copied from the input transaction
@@ -273,97 +342,24 @@ def is_normalized_timestamp_field(field_name: str) -> bool:
     return DALYTRAN_LAYOUT.field(field_name).normalize_ts
 
 
-# WHY : Assumptions: an unwritten stamp has exactly TWO uniform forms, and this module recognises
-#   the same two the package's timestamp authority does. `copybook.ebcdic_codec.decode_timestamp`
-#   documents both on measured evidence: every one of the three hundred records of
-#   `AWS.M2.CARDDEMO.DALYTRAN.PS` carries a blank `DALYTRAN-PROC-TS`, because the posting run is
-#   what writes that stamp and this extract is its input, and the shipped primer record
-#   `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT` was never written at all, so its stamp spans hold low
-#   values. Recognising only one of the two would refuse a form the baseline itself produces.
-_BLANK: Final[str] = " "
-_LOW_VALUE: Final[str] = "\x00"
-
-# WHY : Assumptions: these are positions WITHIN one decoded stamp and the characters admitted at
-#   them -- not record geometry, of which this module still states none, and the stamp's own width
-#   is taken from its descriptor rather than written here. The rule is transcribed from the
-#   reference harness's shared timestamp test, which admits the union of four separators at these
-#   six positions so that ONE rule covers both dialects CardDemo emits: the
-#   `YYYY-MM-DD HH:MM:SS.ffffff` form the seeds and the posting program write, and the
-#   `YYYY-MM-DD-HH.MM.SS.NNNNNN` form the interest program takes from the current date. Every
-#   other position is a digit. A dialect-specific matcher would have to know which program wrote
-#   the record, which a reader cannot know from the bytes it was handed.
-_TIMESTAMP_SEPARATOR_OFFSETS: Final[frozenset[int]] = frozenset({4, 7, 10, 13, 16, 19})
-_TIMESTAMP_SEPARATOR_CHARACTERS: Final[frozenset[str]] = frozenset("-.: ")
-
-# WHY : Trade-offs: the digit test is this explicit ASCII set rather than the string method the
-#   reference test uses. That method also answers true for a superscript and for the digit forms
-#   of other scripts, so a mis-decoded span could satisfy it while holding characters no
-#   timestamp column can parse. The accepted cost is one more name; what it buys is that the
-#   check means what it says on BOTH paths, including the byte path, where which characters
-#   appear is decided by the code page rather than by anything a caller controls.
-_TIMESTAMP_DIGITS: Final[frozenset[str]] = frozenset(string.digits)
-
-
-def _is_uniformly(value: str, character: str) -> bool:
-    """Report whether every position of a value holds one given character.
-
-    Purpose
-    -------
-    Recognise one of the two uniform forms an unwritten fixed-width stamp takes, as a single test
-    both forms are checked through, so the two cannot be recognised by slightly different rules.
-
-    Parameters
-    ----------
-    value : str
-        The decoded field characters to test.
-    character : str
-        The single character the whole value must consist of.
-
-    Returns
-    -------
-    bool
-        ``True`` when the value is non-empty and every position equals ``character``; ``False``
-        otherwise, an empty value included.
-
-    Raises
-    ------
-    None
-    """
-    # WHY : Assumptions: an EMPTY value must not read as uniform, which is why the emptiness test
-    #   is here rather than left to the generator. A test over no positions is vacuously true, so
-    #   without this an empty span would be accepted as an unwritten stamp -- and an empty span is
-    #   a field that was sliced wrongly, which is the opposite of a stamp nobody has written yet.
-    return bool(value) and all(position == character for position in value)
-
-
-def _is_timestamp_position(offset: int, character: str) -> bool:
-    """Report whether one position of a stamp holds a character its shape admits there.
-
-    Purpose
-    -------
-    Express the timestamp shape as a per-position rule, so the whole-value test reads as the
-    quantifier it is and the two kinds of position are decided in one named place.
-
-    Parameters
-    ----------
-    offset : int
-        The zero-based position WITHIN the stamp, not within the record.
-    character : str
-        The single character at that position.
-
-    Returns
-    -------
-    bool
-        ``True`` when a separator position holds one of the admitted separators, or a
-        non-separator position holds a digit; ``False`` otherwise.
-
-    Raises
-    ------
-    None
-    """
-    if offset in _TIMESTAMP_SEPARATOR_OFFSETS:
-        return character in _TIMESTAMP_SEPARATOR_CHARACTERS
-    return character in _TIMESTAMP_DIGITS
+# WHY : Refactoring Rationale: the timestamp shape rule that stood here -- two pad-character
+#   constants, a uniformity helper, a per-position character helper and two frozen sets naming the
+#   admitted separators and the admitted digits -- is gone, and `copybook.timestamp` now answers
+#   both questions for every caller in the package. The rule as written admitted the UNION of four
+#   separator characters at EACH of six positions and validated no calendar and no clock at all, so
+#   three spellings the baseline never writes satisfied it: a value separated
+#   `2022.07-18:10.30 00-123456`, an impossible date `2022-13-45 10:30:00.123456`, and an
+#   out-of-range clock `2022-07-18 99:99:99.123456`. The last two then failed much later, inside the
+#   database, as a cast error naming a column rather than a record. And the same forty lines existed
+#   in THREE readers, so a correction had to be made three times or the three would disagree about
+#   what a timestamp is while all three continued to look right.
+# WHY : Alternatives Considered: tightening the per-position rule in place -- a separator set per
+#   position plus explicit range checks on month, day, hour, minute and second. Rejected because it
+#   re-implements a calendar: it still has to know that April has thirty days and that 2100 is not a
+#   leap year, and either line can be wrong with no test noticing until a particular date arrives.
+#   The shared module parses through the standard library's own calendar and requires the parsed
+#   instant to FORMAT BACK to the original characters, which is the same test with none of that
+#   surface and which additionally rejects a short fraction that `%f` alone accepts.
 
 
 def _require_timestamp_shape(value: str, field: FieldSpec) -> str:
@@ -419,9 +415,13 @@ def _require_timestamp_shape(value: str, field: FieldSpec) -> str:
         well-formed timestamp in either dialect.
     """
     if len(value) == field.length:
-        if _is_uniformly(value, _BLANK) or _is_uniformly(value, _LOW_VALUE):
-            return value
-        if all(_is_timestamp_position(offset, character) for offset, character in enumerate(value)):
+        # WHY : Assumptions: the DECLARED width is still checked here, against the
+        #   descriptor, rather than delegated with the rest. The shared authority checks the
+        #   26 characters its two admitted forms occupy; this reader is the only place that
+        #   knows the width the LAYOUT declares for this field, and the two agreeing is a
+        #   property to verify rather than one to assume -- a descriptor edited to a
+        #   different width would otherwise pass silently on every populated stamp.
+        if timestamp.is_unwritten(value) or timestamp.is_admitted(value):
             return value
 
     # WHY : Trade-offs: the refusal names the field's GEOMETRY and the declared width it failed
@@ -758,18 +758,22 @@ def record_key(record: str) -> str:
     Raises
     ------
     RecordLengthError
-        If the record is shorter than the declared width, which would make the sliced key short.
+        If the record is not exactly the declared width. Raised by the shared width guard: a short
+        record would yield a short key that collides with a sibling row, and an over-long one means
+        the source was cut on the wrong boundary, so neither is accepted.
     """
     # WHY : Assumptions: the key is sliced by `key_offset` and `key_length` from the descriptor,
     #   never by a literal. Writing the width here would be a second statement of it, and a key
     #   sliced one character short still looks like a key -- it collides with a sibling record
     #   instead of raising, which a loader would resolve as an upsert onto the wrong row.
-    if len(record) < DALYTRAN_LAYOUT.reclen:
-        raise RecordLengthError(
-            f"a {DALYTRAN_LAYOUT.name} record of {len(record)} characters is shorter than the"
-            f" declared {DALYTRAN_LAYOUT.reclen}, so its"
-            f" {DALYTRAN_LAYOUT.key_length}-character key cannot be sliced"
-        )
+    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
+    #   now EXACT. This function used to accept any record at least the declared width,
+    #   which its own docstring and every decoder in this module contradict, and the
+    #   over-long case is the more dangerous of the two: the key sliced from it comes from
+    #   the right offsets of the WRONG record -- two rows concatenated, most plausibly --
+    #   so it looks entirely well formed and a loader upserts on it. Delegating also means
+    #   the eight flat readers cannot drift apart on a test they all have to make.
+    require_exact_record_width(record, DALYTRAN_LAYOUT)
     start = DALYTRAN_LAYOUT.key_offset
     return record[start : start + DALYTRAN_LAYOUT.key_length]
 
@@ -890,7 +894,20 @@ def iter_ascii_daily_transactions(
     #   with blanks -- is inherited deliberately. Every row of this dataset's seed is
     #   already full width, so the tolerance never engages here, and overriding it would
     #   fork the contract for one reader.
-    records = iter_ascii_text_records(source, DALYTRAN_LAYOUT.reclen)
+    # WHY : Refactoring Rationale: the record cut is bounded by `_DATA_REGION_WIDTH`, and the bound
+    #   closes a data-integrity defect rather than tightening a nicety. The shared iterator
+    #   right-pads a short line -- which is what lets a seed whose trailing pad the conversion
+    #   dropped be read at all -- and it padded a line of ANY length, so a line that stopped
+    #   part-way through a field this reader PUBLISHES was completed with manufactured blanks and
+    #   returned as a well-formed record. Nothing raised: the invented characters are
+    #   indistinguishable from real ones. The bound is the end of the last published field, derived
+    #   from `LOADED_FIELDS` rather than written here, and it is compared against the SOURCE line
+    #   before any padding, which is the only place the comparison is exact.
+    # WHY : Assumptions: the descriptor is passed for DIAGNOSTICS only, so a refusal can name the
+    #   record and the field the line stopped inside. It cannot change which lines are accepted.
+    records = iter_ascii_text_records(
+        source, DALYTRAN_LAYOUT.reclen, min_data_width=_DATA_REGION_WIDTH, layout=DALYTRAN_LAYOUT
+    )
 
     for number, record in enumerate(records, start=1):
         yield decode_ascii_daily_transaction(record, number=number)
@@ -941,20 +958,23 @@ def read_ascii_daily_transactions(path: pathlib.Path) -> Iterator[DecodedDailyTr
     #   match would either sweep the placeholder in or load a dataset twice -- and a doubled image
     #   still divides by the record length with remainder zero, so nothing downstream would catch
     #   it and every money total would come out doubled.
-    # WHY : Alternatives Considered: the file is decoded through a single-byte code page that is
-    #   total over all 256 byte values rather than through a strict ASCII decode. Both reject a
-    #   non-conforming file but differ in WHERE: a strict decode fails inside the interpreter's
-    #   reader with an untyped encoding error, which would make the single-byte guard above
-    #   unreachable, whereas a total page maps each byte to one character so the failure surfaces
-    #   as this package's own record-length error naming the offset.
-    # WHY : Assumptions: line splitting is pinned to the separator alone, matching the shared
-    #   iterator's own whole-text scanner, so streaming this handle line by line and passing the
-    #   whole text produce identical records. Leaving the default in place would let the
-    #   interpreter translate and split on a carriage return as well, moving terminator policy out
-    #   of the module that owns it -- which matters for this corpus specifically, because three of
-    #   the nine ASCII seeds carry carriage returns on some rows and not others.
-    with path.open("r", encoding="latin-1", newline="\n") as handle:
-        yield from iter_ascii_daily_transactions(handle)
+    # WHY : Refactoring Rationale: the open is DELEGATED to `readers.source.iter_seed_lines` and
+    #   is no longer a `Path.open` here, which closes two faults this reader shared with its seven
+    #   siblings. `Path.open` is a BLOCKING open, so a named pipe or a character device named where
+    #   a seed file was expected did not fail -- it waited, indefinitely and with no diagnostic, in
+    #   a step an operator is watching for a load to finish. And iterating a text handle reads to
+    #   the next separator with NO bound at all, so a file whose first separator lies far past the
+    #   record length was materialised in full before any width check could refuse it: the check
+    #   that would have rejected it ran after the allocation that made it a problem. The shared
+    #   reader opens with O_NONBLOCK, proves the descriptor is a regular file with fstat before a
+    #   byte is read, and bounds each line by the declared width plus its terminators.
+    # WHY : Trade-offs: the code page and the terminator policy move WITH the open, so this module
+    #   no longer names either. That is the point -- eight modules each naming them is eight
+    #   chances to disagree, and a disagreement would be invisible, because a reader that validated
+    #   a file slightly differently from its siblings still returns well-formed records for every
+    #   ordinary input. The accepted cost is one more module to read to see how a file is opened;
+    #   `readers.source` records the full reasoning for both decisions in one place.
+    yield from iter_ascii_daily_transactions(iter_seed_lines(path, DALYTRAN_LAYOUT.reclen))
 
 
 def decode_ebcdic_daily_transaction(

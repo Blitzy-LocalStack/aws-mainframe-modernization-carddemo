@@ -93,6 +93,15 @@ class AuthorizationApiContractTest {
     }
 
     /**
+     * The paging wording this contract withdrew, quoted once so two assertions cannot spell it differently.
+     *
+     * <p>Assumptions: the phrase is held as a constant rather than typed at each of the three assertion
+     * sites, because two of them require its absence and one requires its presence -- and a misspelling in
+     * either of the first two would pass silently while asserting nothing at all.</p>
+     */
+    private static final String WITHDRAWN_PAGING_RULE = "sent together or not at all";
+
+    /**
      * Descends one level into a mapping, failing loudly when the shape is not what the caller assumed.
      *
      * @param parent the mapping to read from
@@ -292,6 +301,75 @@ class AuthorizationApiContractTest {
     }
 
     /**
+     * The published paging rule states the asymmetry the service actually implements.
+     *
+     * <p>Purpose: the two optional members of the search body are governed by an asymmetric rule -- a cursor
+     * may be sent alone and is read forward, a direction may not -- and the document said they were "sent
+     * together or not at all". A caller written to that text sends a direction it does not need, and a
+     * caller written to it defensively may treat a cursor-only page as its own client error. This asserts
+     * the document now states the rule, so the pair cannot drift apart again.
+     *
+     * <p>Assumptions: the assertion is on the WORDS rather than on a machine-readable constraint, because
+     * the rule is not expressible in the schema language. A dependency between two optional members would
+     * need a conditional composition that the publishing library does not emit and that few client
+     * generators honour; the prose is therefore the contract, and prose that nothing checks is prose that
+     * goes stale, which is precisely what happened here.
+     *
+     * <p>Assumptions: the withdrawn sentence is asserted absent from the NORMATIVE text only, and the
+     * normative text is taken to be everything before the rationale marker. Adding the asymmetric statement
+     * while leaving the all-or-nothing one standing would leave the document saying both things, which is
+     * the state this finding described -- but a withdrawal notice has to be able to QUOTE what it withdraws,
+     * or a reader who acted on the old wording cannot tell which claim to trust. Asserting absence across
+     * the whole description would therefore forbid the very sentence that makes the correction legible, so
+     * the assertion is scoped instead of weakened.
+     *
+     * <p>Assumptions: the service side of the same rule is asserted by
+     * {@code PendingAuthSummaryServiceTest.cursorWithNoDirectionIsReadForward} and by
+     * {@code directionWithNoCursorIsRefused}, one per arm. This case deliberately asserts only the
+     * document, because a test that exercised both sides would pass whenever the two agreed with each
+     * other and would not notice them agreeing on something the service does not do.
+     *
+     * <p>This test takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("the published paging rule states the cursor-and-direction asymmetry")
+    void publishedPagingRuleStatesTheAsymmetry() {
+        Map<String, Object> query = schema("PendingAuthPageQuery");
+        String queryDescription = String.valueOf(query.get("description"));
+        String directionDescription = String.valueOf(
+                mapping(mapping(query, "properties"), "direction").get("description"));
+
+        assertThat(normativeHalfOf(queryDescription))
+                .as("the body's own description must name the asymmetry rather than implying symmetry")
+                .contains("ASYMMETRIC")
+                .doesNotContain(WITHDRAWN_PAGING_RULE);
+        assertThat(normativeHalfOf(directionDescription))
+                .as("all four combinations must be enumerated, since none is left to inference")
+                .contains("four combinations")
+                .contains("cursor with no direction is read forward")
+                .contains("direction with no cursor is refused")
+                .doesNotContain(WITHDRAWN_PAGING_RULE);
+        assertThat(directionDescription)
+                .as("the withdrawal must SAY what it withdraws, or a reader cannot tell which to trust")
+                .contains(WITHDRAWN_PAGING_RULE);
+    }
+
+    /**
+     * Returns the part of a published description that states the contract, excluding any rationale.
+     *
+     * <p>Assumptions: the rationale marker is the same label the documentation standard uses in every
+     * language in this repository, so this split needs no convention of its own. A description with no
+     * rationale is returned whole, which is the common case and must not be treated as empty.
+     *
+     * @param description a published description, with or without a trailing rationale
+     * @return the normative leading part, never {@code null}
+     */
+    private static String normativeHalfOf(String description) {
+        int marker = description.indexOf("Refactoring Rationale:");
+        return marker < 0 ? description : description.substring(0, marker);
+    }
+
+    /**
      * The conflict example names the subsystem the assembling factory actually emits.
      *
      * <p>Assumptions: all three conflicts the shared advice recognises are raised by the datastore -- a
@@ -307,6 +385,43 @@ class AuthorizationApiContractTest {
         assertThat(example.get("subsystem")).isEqualTo(ApiError.Subsystem.RELATIONAL.name());
         assertThat(example.get("code")).isEqualTo(ApiError.CODE_CONFLICT);
         assertThat(example.get("status")).isEqualTo(409);
+    }
+
+    /**
+     * The conflict example carries a sentence this context can actually emit.
+     *
+     * <p>Purpose: the shared advice publishes three 409 sentences and answers with whichever condition it
+     * recognised, so a document naming one of the three is naming a condition it claims to reach. This
+     * context reaches exactly one: the fraud write holds the authorization row for its transaction, so a
+     * second operator marking the same authorization is refused when the wait bounded by
+     * {@code carddemo.datasource.lock-timeout-ms} elapses.</p>
+     *
+     * <p>Refactoring Rationale: the example was the data-changed sentence, which the shared advice emits
+     * only for an OPTIMISTIC-lock failure. Neither table in this schema declares a version column -- both
+     * are derived field for field from copybooks that have none -- so that failure was unreachable and this
+     * document promised a sentence the service could not produce. Asserting the example against the
+     * constant is what would have caught it, so the assertion is added with the correction.</p>
+     *
+     * <p>Assumptions: the two sentences this context does NOT reach are asserted absent rather than left
+     * unmentioned, because the failure being closed here is a document naming the wrong one of three
+     * similar strings, and an assertion on the right one alone would still pass if a later edit swapped in
+     * either of the others.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the conflict example carries the lock-unavailable sentence this context can emit")
+    void conflictExampleCarriesTheReachableSentence() {
+        Map<String, Object> example = mapping(mapping(mapping(
+                response("Conflict"), "content"), "application/json"), "example");
+
+        assertThat(example.get("message"))
+                .as("the published example must be the sentence the shared advice emits for a lock"
+                        + " that could not be obtained")
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_LOCK_UNAVAILABLE);
+        assertThat(String.valueOf(example.get("message")))
+                .isNotEqualTo(GlobalExceptionHandler.MESSAGE_RECORD_CHANGED)
+                .isNotEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
     }
 
     /**

@@ -1760,7 +1760,7 @@ final class ReportingDtoMapperTest {
         //       reached three service contracts before anything failed. Exact equality is what makes an
         //       added member fail here, in the module that publishes a page, rather than in review.
         assertThat(envelopeComponents)
-                .containsExactly("items", "firstKey", "lastKey", "hasNext");
+                .containsExactly("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
         assertThat(PageResponse.empty().items()).isEmpty();
         assertThat(PageResponse.empty().firstKey()).isNull();
         assertThat(PageResponse.empty().lastKey()).isNull();
@@ -1796,10 +1796,11 @@ final class ReportingDtoMapperTest {
                                         rows,
                                         TRANSACTION_IDENTIFIER,
                                         TRANSACTION_IDENTIFIER,
-                                        true))
+                                        true,
+                                        false))
                 .isInstanceOf(IllegalArgumentException.class)
                 // WHY : Assumptions: the type alone does not identify WHICH guard fired. The envelope
-                //       validates four components and its factory could equally reject a self
+                //       validates five components and its factory could equally reject a self
                 //       inconsistent page -- a next cursor on an exhausted page, say -- with the same
                 //       type, so a type-only assertion would keep passing if the cursor check were
                 //       removed and some other argument check happened to fail instead. Naming the

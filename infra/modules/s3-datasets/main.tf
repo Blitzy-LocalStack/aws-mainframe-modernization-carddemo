@@ -33,7 +33,7 @@
 #   See the note above the data sources below; infra/bootstrap owns state.
 #
 # Parameters:
-#   All twelve variables declared in variables.tf are read by this file, so the
+#   All thirteen variables declared in variables.tf are read by this file, so the
 #   module has no input that reaches nothing. Their types, defaults and
 #   constraints are documented on the `variable` blocks themselves rather than
 #   restated here, where a second copy could drift from the first:
@@ -536,7 +536,15 @@ resource "aws_s3_bucket_ownership_controls" "datasets" {
 # reported before anything is created. A heredoc is an opaque string to
 # Terraform: every one of those mistakes would survive the plan and surface as
 # an API rejection partway through the apply, with the bucket already created.
-data "aws_iam_policy_document" "tls_only" {
+# WHY : Refactoring Rationale: this document was named `tls_only` while it carried
+#       one transport statement. It now carries two Deny statements -- one about how
+#       a request arrives and one about where it arrives from -- so the name is
+#       changed to describe the boundary rather than one of its halves. A document
+#       called tls_only holding a network-path deny is the kind of stale name a
+#       reader trusts instead of reading, and it would make the second statement
+#       look accidental. Renaming a data source is state-safe: it is refreshed on
+#       every run and nothing outside this module referenced it.
+data "aws_iam_policy_document" "dataset_access_boundary" {
   statement {
     sid    = "DenyNonTlsRequests"
     effect = "Deny"
@@ -581,11 +589,86 @@ data "aws_iam_policy_document" "tls_only" {
       values   = ["false"]
     }
   }
+
+  # WHY : Refactoring Rationale: this second statement is NEW. With the transport
+  #       deny alone, a correctly-formed HTTPS request carrying any principal that
+  #       held an IAM grant could read a dataset generation from anywhere on the
+  #       internet, and those generations carry records derived from the cardholder
+  #       masters. The transport statement governs HOW a request arrives; nothing
+  #       governed WHERE FROM, and the gateway endpoint the batch and ETL tasks
+  #       already use gives that second boundary a name to be enforced against.
+  statement {
+    sid    = "DenyObjectDataOutsideTheVpcEndpoint"
+    effect = "Deny"
+
+    # WHY : Assumptions: exactly the three actions that move object CONTENT, and not
+    #       s3:* . Deletes and listings are deliberately excluded: Terraform runs
+    #       from outside the VPC and both roots derive force_destroy from
+    #       !deletion_protection, so a dev teardown legitimately issues version-aware
+    #       deletes and bucket-configuration reads from there. Denying those would
+    #       break `terraform destroy` -- a criterion this package is accepted against
+    #       -- while adding nothing to confidentiality, since bucket metadata is not
+    #       the dataset. GetObjectVersion is listed beside GetObject because a
+    #       versioned bucket serves a noncurrent version through its own action, so a
+    #       policy naming only GetObject would leave every prior generation readable.
+    #       Assumptions: excluding the delete and list actions has a second, concrete
+    #       beneficiary beyond Terraform. Both roots declare a dataset-retention
+    #       Lambda that enforces the generation-retention window with s3:ListBucket
+    #       and s3:DeleteObject, and it carries no vpc_config -- it runs outside the
+    #       VPC, so its requests carry no aws:SourceVpce and a blanket deny would
+    #       silently stop generation pruning, letting the LIMIT(5) SCRATCH analogue
+    #       fail open into unbounded retention. The three principals that DO move
+    #       object content -- the batch task role, the reporting task role and the
+    #       ETL task -- all run on Fargate in the private application subnets, so
+    #       their traffic takes the gateway endpoint route and is not caught here.
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+    ]
+
+    # WHY : Assumptions: the OBJECT ARN pattern alone, where the transport statement
+    #       above needs both forms. The three actions here are authorised against the
+    #       object resource, so adding the bucket ARN would name a resource on which
+    #       none of them can be evaluated -- a statement that reads as broader
+    #       protection while matching nothing extra.
+    resources = ["${aws_s3_bucket.datasets.arn}/*"]
+
+    # WHY : Assumptions: a Deny has to reach every principal to be a boundary. This
+    #       one is about the network path a request took, not about who sent it, so
+    #       scoping it to named principals would leave it silent for exactly the
+    #       identity nobody anticipated.
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    # WHY : Assumptions: StringNotEquals is chosen over a negated test for a reason
+    #       that is the whole mechanism. aws:SourceVpce is present only on a request
+    #       that traversed a VPC endpoint; on a request from outside a VPC the key is
+    #       ABSENT, and IAM evaluates StringNotEquals on an absent key as TRUE -- so
+    #       this one condition catches both "came through the wrong endpoint" and
+    #       "came from outside the VPC entirely". The ...IfExists form would NOT: it
+    #       treats an absent key as a non-match and would let every request from
+    #       outside the VPC through, which is the opposite of the intent and is the
+    #       error this note exists to prevent being introduced as a simplification.
+    #       Assumptions: in-VPC traffic cannot miss the endpoint and be caught here by
+    #       accident. The gateway endpoint installs a route to the Region's S3
+    #       managed prefix list in the private-application route tables, and a
+    #       prefix-list route is more specific than the 0.0.0.0/0 NAT route, so
+    #       S3-destined packets take the endpoint even though the application
+    #       security group also permits broad 443 egress.
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:SourceVpce"
+      values   = [var.s3_gateway_endpoint_id]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "datasets" {
   bucket = aws_s3_bucket.datasets.id
-  policy = data.aws_iam_policy_document.tls_only.json
+  policy = data.aws_iam_policy_document.dataset_access_boundary.json
 
   # Assumptions: the public-access block must be in place BEFORE a policy is
   # attached. Its `block_public_policy` flag is what causes S3 to reject a

@@ -55,20 +55,37 @@
  * differ is the obligation, which AAP section 0.8.1 states for every language it
  * names, TypeScript included.
  *
- * Two more rules guard the block itself rather than one of its elements.
- * `jsdoc/require-jsdoc` decides whether a block is present at all, and
- * `jsdoc/check-param-names` catches a block that has drifted away from the
- * signature it documents -- which is worse than a missing block, because a
+ * Three more rules guard the block itself rather than one of its elements.
+ * `jsdoc/require-jsdoc` decides whether a block is present at all on a function or
+ * a class, `jsdoc/require-file-overview` decides the same question for a MODULE
+ * entry point, and `jsdoc/check-param-names` catches a block that has drifted away
+ * from the signature it documents -- which is worse than a missing block, because a
  * reader who trusts it is actively misled.
+ *
+ * Refactoring Rationale: the module-entry rule is named here because Rule 1 names
+ * three kinds of subject and this list previously covered two of them. It was for a
+ * time deliberately unconfigured, and the header said so; both statements changed
+ * together when the tree was measured and found to carry the tag in every module.
+ * Splitting them -- enabling the rule and leaving the header describing it as absent
+ * -- would have been the worse of the two possible inconsistencies, since a reader
+ * auditing coverage reads the header first.
  *
  * What this gate does not decide
  * ------------------------------
  * Three of Rule 1's four Forbidden Patterns are semantic, and no linter in any
  * language can decide them: whether a comment restates the code, whether a
  * rationale is specific rather than vague, and whether the decision a comment
- * justifies was the non-obvious one on that line. Rule 1's "module entry point"
- * clause is left to review here as well -- see the note beside
- * `jsdoc/require-file-overview` in the TypeScript block for the measured reason.
+ * justifies was the non-obvious one on that line. Those three are the whole of what
+ * is left to review. What this gate decides is PRESENCE and tag coverage, for all
+ * three kinds of subject Rule 1 names -- function, class and module entry point.
+ *
+ * Refactoring Rationale: the module-entry clause was listed here as a fourth limit
+ * left to review, and it no longer is: `jsdoc/require-file-overview` decides it,
+ * configured in JSDOC_DOCUMENTATION_RULES with the argument that changed the answer.
+ * The correction matters in the direction this section is read -- an audit that
+ * trusted the old sentence would have gone looking for a review obligation that is
+ * now mechanical, and would have found no reviewer carrying it.
+ *
  * These limits are stated rather than left implied, because a configuration that
  * appears to decide everything teaches reviewers to stop reading, and that
  * removes the only check covering the semantic three.
@@ -357,6 +374,61 @@ const JSDOC_DOCUMENTATION_RULES = {
       // that cannot know the "why".
       enableFixer: false,
     },
+  ],
+
+  // Rule 1, MODULE presence: the rule names "every new or modified function,
+  // class, and module entry point", and `jsdoc/require-jsdoc` above decides only
+  // the first two of those three. This entry decides the third. It is the one
+  // rule in the plugin that can: it asks whether the file itself carries a
+  // whole-file overview, which is what a module entry point's docstring is.
+  //
+  // Refactoring Rationale: this rule was previously left OFF and its absence
+  // recorded as a decision, on the ground that it insists on a literal `@file`
+  // tag while `src/messages/messages.ts` opened with an untagged description
+  // block -- so switching it on would have reported a module whose documentation
+  // was present and complete, and a gate that reports complete documentation
+  // teaches a reader its output is noise. That measurement is superseded, and by
+  // the tree rather than by an argument: every authored module in this package now
+  // carries a tagged block ahead of its first statement, so the rule reports ZERO
+  // violations against the landed tree and binds every module authored after it --
+  // measured by running it across the package before adopting it. What the old note
+  // wrong was treating one convention's cost as the rule's defect. The tag is what
+  // makes "does this module state its purpose?" decidable at all, and adopting it
+  // costs one line in each module that was already writing the description
+  // underneath it. Leaving the clause to review was measured too, and it failed in
+  // the way an unenforced clause always fails: nine modules -- the entry point, the
+  // router, the shell, two API clients and four screens -- shipped with no module
+  // docstring at all while `npm run lint` stayed green, because nothing here asked.
+  //
+  // Assumptions: the three sub-checks are stated explicitly even though this object
+  // reproduces the plugin's own defaults exactly, for the reason recorded at
+  // `publicOnly` above -- a search for `mustExist` should find a decision with its
+  // authority attached rather than an absence. Supplying `tags` at all makes every
+  // key default to `false`, so an incomplete object here would silently switch two
+  // thirds of the rule off; all three are therefore listed. Each was verified to
+  // fire against a probe rather than read off its name: an untagged leading
+  // description reports "Missing @file", a tag preceded by a statement reports
+  // "@file should be at the beginning of the file", and a second tag reports
+  // "Duplicate @file". A file carrying no JSDoc comment whatsoever is reported too,
+  // which matters -- a module-entry gate that needed an existing block to notice a
+  // missing one would have exactly the blind spot it exists to close.
+  //
+  // Assumptions: this belongs in the SHARED object rather than in either language
+  // block. The three presets were diffed against the installed plugin, and the rule
+  // is `off` in all of them -- plain, TypeScript and TypeScript-flavour alike -- so
+  // neither language inherits it and neither language needs a different form of it.
+  // Duplicating it per block is the drift this object exists to prevent.
+  //
+  // Trade-offs: the cost is that a module overview must carry the literal tag and
+  // not merely read like one, so a leading description block without it fails even
+  // though a human would call the module documented. That is accepted because the
+  // alternative is the rule having no decidable subject: without the tag the rule
+  // would have to guess whether a leading block describes the module, a licence or
+  // the first declaration beneath it, and a gate that guesses is the gate the old
+  // note was right to refuse.
+  'jsdoc/require-file-overview': [
+    'error',
+    { tags: { file: { initialCommentsOnly: true, mustExist: true, preventDuplicates: true } } },
   ],
 
   // Rule 1, element 1 (Purpose: what the function or class does). The plugin's
@@ -905,35 +977,66 @@ export default defineConfig([
       // line -- drop the flag from one workflow step and the gate keeps reporting
       // while nothing fails. Encoding the severity in the configuration means the
       // flag is defence in depth rather than the whole defence.
-      // ⚠ Assumptions: choosing the TypeScript variant over the plain one is what
-      // turns the three JSDoc `require-*-type` rules off, and that is the stance
-      // this project wants -- the type belongs to the signature, as argued at
-      // `jsdoc/require-param` above. Only ONE of the five rules the variant moves
-      // is reversed here: `jsdoc/no-types` is set back off in this block's own
-      // `rules` below, so a type expression is permitted rather than forbidden.
-      // `jsdoc/no-undefined-types` is set back on too, but from
-      // JSDOC_DOCUMENTATION_RULES rather than from here, because it applies in both
-      // languages -- so a permitted type tag is still checked against real
-      // declarations. Read the preset as supplying both the shared body of rules
-      // and the type-tag stance, with those two entries adjusting how strictly the
-      // stance is applied rather than reversing it.
+      // ⚠ Assumptions: this preset supplies the shared body of rules, and its
+      // type-tag stance is then reversed in full. The two presets were diffed
+      // against the installed plugin rather than assumed about, and they differ in
+      // SIX rules: `jsdoc/no-types` (off in the plain variant, error here),
+      // `jsdoc/require-param-type`, `jsdoc/require-returns-type` and
+      // `jsdoc/require-property-type` (error in the plain variant, off here),
+      // `jsdoc/no-undefined-types` (error in the plain variant, off here) and
+      // `jsdoc/check-tag-names` (bare `error` in the plain variant, `typed: true`
+      // here). FIVE of those six are reversed, and every reversal has an entry a
+      // reader can find. Four sit in this block's own `rules` below --
+      // `jsdoc/no-types` back to off so a `{Type}` tag is permitted, and
+      // `jsdoc/require-param-type`, `jsdoc/require-returns-type` and
+      // `jsdoc/require-property-type` back to error so it is required. The fifth,
+      // `jsdoc/no-undefined-types`, is reversed from JSDOC_DOCUMENTATION_RULES
+      // rather than from here because it applies in both languages, so a permitted
+      // type tag is still checked against real declarations. The sixth,
+      // `jsdoc/check-tag-names`, is not reversed but restated with its `typed: true`
+      // option in this block's own `rules` below. The Rule 1 reason
+      // is one reason for all five: elements 2 and 3 ask the DOCUMENTATION for each
+      // parameter's type and the return value's type, with no qualification by
+      // language, and this preset's stance is that a `.ts` docstring should carry
+      // neither. The argument is set out in full at `jsdoc/require-param` above.
+      //
+      // Refactoring Rationale: this note said "Only ONE of the five rules the
+      // variant moves is reversed here" and closed by describing the entries as
+      // "adjusting how strictly the stance is applied rather than reversing it".
+      // Both halves described a superseded arrangement in which the three
+      // `require-*-type` rules were left at the preset's off, and both were wrong
+      // about the operative configuration in the direction that does real damage: a
+      // reader auditing Rule 1 coverage would have read the summary, concluded the
+      // type half was unenforced in `.ts`, and either reported a gap that does not
+      // exist or deleted the four entries below as inconsistent with the documented
+      // intent. It also undercounted the difference at five rules; `check-tag-names`
+      // is the sixth.
       //
       // ⚠ Alternatives Considered: extending `flat/recommended-error` -- the plain
-      // variant -- instead. The two presets were diffed against the installed
-      // plugin rather than assumed about, and they turn out to differ in EXACTLY
-      // five rules, every one of them part of the type-tag stance: the plain
-      // variant has `no-types` off with `require-param-type`,
-      // `require-returns-type`, `require-property-type` and `no-undefined-types`
-      // on, and the TypeScript variant inverts all five. The plain variant is
-      // therefore the WRONG base here in three of the five -- it would require the
-      // duplicated types this file deliberately does not -- so extending it would
-      // need three overrides where the TypeScript variant needs two. It also loses
-      // for a second, independent reason: this is the TypeScript block, and a
-      // future plugin release that adds a genuinely TypeScript-specific adjustment
-      // will add it to the TypeScript preset, which the plain variant would not
-      // inherit. Trade-offs: the cost is the four explicit type-tag entries below
-      // and one indirection for a reader learning the exact stance -- paid so the
-      // language-specific preset stays the base for the language-specific block.
+      // variant -- instead, and the honest statement of the comparison is that it
+      // would reach the same type-tag stance with NO override at all. The plain
+      // variant already has `no-types` off with `require-param-type`,
+      // `require-returns-type`, `require-property-type` and `no-undefined-types` on,
+      // which is exactly what the five reversals above restore, so the arithmetic
+      // favours it: zero type-tag entries against the four below, with
+      // `check-tag-names` needing its `typed: true` option under either base.
+      // Refactoring Rationale: this paragraph used to argue the opposite -- that the
+      // plain variant was "the WRONG base here in three of the five" because it
+      // "would require the duplicated types this file deliberately does not". That
+      // was true of the superseded arrangement in which those three rules were left
+      // off, and it inverted once they were raised to error; keeping it would have
+      // left the file arguing for its base on a ground its own rules contradict.
+      // The TypeScript variant is nevertheless kept, for two reasons that survive
+      // the correction. This is the TypeScript block, so a future plugin release
+      // that adds a genuinely TypeScript-specific adjustment will add it to the
+      // TypeScript preset, and the plain variant would not inherit it. And the four
+      // entries the TypeScript base makes necessary are worth having on their own
+      // terms: they pin this project's stance LOCALLY, so a future release that
+      // changed a default in the plain preset could not move the stance silently,
+      // whereas under the plain base the same change would arrive with nothing in
+      // this file to contradict it. Trade-offs: the cost is those four entries,
+      // which read as redundant to anyone comparing against the plain variant, plus
+      // one indirection for a reader learning the exact stance.
       jsdoc.configs['flat/recommended-typescript-error'],
     ],
 
@@ -1041,18 +1144,15 @@ export default defineConfig([
       'jsdoc/require-returns-type': 'error',
       'jsdoc/require-property-type': 'error',
 
-      // Assumptions: `jsdoc/require-file-overview` is the only rule that could
-      // mechanise Rule 1's "module entry point" clause, and it is left off after
-      // measuring the tree rather than on principle: it insists on a literal
-      // `@file` tag, and of the two modules measured `vite.config.ts` carries
-      // one while `src/messages/messages.ts` opens with an untagged description
-      // block. Switching it on would report a violation against a module whose
-      // documentation is present and complete, which teaches a reader that the
-      // gate's reports are noise. The clause stays a review obligation, and it is
-      // named here -- and in the blind-spot note at the top of this file -- so its
-      // absence reads as a decision rather than a gap. It is written in backticks
-      // rather than as a configured entry so that a grep for a disabled
-      // `jsdoc/require-*` rule in this file finds nothing.
+      // Refactoring Rationale: `jsdoc/require-file-overview` was configured here,
+      // in this block, as a note explaining why it was left OFF. It is now ON and
+      // it lives in `JSDOC_DOCUMENTATION_RULES` instead, with the full argument and
+      // the measurement that changed the answer. The move is not cosmetic: the rule
+      // is `off` in all three of the plugin's presets, so it is inherited by neither
+      // language and needs no language-specific form, which makes the shared object
+      // the only place it can sit without being written twice. A reader who came
+      // here looking for the old decision is meant to find this pointer rather than
+      // a silence.
     },
   },
 

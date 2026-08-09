@@ -50,15 +50,25 @@ import com.carddemo.common.money.Money;
  * <b>scale 4</b> before the division reduces it. Dividing first reduces at the wrong step and loses
  * those digits, which is why transformation rule T4 requires the order be preserved.
  *
- * <p>Assumptions: <b>the quotient is rounded half up</b>, under the single money contract
- * {@link Money#GENERAL_ROUNDING} that transformation rule T3 states for the whole money path. The
- * reference program instead truncates -- no {@code ROUNDED} phrase appears on the statement nor
- * anywhere else in that program, and an unrounded {@code COMPUTE} storing into the fixed-scale
- * {@code PIC S9(09)V99} fields at lines 168 and 169 discards the surplus digits. The difference is
- * one cent on a quotient landing exactly on a half cent: a balance of {@code 1000.80} at a rate of
- * {@code 2.50} forms the scale-4 product {@code 2502.0000}, whose quotient truncates to
- * {@code 2.08} and rounds half up to {@code 2.09}. It is registered as divergence C-ROUNDING in
- * {@code docs/architecture/cobol-to-service-traceability.md} rather than reproduced.
+ * <p>Assumptions: <b>the quotient is truncated toward zero</b>, under
+ * {@link Money#BASELINE_INTEREST_ROUNDING}, which is the accrual's own contract and is distinct from
+ * the {@link Money#GENERAL_ROUNDING} half up that governs every other reduction in the money path.
+ * Truncation is what the reference program does -- no {@code ROUNDED} phrase appears on the statement
+ * nor anywhere else in that program, and an unrounded {@code COMPUTE} storing into the fixed-scale
+ * {@code PIC S9(09)V99} fields at lines 168 and 169 discards the surplus digits. The two modes part
+ * company by one cent on a quotient landing exactly on a half cent: a balance of {@code 1000.80} at
+ * a rate of {@code 2.50} forms the scale-4 product {@code 2502.0000}, whose quotient truncates to
+ * {@code 2.08} and would round half up to {@code 2.09}. The accrual produces {@code 2.08}.
+ *
+ * <p>Refactoring Rationale: this paragraph stated that the quotient is rounded half up and that the
+ * one-cent difference was registered as divergence C-ROUNDING rather than reproduced. That
+ * disposition is withdrawn -- the accrual now truncates and the difference is gone. The identifier
+ * survives only as a withdrawal record in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5, so that it still resolves
+ * for a reader who meets it in an older comment. The reason the divergence could not stand is that
+ * the accrual formula is one of the rules the reference test suite asserts verbatim, and the cent did
+ * not stay local: line 467 adds each reduced term into the account total and line 352 adds that total
+ * to the balance, which the next inclusive over-limit comparison is made against.
  *
  * <p>Assumptions: the account increment is <b>the sum of per-category reduced values</b> and never
  * the reduction of a sum. Line 467 adds each transaction's own already-reduced interest into

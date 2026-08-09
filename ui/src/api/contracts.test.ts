@@ -123,11 +123,17 @@ const BROWSER_CLIENTS: ReadonlyArray<
  * How many operations the five browser-facing contracts declare in total.
  *
  * Assumptions: this figure is the scanner's self-check and not a target. It was measured across the
- * five documents while this gate was authored -- auth 8, authorization 3, card 5, reference 19,
- * reporting 5 and transaction 4 -- and its only job is to fail loudly if the scanner ever stops
- * matching, because a scanner that matches nothing agrees with an empty manifest.
+ * six documents -- auth 8, authorization 5, card 5, reference 19, reporting 5 and transaction 4 -- and
+ * its only job is to fail loudly if the scanner ever stops matching, because a scanner that matches
+ * nothing agrees with an empty manifest.
+ *
+ * Refactoring Rationale: this was 44 with authorization counted at 3. That contract now publishes two
+ * further operations -- the detail screen's second representation and its forward paging move -- which
+ * were added because the service methods behind them had no caller at all: no controller reached them
+ * and no contract declared them, while the service package's own documentation described them as
+ * published. Raising the figure records the new surface rather than the scanner having drifted.
  */
-const EXPECTED_OPERATION_COUNT = 44;
+const EXPECTED_OPERATION_COUNT = 46;
 
 /** The methods a path item may declare, matching the set the Java-side contract tests filter on. */
 const HTTP_METHODS = ['get', 'post', 'put', 'delete', 'patch'] as const;

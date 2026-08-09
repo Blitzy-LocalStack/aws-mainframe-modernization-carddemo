@@ -46,6 +46,16 @@ class TransactionTypeBrowseTest {
     private static final Duration CURSOR_LIFETIME = Duration.ofHours(1);
 
     /**
+     * The authenticated caller every case pages as.
+     *
+     * <p>Assumptions: a subject is now part of every cursor binding, so a case that sealed a position
+     * under one name and opened it under another would be asserting the refusal rather than the walk.
+     * One constant keeps every positive case on one identity and lets the refusal cases state the second
+     * identity explicitly.</p>
+     */
+    private static final String SUBJECT = "REFUSER1";
+
+    /**
      * Builds a run of types with sequential two-digit codes.
      *
      * @param count how many rows to build
@@ -89,7 +99,7 @@ class TransactionTypeBrowseTest {
 
         PageResponse<TransactionTypeResponse> page =
                 new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, null, null),
-                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         assertThat(page.items()).hasSize(TransactionTypeService.PAGE_SIZE);
         assertThat(TransactionTypeService.PAGE_SIZE).isEqualTo(7);
@@ -111,7 +121,7 @@ class TransactionTypeBrowseTest {
         when(types.findAllByOrderByTypeCdAsc(any(Limit.class))).thenReturn(rows(8));
 
         new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, null, null),
-                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         verify(types).findAllByOrderByTypeCdAsc(Limit.of(8));
     }
@@ -127,7 +137,7 @@ class TransactionTypeBrowseTest {
 
         PageResponse<TransactionTypeResponse> page =
                 new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, null, null),
-                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         assertThat(page.items()).hasSize(7);
         assertThat(page.hasNext())
@@ -148,7 +158,7 @@ class TransactionTypeBrowseTest {
 
         PageResponse<TransactionTypeResponse> page =
                 new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, "03", null),
-                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         assertThat(page.items()).extracting(TransactionTypeResponse::typeCd).containsExactly("03");
         verify(types).findFilteredPageAfter(eq("03"), isNull(), isNull(), any(Limit.class));
@@ -172,7 +182,7 @@ class TransactionTypeBrowseTest {
                 .thenReturn(rows(2));
 
         new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, null, "Purchase"),
-                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         verify(types).findFilteredPageAfter(isNull(), eq(expected), isNull(), any(Limit.class));
     }
@@ -187,7 +197,7 @@ class TransactionTypeBrowseTest {
         when(types.findAllByOrderByTypeCdAsc(any(Limit.class))).thenReturn(rows(3));
 
         new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(null, null, null, "   "),
-                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME));
+                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
         verify(types).findAllByOrderByTypeCdAsc(any(Limit.class));
         verify(types, never()).countFilterMatches(any(), any());
@@ -202,12 +212,12 @@ class TransactionTypeBrowseTest {
     void aForwardPageReadsStrictlyPastThePosition() {
         TransactionTypeRepository types = mock(TransactionTypeRepository.class);
         CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
-        String cursor = sealer.seal(TransactionTypeService.CURSOR_BINDING, "04");
+        String cursor = sealer.seal(forwardBinding(null, null), "04");
         when(types.findByTypeCdGreaterThanOrderByTypeCdAsc(eq("04"), any(Limit.class)))
                 .thenReturn(rows(2));
 
         new TransactionTypeService(types, mock(TransactionCategoryRepository.class)).list(request(cursor, PageDirection.NEXT, null, null),
-                sealer);
+                sealer, SUBJECT);
 
         verify(types).findByTypeCdGreaterThanOrderByTypeCdAsc(eq("04"), any(Limit.class));
     }
@@ -220,14 +230,16 @@ class TransactionTypeBrowseTest {
     void aFilteredBackwardPageRendersAscending() {
         TransactionTypeRepository types = mock(TransactionTypeRepository.class);
         CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
-        String cursor = sealer.seal(TransactionTypeService.CURSOR_BINDING, "09");
+        String cursor = sealer.seal(
+                backwardBinding(null, TransactionTypeRepository.descriptionFilterPattern("Description")),
+                "09");
         String expected = TransactionTypeRepository.descriptionFilterPattern("Description");
         when(types.countFilterMatches(isNull(), eq(expected))).thenReturn(9L);
         when(types.findFilteredPageBefore(isNull(), eq(expected), eq("09"), any(Limit.class)))
                 .thenReturn(rows(3).reversed());
 
         PageResponse<TransactionTypeResponse> page = new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
-                .list(request(cursor, PageDirection.PREVIOUS, null, "Description"), sealer);
+                .list(request(cursor, PageDirection.PREVIOUS, null, "Description"), sealer, SUBJECT);
 
         verify(types).findFilteredPageBefore(isNull(), eq(expected), eq("09"), any(Limit.class));
         assertThat(page.items()).extracting(TransactionTypeResponse::typeCd)
@@ -248,7 +260,8 @@ class TransactionTypeBrowseTest {
         when(types.countFilterMatches(eq("99"), isNull())).thenReturn(0L);
 
         assertThatThrownBy(() -> new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
-                .list(request(null, null, "99", null), new CursorToken(CURSOR_KEY, CURSOR_LIFETIME)))
+                .list(request(null, null, "99", null), new CursorToken(CURSOR_KEY, CURSOR_LIFETIME),
+                        SUBJECT))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionTypeService.MESSAGE_NO_RECORDS_FOR_FILTER)
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.type(
@@ -273,7 +286,7 @@ class TransactionTypeBrowseTest {
 
         assertThatThrownBy(() -> new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
                 .list(request(null, null, null, "Nothing"),
-                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME)))
+                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT))
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.type(
                         ClientInputException.class))
                 .extracting(ClientInputException::fields)
@@ -292,11 +305,177 @@ class TransactionTypeBrowseTest {
 
         assertThatThrownBy(() -> new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
                 .list(request(null, null, "99", "Nothing"),
-                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME)))
+                        new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT))
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.type(
                         ClientInputException.class))
                 .extracting(ClientInputException::fields)
                 .isEqualTo(List.of(TransactionTypeService.FIELD_TYPE_CODE,
                         TransactionTypeService.FIELD_DESCRIPTION));
+    }
+
+    /**
+     * Composes the binding a FORWARD position of this browse is sealed under.
+     *
+     * <p>Assumptions: a case that seals a position must seal it under the same four facts the service
+     * opens it under -- browse, caller, filters, direction -- or it is asserting the refusal rather than
+     * the walk. These two helpers exist so a case states which direction's position it is minting, which
+     * is the fact that is easiest to get silently wrong.</p>
+     *
+     * @param typeCodeFilter the normalised type-code filter, or {@code null} for none
+     * @param descriptionFilter the normalised description filter, or {@code null} for none
+     * @return the binding a trailing position is sealed under, never {@code null}
+     */
+    private static String forwardBinding(String typeCodeFilter, String descriptionFilter) {
+        return ReferencePaging.binding(TransactionTypeService.CURSOR_BINDING, SUBJECT, false,
+                typeCodeFilter, descriptionFilter);
+    }
+
+    /**
+     * Composes the binding a BACKWARD position of this browse is sealed under.
+     *
+     * @param typeCodeFilter the normalised type-code filter, or {@code null} for none
+     * @param descriptionFilter the normalised description filter, or {@code null} for none
+     * @return the binding a leading position is sealed under, never {@code null}
+     */
+    private static String backwardBinding(String typeCodeFilter, String descriptionFilter) {
+        return ReferencePaging.binding(TransactionTypeService.CURSOR_BINDING, SUBJECT, true,
+                typeCodeFilter, descriptionFilter);
+    }
+
+    /**
+     * Confirms a position minted for one caller is refused for another.
+     *
+     * <p>Assumptions: this is asserted from OUTSIDE the service, by minting under a second subject and
+     * presenting the result, because the property under test is that the seal carries the subject at all.
+     * A test that inspected the binding string would pass while the seal ignored it.</p>
+     */
+    @Test
+    @DisplayName("a position issued to one caller is refused for another")
+    void aPositionIssuedToOneCallerIsRefusedForAnother() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        String foreign = sealer.seal(
+                ReferencePaging.binding(TransactionTypeService.CURSOR_BINDING, "OTHERUSR", false,
+                        null, null),
+                "04");
+
+        assertThatThrownBy(() ->
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(foreign, PageDirection.NEXT, null, null), sealer, SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Confirms a position minted under one filter is refused once the filter changes.
+     */
+    @Test
+    @DisplayName("a position issued under one filter is refused once the filter changes")
+    void aPositionIssuedUnderOneFilterIsRefusedWhenTheFilterChanges() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        String unfiltered = sealer.seal(forwardBinding(null, null), "04");
+
+        assertThatThrownBy(() ->
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(unfiltered, PageDirection.NEXT, "03", null), sealer, SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Confirms neither boundary position can be replayed in the other direction.
+     */
+    @Test
+    @DisplayName("neither boundary position can be replayed in the other direction")
+    void neitherBoundaryPositionCanBeReplayedInTheOtherDirection() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        String trailing = sealer.seal(forwardBinding(null, null), "04");
+        String leading = sealer.seal(backwardBinding(null, null), "04");
+
+        assertThatThrownBy(() ->
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(trailing, PageDirection.PREVIOUS, null, null), sealer, SUBJECT))
+                .as("a trailing position replayed backward")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+
+        assertThatThrownBy(() ->
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(leading, PageDirection.NEXT, null, null), sealer, SUBJECT))
+                .as("a leading position replayed forward")
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Confirms a direction stated without a position is refused rather than answered with page one.
+     *
+     * <p>Assumptions: both directions are asserted. The published contract states the pair travels
+     * together or not at all, and answering the opening page for PREVIOUS is the case that let a client
+     * loop over the first page while believing it was retreating.</p>
+     */
+    @Test
+    @DisplayName("a direction without a position is refused, in both directions")
+    void aDirectionWithoutAPositionIsRefused() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+
+        for (PageDirection direction : PageDirection.values()) {
+            assertThatThrownBy(() ->
+                    new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                            .list(request(null, direction, null, null), sealer, SUBJECT))
+                    .as("direction %s with no cursor", direction)
+                    .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.type(
+                            ClientInputException.class))
+                    .extracting(ClientInputException::fields)
+                    .isEqualTo(List.of(ReferencePaging.FIELD_DIRECTION));
+        }
+    }
+
+    /**
+     * Confirms a backward page always reports that a further page follows it.
+     *
+     * <p>Assumptions: this is the reference's own unconditional behaviour, set at physical line 1738 of
+     * {@code COTRTLIC.cbl} at the top of its backward reader. Reporting the backward surplus instead told
+     * a caller that had just stepped back that nothing lay ahead, which made the page it came from
+     * unreachable.</p>
+     */
+    @Test
+    @DisplayName("a backward page reports that a further page follows")
+    void aBackwardPageReportsAFollowingPage() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        String leading = sealer.seal(backwardBinding(null, null), "04");
+        when(types.findByTypeCdLessThanOrderByTypeCdDesc(eq("04"), any(Limit.class)))
+                .thenReturn(rows(3).reversed());
+
+        PageResponse<TransactionTypeResponse> page =
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(leading, PageDirection.PREVIOUS, null, null), sealer, SUBJECT);
+
+        assertThat(page.hasNext())
+                .as("the caller stepped back from a page, so that page still lies ahead")
+                .isTrue();
+        assertThat(page.hasPrevious())
+                .as("three rows read against a window of seven leaves no surplus behind them")
+                .isFalse();
+    }
+
+    /**
+     * Confirms the opening page reports no earlier page even though it carries a leading position.
+     */
+    @Test
+    @DisplayName("the opening page reports no earlier page")
+    void theOpeningPageReportsNoEarlierPage() {
+        TransactionTypeRepository types = mock(TransactionTypeRepository.class);
+        when(types.findAllByOrderByTypeCdAsc(any(Limit.class))).thenReturn(rows(8));
+
+        PageResponse<TransactionTypeResponse> page =
+                new TransactionTypeService(types, mock(TransactionCategoryRepository.class))
+                        .list(request(null, null, null, null),
+                                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
+
+        assertThat(page.hasPrevious())
+                .as("nothing precedes the opening page, whatever leading position it publishes")
+                .isFalse();
+        assertThat(page.firstKey()).isNotNull();
     }
 }

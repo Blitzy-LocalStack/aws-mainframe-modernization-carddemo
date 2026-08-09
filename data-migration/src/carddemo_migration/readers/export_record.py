@@ -13,6 +13,35 @@ own -- and departs from it in exactly three ways, each recorded at the point it 
 decode is two-step rather than one, there is no text form of this record at all, and the decoded
 shape is a function of the record's own discriminator rather than a constant.
 
+Parameters
+----------
+None
+    A module takes no argument. Every published callable states its own parameters at its own
+    definition, and this module reads no argument, option or environment variable while being
+    imported.
+
+Returns
+-------
+None
+    Importing binds names only: :data:`ENVELOPE_LOADED_FIELDS`, the per-branch published field
+    tuples, :data:`DROPPED_FIELD_NAMES` and :data:`SUPPRESSED_FIELD_NAMES` are derived from the
+    envelope and branch descriptors, and nothing else is computed. No dataset is opened, no
+    database connection is made, no environment variable is read and no network is reached at
+    import time, so importing this module is safe on a bare checkout with no credential
+    configured.
+
+Raises
+------
+LayoutError
+    At import, from ``carddemo_migration.copybook.layouts``, which this module imports for its
+    record descriptor: that module validates every declared layout's geometry and both disclosure
+    allowlists as it loads, and refuses to import if any of them disagree. The failure belongs to
+    that module and is neither caught nor re-worded here. At call time, from the two masked
+    renderings, if ``CARDDEMO_MASK_HMAC_KEY`` is set to material this package refuses -- anything
+    that is not canonical base64 of at least thirty-two distinct-valued bytes -- because a
+    guessable key returns the redaction tag to the confirmable digest it replaced. Leaving the
+    variable unset is supported and is not an error.
+
 What this module reads
 ---------------------
 The record is ``EXPORT-RECORD`` as declared in ``app/cpy/CVEXPORT.cpy``, and its byte geometry is
@@ -110,8 +139,20 @@ Export-record exposure control
 ------------------------------
 This one record carries more sensitive data than any other in the corpus -- a primary account
 number in three of its five branches, a card verification value, a national identifier, a
-government-issued identifier, a date of birth, and six account-borne money fields -- so the
+government-issued identifier, a date of birth, and FIVE account-borne money fields -- so the
 disclosure decisions are stated here in full:
+
+Refactoring Rationale: that count read "six" and was wrong. ``EXPORT-ACCOUNT-DATA`` declares
+exactly FIVE scale-two amounts -- ``EXP-ACCT-CURR-BAL``, ``EXP-ACCT-CREDIT-LIMIT``,
+``EXP-ACCT-CASH-CREDIT-LIMIT``, ``EXP-ACCT-CURR-CYC-CREDIT`` and ``EXP-ACCT-CURR-CYC-DEBIT``. That
+is the same five the Decoded-shape section above enumerates by name, the same five the Trade-offs
+paragraph below counts, and the same five :func:`branch_loaded_fields` returns in a numeric regime
+for the ``'A'`` type. One paragraph disagreeing with three others about a MONEY field count is
+worse than it looks: a reader reconciling a total has no way to tell which count is the layout's,
+so the wrong one is corrected rather than left as a discrepancy somebody has to resolve twice.
+(These five are deliberately NOT summed by ``sql/verify/money_totals.sql``, which states in its
+own commentary that the export record's computational fields are outside that pass because they
+decode through a different codec and are not base-master columns.)
 
 * The card verification value is **suppressed**. Its bytes are never handed to a decoder, so no
   representation of it exists at any point in this module: not cleartext, not masked, not
@@ -257,7 +298,6 @@ Trade-offs:
 from __future__ import annotations
 
 import pathlib
-import string
 from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from types import MappingProxyType
@@ -269,6 +309,12 @@ from typing import Final
 #   broken quietly: a module moved between `readers/` and `loaders/` keeps importing successfully
 #   but against a different sibling, and this project's ruff configuration bans relative imports
 #   outright for that reason.
+# WHY : Assumptions: the shared timestamp authority is imported as a MODULE and its members
+#   reached through it, where every other import here names the members it wants. That is
+#   deliberate: `is_unwritten`, `is_admitted` and `canonical` are generic verbs, and unqualified
+#   they would read as though this reader owned the rule. Qualified, every use site says which
+#   module decides what a timestamp is -- the whole point of one module rather than three copies.
+from carddemo_migration.copybook import timestamp
 from carddemo_migration.copybook.ebcdic_codec import (
     decode_export_record,
     decode_field,
@@ -603,95 +649,23 @@ ENVELOPE_DETERMINISTIC_FIELD_NAMES: Final[tuple[str, ...]] = tuple(
 )
 
 
-# WHY : Assumptions: these are the two uniform forms an UNWRITTEN fixed-width stamp takes in this
-#   corpus, and they are named as constants because both are tested through one helper so the two
-#   cannot come to be recognised by slightly different rules. The blank is what COBOL leaves in a
-#   character field nobody has moved a value into; the low value is the same fact for a record whose
-#   storage was never written at all.
-_BLANK: Final[str] = " "
-_LOW_VALUE: Final[str] = "\x00"
-
-# WHY : Assumptions: these are positions WITHIN one decoded stamp and the characters admitted at
-#   them -- not record geometry, of which this module still states none, and the stamp's own width
-#   is taken from its descriptor rather than written here. The rule admits the union of four
-#   separators at these six positions so that ONE rule covers both dialects CardDemo emits: the
-#   `YYYY-MM-DD HH:MM:SS.ffffff` form the posting program writes, and the
-#   `YYYY-MM-DD-HH.MM.SS.NNNNNN` form a program taking the current date writes. Both genuinely reach
-#   this record, because the export extract is produced from masters the posting pipeline writes.
-#   Every other position is a digit. A dialect-specific matcher would have to know which program
-#   wrote the record, which a reader cannot know from the bytes it was handed.
-_TIMESTAMP_SEPARATOR_OFFSETS: Final[frozenset[int]] = frozenset({4, 7, 10, 13, 16, 19})
-_TIMESTAMP_SEPARATOR_CHARACTERS: Final[frozenset[str]] = frozenset("-.: ")
-
-# WHY : Trade-offs: the digit test is this explicit ASCII set rather than the string method that
-#   reads more naturally. That method also answers true for a superscript and for the digit forms of
-#   other scripts, so a mis-decoded span could satisfy it while holding characters no timestamp
-#   column can parse. The accepted cost is one more name; what it buys is that the check means what
-#   it says on a byte path, where which characters appear is decided by the code page rather than by
-#   anything a caller controls.
-_TIMESTAMP_DIGITS: Final[frozenset[str]] = frozenset(string.digits)
-
-
-def _is_uniformly(value: str, character: str) -> bool:
-    """Report whether every position of a value holds one given character.
-
-    Purpose
-    -------
-    Recognise one of the two uniform forms an unwritten fixed-width stamp takes, as a single test
-    both forms are checked through, so the two cannot be recognised by slightly different rules.
-
-    Parameters
-    ----------
-    value : str
-        The decoded field characters to test.
-    character : str
-        The single character the whole value must consist of.
-
-    Returns
-    -------
-    bool
-        ``True`` when the value is non-empty and every position equals ``character``; ``False``
-        otherwise, an empty value included.
-
-    Raises
-    ------
-    None
-    """
-    # WHY : Assumptions: an EMPTY value must not read as uniform, which is why the emptiness test is
-    #   here rather than left to the generator. A test over no positions is vacuously true, so
-    #   without this an empty span would be accepted as an unwritten stamp -- and an empty span is a
-    #   field that was sliced wrongly, which is the opposite of a stamp nobody has written yet.
-    return bool(value) and all(position == character for position in value)
-
-
-def _is_timestamp_position(offset: int, character: str) -> bool:
-    """Report whether one position of a stamp holds a character its shape admits there.
-
-    Purpose
-    -------
-    Express the timestamp shape as a per-position rule, so the whole-value test reads as the
-    quantifier it is and the two kinds of position are decided in one named place.
-
-    Parameters
-    ----------
-    offset : int
-        The zero-based position WITHIN the stamp, not within the record.
-    character : str
-        The single character at that position.
-
-    Returns
-    -------
-    bool
-        ``True`` when a separator position holds one of the admitted separators, or a non-separator
-        position holds a digit; ``False`` otherwise.
-
-    Raises
-    ------
-    None
-    """
-    if offset in _TIMESTAMP_SEPARATOR_OFFSETS:
-        return character in _TIMESTAMP_SEPARATOR_CHARACTERS
-    return character in _TIMESTAMP_DIGITS
+# WHY : Refactoring Rationale: the timestamp shape rule that stood here -- two pad-character
+#   constants, a uniformity helper, a per-position character helper and two frozen sets naming the
+#   admitted separators and the admitted digits -- is gone, and `copybook.timestamp` now answers
+#   both questions for every caller in the package. The rule as written admitted the UNION of four
+#   separator characters at EACH of six positions and validated no calendar and no clock at all, so
+#   three spellings the baseline never writes satisfied it: a value separated
+#   `2022.07-18:10.30 00-123456`, an impossible date `2022-13-45 10:30:00.123456`, and an
+#   out-of-range clock `2022-07-18 99:99:99.123456`. The same forty lines existed in THREE readers,
+#   so a correction had to be made three times or the three would disagree about what a timestamp is
+#   while all three continued to look right.
+# WHY : Alternatives Considered: tightening the per-position rule in place -- a separator set per
+#   position plus explicit range checks on month, day, hour, minute and second. Rejected because it
+#   re-implements a calendar: it still has to know that April has thirty days and that 2100 is not a
+#   leap year, and either line can be wrong with no test noticing until a particular date arrives.
+#   The shared module parses through the standard library's own calendar and requires the parsed
+#   instant to FORMAT BACK to the original characters, which is the same test with none of that
+#   surface and which additionally rejects a short fraction that `%f` alone accepts.
 
 
 def _require_timestamp_shape(value: str, field: FieldSpec, layout_name: str) -> str:
@@ -735,9 +709,13 @@ def _require_timestamp_shape(value: str, field: FieldSpec, layout_name: str) -> 
     #   produced from its input. Refusing the blank form would therefore refuse three fifths of the
     #   shipped extract.
     if len(value) == field.length:
-        if _is_uniformly(value, _BLANK) or _is_uniformly(value, _LOW_VALUE):
-            return value
-        if all(_is_timestamp_position(offset, character) for offset, character in enumerate(value)):
+        # WHY : Assumptions: the DECLARED width is still checked here, against the descriptor,
+        #   rather than delegated with the rest. The shared authority checks the 26 characters its
+        #   two admitted forms occupy; this reader is the only place that knows the width the
+        #   BRANCH layout declares for this field, and the two agreeing is a property to verify
+        #   rather than one to assume -- a descriptor edited to a different width would otherwise
+        #   pass silently on every populated stamp.
+        if timestamp.is_unwritten(value) or timestamp.is_admitted(value):
             return value
 
     # WHY : Trade-offs: a stamp that is NEITHER unwritten NOR well formed is refused rather than
@@ -1301,22 +1279,40 @@ def decode_ebcdic_export_record(record: bytes | bytearray | memoryview) -> Decod
     #   own declared length, and checks the two agree -- so this reader states none of those four
     #   things and cannot state any of them differently. What remains here is the projection and the
     #   run-clock stamp policy, both of which are reader decisions and belong nowhere else.
-    envelope, payload = decode_export_record(record)
-    discriminator = _require_discriminator_characters(envelope[_DISCRIMINATOR_FIELD.name])
+    # WHY : Refactoring Rationale: the projection is now passed INTO the decode instead of being
+    #   applied to its result, and the difference is the whole point. The previous form decoded
+    #   every field the selected branch declares -- `EXP-CARD-CVV-CD` among them -- and then built
+    #   the returned mapping from the published field tuple, so the verification value was absent
+    #   from the RESULT but had already been materialised: it existed as a decoded value in the
+    #   payload mapping, reachable for as long as that mapping lived, and a traceback or a debugger
+    #   frame raised anywhere below the decode would have carried it. Suppression after
+    #   materialisation is not suppression. Naming the fields up front means the CVV's bytes are
+    #   never handed to a codec at all, which is what `docs/architecture/security-and-identity.md`
+    #   requires of this value and what no post-hoc filter can provide.
+    # WHY : Trade-offs: the branch has to be resolved TWICE -- once inside the codec to select the
+    #   overlay and once here to look up the field names to ask for -- because the names must be
+    #   known before the call that would decode them. `export_branch` is a pure lookup over an
+    #   import-time table, so the cost is one dictionary access per record; the alternative, letting
+    #   the codec discover this reader's projection, would put a reader's disclosure policy inside a
+    #   shared codec. Both resolutions read the discriminator from the same envelope bytes through
+    #   the same published function, so they cannot select different branches.
+    discriminator = _require_discriminator_characters(record_type(record))
+    branch = export_branch(discriminator)
+    published = _BRANCH_LOADED_FIELDS[branch.name]
+    envelope, payload = decode_export_record(
+        record, payload_fields=tuple(field.name for field in published)
+    )
 
-    # WHY : Assumptions: the mapping is built by iterating the PUBLISHED field tuples rather than
-    #   by copying the decoded halves and deleting keys, and that is what makes the suppression a
-    #   real one on this path. The verification value's bytes are inside the payload the codec
-    #   decoded, so its decoded form exists for as long as `payload` does -- but it is never
-    #   copied into the returned mapping, and the returned mapping is the only thing that outlives
-    #   this call. Deleting a key afterwards would leave the value reachable through every
-    #   intermediate a caller might hold.
+    # WHY : Assumptions: the mapping is still built by iterating the PUBLISHED field tuples rather
+    #   than by copying the decoded halves, which keeps the result's key order the record's byte
+    #   order -- envelope fields first, then branch fields -- and keeps one function responsible for
+    #   both what is decoded and what is returned. The payload mapping now holds exactly the fields
+    #   named above, so the two can no longer disagree about which fields exist.
     decoded: DecodedExportRecord = {
         field.name: _publishable_value(envelope[field.name], field, EXPORT_HEADER_LAYOUT.name)
         for field in ENVELOPE_LOADED_FIELDS
     }
-    branch = export_branch(discriminator)
-    for field in _BRANCH_LOADED_FIELDS[branch.name]:
+    for field in published:
         decoded[field.name] = _publishable_value(payload[field.name], field, branch.name)
     return decoded
 

@@ -35,16 +35,19 @@
 #   rationale and for the explicitly local way to iterate without installing.
 #
 # State at this checkpoint:
-#   `src/carddemo_migration/` currently holds THIRTY-TWO Python modules, measured with
+#   `src/carddemo_migration/` currently holds THIRTY-THREE Python modules, measured with
 #   `find src -name '*.py' -not -path '*__pycache__*' | wc -l`: `__init__.py`, `cli.py`,
 #   `config.py`, `credentials.py`, `role_credentials.py`, `seed_datasets.py`; the four
 #   `copybook/` codec modules plus its `__init__.py` -- `ebcdic_codec.py`, `layouts.py`,
 #   `packed.py`, `zoned.py`; the `loaders/` package -- `__init__.py`, `aurora.py`,
-#   `s3_stage.py`; the `readers/` package -- `__init__.py`, `factory.py` and the eleven
-#   record readers `account.py`, `card.py`, `customer.py`, `dalytran.py`, `discgrp.py`,
-#   `export_record.py`, `tcatbal.py`, `trancatg.py`, `transaction.py`, `trantype.py`,
-#   `usrsec.py`, `xref.py`; and the `verify/` package -- `__init__.py`, `checksum.py`,
-#   `money_parity.py`, `row_counts.py`.
+#   `s3_stage.py`; the `readers/` package -- `__init__.py`, `factory.py`, `source.py` and
+#   the twelve record readers `account.py`, `card.py`, `customer.py`, `dalytran.py`,
+#   `discgrp.py`, `export_record.py`, `tcatbal.py`, `trancatg.py`, `transaction.py`,
+#   `trantype.py`, `usrsec.py`, `xref.py`; and the `verify/` package -- `__init__.py`,
+#   `checksum.py`, `money_parity.py`, `row_counts.py`.
+#   `readers/source.py` is the newest of these and is not a record reader: it holds the one
+#   hardened flat-file open and the two record-width guards that all twelve share, which
+#   previously stood as eight to ten identical copies across the reader modules.
 #   Every package named in this distribution is now PRESENT. Nothing is a later-index
 #   artifact, so `cli.py` registers eight of the nine documented subcommands: the four
 #   read-only ones plus `load-dataset` and the three verification passes. Only
@@ -71,37 +74,45 @@
 #   `__init__.py` carries the reasoning at the site.
 #   Measured consequences (re-measure with the commands quoted above before editing any
 #   figure here; every one of them has gone stale at least once):
-#     - `ruff check .` passes over all FIFTY-SIX files this configuration governs -- the
-#       thirty-two source modules above, the twenty-three test modules below (twenty-two
+#     - `ruff check .` passes over all SIXTY-TWO files this configuration governs -- the
+#       thirty-four source modules above, the twenty-seven test modules below (twenty-six
 #       `test_*.py` plus `conftest.py`), and this file, which `ruff check --show-files`
 #       lists because it lints the configuration itself -- so the docstring gate is live
 #       for the code that exists. The figure is that command's own output
 #       (`ruff check . --show-files | wc -l`) rather than a count of `.py` files, which
-#       is fifty-five; quoting the smaller number would make the two disagree for a
+#       is sixty-one; quoting the smaller number would make the two disagree for a
 #       reason a reader could not see.
-#     - `ruff format --check .` reports FIFTY-SIX files already formatted and none it
+#     - `ruff format --check .` reports SIXTY-TWO files already formatted and none it
 #       would reformat. Refactoring Rationale: this entry previously named
 #       `src/carddemo_migration/config.py` and `tests/test_authorization_disclosure.py`
 #       as pre-existing formatter failures and recorded that the formatter was not clean
 #       over this package. Both have since been formatted, along with three others whose
 #       only defect was a missing blank-line separator, so the entry now records the
-#       stronger fact rather than the older concession.
-#     - `python -m pytest data-migration/tests` collects twenty-two test modules --
+#       stronger fact rather than the older concession. It is re-asserted rather than
+#       weakened after the protected-column work: that work left four files the formatter
+#       would have rewritten, and they were formatted rather than the claim being
+#       downgraded, because `ruff format --check` is NOT one of the CI steps -- so this
+#       block is the only place the property is recorded and a weakened claim here would
+#       be the end of it.
+#     - `python -m pytest data-migration/tests` collects twenty-six test modules --
 #       test_aurora_loader, test_authorization_disclosure, test_card_protected_value,
-#       test_cli, test_config_name_contract, test_database_trust, test_docstring_gate,
-#       test_doubles, test_ebcdic_code_page_allow_list, test_ebcdic_codec,
-#       test_mask_key_material, test_master_disclosure, test_online_write_lease,
-#       test_packed, test_readers, test_reporting_views, test_s3_stage,
+#       test_cli, test_config_name_contract, test_corpus_disclosure, test_database_trust,
+#       test_docstring_gate, test_doubles, test_ebcdic_code_page_allow_list,
+#       test_ebcdic_codec, test_mask_key_material, test_master_disclosure,
+#       test_online_write_lease, test_packed, test_protected_columns,
+#       test_reader_factory, test_readers, test_reporting_views, test_s3_stage,
 #       test_seed_datasets, test_seed_user_subjects, test_shared_doubles,
-#       test_verification and test_zoned -- and SEVEN HUNDRED AND SEVENTY-EIGHT tests
-#       pass with THREE skipped. Assumptions: the three skips are stated rather than
-#       elided because "none skipped" was true of an earlier tree and is not true of
-#       this one; each names its own reason at the skip site -- `usrsec` ships in one
-#       encoding only, and `transaction` has no committed fixed-length extract.
+#       test_timestamp, test_verification and test_zoned -- and NINE HUNDRED AND
+#       NINETY-EIGHT tests pass with FOUR skipped. Assumptions: the four skips are
+#       stated rather than elided because "none skipped" was true of an earlier tree and
+#       is not true of this one; each names its own reason at the skip site -- `usrsec`
+#       ships in one encoding only and publishes no character decode path at all, and
+#       `transaction` has no committed fixed-length extract.
 #     - Refactoring Rationale: the figures above have read, in succession, nineteen
 #       governed files with one hundred and nineteen tests over six test modules, then
 #       thirty-one governed files with four hundred and seventy-three tests over
-#       thirteen. Neither had been true for some time. They are corrected together
+#       thirteen, then fifty-six governed files with seven hundred and seventy-eight
+#       tests over twenty-two. None had been true for some time. They are corrected together
 #       rather than one at a time because they share that single cause, and because a
 #       partially corrected set of counts is harder to trust than a wholly stale one: a
 #       reader cannot tell which numbers were checked.
@@ -245,6 +256,15 @@ dependencies = [
   "ebcdic>=2.0.1",
   "boto3>=1.43.50",
   "botocore>=1.43.50",
+  # WHY : Assumptions: `cryptography` is a RUNTIME dependency and not an optional
+  #   extra, because the container image the batch orchestrator invokes runs
+  #   `load-dataset CUSTOMER` and `load-dataset CARD`, and both write ciphertext
+  #   envelopes into BYTEA columns. Declared as an extra it would be absent from
+  #   the shipped image, so the documented load command would fail in the one place
+  #   it has to work. `data-migration/requirements.txt` records the three
+  #   alternatives that were rejected before adding it, and the fact that it is the
+  #   one platform-tagged member of this closure.
+  "cryptography>=49.0.0",
 ]
 
 # WHY : Trade-offs: `readme` and an explicit `license` are deliberately left
@@ -405,6 +425,26 @@ target-version = "py313"
 #   BOTH are load-bearing: ruff owns docstring shape everywhere and presence on
 #   public declarations, that test owns presence on every declaration ruff cannot
 #   see. Removing either one leaves an unenforced half.
+#
+# WHY : Refactoring Rationale: that same test file now carries a SECOND
+#   assertion, and this block is corrected rather than left describing only the
+#   first, because prose that understates a gate is how a reviewer comes to
+#   believe an element is unenforced when it is not.
+#   `test_every_package_function_documents_its_return` asserts Rule 1's THIRD
+#   docstring element - "Return values: Type and description of what is
+#   returned" - by requiring a `Returns` or a `Yields` section on every function
+#   under `src/carddemo_migration`. Nothing here could see that element before:
+#   the D family does not look for the section, and the presence walk above is
+#   satisfied by any non-blank docstring, so three docstrings in
+#   `loaders/aurora.py` documented their purpose and their exception and said
+#   nothing about what they returned while the build stayed green. Its scope
+#   stops at the package tree, and the reason is measured rather than assumed:
+#   487 of 487 package functions document a return or a yield, while 355 of 609
+#   under `tests/` do not - pytest cases that return nothing and say so in prose.
+#   Trade-offs: enforcing the element on the shipping code was taken; demanding a
+#   355-function sweep of test docstrings as the price of it was not, and the
+#   suite tree therefore remains a review obligation for this one element. That
+#   limit is stated in the test itself as well as here.
 # -----------------------------------------------------------------------------
 # The remaining families are deliberately few. Each earns its place by catching
 # a defect class this ETL can actually produce, not by being conventional:

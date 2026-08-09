@@ -199,6 +199,17 @@ public class CardXrefView {
      */
     public static final int CARD_NUMBER_WIDTH = 16;
 
+    /**
+     * Declared width of the per-card fingerprint, in characters, being 64.
+     *
+     * <p>Assumptions: 64 is not a preference. The relation renders a SHA-256 digest with
+     * {@code encode(..., 'hex')} at {@code data-migration/sql/V1__reporting_views.sql}, and a
+     * SHA-256 digest is 32 bytes, which a lower-case hexadecimal rendering carries in exactly two
+     * characters each. Declaring the width states the contract the definition already fixes, so a
+     * change to the digest on that side fails the read here rather than silently truncating.</p>
+     */
+    public static final int CARD_FINGERPRINT_WIDTH = 64;
+
     // Assumptions: the card number is mapped as sixteen characters and a String, never as a numeric
     // type, because app/cpy/CVACT03Y.cpy L5 declares it PIC X(16), an alphanumeric picture, and the
     // declared width is part of the key contract rather than a presentation choice. Two measured
@@ -226,9 +237,51 @@ public class CardXrefView {
     // carries as card_num CHAR(16) NOT NULL at
     // services/account-service/src/main/resources/db/migration/V1__account.sql L657. A mapped
     // column cannot be renamed on this side without breaking the read.
-    @Id
+    // WHY : Refactoring Rationale: this member is NO LONGER the identifier of the type, and the
+    //       change is the substance of the fix rather than a mapping preference. The relation
+    //       projects this column as twelve asterisks followed by four digits, so two cards sharing
+    //       their last four digits present one identical value -- and a JPA identifier is required
+    //       to be unique per row. Two consequences followed from declaring it here and both were
+    //       silent. The persistence context is keyed by identifier, so the second colliding row
+    //       read in one session was answered from the first row's entry and the second cardholder's
+    //       customer and account were never seen. And the report's join, which matched a
+    //       transaction to its cross-reference row on this column, matched on four digits, so one
+    //       transaction joined to every colliding row and the joined result carried more lines than
+    //       the driving relation admitted. The identifier is now the fingerprint below, which is a
+    //       function of the whole trimmed number, and this column is what it was always safe to be:
+    //       a value to display.
+    // WHY : Alternatives Considered: keeping the masked column as the identifier and adding a
+    //       unique constraint to make the collision fail loudly instead of silently. Rejected
+    //       because the collision is a property of the MASK and not of the data -- the base
+    //       relation's own key is unique -- so the constraint would refuse a perfectly valid load
+    //       and take the reporting context down for a condition the ledger is entitled to.
     @Column(name = "card_num", length = CARD_NUMBER_WIDTH, nullable = false, updatable = false)
     private String cardNum;
+
+    // Assumptions: the fingerprint is a lower-case hexadecimal rendering of a SHA-256 digest, so it
+    // is exactly 64 characters and is mapped as characters at that width. The relation computes it
+    // at data-migration/sql/V1__reporting_views.sql over the single-row secret in
+    // reporting.card_grouping_key concatenated with the trimmed card number, which is why it is
+    // unique per card where the masked column is not: it is a function of all sixteen digits.
+    // Assumptions: the value is never rendered to a client and never logged. Its purpose is
+    // identity, join and ordering inside this context; a client that received it would hold a
+    // stable per-card correlator across statements, which is precisely the linkability the masking
+    // exists to remove. Every response type in this module carries the masked rendering instead,
+    // and ReportingDtoMapper is the only place a card value reaches a response at all.
+    // Assumptions: no length is asserted here beyond the mapped width. The digest's width is fixed
+    // by the algorithm the relation names, so a value of another width would mean the relation had
+    // been redefined -- a condition to discover as a read failure against the definition rather
+    // than to re-derive from a constant on this side.
+    // WHY : Assumptions: substituting this value for the card number as the identity, join and
+    //       ordering key is registered as divergence D-REPORT-ORDER-FINGERPRINT in
+    //       docs/architecture/cobol-to-service-traceability.md. That entry records what is preserved
+    //       -- injectivity, so one card's rows still sort together and a group break still falls
+    //       where the reference's does -- and what is not: the relative order BETWEEN two cards,
+    //       because a digest orders differently from the number it digests.
+    @Id
+    @Column(name = "card_fingerprint", length = CARD_FINGERPRINT_WIDTH,
+            nullable = false, updatable = false)
+    private String cardFingerprint;
 
     // Alternatives Considered: mapping the customer identifier as characters, which is how the
     // baseline's own generic input-output module spells it, declaring FD-CUST-ID PIC X(09) at
@@ -288,6 +341,9 @@ public class CardXrefView {
      * @param cardNum {@code String} carrying the masked rendering of the card number the relation
      *     returns, being twelve asterisks followed by the last four digits, at the width
      *     {@code XREF-CARD-NUM PIC X(16)} declares at {@code app/cpy/CVACT03Y.cpy} L5
+     * @param cardFingerprint {@code String} carrying the keyed per-card fingerprint the relation
+     *     computes, at the width {@value #CARD_FINGERPRINT_WIDTH}, which is the identity of this row
+     *     because the masked rendering above is not unique per card
      * @param customerId {@code Long} identifying the customer this card belongs to, declared
      *     {@code XREF-CUST-ID PIC 9(09)} at {@code app/cpy/CVACT03Y.cpy} L6 and carried as a
      *     magnitude so its leading zeros survive
@@ -295,8 +351,9 @@ public class CardXrefView {
      *     {@code XREF-ACCT-ID PIC 9(11)} at {@code app/cpy/CVACT03Y.cpy} L7 and the sole source of
      *     the account column the report prints at {@code app/cbl/CBTRN03C.cbl} L364
      */
-    public CardXrefView(String cardNum, Long customerId, Long accountId) {
+    public CardXrefView(String cardNum, String cardFingerprint, Long customerId, Long accountId) {
         this.cardNum = cardNum;
+        this.cardFingerprint = cardFingerprint;
         this.customerId = customerId;
         this.accountId = accountId;
     }
@@ -309,6 +366,28 @@ public class CardXrefView {
      */
     public String getCardNum() {
         return cardNum;
+    }
+
+    /**
+     * Returns the keyed per-card fingerprint that identifies this row.
+     *
+     * <p>Assumptions: this is the value to join on, order by and select by, because it is the only
+     * column of the relation that is a function of the whole card number. The masked rendering above
+     * is four digits behind a constant filler, so a predicate on it names a tail rather than a card.
+     * </p>
+     *
+     * <p>Trade-offs: the value is returned rather than kept private, because the report's join and
+     * the statement path's per-card traversal both need to name it, and both live outside this type.
+     * What that costs is that a caller could put it in a response or a log line, which would hand a
+     * client a stable per-card correlator; what stops that is that neither
+     * {@code ReportingDtoMapper} nor any response type in this module declares a member for it, and
+     * this type's own {@code toString()} omits it.</p>
+     *
+     * @return {@code String} holding the {@code card_fingerprint} column at the declared width of
+     *     {@value #CARD_FINGERPRINT_WIDTH}, or {@code null} where no value has been projected yet
+     */
+    public String getCardFingerprint() {
+        return cardFingerprint;
     }
 
     /**
@@ -340,9 +419,17 @@ public class CardXrefView {
      * <p>Assumptions: equality rests on the key alone. Including either identifier would make two
      * loads of one row compare unequal if the owning context changed either of them between the
      * loads, which would make row identity depend on data this context neither owns nor controls.
-     * The key is sound for the comparison because the relation holds one row per card and the mask
-     * preserves the width {@code XREF-CARD-NUM PIC X(16)} declares at {@code app/cpy/CVACT03Y.cpy}
-     * L5, so two masked values are equal only when their two four-digit tails are equal.</p>
+     * </p>
+     *
+     * <p>Refactoring Rationale: the key this rests on is the fingerprint and no longer the masked
+     * card number, and the prose that justified the masked one is withdrawn rather than adjusted. It
+     * argued that the mask was sound "because the relation holds one row per card and the mask
+     * preserves the width ... so two masked values are equal only when their two four-digit tails
+     * are equal" -- and that last clause is the defect stated as if it were the guarantee. Equal
+     * tails is exactly what two DIFFERENT cards can have, so the old equality reported two distinct
+     * cardholders' rows equal, and every hash-based collection and every persistence-context lookup
+     * keyed on it silently kept the first and discarded the second. The fingerprint is a function of
+     * all sixteen digits, so equal fingerprints means one card.</p>
      *
      * <p>Assumptions: the test is a pattern match rather than an exact-class comparison because
      * every instance a caller compares arrives from the persistence provider rather than from a
@@ -354,7 +441,7 @@ public class CardXrefView {
      * @param other {@code Object} to compare against, which may be of any type and may be
      *     {@code null}
      * @return {@code boolean} that is {@code true} when the argument is a cross-reference
-     *     projection carrying an equal masked card number, and {@code false} otherwise
+     *     projection carrying an equal per-card fingerprint, and {@code false} otherwise
      */
     @Override
     public boolean equals(Object other) {
@@ -364,45 +451,55 @@ public class CardXrefView {
         if (!(other instanceof CardXrefView that)) {
             return false;
         }
-        return Objects.equals(this.cardNum, that.cardNum);
+        return Objects.equals(this.cardFingerprint, that.cardFingerprint);
     }
 
     /**
      * Returns a hash consistent with the key-only equality this type defines.
      *
      * <p>Assumptions: the hash is taken over exactly the one field equality is taken over, the
-     * 16-character key declared {@code XREF-CARD-NUM PIC X(16)} at {@code app/cpy/CVACT03Y.cpy} L5,
-     * because a hash covering either of the other two mapped fields would place two instances that
-     * compare equal in two different buckets and break every hash-based collection holding
+     * per-card fingerprint, because a hash covering any other mapped field would place two instances
+     * that compare equal in two different buckets and break every hash-based collection holding
      * them.</p>
      *
-     * @return {@code int} hash of the masked card number, or zero when no value has been projected
+     * @return {@code int} hash of the per-card fingerprint, or zero when no value has been projected
      *     into this instance yet
      */
     @Override
     public int hashCode() {
-        return Objects.hashCode(this.cardNum);
+        return Objects.hashCode(this.cardFingerprint);
     }
 
     /**
-     * Returns a diagnostic rendering naming the two identifiers and no part of the card.
+     * Returns a diagnostic rendering naming the type and none of the three projected members.
      *
-     * <p>Trade-offs: the card number is omitted outright rather than abbreviated. Abbreviating a
-     * card number is masking, and masking belongs to this context's mapper package, which the
-     * module charter names as the sole boundary where it may appear; a second, slightly different
-     * masking rule here would give one value two renderings and make neither of them
-     * authoritative. That the value this type holds is <b>already</b> masked does not change the
-     * decision, because a rendering carrying it would put 4 of the 16 characters declared at
-     * {@code app/cpy/CVACT03Y.cpy} L5 into a log line, and those 4 digits beside an 11-digit
-     * account identifier is a narrower gap than either of them alone. The cost accepted is that a
-     * reader cannot tell from a log line which card a row belongs to; what is bought is that no log
-     * line written from this type carries any part of a card number.</p>
+     * <p>Assumptions: all three members are withheld. The card number is omitted outright rather than
+     * abbreviated, because abbreviating a card number is masking and masking belongs to this context's
+     * mapper package, which the module charter names as the sole boundary where it may appear; a
+     * second, slightly different masking rule here would give one value two renderings and make
+     * neither authoritative. The customer and account identifiers are omitted because
+     * {@code docs/architecture/observability.md} names both among the values a diagnostic must omit
+     * rather than abbreviate. Nothing remains that the rule permits a rendering to keep, so this one
+     * names its type alone, which is exactly what that rule prescribes for that case.</p>
      *
-     * @return {@code String} rendering on a single line, naming this type, the customer identifier
-     *     and the account identifier, and no part of the card number
+     * <p>Refactoring Rationale: this rendering kept both identifiers and its own documentation argued
+     * that a masked card number "beside an 11-digit account identifier is a narrower gap than either of
+     * them alone" -- reasoning about the card number while treating the account identifier as free.
+     * The authority it appealed to prohibits both, and the sentence is instructive precisely because it
+     * shows how a rendering can be carefully argued and still disclose: the argument was about which
+     * value to omit rather than about whether the rule admitted a choice. It is recorded here rather
+     * than deleted so that the correction reads as a correction.</p>
+     *
+     * <p>Trade-offs: a log line written from this type can no longer say which cross-reference row it
+     * describes. What pays that down is the same mechanism the observability authority names
+     * everywhere else -- the correlation identifier on every request-scoped line and the
+     * {@code batch.batch_run} step ledger for batch work.</p>
+     *
+     * @return {@code String} rendering on a single line, naming this type alone and no projected
+     *     member, never {@code null}
      */
     @Override
     public String toString() {
-        return "CardXrefView[customerId=" + customerId + ", accountId=" + accountId + ']';
+        return "CardXrefView[]";
     }
 }

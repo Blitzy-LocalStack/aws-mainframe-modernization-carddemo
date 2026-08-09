@@ -1,5 +1,6 @@
 package com.carddemo.authorization;
 
+import com.carddemo.authorization.task.MaintenanceTaskRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -48,6 +49,19 @@ public class AuthorizationApplication {
      *     {@code null}
      */
     public static void main(String[] args) {
+        // WHY : Assumptions: a job selection DIVERTS this entry point into the maintenance runner before
+        //       any service context is started, and the process then ends on the runner's exit status.
+        //       Refactoring Rationale: the diversion is added because the extract load and the expiry
+        //       purge had no production invocation path at all -- both documented themselves as
+        //       orchestrator-invoked while nothing invoked them, so each was reachable only from its
+        //       tests, and the purge is the only thing that bounds the growth of this schema's two
+        //       largest tables. Alternatives Considered: a scheduled method inside the service context,
+        //       which was rejected because it would run on every serving replica at once and would give
+        //       the run no exit status for the orchestrator to branch on. The shape matches
+        //       reporting-service's own entry point, because the same orchestrator invokes both.
+        if (MaintenanceTaskRunner.isTaskInvocation(args)) {
+            System.exit(MaintenanceTaskRunner.execute(args));
+        }
         SpringApplication.run(AuthorizationApplication.class, args);
     }
 }

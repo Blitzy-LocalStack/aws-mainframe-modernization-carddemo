@@ -71,6 +71,42 @@ class CursorTokenTest {
     }
 
     /**
+     * Confirms base64url-decoding every segment of a token recovers no part of the key.
+     *
+     * <p>Refactoring Rationale: the sibling assertion above -- that the token does not CONTAIN the key
+     * -- passed for the previous revision of this class too, and that revision published the key in
+     * full. It signed a base64url-encoded plaintext payload, so the characters of the key were absent
+     * from the token while one decode recovered them exactly. This case closes that gap by doing what a
+     * client would do: decode each segment and look inside. It is the assertion the review asked for by
+     * name, and it fails on any revision that returns to encoding rather than enciphering.</p>
+     */
+    @Test
+    @DisplayName("decoding every segment of a token recovers no part of the key")
+    void decodedTokenRevealsNoPartOfTheKey() {
+        CursorToken sealer = new CursorToken(KEY, LIFETIME);
+        String token = sealer.seal(BINDING, RAW_CURSOR);
+
+        StringBuilder decoded = new StringBuilder();
+        for (String segment : token.split("\\.")) {
+            try {
+                decoded.append(new String(
+                        java.util.Base64.getUrlDecoder().decode(segment), StandardCharsets.ISO_8859_1));
+            } catch (IllegalArgumentException notEncoded) {
+                // WHY : Assumptions: the version marker is not base64url and is appended as it stands, so
+                //       the assembled text is everything a client could read out of the token by any
+                //       route rather than only the segments that happen to decode.
+                decoded.append(segment);
+            }
+        }
+
+        assertThat(decoded.toString())
+                .as("no decode of any segment yields the composite key, the card number or the account")
+                .doesNotContain(RAW_CURSOR)
+                .doesNotContain(RAW_CURSOR.substring(0, 16))
+                .doesNotContain(RAW_CURSOR.substring(16));
+    }
+
+    /**
      * Confirms a token whose payload is edited by one character fails to open, so a client cannot turn
      * a page cursor into a key predicate of its own choosing.
      */
@@ -167,7 +203,8 @@ class CursorTokenTest {
     @DisplayName("a token longer than the bound is refused before anything is decoded")
     void oversizedTokenIsRefused() {
         CursorToken sealer = new CursorToken(KEY, LIFETIME);
-        String oversized = "v1." + "A".repeat(CursorToken.MAX_TOKEN_LENGTH) + ".B";
+        String oversized = CursorToken.VERSION + "." + "A".repeat(CursorToken.MAX_TOKEN_LENGTH)
+                + ".B";
 
         assertThatThrownBy(() -> sealer.open(BINDING, oversized))
                 .isInstanceOf(InvalidCursorException.class)
@@ -231,27 +268,27 @@ class CursorTokenTest {
         //   envelope settles its row-count invariant -- a page carrying rows must name both of its ends
         //   -- before it inspects either token's shape. Supplying one raw component and one sealed one
         //   is what makes the refusal under test the reachable one rather than the invariant above it.
-        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, false, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, false, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
         // Assumptions: the filtered-away page reaches the same two components by a different route, so
         //   it is exercised separately. Its scan positions ARE the boundary components -- the envelope
-        //   carries four members and has none of its own for them -- so a raw key handed to either
+        //   carries five members and has none of its own for them -- so a raw key handed to either
         //   parameter of that factory has to be refused by the same check, naming the component it
         //   landed in rather than the parameter it arrived through.
-        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(RAW_CURSOR, null))
+        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(RAW_CURSOR, null, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(null, RAW_CURSOR))
+        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(null, RAW_CURSOR, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
@@ -269,18 +306,18 @@ class CursorTokenTest {
         String first = sealer.seal(BINDING, RAW_CURSOR);
         String last = sealer.seal(BINDING, "411111111111111200000000012");
 
-        PageResponse<String> page = new PageResponse<>(List.of("row"), first, last, true);
+        PageResponse<String> page = new PageResponse<>(List.of("row"), first, last, true, true);
 
         assertThat(page.firstKey()).isEqualTo(first);
         assertThat(page.lastKey()).isEqualTo(last);
         assertThat(page.hasNext()).isTrue();
 
         // Assumptions: the filtered-away page is asserted here because it is the state the envelope's
-        //   four components have to carry without components of their own. Its forward scan position
+        //   boundary components have to carry without components of their own. Its forward scan position
         //   lands in lastKey and its backward one in firstKey, and a further page is reported from the
         //   presence of the forward position alone, so a caller honouring the indicator always holds
         //   the token to send back.
-        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(last, first);
+        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(last, first, true);
 
         assertThat(filtered.items()).isEmpty();
         assertThat(filtered.lastKey()).isEqualTo(last);

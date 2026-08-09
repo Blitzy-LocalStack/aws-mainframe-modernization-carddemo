@@ -1,5 +1,6 @@
 package com.carddemo.reference.dto;
 
+import com.carddemo.common.web.CursorToken;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
@@ -213,8 +214,8 @@ public record LookupPageRequest(
         //   instead of surviving as far as the point where the position is opened. Both constraints
         //   pass an absent value, which is what keeps a first request -- one that carries no position
         //   at all -- a valid request rather than a rejected one.
-        @Size(max = 256)
-        @Pattern(regexp = "v1\\.[A-Za-z0-9_-]{1,200}\\.[A-Za-z0-9_-]{43}")
+        @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+        @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN)
         String cursor,
 
         // Alternatives Considered: an enumeration rather than a constrained string. A string would
@@ -230,6 +231,19 @@ public record LookupPageRequest(
         //   exists for the seed to hold. A value outside the domain is refused as a bad request rather
         //   than passed to a query that would answer it with an empty page, which would report an
         //   unrecognised classification as a legitimately empty result.
-        @Pattern(regexp = "[GE]")
+        @Pattern(regexp = LookupPageRequest.CODE_CLASS_PATTERN)
         String codeClass) {
+
+    /**
+     * The closed domain of the phone-area-code classification filter, as a regular expression.
+     *
+     * <p>Refactoring Rationale: published as a constant so the route that accepts this filter can hold
+     * its own parameter to the identical domain. It has to: a record's constraints are evaluated when
+     * something VALIDATES the record, and the browse route constructs this shape by hand rather than
+     * binding it, so nothing validated it and every value reached a repository predicate. A second
+     * literal on the handler would have been the alternative and would have been able to drift from
+     * this one, which is the failure mode that produces a 200 with an empty page where a 400 was
+     * owed.</p>
+     */
+    public static final String CODE_CLASS_PATTERN = "[GE]";
 }

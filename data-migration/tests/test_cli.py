@@ -6,15 +6,25 @@ import base64
 import hashlib
 import json
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from carddemo_migration import cli, seed_datasets
-from carddemo_migration.config import ConfigurationError, DatasetStagingSettings
-from carddemo_migration.copybook import layouts
+from carddemo_migration.config import (
+    AuroraConnectionSettings,
+    ConfigurationError,
+    DatasetStagingSettings,
+)
+from carddemo_migration.copybook import ebcdic_codec, layouts
 from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXIT_USAGE
+from carddemo_migration.loaders.aurora import target_for
+from carddemo_migration.readers import usrsec
+
+if TYPE_CHECKING:
+    from conftest import FakeAuroraDatabase
 
 # Assumptions: the subcommands asserted here are exactly the ones cli.build_parser
 #   registers, in registration order, and the test states them literally rather than reading
@@ -74,6 +84,14 @@ _USER_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.USRSEC.PS"
 #   assembly of a sign-overpunched fixed-point number stays ASSERTABLE now that every account
 #   balance and transaction amount is withheld from the rendering.
 _DISCLOSURE_GROUP_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.DISCGRP.PS"
+
+# Assumptions: the load and verification tests below read the ASCII seed rather than the EBCDIC
+#   twin, because the runbook nominates the ASCII tree as the authoritative form for the datasets
+#   an operator loads and it is the form those documented commands name. The EBCDIC path is
+#   already covered record-by-record by the reader suite, so exercising it again here would test
+#   the codec a second time rather than the command.
+_ASCII_DIRECTORY = Path(__file__).resolve().parents[2] / "app" / "data" / "ASCII"
+_CATEGORY_BALANCE_SEED = _ASCII_DIRECTORY / "tcatbal.txt"
 
 
 class _FakeS3Client:
@@ -767,7 +785,7 @@ def test_decode_record_decodes_a_shipped_extract(
     assert "ACCT-CURR-BAL" in fields
     assert fields["ACCT-CURR-BAL"] != "194.00"
 
-    # WHY (Refactoring Rationale): the fixed-point half of this proof read
+    # Refactoring Rationale: the fixed-point half of this proof read
     #   ACCT-CURR-BAL == "194.00", and it is moved to DIS-INT-RATE because layouts.py now
     #   WITHHOLDS every account balance from a diagnostic rendering. Asserting the cleartext
     #   balance would have held this command to the fail-open behaviour that closure removed,
@@ -786,7 +804,36 @@ def test_decode_record_decodes_a_shipped_extract(
 def test_decode_record_withholds_account_money_and_its_postal_code(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Never print a balance, a credit limit, a cycle total or a postal code."""
+    """Never print a balance, a credit limit, a cycle total or a postal code.
+
+    Purpose
+    -------
+    Assert the fail-closed master disclosure policy at the one boundary an operator actually
+    sees: the decoded record this command writes to standard output. Both halves of the policy
+    are asserted together -- the withheld fields must not appear in clear, and the admitted
+    fields must still appear -- because either half alone is satisfied by a command that has
+    stopped being useful.
+
+    Parameters
+    ----------
+    capsys : pytest.CaptureFixture[str]
+        Captures standard output, which is where the decoded record is written and therefore
+        the only place a disclosure can surface. It is read once, because ``readouterr``
+        drains the buffer.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the command exits non-zero, if a withheld field's decoded value appears anywhere in
+        the output, if a withheld field renders anything but the fixed literal, if the postal
+        code renders as anything but a keyed tag of the declared width, or if an allowlisted
+        field stops rendering in clear.
+    """
     # WHY (Assumptions): the account master carries no field any factory in layouts.py had
     #   marked sensitive, so before the corpus disclosure allowlist existed this command printed
     #   every one of its thirteen fields in cleartext -- five money fields among them. The
@@ -797,7 +844,7 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
     printed = capsys.readouterr().out
     fields = json.loads(printed)
 
-    # WHY (Assumptions): each expected cleartext is the value the codecs really produce for
+    # Assumptions: each expected cleartext is the value the codecs really produce for
     #   record one of the shipped extract, captured by running the command against it. Naming
     #   the actual values is what makes this a disclosure test rather than a shape test -- a
     #   check that merely looked for a "<" would pass on a rendering that printed the balance
@@ -811,7 +858,7 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
     }
     for name, cleartext in withheld.items():
         assert cleartext not in printed, f"{name}'s decoded value must not be printed"
-        # WHY (Assumptions): a money field renders the fixed literal and NOT a keyed tag, and
+        # Assumptions: a money field renders the fixed literal and NOT a keyed tag, and
         #   the exact literal is asserted rather than a leading "<". A decoded number's text is
         #   a different length from the declared field width, so the only chunk available to a
         #   tag on this path would be a constant -- which would yield a tag that is equal for
@@ -819,11 +866,11 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
         #   pins the command to the honest rendering instead of the plausible one.
         assert fields[name] == "<withheld>", f"{name} must render the withheld literal"
 
-    # WHY (Trade-offs): the postal code is asserted alongside the money because it is the
+    # Trade-offs: the postal code is asserted alongside the money because it is the
     #   member of this record whose classification is least obvious -- it is neither money nor
     #   an identifier -- and it is withheld deliberately, on the ground that ten characters of
     #   postal code narrow a household where the two-character state code does not.
-    # WHY (Assumptions): it renders a keyed TAG rather than the literal, because it is a
+    # Assumptions: it renders a keyed TAG rather than the literal, because it is a
     #   character field whose decoded rendering is its own ten bytes and therefore already the
     #   declared width. Both renderings are asserted in one test so that the distinction between
     #   them is pinned as a consequence of the field's width and not of a hand-kept list.
@@ -832,12 +879,12 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
     assert postal.startswith("<") and postal.endswith(">")
     assert len(postal) == layouts.layout("ACCOUNT").field("ACCT-ADDR-ZIP").length
 
-    # WHY (Assumptions): the three lifecycle dates, the status code and the key stay in
+    # Assumptions: the three lifecycle dates, the status code and the key stay in
     #   cleartext, and that half is asserted in the same test for the reason the codec
     #   diagnostics use: "the balance was withheld" is only evidence of a POLICY if something
     #   the policy admits is still disclosed. A command that had begun redacting everything
     #   would otherwise pass every assertion above while having become useless.
-    # WHY (Refactoring Rationale): the key is asserted PRESENT and NOT in clear, where this case
+    # Refactoring Rationale: the key is asserted PRESENT and NOT in clear, where this case
     #   first asserted `ACCT-ID == "00000000001"`. The account master is closed under the
     #   fail-closed master disclosure policy and `_ACCOUNT_MASTER_DISCLOSABLE_FIELDS` does not
     #   name `ACCT-ID`, so the field is sensitive and this command renders it as a keyed tag. The
@@ -848,11 +895,13 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
     assert "ACCT-ID" in fields
     assert fields["ACCT-ID"] != "00000000001"
 
-    # WHY (Assumptions): the status and the expiry stay in clear and are asserted verbatim, and
+    # Assumptions: the status and the expiry stay in clear and are asserted verbatim, and
     #   they are what keep this a disclosure test rather than a redact-everything test. Both are
     #   named by the master allowlist, so a change that began withholding them would fail here.
     assert fields["ACCT-ACTIVE-STATUS"] == "Y"
+    assert fields["ACCT-OPEN-DATE"] == "2014-11-20"
     assert fields["ACCT-EXPIRAION-DATE"] == "2025-05-20"
+    assert fields["ACCT-REISSUE-DATE"] == "2025-05-20"
 
 
 def test_decode_record_renders_money_as_a_string(
@@ -882,7 +931,108 @@ def test_decode_record_redacts_every_sensitive_field(
     fields = json.loads(printed)
     assert fields["SEC-USR-ID"] == "ADMIN002"
     assert fields["SEC-USR-TYPE"] == "A"
-    assert "<" in fields["SEC-USR-PWD"]
+    # WHY : Refactoring Rationale: this asserted only that the password rendering CONTAINED a
+    #   '<', which was satisfied by the keyed HMAC tag this command used to print for it -- a tag
+    #   derived from the plaintext, and therefore a representation of it. The exact marker is now
+    #   pinned, because "contains a bracket" is true of both the correct rendering and the defect
+    #   it replaced, and a test that cannot tell them apart could not have caught the defect.
+    # Assumptions: the marker is asserted as a LITERAL rather than read from cli's own constant.
+    #   What is under test is the observable output an operator sees, so a change to the literal
+    #   is a change to that contract and should fail here rather than pass because both sides
+    #   moved together.
+    assert fields["SEC-USR-PWD"] == "<withheld>"
+
+
+def test_decode_record_never_decodes_a_suppressed_field(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decode every field of the security record except the stored password, which is skipped.
+
+    Parameters
+    ----------
+    capsys : pytest.CaptureFixture
+        Captures the rendered field map.
+    monkeypatch : pytest.MonkeyPatch
+        Replaces the codec's per-field decode with a recording wrapper.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the suppressed span is converted to characters, or if withholding it costs the
+        output the field's line.
+    """
+    decoded: list[str] = []
+    original = ebcdic_codec._decode_one_field
+
+    def recording(record: bytes, field: layouts.FieldSpec, code_page: str) -> object:
+        """Record the field name, then decode exactly as the codec would."""
+        decoded.append(field.name)
+        return original(record, field, code_page)
+
+    # WHY : the observation is made at the CODEC rather than on the output, because the output
+    #   cannot distinguish "never decoded" from "decoded and then replaced". That distinction is
+    #   the whole of this property: a cleartext password that exists in a local for one statement
+    #   is in this process's memory and in the traceback of anything raised while it is live.
+    monkeypatch.setattr(ebcdic_codec, "_decode_one_field", recording)
+    assert cli.main(_decode_arguments(_USER_EXTRACT, dataset="SECUSER")) == EXIT_OK
+    fields = json.loads(capsys.readouterr().out)
+
+    suppressed = next(iter(usrsec.SUPPRESSED_FIELD_NAMES))
+    assert suppressed not in decoded, f"{suppressed} must never be decoded"
+    assert decoded, "the recording wrapper saw no field at all, so it proves nothing"
+    # WHY : the field must still APPEAR, so an operator verifying that a delivery decodes at the
+    #   declared geometry can still count offsets across the whole record. Dropping the line would
+    #   withhold the value and the evidence together.
+    assert list(fields) == [field.name for field in layouts.layout("SECUSER").fields]
+    assert fields[suppressed] == "<withheld>"
+
+
+def test_decode_record_withholds_a_suppressed_field_independently_of_the_mask_key(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Render the suppressed field identically under two keys, while the redacted ones differ.
+
+    Parameters
+    ----------
+    capsys : pytest.CaptureFixture
+        Captures each rendered field map.
+    monkeypatch : pytest.MonkeyPatch
+        Supplies each masking key through the environment.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the suppressed rendering varies with the key -- which would mean it is derived from
+        the value -- or if the merely-sensitive fields stop being keyed.
+    """
+    renderings: list[dict[str, str]] = []
+    for material in (bytes(range(32)), bytes(range(32, 64))):
+        # WHY : the key is supplied through the environment rather than by reloading the layouts
+        #   module, because the masker resolves the key at CALL time. Reloading a shared module
+        #   inside a test replaces the class and enum objects every other test holds, which was
+        #   measured to break twenty-six unrelated tests in this suite.
+        monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, base64.b64encode(material).decode())
+        assert cli.main(_decode_arguments(_USER_EXTRACT, dataset="SECUSER")) == EXIT_OK
+        renderings.append(json.loads(capsys.readouterr().out))
+
+    first, second = renderings
+    suppressed = next(iter(usrsec.SUPPRESSED_FIELD_NAMES))
+    # WHY : key-independence is the operational test for "not derived from the value". A keyed tag
+    #   changes when the key changes; a fixed marker cannot. The name field is asserted in the
+    #   opposite direction in the same test, so a change that flattened EVERY redaction to a
+    #   constant -- losing the ability to tell two records apart field by field -- fails here too.
+    assert first[suppressed] == second[suppressed] == "<withheld>"
+    assert first["SEC-USR-FNAME"] != second["SEC-USR-FNAME"]
 
 
 def test_decode_record_reveals_only_a_card_number_s_last_four(
@@ -943,3 +1093,240 @@ def test_decode_record_requires_both_the_dataset_and_the_source() -> None:
     """Refuse an invocation missing either required argument."""
     assert cli.main(["decode-record", "--dataset", "ACCOUNT"]) == EXIT_USAGE
     assert cli.main(["decode-record", "--source", str(_ACCOUNT_EXTRACT)]) == EXIT_USAGE
+
+
+def _bind_database(
+    monkeypatch: pytest.MonkeyPatch,
+    database: FakeAuroraDatabase,
+    settings: AuroraConnectionSettings,
+) -> list[str]:
+    """Point the command line's database seam at the recording double and record the schemas.
+
+    Purpose
+    -------
+    Let a command be driven end to end -- argument parsing, reader selection, target resolution
+    and the database call -- without a cluster, while capturing which schema each command asked
+    for. That capture is the assertion that matters for a newly-added target: the command must
+    authenticate as the schema that OWNS the table, and a target declared under the wrong schema
+    would still load cleanly against a double that ignored the question.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        The patcher, scoped to the calling test.
+    database : FakeAuroraDatabase
+        The recording double every patched connect call returns a connection from.
+    settings : AuroraConnectionSettings
+        Synthetic settings naming an unreachable host, returned for every schema.
+
+    Returns
+    -------
+    list[str]
+        A list the patched resolver appends each requested schema name to, in call order.
+
+    Raises
+    ------
+    None
+    """
+    requested: list[str] = []
+
+    def _resolve(schema: str) -> AuroraConnectionSettings:
+        """Record the schema a command asked for and return the synthetic settings.
+
+        Parameters
+        ----------
+        schema : str
+            The owning schema the command resolved from its load target.
+
+        Returns
+        -------
+        AuroraConnectionSettings
+            The same synthetic settings for every schema.
+
+        Raises
+        ------
+        None
+        """
+        requested.append(schema)
+        return settings
+
+    def _connect(resolved: AuroraConnectionSettings) -> object:
+        """Open a recording connection from resolved settings.
+
+        Parameters
+        ----------
+        resolved : AuroraConnectionSettings
+            The settings the command resolved.
+
+        Returns
+        -------
+        object
+            A recording connection from the double.
+
+        Raises
+        ------
+        ConfigurationError
+            Propagated from the double if the parameters would not have verified the server
+            certificate.
+        """
+        # WHY : Assumptions: the parameters come from ``as_connection_params`` rather than being
+        #   hand-built, so the double's TLS keyword checks are exercised on the same translation
+        #   the production path performs. Hand-building the mapping is precisely how the
+        #   ``database``-versus-``dbname`` rename gets lost.
+        return database.connect(**resolved.as_connection_params())
+
+    monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
+    monkeypatch.setattr(cli, "connect", _connect)
+    return requested
+
+
+def test_load_dataset_loads_the_category_balance_seed_into_the_ledger_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+) -> None:
+    """Load every record of the shipped category-balance seed through one committed COPY.
+
+    Purpose
+    -------
+    Prove the delivered path end to end for the one dataset the verification SQL declared and
+    the loader could not fill: the real reader over the real seed, the real target, and the real
+    COPY statement. A target asserted only against its own declaration would not have caught the
+    reader and the target disagreeing about a field name, which is the failure that surfaces on
+    the first record rather than at declaration time.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to bind the database seam to the double.
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic settings naming an unreachable host.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the command does not succeed, asks for a schema other than the owning one, issues a
+        statement other than the target's own COPY, loads a record count other than the seed's,
+        or fails to commit exactly once.
+    """
+    requested = _bind_database(monkeypatch, fake_aurora, aurora_settings)
+    exit_code = cli.main(
+        [
+            "load-dataset",
+            "--dataset",
+            "TCATBAL",
+            "--source",
+            str(_CATEGORY_BALANCE_SEED),
+            "--encoding",
+            "ascii",
+        ]
+    )
+    assert exit_code == EXIT_OK
+    # WHY : Assumptions: `ledger` and not `account`, even though every record leads with an
+    #   account identifier. The table belongs to the context that owns the posting unit of work,
+    #   so the load must authenticate as that context's role -- and asking for `account` would
+    #   reach a role with no grant on the table, which fails at run time rather than here.
+    assert requested == ["ledger"]
+    assert fake_aurora.copy_statements == [target_for("TCATBAL").copy_statement()]
+    # WHY : Assumptions: the expected row count is DERIVED from the seed rather than written as
+    #   50, so the assertion cannot agree with a reader that stopped early on a seed which later
+    #   grew. It counts LINES and not bytes-over-record-length: this seed is the line-oriented
+    #   ASCII form, it is one of the three that terminate with CRLF, and its final line carries
+    #   no terminator at all -- so a byte-length division is wrong by both the terminator width
+    #   and that last record. The fixed-length division is the right derivation for the EBCDIC
+    #   twin, whose 2500 bytes over the 50-byte record is what the verification SQL states.
+    expected_rows = sum(
+        1 for line in _CATEGORY_BALANCE_SEED.read_bytes().splitlines() if line.strip()
+    )
+    fixed_length_twin = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.TCATBALF.PS"
+    assert expected_rows == fixed_length_twin.stat().st_size // layouts.reclen_of("TCATBAL")
+    assert len(fake_aurora.copied_rows) == expected_rows
+    assert fake_aurora.commits == 1
+    assert fake_aurora.rollbacks == 0
+    # WHY : the money value is asserted to arrive as an exact Decimal at the column's own scale.
+    #   Every record of this seed carries a zoned zero with the sign overpunched, so a field
+    #   read as characters would hand the driver the overpunch character itself and the load
+    #   would fail on a NUMERIC column -- or, worse, succeed against a permissive one.
+    balances = {row[-1] for _, row in fake_aurora.copied_rows}
+    assert all(isinstance(balance, Decimal) for balance in balances)
+    assert all(balance.as_tuple().exponent == -2 for balance in balances)
+
+
+@pytest.mark.parametrize("command", ["verify-row-counts", "verify-checksum", "verify-money-parity"])
+def test_every_verification_command_accepts_the_category_balance_dataset(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+) -> None:
+    """Reach the database for the category-balance dataset from all three verification passes.
+
+    Purpose
+    -------
+    The three passes each resolve a load target before they do anything else, so a dataset with
+    no target was refused by all three even though the whole-schema SQL registered it. This
+    asserts the refusal is gone from every one of them rather than from the load command alone,
+    which is what the finding required: row counts, checksum and money parity all reach the
+    table.
+
+    Parameters
+    ----------
+    command : str
+        One of the three verification subcommands.
+    monkeypatch : pytest.MonkeyPatch
+        Used to bind the database seam to the double.
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic settings naming an unreachable host.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a pass resolved no schema, which is what a refused target produces, or resolved one
+        other than the owning schema.
+    """
+    requested = _bind_database(monkeypatch, fake_aurora, aurora_settings)
+    # WHY : Assumptions: an aggregate is arranged to return ONE row holding zero, because a real
+    #   database always returns a row for `COUNT(*)` and for a coalesced `SUM` even over an empty
+    #   table -- and the passes correctly refuse a connection that returns none, calling it "not
+    #   behaving as a database connection". Arranging the empty-table answer is therefore what
+    #   makes the double a database rather than what makes the assertion pass: the comparison
+    #   still reports a difference against the seed's records, which is the honest outcome for a
+    #   table nothing loaded into.
+    fake_aurora.arrange_rows("COUNT(*)", [(0,)])
+    fake_aurora.arrange_rows("SUM(", [(Decimal("0.00"),)])
+    exit_code = cli.main(
+        [
+            command,
+            "--dataset",
+            "TCATBAL",
+            "--source",
+            str(_CATEGORY_BALANCE_SEED),
+            "--encoding",
+            "ascii",
+        ]
+    )
+    # WHY : Trade-offs: the SCHEMA REQUEST is asserted and the exit code deliberately is not.
+    #   The double answers every query with the empty result set the test arranged, so a pass
+    #   comparing 50 source records against 0 target rows correctly reports a difference and
+    #   exits FAILED. That outcome is right, and asserting it would be asserting the double's
+    #   arrangement. What the finding is about is whether the pass gets far enough to ask -- a
+    #   refused target returns before any connection is opened, so an empty list is the failure.
+    assert requested == ["ledger"], (
+        f"{command} resolved no owning schema for TCATBAL, so the target was refused before any"
+        " comparison could be attempted"
+    )
+    assert exit_code in {EXIT_OK, EXIT_FAILED}

@@ -4,7 +4,6 @@ import com.carddemo.reference.domain.TransactionCategory;
 import com.carddemo.reference.dto.TransactionCategoryCreateRequest;
 import com.carddemo.reference.dto.TransactionCategoryResponse;
 import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
-import java.util.List;
 
 /**
  * Converts between the transaction-category entity and its wire shapes.
@@ -24,13 +23,13 @@ import java.util.List;
  * {@code package-info.java} -- the hand-written charter, the rejection of MapStruct and, on a
  * separate ground, of Lombok, the static-versus-component class shape, the trim boundary and the
  * register of dropped padding -- and they are cited here rather than argued again. What this file
- * adds is the evidence specific to this one record, which the charter summarises at its own L315 to
- * L337 and which is set out at length below because L27 of the governing rule requires a rationale to
+ * adds is the evidence specific to this one record, which the charter summarises at its own L354 to
+ * L376 and which is set out at length below because L27 of the governing rule requires a rationale to
  * sit beside the line it explains.</p>
  *
  * <p>Assumptions: this class is {@code final} with a private constructor and static members rather
  * than a Spring {@code @Component}, which is the shape the charter fixes for the four entity
- * conversions at its own L139 to L156. Each of the four is a total function of its argument, with no
+ * conversions at its own L170 to L192. Each of the four is a total function of its argument, with no
  * collaborator, no configuration and no state between calls, and {@code TransactionTypeMapper} beside
  * it is written the same way. {@code DateInquiryReplyMapper} alone in this package is a component and
  * alone is not {@code final}, so that it stays proxyable; that exception is recorded there and does
@@ -54,6 +53,19 @@ import java.util.List;
  * {@code description VARCHAR(50) NOT NULL}, with L223 {@code version BIGINT NOT NULL DEFAULT 0}
  * carrying the revision. That migration is the authority for the physical shape of this schema; where
  * it and this file could ever disagree, the migration is right.</p>
+ *
+ * <p>Alternatives Considered: a list-rendering member beside {@link #toResponse}, which this class
+ * carried and which had no caller. Removed rather than wired, because there is no boundary for it to
+ * serve: every published collection of categories is a keyset PAGE, and the one place a page is
+ * assembled -- {@code com.carddemo.reference.service.ReferencePaging} -- renders the window one row at
+ * a time through a per-row function, deliberately, so that the surplus-row asymmetry that decides
+ * which end to trim is written once for all five browses rather than five times. Widening that
+ * function to take a whole list would ripple to all five call sites and force a list renderer onto the
+ * three seeded-lookup mappers that have no use for one. A method reachable from nowhere is worse than
+ * an absent one: it reads as a supported entry point, and the first caller to adopt it would bypass
+ * the pager that owns trimming and boundary sealing. The per-row {@code toResponse} below IS the
+ * convention the pager consumes, and it is the member the sibling type mapper shares a shape
+ * with.</p>
  *
  * <p>Assumptions: the four rationale labels used below are written in the one plural,
  * unparenthesised, unemphasised form that {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes at its
@@ -140,19 +152,16 @@ public final class TransactionCategoryMapper {
         //       wider migration makes belong to other bounded contexts and none of them is this one.
         String publishedCatCd = TransactionTypeMapper.trimTrailing(entity.getCatCd());
 
-        // WHY : Assumptions: the stored description is returned as it stands and is never re-padded
-        //       to fifty, because the column is VARCHAR at V1__reference.sql L209 and the trailing
-        //       blanks of the source field were padding to a fixed record length rather than content.
-        //       This is a divergence and is stated as one rather than smoothed over: the seed
-        //       descriptions in app/data/ASCII/trancatg.txt occupy bytes 7 to 56 blank-padded to the
-        //       full fifty, and the baseline moves the raw fixed field outbound to its map at
-        //       app/app-transaction-type-db2/cbl/COTRTUPC.cbl L1200 and at COTRTLIC.cbl L1417, so a
-        //       3270 field receives fifty characters where a response body here carries only the
-        //       content. The baseline does what those two lines say, the Java implements what the
-        //       charter's trim boundary says, and the difference is registered in
-        //       docs/architecture/cobol-to-service-traceability.md, which is the one place such a
-        //       difference is recorded. Everything under app/ is reference material this migration
-        //       reads and never rewrites, so nothing above describes an edit made to it.
+        // WHY : Assumptions: the stored description is published at its content length and is never
+        //       re-padded to fifty. The column is VARCHAR at V1__reference.sql L209, and the trailing
+        //       blanks of the source field are padding to a fixed record length rather than content --
+        //       the seed descriptions in app/data/ASCII/trancatg.txt occupy bytes 7 to 56 blank-padded
+        //       to the full fifty, and the baseline's own Db2 declaration of the same field is
+        //       TRC_CAT_DATA VARCHAR(50) at ddl/TRNTYCAT.ddl L4. A JSON body has no fixed field to
+        //       fill, so carrying the padding would give every caller a value to strip before
+        //       comparing it. This is a divergence rather than parity, and it is registered as
+        //       D-REFDATA-DESCRIPTION-TRIM in docs/architecture/cobol-to-service-traceability.md,
+        //       which is the one place such a difference is recorded.
         String publishedDescription = TransactionTypeMapper.trimTrailing(entity.getDescription());
 
         // WHY : Assumptions: the revision is read off the entity rather than derived. It is the
@@ -161,47 +170,8 @@ public final class TransactionCategoryMapper {
         //       TransactionCategoryService compares it at its own L209 and reports the stored value
         //       at L210 -- so a caller needs the number the row actually holds in order to retry
         //       against the revision that exists.
-        // WHAT: the four components of the response, supplied positionally to the record's canonical
-        //       constructor in its declared order of type code, category code, description, revision.
         return new TransactionCategoryResponse(
                 publishedTypeCd, publishedCatCd, publishedDescription, entity.getVersion());
-    }
-
-    /**
-     * Renders a page of stored categories, preserving the order they arrive in.
-     *
-     * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
-     * indicator of {@code com.carddemo.common.web.PageResponse} are assembled by
-     * {@code com.carddemo.reference.service}, the only layer that holds the keyset cursor and so the
-     * only one able to say whether a further page exists; a mapper is handed rows and knows nothing
-     * about the query that produced them. Two members a caller might reach for are absent from that
-     * envelope altogether -- it carries no previous-page flag and no page-size member -- so neither
-     * can be obtained from this method by any route.</p>
-     *
-     * <p>Trade-offs: an empty input yields an empty list, while a {@code null} input propagates a
-     * {@code NullPointerException} instead of being folded into one. Folding it would make a genuinely
-     * empty page and a defect that returned nothing at all report identically, and the second would
-     * then reach a caller as a page with no rows rather than as a fault anyone could act on. The
-     * returned list is unmodifiable, so a caller needing to sort or extend it copies it first; that
-     * costs a copy at the one call site that would need it and removes the possibility of a shared
-     * response list being mutated after it is built.</p>
-     *
-     * @param entities the rows to render, in the order they are to be published; must not be
-     *     {@code null}, and every element must be a loaded row
-     * @return an unmodifiable list of response shapes in the same order, empty when the input was
-     *     empty, never {@code null}
-     * @throws NullPointerException if {@code entities} is {@code null} or holds a {@code null} element
-     */
-    public static List<TransactionCategoryResponse> toResponseList(
-            List<TransactionCategory> entities) {
-
-        // WHY : Assumptions: the caller's order is preserved and nothing is sorted here. A backward
-        //       page is read in descending key order and reversed by the service before it is
-        //       rendered, so a sort applied at this point would undo that silently and hand a
-        //       backward page back in the wrong direction. The member name and shape are those of
-        //       TransactionTypeMapper.toResponseList at its own L145, so the two sibling records read
-        //       as one convention rather than two.
-        return entities.stream().map(TransactionCategoryMapper::toResponse).toList();
     }
 
     /**
@@ -219,7 +189,7 @@ public final class TransactionCategoryMapper {
      * every other path. It is declined because the composite key is a representation concern of this
      * one record -- two separately typed fixed-width character columns combined into a single identity
      * -- and this layer is the only place in the service such concerns are permitted to appear. The
-     * charter records the same ruling from the other direction at its own L442 to L449, where the
+     * charter records the same ruling from the other direction at its own L481 to L488, where the
      * nested embeddable identity is named as the reason a mapper composes an identity object instead
      * of setting key members one by one.</p>
      *
@@ -276,7 +246,7 @@ public final class TransactionCategoryMapper {
         //       trailing blanks only and treats a leading blank as content the source record is
         //       entitled to hold; and the single implementation of it lives on TransactionTypeMapper,
         //       the mapper of the record whose description the baseline manipulates most, which the
-        //       charter explains at its own L162 to L171. Calling it by qualified name is what keeps
+        //       charter explains at its own L198 to L210. Calling it by qualified name is what keeps
         //       one implementation of the rule -- a second one here would be free to drift, and a
         //       VARCHAR column would report nothing when it did.
         // WHY : Alternatives Considered: checking here that the parent transaction type exists. It is

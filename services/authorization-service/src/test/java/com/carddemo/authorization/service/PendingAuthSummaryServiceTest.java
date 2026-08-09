@@ -1,14 +1,5 @@
 package com.carddemo.authorization.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
@@ -29,7 +20,19 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.data.domain.Limit;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Verifies the migrated browse loop: page size, the look-ahead probe, both directions, both navigation
@@ -86,6 +89,11 @@ class PendingAuthSummaryServiceTest {
     /** The real mapper, so a sealed cursor can be redeemed by the code under test. */
     private PendingAuthViewMapper mapper;
 
+    /**
+     * The account-context seam the four customer display fields are read through.
+     */
+    private AccountContextClient accountContext;
+
     /** The service under test. */
     private PendingAuthSummaryService service;
 
@@ -102,7 +110,15 @@ class PendingAuthSummaryServiceTest {
         byte[] keyMaterial = new byte[CursorToken.MIN_KEY_LENGTH];
         Arrays.fill(keyMaterial, (byte) 0x3C);
         this.mapper = new PendingAuthViewMapper(new CursorToken(keyMaterial, Duration.ofMinutes(5)));
-        this.service = new PendingAuthSummaryService(this.summaries, this.details, this.mapper);
+        this.accountContext = mock(AccountContextClient.class);
+        // WHY : Assumptions: the seam is stubbed LENIENTLY to resolve nothing. Most cases here assert
+        //       paging and boundary behaviour and never read a customer field, so a strict stub would be
+        //       reported as unnecessary in each of them; and resolving empty rather than a fixture keeps
+        //       those cases from quietly depending on data they are not about.
+        Mockito.lenient().when(this.accountContext.customerDisplay(anyLong()))
+                .thenReturn(Optional.empty());
+        this.service = new PendingAuthSummaryService(this.summaries, this.details, this.mapper,
+                this.accountContext);
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryRow()));
     }
 
@@ -398,6 +414,45 @@ class PendingAuthSummaryServiceTest {
     }
 
     /**
+     * A cursor sent with no direction is read FORWARD from that cursor, not answered as the opening page.
+     *
+     * <p>Purpose: the two optional members have an ASYMMETRIC rule and this is the arm that is easiest to
+     * get wrong in either direction. A cursor with no direction is honoured and read forward; a direction
+     * with no cursor is refused, which the case below asserts. This case pins the permissive half, so a
+     * later edit tightening the rule for symmetry fails here rather than silently breaking every client
+     * that pages forward with a cursor alone.
+     *
+     * <p>Assumptions: the assertion is on the REPOSITORY call and not merely on the returned page, because
+     * both the opening read and a forward move can return rows. Answering the opening page would satisfy a
+     * size assertion while ignoring the caller's position entirely, and the two are distinguished only by
+     * which query was issued -- the keyed walk or the strictly-older seek from the redeemed pair.
+     *
+     * <p>Assumptions: this is the behaviour the published contract now enumerates as one of four defined
+     * combinations. The contract previously said the two members were sent together or not at all, which
+     * this case shows was never true of the service; the two are corrected together, and
+     * {@code AuthorizationApiContractTest} asserts the document states the rule so the pair cannot drift
+     * apart again.
+     */
+    @Test
+    @DisplayName("a cursor with no direction is read forward from that cursor")
+    void cursorWithNoDirectionIsReadForward() {
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(ACCOUNT_ID), any(Limit.class))).thenReturn(rowsDescending(6));
+        PendingAuthListView opening = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+        String trailing = opening.page().lastKey();
+
+        when(this.details.findOlderThan(eq(ACCOUNT_ID), any(), any(), any(Limit.class)))
+                .thenReturn(rowsDescending(2));
+
+        PendingAuthListView next = this.service.list(ACCOUNT_ID, trailing, null, SUBJECT);
+
+        verify(this.details).findOlderThan(ACCOUNT_ID, AUTH_DATE,
+                lastRenderedTime(), Limit.of(PendingAuthSummaryService.PAGE_SIZE + 1));
+        assertThat(next.page().items()).hasSize(2);
+        verify(this.details, never()).findNewerThan(any(), any(), any(), any(Limit.class));
+    }
+
+    /**
      * A direction with no cursor is refused and keyed to the direction, not answered as the opening page.
      *
      * <p>Assumptions: refusing is what lets the caller learn which of its two parameters it dropped.
@@ -576,5 +631,69 @@ class PendingAuthSummaryServiceTest {
             times.add(String.format("%06d", (NEWEST_TIME - index) % 1_000_000));
         }
         return times;
+    }
+
+    /**
+     * The four customer display fields reach the published summary, read once for the whole page.
+     *
+     * <p>Refactoring Rationale: this case exists because the screen published the segment's own identifiers
+     * and totals and nothing else, while the record it publishes into declares a customer name, two address
+     * lines and a telephone number that the reference composes from {@code GETCUSTDATA-BYCUST} at
+     * {@code cbl/COPAUS0C.cbl} L920. Their absence was a functional-parity gap, and nothing failed when
+     * they were absent because nothing asserted they were there.</p>
+     *
+     * <p>Assumptions: the call COUNT is asserted as well as the values, and the count is the point. Every
+     * authorization beneath a summary belongs to the same account and so the same customer, so a per-row
+     * read would make the screen's cost grow with the page size for data identical on every row -- and a
+     * test that only checked the values would pass either way.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the customer display fields are published and are read once per page")
+    void theCustomerDisplayFieldsArePublishedAndAreReadOncePerPage() {
+        AccountContextClient.CustomerDisplay resolved = new AccountContextClient.CustomerDisplay(
+                "SMITH JOHN", "1 HIGH STREET", "SPRINGFIELD IL", "5550001111");
+        Mockito.reset(this.accountContext);
+        when(this.accountContext.customerDisplay(anyLong())).thenReturn(Optional.of(resolved));
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(ACCOUNT_ID), any(Limit.class))).thenReturn(rowsDescending(3));
+
+        PendingAuthListView view = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+
+        assertThat(view.summary().customerName()).isEqualTo("SMITH JOHN");
+        assertThat(view.summary().addressLine1()).isEqualTo("1 HIGH STREET");
+        assertThat(view.summary().addressLine2()).isEqualTo("SPRINGFIELD IL");
+        assertThat(view.summary().phoneNumber1()).isEqualTo("5550001111");
+        assertThat(view.page().items()).hasSize(3);
+        verify(this.accountContext, times(1)).customerDisplay(anyLong());
+    }
+
+    /**
+     * An unresolved customer publishes the screen with blank display fields rather than refusing it.
+     *
+     * <p>Assumptions: the totals are asserted PRESENT in the same case, because that is the whole argument
+     * for degrading rather than refusing -- the authorization figures are what the screen is for, and
+     * withdrawing them because a display name could not be resolved would remove the information the
+     * operator can act on over the information they cannot. The reference has a not-found arm that leaves
+     * the fields unfilled and continues.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an unresolved customer leaves the display fields blank and still publishes the totals")
+    void anUnresolvedCustomerLeavesTheDisplayFieldsBlankAndStillPublishesTheTotals() {
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(ACCOUNT_ID), any(Limit.class))).thenReturn(rowsDescending(1));
+
+        PendingAuthListView view = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+
+        assertThat(view.summary().customerName()).isNull();
+        assertThat(view.summary().addressLine1()).isNull();
+        assertThat(view.summary().phoneNumber1()).isNull();
+        assertThat(view.summary().approvedAuthCnt())
+                .as("the authorization totals are published whether or not a customer resolved")
+                .isNotNull();
+        assertThat(view.page().items()).hasSize(1);
     }
 }

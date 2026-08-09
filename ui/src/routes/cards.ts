@@ -1,5 +1,5 @@
 /**
- * Card-route contract shared by the router, links and API client.
+ * @file Card-route contract shared by the router, links and API client.
  *
  * Assumptions: a card is addressed by the OPAQUE SELECTOR the service mints for it, published as the
  * `key` member of every card response, and never by its sixteen-digit number. A selector is a

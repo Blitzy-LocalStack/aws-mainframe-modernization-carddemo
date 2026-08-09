@@ -30,10 +30,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+from typing import TYPE_CHECKING
 
 import pytest
 
 from carddemo_migration.copybook import layouts
+
+if TYPE_CHECKING:
+    # WHY : Assumptions: the builder class is imported for ANNOTATION only, under the
+    #   type-checking guard, exactly as ``test_verification`` and ``test_aurora_loader`` do for
+    #   the Aurora double. pytest injects the object itself as a fixture, so the name is needed
+    #   to document the parameter and for nothing else; importing it unconditionally would tie
+    #   collection of this file to the folder's conftest being importable for no run-time gain.
+    from conftest import SentinelRecordBuilder
 
 # Assumptions: the floor is expressed as the hash's OWN output size rather than as the literal
 #   thirty-two, so the assertion below compares two independently derived values instead of a
@@ -64,7 +73,7 @@ def _sentinel_record(layout: layouts.RecordSpec) -> str:
     AssertionError
         If the record declares more fields than the sentinel alphabet can distinguish.
     """
-    # WHY (Assumptions): the sentinel is chosen by the field's ORDINAL and not by its name,
+    # Assumptions: the sentinel is chosen by the field's ORDINAL and not by its name,
     #   because a name-derived marker would let a leak of one field be mistaken for a leak of a
     #   similarly named one -- TRAN-MERCHANT-ZIP and TRNX-MERCHANT-ZIP share a suffix. An ordinal
     #   is unique within the record by construction.
@@ -91,12 +100,13 @@ def test_the_key_floor_is_the_hash_s_own_output_size() -> None:
 def test_an_unset_key_falls_back_to_strong_process_material(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Assert an unconfigured run uses the process key and that the key clears the floor.
+    """Assert an ABSENT key falls back, that the fallback is strong, and that blank is refused.
 
     Parameters
     ----------
     monkeypatch : pytest.MonkeyPatch
-        Used to remove the masking-key variable for the duration of the test.
+        Used to remove the masking-key variable, and then to set it to blank spellings, for
+        the duration of the test.
 
     Returns
     -------
@@ -108,14 +118,22 @@ def test_an_unset_key_falls_back_to_strong_process_material(
     assert len(layouts._PROCESS_MASK_KEY) >= layouts._MASK_HMAC_KEY_MIN_BYTES
     assert len(set(layouts._PROCESS_MASK_KEY)) > 1
 
-    # WHY (Assumptions): empty and whitespace-only are asserted to take the same path as
+    # Assumptions: empty and whitespace-only are asserted to take the same path as
     #   unset, because a deployment that references the variable conditionally renders it empty
     #   and the fallback is the safe outcome there. The case is stated so that behaviour is a
     #   decision on record rather than something a later reader tightens without noticing that
     #   tightening it refuses a correct deployment.
     for blank in ("", "   ", "\n"):
         monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, blank)
-        assert layouts._mask_hmac_key() == layouts._PROCESS_MASK_KEY
+        with pytest.raises(layouts.LayoutError) as refused:
+            layouts._mask_hmac_key()
+        message = str(refused.value)
+        assert layouts.ENV_MASK_HMAC_KEY in message
+        # WHY (Assumptions): the refusal must tell an operator how to reach BOTH supported
+        #   outcomes, because a message that only demands a key would push someone who wanted
+        #   the fallback into inventing one, which is how weak keys get chosen.
+        assert "UNSET" in message
+        assert "generate a key with" in message.lower()
 
 
 @pytest.mark.parametrize(
@@ -157,11 +175,11 @@ def test_weak_or_malformed_key_material_is_refused(
         layouts._mask_hmac_key()
     message = str(refusal.value)
     assert layouts.ENV_MASK_HMAC_KEY in message, f"the refusal must name the variable ({reason})"
-    # WHY (Assumptions): the refusal is required NOT to echo the value. A message naming the
+    # Assumptions: the refusal is required NOT to echo the value. A message naming the
     #   rejected key would put candidate key material into whatever log captured the failure,
     #   which is a worse disclosure than the weak key it was refusing.
     assert supplied not in message, f"the refusal must not echo the value ({reason})"
-    # WHY (Assumptions): the refusal must also name the remedy, because this abort reaches an
+    # Assumptions: the refusal must also name the remedy, because this abort reaches an
     #   operator through a command that has stopped working and the generation command is the
     #   only thing that makes it actionable.
     assert "secrets.token_bytes" in message
@@ -182,7 +200,7 @@ def test_a_non_canonical_encoding_of_conforming_material_is_refused(
     None
         The refusal is the result.
     """
-    # WHY (Assumptions): the variant is built by flipping an UNUSED bit of the final data
+    # Assumptions: the variant is built by flipping an UNUSED bit of the final data
     #   character, so it decodes to the identical thirty-two bytes and clears every other check.
     #   That is what isolates the canonicality rule: without this case the rule could be deleted
     #   and every remaining case would still pass, because the other refusals are reached first.
@@ -225,7 +243,7 @@ def test_conforming_key_material_is_accepted_at_or_above_the_floor(
     monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, base64.b64encode(material).decode())
     assert layouts._mask_hmac_key() == material
 
-    # WHY (Trade-offs): a trailing newline is asserted to be tolerated because a secret store
+    # Trade-offs: a trailing newline is asserted to be tolerated because a secret store
     #   and a shell here-document both add one, and refusing a correct key over a transport
     #   artefact would push operators toward stripping it themselves -- or toward a shorter key
     #   that avoids the problem.
@@ -235,6 +253,7 @@ def test_conforming_key_material_is_accepted_at_or_above_the_floor(
 
 def test_masking_refuses_to_run_at_all_under_weak_key_material(
     monkeypatch: pytest.MonkeyPatch,
+    sentinel_record_builder: SentinelRecordBuilder,
 ) -> None:
     """Assert the enforcement reaches the masking path and is not merely a helper.
 
@@ -242,17 +261,19 @@ def test_masking_refuses_to_run_at_all_under_weak_key_material(
     ----------
     monkeypatch : pytest.MonkeyPatch
         Used to configure the masking-key variable for the duration of the test.
+    sentinel_record_builder : SentinelRecordBuilder
+        Suite-wide builder for a record whose every field carries a position-unique sentinel.
 
     Returns
     -------
     None
         The refusal is the result.
     """
-    # WHY (Assumptions): this is asserted through mask_record rather than through the key
+    # Assumptions: this is asserted through mask_record rather than through the key
     #   resolver, because a resolver nobody consulted would enforce nothing. It is the only case
     #   in this file that proves the two are connected.
     layout = layouts.CARD_LAYOUT
-    raw = _sentinel_record(layout)
+    raw = sentinel_record_builder.build(layout)
     monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, "not base64 at all!")
     with pytest.raises(layouts.LayoutError):
         layouts.mask_record(raw, layout)
@@ -265,6 +286,7 @@ def test_masking_refuses_to_run_at_all_under_weak_key_material(
 
 def test_a_tag_is_stable_under_one_key_and_unrelated_across_keys(
     monkeypatch: pytest.MonkeyPatch,
+    sentinel_record_builder: SentinelRecordBuilder,
 ) -> None:
     """Assert the tag is a function of the key, so replacing the key replaces every tag.
 
@@ -272,18 +294,20 @@ def test_a_tag_is_stable_under_one_key_and_unrelated_across_keys(
     ----------
     monkeypatch : pytest.MonkeyPatch
         Used to configure the masking-key variable for the duration of the test.
+    sentinel_record_builder : SentinelRecordBuilder
+        Suite-wide builder for a record whose every field carries a position-unique sentinel.
 
     Returns
     -------
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): key dependence is asserted because it is what makes the strength
+    # Assumptions: key dependence is asserted because it is what makes the strength
     #   floor matter. If the tag did not depend on the key, refusing weak material would be
     #   theatre -- so this case is the one that gives every refusal above its purpose.
     layout = layouts.CUSTOMER_LAYOUT
     field = layout.field("CUST-GOVT-ISSUED-ID")
-    raw = _sentinel_record(layout)
+    raw = sentinel_record_builder.build(layout)
 
     first = base64.b64encode(secrets.token_bytes(32)).decode()
     second = base64.b64encode(secrets.token_bytes(32)).decode()

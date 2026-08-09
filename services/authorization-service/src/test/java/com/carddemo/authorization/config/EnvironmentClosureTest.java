@@ -101,7 +101,17 @@ class EnvironmentClosureTest {
             // so the signing side here and the verifying side in account-service must hold the same bytes
             // -- which is why the roots gate it on a pair and infra/modules/ecs-service asserts that pair
             // biconditionally.
-            "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+            //
+            // WHY the name carries the caller (Refactoring Rationale): this entry read
+            // CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY while ONE key was injected into three workloads --
+            // this service, transaction-service and account-service. That shape made the two callers
+            // mutually impersonating: either could mint a token bearing the other's subject, because with
+            // shared bytes a subject is a claim the holder writes rather than a property the verifier can
+            // check. The key is now per-caller, so this service holds only the authorization key and the
+            // gate on it names the pair {authorization, account} -- the minting caller and the verifying
+            // callee -- while transaction-service's key is gated on {transaction, account} and is not
+            // published for this service at all, which is why only one of the two appears in this set.
+            "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
             "CARDDEMO_MESSAGING_HMAC_KEY");
 
     /**
@@ -335,6 +345,13 @@ class EnvironmentClosureTest {
                 .contains("CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN")
                 .contains("CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST")
                 .contains("CARDDEMO_MESSAGING_HMAC_KEY")
-                .contains("CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY");
+                .contains("CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY")
+                // WHY assert the undifferentiated name is absent (Trade-offs): admission of the per-caller
+                // name does not by itself prevent the shared name being re-added alongside it, and a module
+                // admitting both would let a root inject one key into every caller again without failing
+                // any assertion. Requiring the absence of the superseded name closes that path. The two
+                // strings are not substrings of one another, so this assertion cannot be satisfied or
+                // broken by the one above.
+                .doesNotContain("CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY");
     }
 }

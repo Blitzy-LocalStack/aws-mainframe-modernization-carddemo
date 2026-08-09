@@ -1195,14 +1195,48 @@ The controls that **are authored** are narrower and measurable:
    prohibited value never enters a target, and it is now applied to **both** values the
    prohibition names rather than to the primary account number alone.
 
-   No published operation carries an account or customer identifier in a path or a query
-   string. Six moved to reach that: `listCards` and `listPendingAuthorizations` take their
-   account narrowing in a request body at `/api/v1/cards/search` and
-   `/api/v1/authorizations/search`; `lookupAccountContext` and `lookupCustomerExists` replaced
-   keyed `GET`s — and, for the customer probe, a `HEAD` and a `GET` served by one handler —
-   with `/api/v1/accounts/lookup` and `/api/v1/customers/lookup`; and the account-keyed
+   No **machine-called** operation carries an account or customer identifier in a path or a
+   query string. Seven moved to reach that: `listCards` and `listPendingAuthorizations` take
+   their account narrowing in a request body at `/api/v1/cards/search` and
+   `/api/v1/authorizations/search`; `readAccountContext` and `customerExists` replaced keyed
+   `GET`s — and, for the customer probe, a `HEAD` and a `GET` served by one handler — with
+   `POST /api/v1/accounts/lookup` and `POST /api/v1/customers/lookup`; `readCustomerRecord`
+   replaced a keyed `GET` with `POST /api/v1/customers/record`; and the account-keyed
    cross-reference read and the bill-payment write moved their identifier into the body each
-   already carried. What remains in the clear is a transaction identifier and a user
+   already carried.
+
+   Refactoring Rationale: this paragraph claimed that **no** published operation carried
+   either identifier, and that was measurably false in two directions at once. Understating
+   the count — it named six moves where the seventh, the keyed customer record read, had not
+   in fact moved — was the smaller error. The larger one is that three END-USER account
+   operations legitimately keep the identifier in the path and always did:
+   `GET /api/v1/accounts/{accountId}/view`, `PUT /api/v1/accounts/{accountId}` and
+   `GET /api/v1/accounts/{accountId}/card-cross-references`. A claim of "no published
+   operation" therefore told a reader that this edge held a property it did not hold, in the
+   one direction a disclosure statement must never err in. Worse, the three moves the
+   paragraph did describe had not landed on the server at the time it was written: two of the
+   addresses it named as published — `/api/v1/accounts/lookup` and `/api/v1/customers/lookup`
+   — existed only in the calling clients, so the document asserted a control that no handler
+   implemented. The claim is now scoped to what is enforced and the residue is named below.
+
+   The residue, stated rather than absorbed. Those three operations are migrated SCREENS —
+   `app/cbl/COACTVWC.cbl` and `app/cbl/COACTUPC.cbl`, keyed by the account identifier the user
+   types into the map — so the identifier is a value the caller already holds and just typed,
+   and the keyed address is the shape the plan publishes for them. What is accepted is that
+   the load balancer's access record holds those identifiers for the retention configured on
+   the log bucket. Three things bound it and none of them is masking, which cannot reach this
+   record: the operations are reachable only through the public edge behind the identity
+   provider's authorizer, so an entry exists only for a request an authenticated user made;
+   the log bucket is server-side encrypted with a customer-managed key and carries the same
+   lifecycle expiry as the rest of the tier; and no card number, verification value, national
+   identifier or government-issued identifier can appear in any of the three targets, so what
+   the record holds is the join key and not the data it joins. The alternative — moving three
+   screen reads to `POST` bodies — was considered and not taken here: it would trade the
+   cacheability and addressability of a screen read for a property the two bounds above
+   already supply, and no finding in this checkpoint asks for it. It is recorded as an open
+   item rather than as a closed one.
+
+   What remains in the clear beyond those three is a transaction identifier and a user
    identifier, neither of which the prohibition enumerates.
 
    - Refactoring Rationale: this item did not exist, and its absence was the gap. Three edges

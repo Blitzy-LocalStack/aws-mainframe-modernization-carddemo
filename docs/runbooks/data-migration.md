@@ -12,13 +12,16 @@ normative layout catalogue, the twelve fixed-width record readers, the Aurora
 bulk loader and all three verification passes, and it exposes them as the
 `load-dataset`, `verify-row-counts`, `verify-checksum` and `verify-money-parity`
 subcommands used below. Every step in this runbook is executable and fails
-closed. Two records are the exception and are called out at the cutover gate:
-`CUSTOMER` and `CARD` cannot be loaded from this package at all.
+closed. Ten records are loadable, covering all eight schemas' seeded tables, and
+the two conditions a cutover still turns on are stated at the gate at the end.
 
-Refactoring Rationale: this paragraph stated that the reader and bulk-loader CLI
-was absent, which was true until those modules landed. It is rewritten rather
-than deleted because an operator who had read the old text would otherwise
-conclude the load steps below were aspirational, and skip them.
+Refactoring Rationale: this paragraph twice described a narrower package than the
+one that now ships. It first stated that the reader and bulk-loader CLI was absent,
+which was true until those modules landed; it then stated that `CUSTOMER` and
+`CARD` could not be loaded at all, which was true until the loader gained the
+envelope ciphers their `*_encrypted` columns require. It is rewritten rather than
+deleted because an operator who had read either earlier version would otherwise
+conclude that steps below were aspirational, and skip them.
 
 Assumptions: PostgreSQL is reachable only over TLS with a trusted CA, and the
 operator uses a temporary database identity with the privileges required by the
@@ -102,19 +105,32 @@ sys.exit(1 if problems else 0)
 PY
 ```
 
-## Create Schemas, Reporting Views and Runtime Delete Grants
+## Create Schemas, Reporting Views, Runtime Delete Grants and Verification Surfaces
 
 Set `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` through an
 approved secret-delivery channel. Point `PGSSLROOTCERT` at the pinned CA bundle.
 
-Three SQL artifacts ship here and their order is **not interchangeable**.
+Four SQL artifacts ship here and their order is **not interchangeable**.
 `V0__schemas_and_roles.sql` runs before any table exists, so it can only express
 privileges schema-wide or as default privileges; `V2__runtime_delete_grants.sql`
-names individual tables and therefore cannot run until the owning services'
-Flyway migrations have created them. The full sequence is the one recorded in
-[data-model-and-schema-mapping.md](../architecture/data-model-and-schema-mapping.md):
+names individual tables and `V3__verification_surfaces.sql` creates views over
+them, so neither can run until the owning services' Flyway migrations have created
+those tables. The full sequence is the one recorded in
+[data-model-and-schema-mapping.md](../architecture/data-model-and-schema-mapping.md),
+extended by one step:
 `V0` -> each owning service's Flyway migration -> `V1__reporting_views.sql` ->
-`V2__runtime_delete_grants.sql` -> `V0` once more.
+`V2__runtime_delete_grants.sql` -> `V3__verification_surfaces.sql` -> `V0` once
+more.
+
+`V3` is what makes the two whole-schema verification queries below runnable by the
+least-privilege read-only role. It publishes the row counts and the money totals as
+aggregate-only views owned by the schema owners, and grants `SELECT` on those views
+alone to `carddemo_reporting`. Refactoring Rationale: before it existed, those two
+queries read eleven base tables directly, so running them required a principal
+holding row-level read access to every balance, card number and identity record in
+the system — and `money_totals.sql` named the **write-capable** `carddemo_batch` as
+the role to use. A verification step must not be able to modify what it verifies,
+and its execution must not itself be a disclosure.
 
 ```bash
 # WHAT: apply the role/schema bootstrap, then -- only after every owning service has
@@ -132,6 +148,13 @@ psql -v ON_ERROR_STOP=1 -f data-migration/sql/V0__schemas_and_roles.sql
 # that step has not happened.
 psql -v ON_ERROR_STOP=1 -f data-migration/sql/V1__reporting_views.sql
 psql -v ON_ERROR_STOP=1 -f data-migration/sql/V2__runtime_delete_grants.sql
+
+# WHY : Assumptions: V3 must run as a principal able to SET ROLE to BOTH
+#       carddemo_auth_owner and carddemo_reporting_owner -- it creates one view under
+#       each, and each half asserts its own owner before creating anything. A view
+#       created under the wrong owner reads its base tables with that owner's
+#       privileges, which would silently widen the boundary the views exist to narrow.
+psql -v ON_ERROR_STOP=1 -f data-migration/sql/V3__verification_surfaces.sql
 
 # WHY : Assumptions: V0 is idempotent by construction, so the closing pass is part of
 #       the documented sequence rather than a workaround -- its to_regclass-guarded
@@ -166,72 +189,14 @@ Each invocation loads **one** dataset into the one schema that owns it, as a
 single committed unit of work. `--dataset` is the record-layout identifier
 `list-datasets` reports; `--encoding` is required and is never inferred.
 
-```bash
-# WHAT: load the five records this package can load, smallest reference data first.
-# WHY : Assumptions: the reference tables are loaded before the account tables
-#       because `reference.transaction_categories` carries a foreign key to
-#       `reference.transaction_types` with ON DELETE RESTRICT, and
-#       `account.card_xref` is what every later lookup joins through. Loading in
-#       this order means a referential failure names the row that is missing
-#       rather than the constraint that noticed.
-# WHY : Trade-offs: `--encoding ascii` is used for these five because the ASCII
-#       tree is the authoritative form for them; the EBCDIC twin is loadable by
-#       naming the other path and encoding, which is why the flag is required
-#       rather than defaulted. A sniffed encoding would read an all-ASCII EBCDIC
-#       extract as text and decode plausible wrong values.
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANTYPE --source app/data/ASCII/trantype.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANCAT  --source app/data/ASCII/trancatg.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset DISGROUP --source app/data/ASCII/discgrp.txt  --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset ACCOUNT  --source app/data/ASCII/acctdata.txt --encoding ascii
-```
-
-## Run All Three Verification Passes
-
-```bash
-# WHAT: run every pass for every loaded dataset. All three are mandatory.
-# WHY : Assumptions: the three catch different defects and none subsumes another.
-#       Row counts catch a load that stopped early or ran twice; the checksum
-#       catches a corrupted field where the counts agree; money parity catches a
-#       sign overpunch or a misplaced decimal point where both the counts and the
-#       field bytes agree. A load reported as verified on fewer than three is not
-#       verified.
-# WHY : Assumptions: a non-zero exit is the gate. Each pass exits 8 on a
-#       difference and prints the comparison line, so `set -e` stops at the first
-#       failing dataset with the evidence on standard output.
-set -e
-for pair in \
-  "TRANTYPE app/data/ASCII/trantype.txt" \
-  "TRANCAT  app/data/ASCII/trancatg.txt" \
-  "DISGROUP app/data/ASCII/discgrp.txt" \
-  "XREF     app/data/ASCII/cardxref.txt" \
-  "ACCOUNT  app/data/ASCII/acctdata.txt" ; do
-  set -- $pair
-  python -m carddemo_migration.cli verify-row-counts   --dataset "$1" --source "$2" --encoding ascii
-  python -m carddemo_migration.cli verify-checksum     --dataset "$1" --source "$2" --encoding ascii
-  python -m carddemo_migration.cli verify-money-parity --dataset "$1" --source "$2" --encoding ascii
-done
-```
-
-```bash
-# WHAT: the two whole-schema queries, run once after every dataset is loaded.
-# WHY : Assumptions: these cover tables no single dataset load touches -- the
-#       ledger tables the batch jobs populate, and `auth.users` -- so they are the
-#       only check that the database as a whole is in the state a cutover assumes.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/row_counts.sql
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/money_totals.sql
-```
-
-## Load Source Records
-
-Each invocation loads **one** dataset into the one schema that owns it, as a
-single committed unit of work. `--dataset` is the record-layout identifier
-`list-datasets` reports; `--encoding` is required and is never inferred.
+Refactoring Rationale: this section and the verification section beneath it each
+appeared **three times**, byte-identically, between here and the cutover gate. The
+repetition carried no distinction — not a per-environment pass, not a retry, not a
+dry run — so the only thing it could tell an operator was that the same commands
+were to be issued three times, which is wrong for a load that is not idempotent:
+`load-dataset` commits per dataset, and a second run of `ACCOUNT` against a loaded
+schema fails on the primary key rather than reloading. One sequence and one gate is
+therefore the corrected procedure, not merely the shorter one.
 
 ```bash
 # WHAT: load the five records this package can load, smallest reference data first.
@@ -286,99 +251,57 @@ done
 ```
 
 ```bash
-# WHAT: the two whole-schema queries, run once after every dataset is loaded.
+# WHAT: the two whole-schema queries, run once after every dataset is loaded, AS
+#       carddemo_reporting.
 # WHY : Assumptions: these cover tables no single dataset load touches -- the
 #       ledger tables the batch jobs populate, and `auth.users` -- so they are the
 #       only check that the database as a whole is in the state a cutover assumes.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/row_counts.sql
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/money_totals.sql
-```
-
-## Load Source Records
-
-Each invocation loads **one** dataset into the one schema that owns it, as a
-single committed unit of work. `--dataset` is the record-layout identifier
-`list-datasets` reports; `--encoding` is required and is never inferred.
-
-```bash
-# WHAT: load the five records this package can load, smallest reference data first.
-# WHY : Assumptions: the reference tables are loaded before the account tables
-#       because `reference.transaction_categories` carries a foreign key to
-#       `reference.transaction_types` with ON DELETE RESTRICT, and
-#       `account.card_xref` is what every later lookup joins through. Loading in
-#       this order means a referential failure names the row that is missing
-#       rather than the constraint that noticed.
-# WHY : Trade-offs: `--encoding ascii` is used for these five because the ASCII
-#       tree is the authoritative form for them; the EBCDIC twin is loadable by
-#       naming the other path and encoding, which is why the flag is required
-#       rather than defaulted. A sniffed encoding would read an all-ASCII EBCDIC
-#       extract as text and decode plausible wrong values.
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANTYPE --source app/data/ASCII/trantype.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANCAT  --source app/data/ASCII/trancatg.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset DISGROUP --source app/data/ASCII/discgrp.txt  --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset ACCOUNT  --source app/data/ASCII/acctdata.txt --encoding ascii
-```
-
-## Run All Three Verification Passes
-
-```bash
-# WHAT: run every pass for every loaded dataset. All three are mandatory.
-# WHY : Assumptions: the three catch different defects and none subsumes another.
-#       Row counts catch a load that stopped early or ran twice; the checksum
-#       catches a corrupted field where the counts agree; money parity catches a
-#       sign overpunch or a misplaced decimal point where both the counts and the
-#       field bytes agree. A load reported as verified on fewer than three is not
-#       verified.
-# WHY : Assumptions: a non-zero exit is the gate. Each pass exits 8 on a
-#       difference and prints the comparison line, so `set -e` stops at the first
-#       failing dataset with the evidence on standard output.
-set -e
-for pair in \
-  "TRANTYPE app/data/ASCII/trantype.txt" \
-  "TRANCAT  app/data/ASCII/trancatg.txt" \
-  "DISGROUP app/data/ASCII/discgrp.txt" \
-  "XREF     app/data/ASCII/cardxref.txt" \
-  "ACCOUNT  app/data/ASCII/acctdata.txt" ; do
-  set -- $pair
-  python -m carddemo_migration.cli verify-row-counts   --dataset "$1" --source "$2" --encoding ascii
-  python -m carddemo_migration.cli verify-checksum     --dataset "$1" --source "$2" --encoding ascii
-  python -m carddemo_migration.cli verify-money-parity --dataset "$1" --source "$2" --encoding ascii
-done
-```
-
-```bash
-# WHAT: the two whole-schema queries, run once after every dataset is loaded.
-# WHY : Assumptions: these cover tables no single dataset load touches -- the
-#       ledger tables the batch jobs populate, and `auth.users` -- so they are the
-#       only check that the database as a whole is in the state a cutover assumes.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/row_counts.sql
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/verify/money_totals.sql
+# WHY : Assumptions: the role is carddemo_reporting and not the operator principal.
+#       Both files read only the aggregate views V3 creates, so this role is
+#       sufficient -- and it is the right choice rather than merely a possible one,
+#       because it can read nine aggregates and eleven counts and cannot read one
+#       base-table row or write anything anywhere. A pass that cannot alter its own
+#       subject is the property being bought.
+PGUSER=carddemo_reporting psql -v ON_ERROR_STOP=1 \
+  -f data-migration/sql/verify/row_counts.sql
+PGUSER=carddemo_reporting psql -v ON_ERROR_STOP=1 \
+  -f data-migration/sql/verify/money_totals.sql
 ```
 
 ## Cutover Gate
 
 Do not switch application traffic based only on schema success. A production
 cutover requires every command above to have succeeded, plus an approved rollback
-snapshot, plus a resolution for the two records this package cannot load.
+snapshot, plus a deliberate decision on the two items below.
 
-**`CUSTOMER` and `CARD` are refused by `load-dataset`, by name.**
-`account.customers` declares `ssn_encrypted` and `govt_issued_id_encrypted`, and
-`card.cards` declares `cvv_encrypted`, as `BYTEA NOT NULL` holding ciphertext
-produced by the owning service's cipher under a key this package does not hold.
-Both records have working readers and both decode correctly; what is absent is
-any way for this package to produce the ciphertext those columns require. Loading
-them is therefore work for `account-service` and `card-service`, and the cutover
-gate stays **closed** until that path exists.
+Refactoring Rationale: this gate previously stood on `CUSTOMER` and `CARD` being
+unloadable — `account.customers` declares `ssn_encrypted` and
+`govt_issued_id_encrypted`, `card.cards` declares `cvv_encrypted`, and this package
+held no way to produce the ciphertext they require, so the gate stayed closed by
+construction. It produces that ciphertext now, under the same envelope framing the
+owning service reads and the same key the owning service resolves, so that
+exception is withdrawn and the gate rests on the two real conditions instead.
 
-Assumptions: the refusal is preferred to the alternative, which would succeed.
-Writing the decoded plaintext into the `*_encrypted` columns would load cleanly
-and both the row-count and checksum passes would agree, while every national
-identifier and card verification value in the database sat in cleartext in a
-column whose name asserted otherwise. A refusal naming the reason is the only
-outcome that cannot be mistaken for a completed load.
+**1. The protected columns are enciphered, so confirm the keys were the right ones.**
+Three columns are written as ciphertext and never in the clear. Each is sealed under
+the key that the service owning the column reads at run time, resolved from the same
+parameter the service resolves it from, so a load performed against a different
+environment's key produces rows that store and verify cleanly and then fail to
+decrypt in the application days later. Confirm before cutover that the environment
+whose parameters the load resolved is the environment the application will run in.
+
+Assumptions: this is stated as a gate condition because no verification pass can
+catch it. The row counts agree, the money totals agree, and the ciphertext is
+well-formed either way — the key identifier is not recoverable from the envelope by
+anything in this package, and the authentication failure is deferred to first read.
+
+**2. The checksum pass covers three of the ten records.**
+Row counts and money parity cover all ten; the checksum pass covers the three
+reference records, for the measured reason given in the section above. Decide
+explicitly whether that is acceptable evidence for the seven master records, or
+whether the read-back should first be extended to render non-character columns back
+into the reader's published shape.
+
+Assumptions: the alternative to stating this is to let a reader infer from "all
+passes green" that all three passes ran for all ten records, which they did not. A
+gate that overstates its own coverage is worse than one that names the gap.

@@ -455,29 +455,6 @@ carddemo:
     customer-identifier:
       key-id: alias/carddemo-customer-identifier-test
 
-  reference-context:
-    # WHY : (1) Assumptions: a value is REQUIRED here because the base document declares
-    #       this key as a fallback-free placeholder and service/RestReferenceAddressLookup
-    #       binds it through @Value, so any context-loading test in this module would abort
-    #       on an unresolvable placeholder before reaching its first assertion. No such
-    #       test exists in this module today -- it holds no @SpringBootTest at all -- and
-    #       the line is supplied anyway, because the first one added would otherwise fail
-    #       for a reason that has nothing to do with what it was written to check.
-    #       (2) Assumptions: this address points at nothing and is NOT a credential. The
-    #       discard-prefixed host name is reserved for exactly this use and resolves
-    #       nowhere, so a test that reached the network through it would fail on connection
-    #       rather than silently talk to something. RestReferenceAddressLookupTest does not
-    #       use this value: it stands up a real loopback server on an ephemeral port and
-    #       constructs the adapter against that, which is why the timeouts below can stay
-    #       at deployment-like values here.
-    #       (3) Trade-offs: the two timeouts are repeated rather than inherited so that the
-    #       complete shape of this seam is readable in one place, at the cost that a
-    #       deliberate change in the base document must be mirrored here -- which is
-    #       precisely the diff a reviewer should be made to see.
-    base-url: http://reference-service.invalid
-    connect-timeout-ms: 2000
-    read-timeout-ms: 3000
-
   account:
     inquiry:
       # WHY : (1) Assumptions: these are queue NAMES, not URLs, ARNs, account
@@ -505,13 +482,32 @@ carddemo:
     #       Its length is exactly the thirty-two bytes the digest width requires,
     #       chosen at the minimum rather than above it so that a test which lowers the
     #       minimum without meaning to stops resolving.
-    #       (3) Trade-offs: because the value is committed, no test that uses it
-    #       proves anything about the confidentiality of the deployed key. What it
-    #       proves is the shape of the boundary: that a token signed with this key
-    #       verifies and that a token signed with any other does not.
-    signing-key: 0123456789abcdef0123456789abcdef
+    #       (3) Trade-offs: because the values are committed, no test that uses them
+    #       proves anything about the confidentiality of the deployed keys. What they
+    #       prove is the shape of the boundary: that a token signed with the key
+    #       belonging to the subject it names verifies, and that one signed with any
+    #       other key does not.
+    #       (4) Assumptions: the two values DIFFER from each other, and that is the
+    #       property the split exists to make testable. Identical values would let a
+    #       token minted for one caller verify under the other's key, so every case
+    #       asserting that a caller cannot impersonate its sibling would pass
+    #       vacuously.
+    authorization-signing-key: 0123456789abcdef0123456789abcdef
+    transaction-signing-key: fedcba9876543210fedcba9876543210
 
   reference-context:
+    # WHY : Refactoring Rationale: this key was declared TWICE in this document, once
+    #       here and once between the customer-identifier alias and the account
+    #       inquiry queues above, with conflicting values -- `http://` against
+    #       `https://` and timeouts of 2000/3000 against 250/250. Neither took
+    #       effect: SnakeYAML refuses a duplicate mapping key outright, so the whole
+    #       document failed to parse and EVERY context-loading test in this module
+    #       aborted before its first assertion with `found duplicate key
+    #       reference-context`. The earlier block was removed rather than this one,
+    #       on the scheme: the adapter refuses any scheme but HTTPS at construction,
+    #       so the `http://` value could never have started a context even without
+    #       the duplication. Measured, not assumed -- this is how the defect was
+    #       found, by adding the first @SpringBootTest this module has ever had.
     # WHY : (1) Assumptions: a value is REQUIRED here for the same reason the signing
     #       key above is -- the base document declares this key as a fallback-free
     #       placeholder and service/RestReferenceAddressLookup.java reads it through
@@ -530,6 +526,26 @@ carddemo:
     #       adapter unintentionally fails in well under a second instead of stalling
     #       the suite for five, which is the difference between a visible mistake and
     #       a suite that merely got slower.
+    #       (4) Assumptions: the host name is reserved by RFC 2606 and therefore
+    #       resolves nowhere on any network, which is what makes an accidental reach
+    #       fail locally instead of contacting something real.
+    #       RestReferenceAddressLookupTest does not read this value at all: it stands
+    #       up a real loopback server on an ephemeral port and constructs the adapter
+    #       against that, so lowering the timeouts here costs that test nothing.
+    #       (5) Refactoring Rationale: this key was declared TWICE in this document,
+    #       once here and once earlier under the same carddemo parent, and the earlier
+    #       copy carried base-url: http://reference-service.invalid with 2000/3000
+    #       timeouts. The duplicate was withdrawn rather than reconciled, for two
+    #       independent reasons. First, Spring Boot's YAML loader constructs its
+    #       parser with allowDuplicateKeys disabled, so a repeated mapping key is a
+    #       hard start-up failure and not a last-one-wins override -- which is why the
+    #       duplicate went unnoticed: this module held no context-loading test to
+    #       trip over it until AccountScreenProjectionIT was added. Second, the
+    #       withdrawn copy was the wrong one on its merits: service/
+    #       RestReferenceAddressLookup refuses any scheme other than HTTPS at
+    #       construction, so a cleartext value would have aborted every
+    #       context-loading test on bean creation even after the duplicate was
+    #       resolved.
     base-url: https://reference-service.invalid
     connect-timeout-ms: 250
     read-timeout-ms: 250

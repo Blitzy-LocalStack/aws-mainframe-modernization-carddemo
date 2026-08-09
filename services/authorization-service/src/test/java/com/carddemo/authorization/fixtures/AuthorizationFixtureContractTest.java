@@ -12,7 +12,6 @@ import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.PackedDecimalCodec;
 import com.carddemo.common.money.Money;
-import com.carddemo.common.security.OpaqueIdentifier;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -1072,18 +1071,29 @@ class AuthorizationFixtureContractTest {
      * persisted.
      *
      * <p>Assumptions: the correlation identity is the card and the transaction identifier ADJACENT, 16
-     * plus 15 characters and hence {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} of them, and it is
-     * TOKENISED before it reaches a queue attribute or a database column. The token is what the
-     * deduplication identity uses, so distinctness is asserted on the token as well as on the composite:
-     * seven records sharing one card must still deduplicate as seven messages, which they do only
-     * because the transaction identifier participates.</p>
+     * plus 15 characters and hence {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} of them. It is
+     * carried into the row's correlation column as that composite, which is the shape a requester deriving
+     * a correlation value from its own request produces; the consumer echoes whatever the requester sent
+     * rather than computing one, so a composite is the faithful stand-in and no tokeniser is involved.</p>
+     *
+     * <p>Assumptions: the row's two first-in-first-out identities are the LITERAL card number and the
+     * LITERAL transaction identifier, which is what specification section 0.4.1.8 fixes. Distinctness is
+     * therefore asserted on the transaction identifier: seven records sharing one card must deduplicate as
+     * seven messages, which they do because the identifier differs per record, while all seven share one
+     * ordering group -- and that shared group is asserted too, because it is the property that makes the
+     * seven replies for one card leave the queue in the order they were written.</p>
+     *
+     * <p>Refactoring Rationale: both identities were previously keyed tokens, and the change is not a
+     * simplification. An ordering group has to be equal for equal cards across EVERY producer on the
+     * queue and a deduplication identity has to be predictable by the REQUESTER that may resend it, so a
+     * value keyed from this service's own secret silently removed both guarantees for anyone else.</p>
      */
     @Test
     @DisplayName("every declined reply round-trips an outbox row and yields a distinct dedup identity")
     void everyDeclinedReplyPayloadSurvivesAnOutboxRowUnchanged() {
-        OpaqueIdentifier tokeniser = new OpaqueIdentifier(fixedTokeniserKey());
         List<String> composites = new ArrayList<>();
         List<String> deduplicationKeys = new ArrayList<>();
+        List<String> orderGroups = new ArrayList<>();
 
         for (String payload : linesOf(DECLINED_REPLY_FIXTURE)) {
             CsvAuthCodec.AuthReply reply = CsvAuthCodec.decodeReply(payload);
@@ -1091,13 +1101,13 @@ class AuthorizationFixtureContractTest {
             assertThat(composite).hasSize(CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
             composites.add(composite);
 
-            String deduplicationKey = reply.deduplicationKey(tokeniser);
-            assertThat(deduplicationKey).hasSize(OpaqueIdentifier.TOKEN_LENGTH)
-                    .doesNotContain(reply.cardNum());
+            String deduplicationKey = reply.transactionId();
+            assertThat(deduplicationKey).isEqualTo(payload.substring(17, 32));
             deduplicationKeys.add(deduplicationKey);
+            orderGroups.add(reply.cardNum());
 
             AuthReplyOutbox row = new AuthReplyOutbox("https://sqs.invalid/carddemo-pauth-reply",
-                    reply.correlationKey(tokeniser), reply.orderGroup(tokeniser), deduplicationKey,
+                    composite, reply.cardNum(), deduplicationKey,
                     payload, LocalDateTime.parse("2022-07-18T03:00:05"),
                     LocalDateTime.parse("2022-07-18T03:00:00"));
 
@@ -1117,24 +1127,13 @@ class AuthorizationFixtureContractTest {
 
         assertThat(composites).hasSize(DECLINE_REASON_COUNT).doesNotHaveDuplicates();
         assertThat(deduplicationKeys).hasSize(DECLINE_REASON_COUNT).doesNotHaveDuplicates();
-    }
-
-    /**
-     * Builds deterministic tokeniser key material of the minimum admissible length.
-     *
-     * <p>Assumptions: a fixed key is correct HERE and would not be in production, where the key comes
-     * from the secret store, because nothing in this class asserts that a token is unguessable -- only
-     * that it is derived, stable across the seven records and free of the card number.</p>
-     *
-     * @return the key material, exactly {@link OpaqueIdentifier#MIN_KEY_LENGTH} bytes, never
-     *     {@code null}
-     */
-    private static byte[] fixedTokeniserKey() {
-        byte[] material = new byte[OpaqueIdentifier.MIN_KEY_LENGTH];
-        for (int index = 0; index < material.length; index++) {
-            material[index] = (byte) (index + 1);
-        }
-        return material;
+        // WHY : Assumptions: the seven ordering groups collapse to ONE distinct value, because the seven
+        //       decline reasons are seven answers about the same card. Asserting the count of distinct
+        //       values rather than merely that each is non-blank is what proves the grouping property: if
+        //       any record grouped differently, that card's replies would be free to leave the queue out
+        //       of the order they were written in.
+        assertThat(orderGroups).hasSize(DECLINE_REASON_COUNT);
+        assertThat(List.copyOf(new java.util.LinkedHashSet<>(orderGroups))).hasSize(1);
     }
 
     /**
@@ -1413,14 +1412,15 @@ class AuthorizationFixtureContractTest {
      * {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} declares. Those two fields are ADJACENT here,
      * at offsets 0 to 15 and 17 to 31 with only the delimiter at 16 between them, and they are
      * SCATTERED in the request, at ordinals 3 and 18. Both derivations are required to agree, because
-     * that agreement is what lets a consumer pair a reply with its request, and the same value doubles
-     * as the FIFO deduplication identifier. The tokenised form is compared rather than the raw pair,
-     * because a correlation value is written to message metadata, queue telemetry and logs, all of
-     * which sit outside the boundary that masks a card number.
+     * that agreement is what lets a consumer pair a reply with its request. The composite is compared as
+     * the raw pair rather than as a keyed token, because the correlation value that crosses back to the
+     * requester is the requester's OWN value echoed unchanged -- the only thing that pairs an answer with
+     * its question -- and a derivation would replace a value the requester chose with one it cannot
+     * recognise.
      *
      * <p>Assumptions: the transactional outbox that {@code V1__authorization.sql} defines stores
      * exactly these 63 bytes in its {@code payload} column, alongside {@code correlation_id},
-     * {@code order_group_token}, {@code deduplication_token}, {@code reply_to_queue_url} and
+     * {@code order_group_id}, {@code deduplication_id}, {@code reply_to_queue_url} and
      * {@code expires_at}, and publishes them unchanged -- not the 64-byte frame and not a re-serialised
      * variant. That column is declared as the delimited text the wire carries rather than as structured
      * columns precisely so that re-encoding at publication time cannot become a second place for the

@@ -375,39 +375,59 @@ public interface CardXrefRepository extends JpaRepository<CardXref, String> {
     Optional<CardXref> findFirstByAccountIdOrderByCardNumAsc(Long accountId);
 
     /**
-     * Returns every cross-reference row for one account, in ascending card-number order.
+     * Reads one account's screen composition -- cross-reference, account and customer -- in one statement.
      *
-     * <p>Assumptions: this read resolves through the same secondary index as the finder above, and
-     * for the same reason -- the account identifier is not a key of the base cluster, whose record key
-     * is named at L32 of {@code app/cbl/CBACT03C.cbl}, so the index defined at L63 of
-     * {@code app/csd/CARDDEMO.CSD} is what makes an account-keyed read a read rather than a search.
-     * The reference's own resource definition grants browse on that path at L70, so reading more than
-     * one row through it is an operation the source sanctions.</p>
+     * <p>Purpose: this is the whole of {@code 9000-READ-ACCT} at L687 of {@code app/cbl/COACTVWC.cbl} as a
+     * single statement. That paragraph drives three keyed reads in a fixed order, each gated on the one
+     * before, and the ordering is load bearing because only the cross-reference yields the customer key the
+     * third read needs.</p>
      *
-     * <p>Assumptions: the ordering is stated in the method name rather than left to the plan, because
-     * the reference observes rows through an index in key order and an unstated ordering would be
-     * free to differ between two executions over identical rows. Stating it also makes this read
-     * agree with the finder above about which row is first.</p>
+     * <p>Refactoring Rationale: the three reads were three statements. One statement replaces them because
+     * this datasource runs at read-committed isolation, where each statement takes its own snapshot, so
+     * three statements could compose an account from before a concurrent update with a customer from after
+     * it -- a pairing that never existed. The rationale on the composing method asserted the opposite, and
+     * this query is what makes that assertion true.</p>
      *
-     * <p>Assumptions: an account with no cards yields an EMPTY list and never an absent one. The
-     * reference draws no distinction on this path between an account with no rows and an account that
-     * does not exist -- the batch program simply reaches the end-of-file condition declared at L63 of
-     * {@code app/cbl/CBACT03C.cbl} -- so an optional here would invent a distinction the source does
-     * not make.</p>
+     * <p>Trade-offs: the gates no longer PREVENT a read. In the reference a miss on the first read meant the
+     * second was never issued, and here all three sides are evaluated together. Nothing observable changes,
+     * because a read has no side effect and the outcome is still decided in the reference's order from which
+     * sides came back empty; what is given up is the ability to say that a missing account cost one read
+     * rather than one join.</p>
      *
-     * <p>Trade-offs: this read is unbounded, unlike the two cursor reads below, and that is
-     * deliberate on a specific ground rather than an oversight. Its callers want the whole set for one
-     * account: an account holds a handful of cards, not a screenful, so the bound a cursor read exists
-     * to impose would add a cursor and a caller-side loop to a set that is already small. What is
-     * accepted is that this is the one method here whose result size the caller does not choose, and
-     * the bounded reads below are what a caller reaches for when it does.</p>
+     * <p>Assumptions: both joins are OUTER, which is what preserves the three distinct reference outcomes.
+     * An inner join would collapse the account-master miss and the customer-master miss into a single empty
+     * result, and each of those arms carries its own verbatim sentence and its own rule about which half of
+     * the screen is published.</p>
      *
-     * @param accountId the account whose cards are wanted, the eleven-digit identifier the copybook
-     *     declares at L7; must not be {@code null}
-     * @return every row for that account in ascending card-number order, empty when the account has
-     *     no cards; never {@code null}
+     * <p>Assumptions: the joins are composed with an explicit predicate rather than by navigating an
+     * association, because the three entities declare none and the schema declares no foreign key between
+     * their tables. Declaring an association to shorten this query would assert a referential guarantee the
+     * database does not enforce.</p>
+     *
+     * <p>Assumptions: the ordering and the caller's limit together settle WHICH cross-reference row answers
+     * when an account holds several. Ascending card number is the base cluster's own order, which
+     * {@code app/cbl/CBACT03C.cbl} states with {@code ACCESS MODE IS SEQUENTIAL} at L31 beside
+     * {@code RECORD KEY IS FD-XREF-CARD-NUM} at L32, and it is the same tie-break the keyed by-account read
+     * on this interface applies -- so both routes resolve to the same row.</p>
+     *
+     * @param accountId the account whose screen composition is wanted, the eleven-digit identifier the
+     *     copybook declares at L7; must not be {@code null}
+     * @param limit the greatest number of rows to return, which a caller wanting the reference's
+     *     single-record shape sets to one
+     * @return the composition rows in ascending card-number order, empty when the account has no
+     *     cross-reference row at all; never {@code null}
      */
-    List<CardXref> findByAccountIdOrderByCardNumAsc(Long accountId);
+    @Query("""
+            select new com.carddemo.account.repository.AccountScreenRow(x, a, c)
+            from CardXref x
+              left join Account a on a.accountId = x.accountId
+              left join Customer c on c.customerId = x.customerId
+            where x.accountId = :accountId
+            order by x.cardNum asc
+            """)
+    List<AccountScreenRow> findAccountScreenRows(
+            @Param("accountId") Long accountId,
+            Limit limit);
 
     /**
      * Reads forward from a cursor in ascending card-number order, optionally narrowed to one account.

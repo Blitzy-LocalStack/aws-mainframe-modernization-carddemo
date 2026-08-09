@@ -191,9 +191,9 @@
  *       whose optimistic-concurrency version column the update path has to respect.</dd>
  *
  *   <dt>{@code CardXrefRepository} into {@code account.card_xref}</dt>
- *   <dd>LANDED. Read-only, and <b>reached by two distinct access paths rather than one</b> --
- *       by card number, and by account identifier. Assumptions: the second path is not an
- *       invention of the migration. {@code app/cbl/CBACT04C.cbl:37} declares
+ *   <dd>LANDED. Read-only, and <b>reached by three distinct access paths rather than one</b> --
+ *       by card number, by account identifier, and as a whole ordered walk. Assumptions: the
+ *       second path is not an invention of the migration. {@code app/cbl/CBACT04C.cbl:37} declares
  *       {@code RECORD KEY IS FD-XREF-CARD-NUM} and the very next line,
  *       {@code app/cbl/CBACT04C.cbl:38}, declares
  *       {@code ALTERNATE RECORD KEY IS FD-XREF-ACCT-ID}; the interest job then reads by account
@@ -202,7 +202,16 @@
  *       {@code app/jcl/INTCALC.jcl:29-30} and the alternate-index path at
  *       {@code app/jcl/INTCALC.jcl:31-32}. The relational replacement for that alternate index is
  *       the non-unique index {@code idx_card_xref_account_id}, which the owning service declares
- *       and this module must not re-declare.</dd>
+ *       and this module must not re-declare.
+ *       Refactoring Rationale: the third path was added, and the omission it corrects was silent
+ *       data loss rather than a missing convenience. {@code app/cbl/CBEXPORT.cbl:47-51} declares the
+ *       same dataset {@code ACCESS MODE IS SEQUENTIAL} and {@code :376-389} reads it until end of
+ *       file, so the export writes one record per CARD row; reaching those rows through the
+ *       by-account path instead -- which is deliberately bounded to a single row, because the index
+ *       it reads is non-unique -- dropped every further card of every multi-card account from the
+ *       exported dataset while leaving the dataset well formed. The three paths differ in RESULT
+ *       CARDINALITY as much as in key, which is why the interface enumerates them rather than
+ *       leaving a reader to infer them from three method names.</dd>
  *
  *   <dt>{@code DisclosureGroupRepository} into {@code reference.disclosure_groups}</dt>
  *   <dd>LANDED. Strictly read-only: an interest-rate lookup on the three-part key of account

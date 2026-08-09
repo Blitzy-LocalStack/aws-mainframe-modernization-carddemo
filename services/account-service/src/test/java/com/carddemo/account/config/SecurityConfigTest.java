@@ -191,13 +191,19 @@ class SecurityConfigTest {
      * would each be a widening this assertion catches.</p>
      */
     @Test
-    @DisplayName("the internal read authority is neither of the two group authorities")
-    void theInternalReadAuthorityIsNeitherGroupAuthority() {
-        assertThat(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY)
-                .isNotEqualTo(JwtRoleConverter.ADMIN_AUTHORITY)
-                .isNotEqualTo(JwtRoleConverter.USER_AUTHORITY);
-        assertThat(grantedBy(SecurityConfig.businessAccess(),
-                workload(InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY))).isFalse();
+    @DisplayName("no internal read authority is either of the two group authorities")
+    void noInternalReadAuthorityIsAGroupAuthority() {
+        // WHY : Refactoring Rationale: the loop replaces a single assertion, because there is now one
+        //   internal authority per family of addresses rather than one for the whole internal surface.
+        //   Asserting the set rather than one member is what keeps a newly added family from being the
+        //   one that collides with a group authority unnoticed.
+        for (var authority : InternalApiSecurityConfig.requiredAuthorities()) {
+            assertThat(authority.getAuthority())
+                    .isNotEqualTo(JwtRoleConverter.ADMIN_AUTHORITY)
+                    .isNotEqualTo(JwtRoleConverter.USER_AUTHORITY);
+            assertThat(grantedBy(SecurityConfig.businessAccess(),
+                    workload(authority.getAuthority()))).isFalse();
+        }
     }
 
     /**

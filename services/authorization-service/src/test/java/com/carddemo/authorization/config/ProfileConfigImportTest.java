@@ -25,8 +25,22 @@ import org.springframework.mock.env.MockEnvironment;
  * deliberately declines to pin {@code spring.cloud.aws.region.static} because a task supplies both
  * region and credentials. Neither failure is suppressed by the {@code optional:} marker, which covers a
  * claimed location holding no resource and not a resolver that throws while building its own client. The
- * overlay and the starter were therefore withdrawn together, and this test is what stops either coming
- * back unnoticed.</p>
+ * OVERLAY was therefore withdrawn from both profiles, and this test is what stops it coming back
+ * unnoticed.</p>
+ *
+ * <p>Refactoring Rationale: the sentence above read "the overlay and the starter were therefore withdrawn
+ * together", and the second half of that was wrong in a way that inverted the module's design.
+ * {@code pom.xml} declares {@code io.awspring.cloud:spring-cloud-aws-starter-parameter-store} at L297-300
+ * and the comment above it argues at length for KEEPING it: the resolver arrives from
+ * {@code spring-cloud-aws-autoconfigure} whether or not anything wants it, so withdrawing the client
+ * would leave the resolver registered and unaccompanied, turning the most likely future edit -- someone
+ * adding a value under this module's own subtree -- from a legible region error into a class-loading
+ * crash raised before logging is configured. {@link ProfileConfigurationTopologyTest} asserts both halves
+ * of that pairing separately, in {@code noDocumentClaimsAParameterStoreLocation} and
+ * {@code theParameterStoreClientIsOnTheClasspath}, so a passing sibling test in this very package already
+ * contradicted the withdrawn-starter claim. A reader who trusted it would have concluded the dependency
+ * was removable and removed it, which is exactly the change those two assertions exist to stop. The same
+ * false claim was carried by {@code application-dev.yml} and is corrected there in the same change.</p>
  *
  * <p>Assumptions: the assertion is made against config-data resolution alone, through
  * {@link ConfigDataEnvironmentPostProcessor#applyTo}, rather than by starting a context. That is the

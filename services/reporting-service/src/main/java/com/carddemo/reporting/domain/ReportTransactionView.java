@@ -298,6 +298,31 @@ public class ReportTransactionView {
     @Column(name = "card_num", length = 16, insertable = false, updatable = false)
     private String cardNum;
 
+    // WHY : Refactoring Rationale: this member is new, and the paragraph above is the reason it had
+    //       to be. That paragraph reasons carefully about ordering on the card number and then on the
+    //       identifier, and every word of it assumed the card number identified a card. The relation
+    //       publishes it MASKED -- twelve constant asterisks and four digits -- so it identifies a
+    //       tail, and the consequences reached past ordering into the join and the grouping. Ordering
+    //       on a tail interleaves two colliding cards' rows, so the card-change break the report
+    //       performs fires in the middle of one cardholder's run and a single emitted group spans
+    //       two. Joining on a tail matched one transaction to every cross-reference row sharing that
+    //       tail, so the joined result carried more lines than the driving relation admitted. Both
+    //       close by using this keyed digest, which is computed inside the relation over the WHOLE
+    //       trimmed number and is therefore unique per card.
+    // WHY : Assumptions: the width is 64 characters because the relation renders a SHA-256 digest as
+    //       lower-case hexadecimal, and the mapping has to track that expression exactly -- a shorter
+    //       mapping would truncate the token and merge two cards whose digests share a prefix, which
+    //       is the same class of defect as the mask with a longer prefix.
+    // WHY : Assumptions: the value is never rendered and never returned to a client. It is a stable
+    //       per-card correlator, so a client holding it across two reports could link them; the report
+    //       output and every response type in this module carry the masked rendering above instead.
+    //       The ordering it produces is not card-number ordering and is not claimed to be: the
+    //       divergence from app/jcl/TRANREPT.jcl L46 is registered in
+    //       docs/architecture/cobol-to-service-traceability.md, where the masked ordering it replaces
+    //       was already registered.
+    @Column(name = "card_fingerprint", length = 64, insertable = false, updatable = false)
+    private String cardFingerprint;
+
     // WHY : Assumptions: a timestamp of twenty-six blanks is a legitimate value in this pipeline
     //       rather than an error to reject, so this attribute and the processing timestamp below
     //       are both left able to hold nothing and neither is declared non-null here.
@@ -571,6 +596,27 @@ public class ReportTransactionView {
      */
     public String cardNum() {
         return cardNum;
+    }
+
+    /**
+     * Returns the keyed per-card fingerprint the report orders, groups and joins by.
+     *
+     * <p>Assumptions: this is the value the card-change break compares, because it is the only
+     * attribute of this row that is a function of the whole card number. The masked rendering above is
+     * four digits behind a constant filler, so a break on it fires between two transactions of one
+     * cardholder whenever a different cardholder's card shares those four digits.</p>
+     *
+     * <p>Trade-offs: the value is returned so that the query surface can order and join on it and the
+     * writing side can break on it, all of which live outside this type. What that costs is that a
+     * caller could render it, which would hand a client a stable per-card correlator; what stops that
+     * is that no response type and no report band in this module declares a place for it, and this
+     * type's own diagnostic rendering omits it.</p>
+     *
+     * @return the sixty-four-character hexadecimal digest held in column {@code card_fingerprint},
+     *     or {@code null} where the view returned none
+     */
+    public String cardFingerprint() {
+        return cardFingerprint;
     }
 
     /**

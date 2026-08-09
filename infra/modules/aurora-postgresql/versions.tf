@@ -47,8 +47,10 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # Assumptions: a provider of 5.81.0 or later is required before an
-    #   Aurora Serverless v2 cluster will accept a zero minimum capacity,
+    # Assumptions: a provider of 5.80.0 or later is required before an
+    #   Aurora Serverless v2 cluster will accept a zero minimum capacity, and
+    #   5.81.0 or later for the auto-pause-seconds argument a zero minimum then
+    #   makes mandatory -- so 5.81.0 is the floor for the pair,
     #   which the dev environment relies on to scale down to nothing while
     #   idle; 6.56 clears that floor. Holding the major at 6 keeps an
     #   unreviewed 7.x from renaming or retiring the cluster arguments

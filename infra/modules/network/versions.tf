@@ -85,7 +85,9 @@ terraform {
     #       admits 6.56.x and later 6.x minors but never 7.x, so a major move
     #       stays a deliberate, reviewable edit. The floor itself traces to
     #       the sibling aurora-postgresql module, which needs a provider no
-    #       older than 5.81.0 to accept a zero minimum Aurora capacity, and
+    #       older than 5.80.0 to accept a zero minimum Aurora capacity and no
+    #       older than 5.81.0 for the auto-pause argument that then becomes
+    #       mandatory -- so 5.81.0 is the floor for the pair -- and
     #       6.56 clears that comfortably. Trade-offs: this module provisions
     #       no database and would run on a far older provider, but repeating
     #       one constraint in every infra/ directory means a calling root

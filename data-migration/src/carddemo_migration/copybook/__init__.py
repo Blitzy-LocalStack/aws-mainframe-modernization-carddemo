@@ -9,7 +9,7 @@ sits inside a fixed-width record, and WHAT the bytes at that position mean -- an
 choosing a dataset, loading a row and verifying a load to the readers, loaders and
 verification passes above it.
 
-This module is the subpackage entry point. It states the contracts the four modules below
+This module is the subpackage entry point. It states the contracts the five modules below
 are held to, and it re-exports a curated selection of their names so that
 ``from carddemo_migration.copybook import decode_zoned`` is a stable spelling. It declares
 no class, no function and no data of its own, and it converts nothing.
@@ -20,7 +20,7 @@ time anywhere below is each module's in-memory self-check of its own declaration
 with the guarded code-page registration described under *Standard library only*; both are
 documented where they happen, and neither touches anything outside the process.
 
-The four modules
+The five modules
 ----------------
 ``layouts``
     The single source of offsets. For every record in the migration contract it declares
@@ -58,6 +58,16 @@ The four modules
     :func:`decode_field` is that per-field entry point. It never decodes a whole record as
     one string, never looks for a line terminator, and never routes a packed or binary
     span through a character decoder at all.
+``timestamp``
+    The one authority on what the 26 characters of a ``PIC X(26)`` stamp may hold. It
+    admits exactly the two spellings CardDemo writes -- ``YYYY-MM-DD HH:MM:SS.ffffff`` from
+    the posting program and ``YYYY-MM-DD-HH.MM.SS.NNNNNN`` from a program taking the current
+    date -- by PARSING each candidate through the standard library's own calendar and
+    requiring it to format back to itself, so an impossible month, an out-of-range hour and
+    a short fraction are all refused without this package maintaining a calendar. It also
+    recognises the two uniform forms an unwritten stamp takes, and renders a populated stamp
+    into the single spelling a ``TIMESTAMP(6)`` column accepts. It raises nothing on the
+    validation path: each caller raises its own error naming its own record and field.
 
 Standard library only
 ---------------------
@@ -224,13 +234,13 @@ Assumptions:
 # preferred, and ruff's ``D104`` enforces it under an ``ignore`` list that is
 # deliberately empty and a ``per-file-ignores`` table that deliberately does not exist.
 
-# Trade-offs: the four modules are imported EAGERLY here, which is the opposite of
+# Trade-offs: the five modules are imported EAGERLY here, which is the opposite of
 # what the root ``carddemo_migration`` entry point does, and the two decisions differ
 # because their costs differ rather than because one of them is inconsistent. Eager
-# import here costs the import of four standard-library-only modules -- no driver, no
+# import here costs the import of five standard-library-only modules -- no driver, no
 # SDK, no configuration read -- and buys the property the folder's own validation gate
 # checks, that ``import carddemo_migration.copybook`` is sufficient and a caller never
-# has to know which of the four owns the name it wants. The root imports NO subpackage
+# has to know which of the five owns the name it wants. The root imports NO subpackage
 # at all, because reaching ``loaders`` or ``verify`` from there would pull ``psycopg``
 # and ``boto3`` in behind them; a copybook-only import would then stop working on a bare
 # checkout and the standard-library-only guarantee would become false at the very point
@@ -263,6 +273,12 @@ from carddemo_migration.copybook.packed import (
     encode_binary,
     encode_packed,
 )
+from carddemo_migration.copybook.timestamp import (
+    ADMITTED_FORMS,
+    canonical,
+    is_admitted,
+    is_unwritten,
+)
 from carddemo_migration.copybook.zoned import (
     ZonedDecimalError,
     ZonedSpanWidthError,
@@ -290,9 +306,10 @@ from carddemo_migration.copybook.zoned import (
 # field-descriptor constructors, the masking helpers, the field-oriented codec forms --
 # stays reachable at its owning module, which is the spelling every existing consumer
 # already uses, so curating withdraws nothing that was available before. The sorted order
-# is the order each of the four modules declares its own surface in, so all five files in
+# is the order each of the five modules declares its own surface in, so all six files in
 # this directory read the same way.
 __all__ = [
+    "ADMITTED_FORMS",
     "AlternateKeySpec",
     "EbcdicFieldDecodeError",
     "EbcdicRecordLengthError",
@@ -306,6 +323,7 @@ __all__ = [
     "RecordSpec",
     "ZonedDecimalError",
     "ZonedSpanWidthError",
+    "canonical",
     "count_fixed_length_records",
     "decode_binary",
     "decode_field",
@@ -314,6 +332,8 @@ __all__ = [
     "encode_binary",
     "encode_packed",
     "encode_zoned",
+    "is_admitted",
+    "is_unwritten",
     "iter_ascii_text_records",
     "iter_fixed_length_records",
     "keylen_of",

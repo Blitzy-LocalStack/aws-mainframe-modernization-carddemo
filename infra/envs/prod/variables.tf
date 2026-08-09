@@ -21,7 +21,22 @@
 #   spa_domain_name and spa_acm_certificate_arn are required because no safe
 #   account-independent default exists.
 #
-# Parameters -- twenty-nine, five required:
+# Parameters -- THIRTY-FOUR, ELEVEN required. The eleven with no default are
+#   `alb_certificate_arn`, `internal_service_domain_name`,
+#   `cloudfront_acm_certificate_arn`, `cloudfront_aliases`,
+#   `cloudfront_api_connect_src_origins`, `image_tag`, `github_repository`,
+#   `github_oidc_provider_arn`, `mask_hmac_secret_arn`,
+#   `permissions_boundary_arn` and `alarm_email_endpoints`.
+#   WHY (Refactoring Rationale): this line said "twenty-nine, five required".
+#   Both figures were stale, and the required count moved again when
+#   `alarm_email_endpoints` stopped defaulting to a value held in this
+#   repository -- an alarm destination is operator-supplied, so it has no
+#   defensible default. The count is stated here rather than left to be counted
+#   from the table below, because the table is what a reader consults for one
+#   input and this line is what they consult before a first apply.
+#   The table that follows is a reading aid for the same declarations and is not
+#   exhaustive; each `variable` block below carries the authoritative type,
+#   description and validation for its own input.
 #   aws_region                      string       Region this environment
 #                                                deploys into.
 #   tags                            map(string)  Common tag set applied through
@@ -107,7 +122,7 @@
 # -----------------------------------------------------------------------------
 
 # WHY this has a default at all, when the region a production deployment lands in
-# is emphatically something an operator should state explicitly (Trade-off): the
+# is emphatically something an operator should state explicitly. Trade-offs: the
 # infrastructure pipeline checks this root without a variable file and without AWS
 # credentials. An input with no default makes that step prompt for a value and
 # then fail in a non-interactive shell, so this would be the one directory in the
@@ -147,7 +162,7 @@ variable "aws_region" {
 }
 
 # WHY the tag set is a root input applied through the provider rather than a
-# per-resource argument (Trade-off): versions.tf sets these on the provider's
+# per-resource argument. Trade-offs: versions.tf sets these on the provider's
 # `default_tags` block, so every taggable resource this root creates -- including
 # every resource created inside all sixteen modules -- carries them without any
 # module author remembering to wire a tags argument through. The accepted cost is
@@ -214,7 +229,9 @@ variable "aurora_min_capacity" {
   #
   # Assumptions: a zero floor is what sets the AWS provider floor in versions.tf,
   # even though THIS root never uses one. The provider accepts a zero minimum only
-  # from 5.81.0 onward and `~> 6.56` clears that comfortably; the constraint is
+  # from 5.80.0 onward, and the auto-pause argument a zero minimum makes mandatory
+  # only from 5.81.0, so the pair floors at 5.81.0 and `~> 6.56` clears that
+  # comfortably; the constraint is
   # identical in both roots because a single provider version has to satisfy both.
   validation {
     # WHY : Assumptions: the range and the increment are both the service's.
@@ -266,8 +283,8 @@ variable "aurora_seconds_until_auto_pause" {
   type        = number
   default     = 300
 
-  # WHY a variable that does nothing in this root is declared anyway
-  # (Assumption): the two environment roots are required to have the same input
+  # WHY a variable that does nothing in this root is declared anyway.
+  # Assumptions: the two environment roots are required to have the same input
   # surface, so that the difference between the environments is entirely in the
   # values. A variable existing in one root and not the other would be a
   # structural difference, and it would also mean a single tfvars template could
@@ -289,8 +306,8 @@ variable "ecs_task_cpu" {
   type        = number
   default     = 1024
 
-  # WHY one virtual CPU here rather than the half a development task gets
-  # (Trade-off): the services are JVM applications, and a task with less than a
+  # WHY one virtual CPU here rather than the half a development task gets.
+  # Trade-offs: the services are JVM applications, and a task with less than a
   # full virtual CPU spends a visible share of its first requests on
   # just-in-time compilation while also serving them. In development that shows
   # up as a slow first call and nothing worse; under production concurrency it
@@ -478,9 +495,34 @@ variable "environment" {
 }
 
 variable "vpc_cidr" {
-  description = "IPv4 CIDR allocated to the production VPC."
+  description = "IPv4 CIDR allocated to the production VPC. Must use a /16 prefix: the reporting service's trusted-proxy pattern is derived from the first two octets of this block, which is exact only for a /16."
   type        = string
   default     = "10.1.0.0/16"
+
+  # WHY : Refactoring Rationale: this validation is NEW and it narrows THIS ROOT's
+  #       contract without touching the module's. The network module accepts /16 to
+  #       /20, and that remains true for any other caller. This root additionally
+  #       requires exactly /16, because one value derived here depends on it for
+  #       correctness rather than for convenience: the reporting service's trusted
+  #       proxy pattern in main.tf is composed from the FIRST TWO OCTETS of this block,
+  #       which describes exactly a /16. Given a /20 the same expression would produce
+  #       a pattern matching the whole containing /16 -- sixteen times the address
+  #       space actually allocated -- so Tomcat would honour an X-Forwarded-For header
+  #       from any address in that range, not merely from this VPC's own load balancer.
+  #       Since a client-supplied header is what that setting decides whether to
+  #       trust, over-matching there is a trust widening rather than an untidiness.
+  #       Alternatives Considered: deriving an exact regex from an arbitrary prefix
+  #       length. Rejected because it reimplements CIDR arithmetic as string
+  #       manipulation -- the third octet of a /20 is a bounded range, not a free
+  #       wildcard -- and a subtle error there fails OPEN, silently trusting more
+  #       than intended, which is the same failure mode by a longer route.
+  #       Assumptions: both environments already use a /16 (dev 10.0.0.0/16, prod
+  #       10.1.0.0/16), so this refuses nothing either root does today and refuses
+  #       only the configurations under which the derived pattern would over-match.
+  validation {
+    condition     = can(regex("/16$", var.vpc_cidr))
+    error_message = "vpc_cidr must use a /16 prefix in this environment root. The reporting service's trusted-proxy pattern is derived from the first two octets of this block, which is exact only for a /16; with any longer prefix that pattern would trust the whole containing /16 rather than this VPC alone."
+  }
 }
 
 variable "aurora_engine_version" {
@@ -520,7 +562,7 @@ variable "batch_schedule_expression" {
 }
 
 variable "image_tag" {
-  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  description = "Immutable image tag applied to all eleven ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
   type        = string
   nullable    = false
 
@@ -573,10 +615,50 @@ variable "secret_recovery_window_in_days" {
 #       deployment that brings its own rotation function reintroduces this input
 #       alongside a `rotation_lambda_arn`, which the module accepts as a pair.
 
+# WHY : Refactoring Rationale: this input was `default = []` and terraform.tfvars set
+#       it to `[]` as well, so PRODUCTION provisioned a notification topic, thirteen
+#       alarms and every alarm action pointing at it -- with ZERO SUBSCRIBERS. Every
+#       alarm would have fired correctly into nothing. That is the worst shape of
+#       monitoring failure, because the dashboards, the alarms and the topic all exist
+#       and look complete, so the gap is invisible until an incident is missed. The
+#       default is REMOVED, making the input required: a production plan cannot now
+#       succeed without a delivery target.
+# WHY : Assumptions: the value is supplied OUT OF BAND and never committed. It is not
+#       a secret, but an operator or on-call address is personal data and the
+#       project's constraint is that the repository carries no environment-specific
+#       identity of that kind, so terraform.tfvars no longer names it at all. Being a
+#       required variable is what makes that safe rather than fragile: because it has
+#       no default, .github/workflows/infra-ci.yml's input-closure guard obliges
+#       deploy.yml, infra-ci.yml and docs/runbooks/deploy.md to supply and document it
+#       together, so an operator following the runbook exactly reaches a plan that
+#       works, and one who forgets is stopped at plan rather than at the first missed
+#       page.
+# WHY : Alternatives Considered: (1) keeping the default and adding a non-empty
+#       validation. Rejected as dishonest bookkeeping -- it produces the same
+#       operational requirement while leaving the variable looking optional to the
+#       closure guard, so the three sources that must name it would never be checked
+#       against each other. (2) Provisioning a chat or pager integration here instead.
+#       Rejected because every such target needs an endpoint URL bearing a workspace
+#       or service token, which is precisely the material that may not enter this
+#       tree; an address subscribed at apply time keeps the secret out. (3) Requiring
+#       it in prod ONLY, leaving dev defaulted to an empty list. Rejected because the
+#       two roots are required to be identical in SHAPE and to differ only in sizing
+#       and retention -- a variable that is required in one root and optional in the
+#       other is a shape difference, and .github/workflows/infra-ci.yml asserts the
+#       two roots' required sets are equal, so the asymmetry fails the build. Dev
+#       therefore supplies an address too; a development environment whose alarms
+#       notify nobody is the same defect at lower stakes.
+# WHY : Trade-offs: a subscription created this way requires the recipient to confirm
+#       it before delivery begins, so provisioning the target is necessary but not by
+#       itself sufficient; the runbook step that follows the apply is what closes it.
 variable "alarm_email_endpoints" {
-  description = "Email addresses subscribed to the production observability topic."
+  description = "Email addresses subscribed to the production observability topic. REQUIRED and deliberately absent from terraform.tfvars: supply it out of band, because the repository carries no operator identity. At least one address must be given, so a production deployment cannot create alarms that notify nobody."
   type        = list(string)
-  default     = []
+
+  validation {
+    condition     = length(var.alarm_email_endpoints) > 0
+    error_message = "alarm_email_endpoints must name at least one recipient in production. A notification topic with no subscriber means every alarm fires into nothing, which is indistinguishable from working monitoring until an incident is missed. Supply the address out of band, for example TF_VAR_alarm_email_endpoints='[\"oncall@example.com\"]'."
+  }
 
   validation {
     condition     = alltrue([for address in var.alarm_email_endpoints : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", address))])

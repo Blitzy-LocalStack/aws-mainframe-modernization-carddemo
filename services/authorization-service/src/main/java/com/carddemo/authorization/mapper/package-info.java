@@ -254,8 +254,8 @@
  * user-specified Rule 1 (Explainability) L15 attaches to a package declaration. A charter at either
  * level would therefore document a package that has no entry point to document. None is required
  * and none is created, and this is recorded so that a later reader does not read the absence as an
- * oversight and add two files the gate never asked for. The set this module is to carry is eight
- * charters, one for the {@code com.carddemo.authorization} root and one for each of its seven
+ * oversight and add two files the gate never asked for. The set this module is to carry is nine
+ * charters, one for the {@code com.carddemo.authorization} root and one for each of its eight
  * subpackages, and this file is the {@code mapper} one.
  *
  * <h2>Parity evidence available to this package, stated plainly</h2>

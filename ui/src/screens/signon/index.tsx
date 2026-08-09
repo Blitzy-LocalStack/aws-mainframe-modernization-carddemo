@@ -1,3 +1,31 @@
+/**
+ * @file The sign-on screen, migrated from `app/cbl/COSGN00C.cbl` and its mapset
+ * `app/bms/COSGN00.bms` (37 `DFHMDF` fields), reached at route `/signon`.
+ *
+ * Purpose
+ * -------
+ * Exchange a user identifier and a password for a token, answer the replacement-password challenge
+ * when the identity provider issues one, and route onward to the administrative or the main menu.
+ * It replaces CICS transaction CC00 and is the one route outside the authentication guard, because
+ * it is the route that establishes the credential every other route requires.
+ *
+ * What replaced the reference's own comparison
+ * -------------------------------------------
+ * Assumptions: the reference reads the security file and compares an eight-character password held
+ * in clear at `app/cpy/CSUSR01Y.cpy:21`, and that field is not carried forward anywhere in the
+ * target. Sign-on here is a token exchange against the managed identity provider, so this screen
+ * transmits the credential in a request BODY and never holds it after the exchange. The onward
+ * branch is taken from the SIGNED group claim rather than from a field the client supplied, which is
+ * the security property the migration gains: the reference branched on a value echoed back to it in
+ * the communication area.
+ *
+ * Message fidelity
+ * ----------------
+ * Assumptions: every string an operator reads here is a catalog constant taken verbatim from the
+ * originating program, trailing ellipses included, so the wording is the reference's and not this
+ * screen's.
+ */
+
 import { Button, Card, Flex, Form, Input, Space } from 'antd';
 import { useState } from 'react';
 import type { ReactElement } from 'react';
@@ -49,8 +77,18 @@ const PASSWORD_FIELD_ID = 'signon-password';
  * Assumptions: the two fields are the two the source screen had, at the widths its copybook
  * declares — eight characters of user identifier and a non-display password field. The password uses
  * `Input.Password` with the visibility toggle suppressed, which is gap G2 in the design-system
- * analysis: a 3270 non-display field renders truly blank while this renders dots, a difference
- * accepted as strictly better feedback with no behavioural consequence.
+ * analysis.
+ *
+ * <p>Trade-offs: a 3270 non-display field renders truly blank, and this renders one dot per
+ * character. The divergence is cosmetic and is accepted for a specific, stated mechanism rather
+ * than because it looks better: the dots confirm that each keypress was ACCEPTED while revealing
+ * none of the characters, so an operator who mistypes or whose keyboard drops a key sees the count
+ * disagree with what they typed and can correct it before submitting. On the truly blank 3270 field
+ * that same mistake is invisible until the exchange is refused, and the refusal message cannot say
+ * which of the two fields was wrong. What is given up is the one property the blank field has that
+ * dots do not — an observer beside the operator cannot read the credential's LENGTH off the screen —
+ * and the visibility toggle is suppressed so that nothing beyond the length can be recovered from
+ * the rendering at all. No behaviour differs: the same characters are submitted either way.
  *
  * Assumptions: every message rendered here is a catalog constant rather than a literal, so the
  * baseline's exact wording — including its trailing ellipses — is what an operator reads.

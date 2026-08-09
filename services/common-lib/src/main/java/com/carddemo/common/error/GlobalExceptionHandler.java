@@ -1,5 +1,6 @@
 package com.carddemo.common.error;
 
+import com.carddemo.common.control.OnlineWritesDisabledException;
 import com.carddemo.common.observability.LogSafeText;
 import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.validation.FieldValidationFlag;
@@ -385,6 +386,23 @@ public class GlobalExceptionHandler {
     public static final String CODE_FORBIDDEN = "CARDDEMO-0403";
 
     /**
+     * The message returned when a mutating request arrives while the online-write window is closed.
+     *
+     * <p>Assumptions: the sentence names the condition and the fact that nothing was applied, and it
+     * says nothing about which parameter carries the flag or when the window reopens. The parameter is
+     * deployment topology, and the reopening instant is decided by the batch state machine rather than
+     * by the service, so stating either would be telling a client something this service does not
+     * know.</p>
+     *
+     * <p>Assumptions: it says "not applied" explicitly, because the one question a caller has after a
+     * refused write is whether any part of it landed. The gate runs before the handler, so the answer is
+     * always none, and saying so removes the need for the caller to go and check.</p>
+     */
+    public static final String MESSAGE_WRITES_QUIESCED =
+            "Updates are temporarily closed while the nightly batch cycle runs."
+                    + " Your change was not applied. Please try again shortly";
+
+    /**
      * The condition code stamped on the abend detail every unclaimed failure is reported through.
      *
      * <p>Assumptions: four characters, because {@code ABEND-CODE PIC X(4)} at line 22 of
@@ -511,29 +529,51 @@ public class GlobalExceptionHandler {
     private static final String CORRELATION_ID_MDC_KEY = "correlationId";
 
     /**
-     * The shortest digit run in a request path that is narrowed as an account number, thirteen.
+     * The shortest digit run in a request path that is withheld as a protected identifier, nine.
      *
-     * <p>Assumptions: thirteen is the first length at which a run cannot be one of the identifiers the
-     * migrated routes legitimately carry. The widest of those is the eleven-digit account identifier
-     * from {@code ACCT-ID PIC 9(11)} at line 5 of {@code app/cpy/CVACT01Y.cpy}, and a twelve-digit run
-     * is left legible as the boundary immediately below, so the threshold sits one digit above every
-     * identifier a diagnostic path is meant to disclose and one digit below the shortest primary
-     * account number in circulation.</p>
+     * <p>Refactoring Rationale: this threshold was thirteen, and thirteen was wrong. It was chosen so
+     * that the run "cannot be one of the identifiers the migrated routes legitimately carry" -- but
+     * those identifiers are themselves protected, and the routes that carry them are exactly the ones
+     * a diagnostic must not disclose. The consequence was concrete: {@code /api/v1/customers/123456789}
+     * and {@code /api/v1/accounts/12345678901} were published in full, in a response body and in a log
+     * line, on every 400, 401, 403, 404 and 409 those routes can return. Nine is the width of
+     * {@code CUST-ID PIC 9(09)} at line 4 of {@code app/cpy/CVCUS01Y.cpy}, the NARROWEST protected
+     * numeric identifier in the migration, so a threshold there is the first one that covers all three
+     * of customer, account and card.</p>
      *
-     * <p>Alternatives Considered: pinning the rule to the sixteen digits {@code CARD-NUM PIC X(16)}
-     * declares at line 5 of {@code app/cpy/CVACT02Y.cpy} and narrowing runs of exactly that width.
-     * Rejected because it fails open on both sides of sixteen: a seventeen- or nineteen-digit run --
-     * a card number with a check digit appended, or two identifiers a client concatenated -- would
-     * pass through in the clear, and so would any longer issuer range this platform later accepts. A
-     * minimum length fails closed instead, which is the direction a masking rule has to fail.</p>
+     * <p>Alternatives Considered: pinning the rule to each identifier's exact width and narrowing runs
+     * of exactly nine, eleven or sixteen digits. Rejected because it fails open between and beyond
+     * those widths: a ten-, twelve-, seventeen- or nineteen-digit run -- a card number with a check
+     * digit appended, two identifiers a client concatenated, or any longer issuer range this platform
+     * later accepts -- would pass through in the clear. A minimum length fails closed instead, which is
+     * the direction a masking rule has to fail.</p>
      *
-     * <p>Trade-offs: a minimum also narrows a sixteen-digit transaction identifier, declared at that
-     * width by {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, so a failed
-     * transaction read reports its identifier reduced to four digits. Nothing is lost operationally,
-     * because the correlation identity in the same body resolves to the operational record, which
-     * holds the unreduced path.</p>
+     * <p>Alternatives Considered: replacing the path with the matched route template, which the review
+     * offered as the other resolution. Rejected because this advice cannot obtain one: it is reached
+     * from every service including the batch context, and the handler-mapping attribute that carries a
+     * template is present only for requests a mapping actually matched -- so the 404 case, the one most
+     * likely to carry a mistyped identifier, would have no template and would fall back to the raw
+     * path. Scanning digit runs needs no mapping and therefore has no such hole.</p>
+     *
+     * <p>Trade-offs: a minimum also withholds a sixteen-digit transaction identifier, declared at that
+     * width by {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, and shorter numeric
+     * path values such as a page size or an ordinal remain legible because they are below nine digits.
+     * Nothing is lost operationally: the correlation identity in the same body resolves to the
+     * operational record, which holds the unreduced path.</p>
      */
-    private static final int ACCOUNT_NUMBER_MASK_THRESHOLD = 13;
+    private static final int IDENTIFIER_REDACTION_THRESHOLD = 9;
+
+    /**
+     * The declared width of a primary account number, sixteen.
+     *
+     * <p>Assumptions: {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy} fixes this,
+     * and it is the width at or above which a digit run in a path can be a card number rather than one
+     * of the two shorter identifiers. It is declared here rather than imported from
+     * {@code com.carddemo.common.security.CardNumberMasker} for the reason recorded on the correlation
+     * key above: this advice runs in contexts that hold no web or security dependency, and the two
+     * spellings are asserted equal by this module's tests.</p>
+     */
+    private static final int CARD_NUMBER_WIDTH = 16;
 
     /**
      * The bean-validation constraint names that assert a value was supplied at all.
@@ -1108,6 +1148,48 @@ public class GlobalExceptionHandler {
     private static final int SENSITIVE_DIGIT_RUN = 13;
 
     /**
+     * Every character besides a letter or a digit that a reference screen message is written with.
+     *
+     * <p>Assumptions: this set is a MEASUREMENT of the baseline catalogue rather than a judgement about
+     * which marks look like prose. Harvesting every {@code 88 <name> VALUE '<literal>'} message
+     * declaration across {@code app/cbl}, {@code app/cpy} and the three extension trees yields
+     * eighty-seven distinct screen sentences, and the complete set of non-alphanumeric characters they
+     * use is the space, the comma, the full stop and the question mark -- nothing else. The only
+     * baseline literals that reach past that set are the HTML fragments the statement generator emits
+     * from {@code app/cbl/CBSTM03A.CBL}, and those are markup written to a file rather than a sentence
+     * shown to an operator, so they are not screen messages and are excluded. The migrated
+     * {@code MESSAGE_*} constants across the nine service modules are tighter still: their only
+     * non-alphanumeric characters are the space and the full stop.</p>
+     *
+     * <p>Assumptions: the four marks a library needs in order to quote the token it could not read are
+     * all ABSENT from this set -- the quotation mark, the apostrophe, the backtick and the opening
+     * bracket -- and so is the colon a library labels a value with. That absence is what makes this a
+     * provenance test and not merely a tidiness test.</p>
+     */
+    private static final String REFERENCE_PROSE_EXTRA_CHARACTERS = " ,.?";
+
+    /**
+     * The greatest number of consecutive digits a reference-prose sentence may hold.
+     *
+     * <p>Assumptions: the longest digit run anywhere in the eighty-seven baseline screen sentences is
+     * TWO -- the function-key name {@code PFK07} and the width figures in sentences such as
+     * {@code 'Card number if supplied must be a 16 digit number'} -- and the longest run in the migrated
+     * constants is likewise two. Four leaves room for a year literal such as the {@code 1950} a future
+     * expiry sentence could name, and stops well short of every identifier width this system carries: a
+     * nine-digit national identifier, an eleven-digit account identifier and a sixteen-digit card
+     * number are all refused outright.</p>
+     *
+     * <p>Trade-offs: this bound is deliberately FAR tighter than {@link #SENSITIVE_DIGIT_RUN}, which the
+     * terminator shape applies. The two shapes are not held to one number because they are not exposed
+     * to the same risk: a terminator-ended sentence is provably from this repository's catalogue, so the
+     * only question about a digit run inside it is whether the catalogue itself embeds an identifier,
+     * whereas a prose-shaped sentence is admitted on weaker evidence and therefore must not be able to
+     * carry an identifier at all. Using one number would have meant either loosening the shape that
+     * needs the guard or rejecting catalogue sentences that legitimately name a width.</p>
+     */
+    private static final int REFERENCE_PROSE_DIGIT_RUN = 4;
+
+    /**
      * Returns a carried sentence when it is provably one of this repository's own, otherwise
      * {@code null}.
      *
@@ -1128,41 +1210,177 @@ public class GlobalExceptionHandler {
      * failure would set the flag to get a better message out, and nothing downstream could tell that
      * apart from a catalogue constant. A shape test cannot be talked into anything.</p>
      *
-     * <p>Assumptions: four independent conditions must all hold. The sentence ends with the reference
-     * terminator, which no framework message does; it is no longer than the reference field width; every
-     * character is printable seven-bit text, which excludes the control characters a forged log record
-     * needs and the multi-byte content a decoded record could carry; and it holds no digit run long
-     * enough to be an account or card number. A catalogue constant satisfies all four by construction. A
-     * driver message quoting the value it rejected fails the last, a parser message quoting a token fails
-     * the first, and a stack-derived message fails the second.</p>
+     * <p>Assumptions: TWO shapes are admitted, and a sentence needs only one of them. The first is the
+     * terminator shape: the sentence ends with the reference terminator, which no framework message does;
+     * it is no longer than the reference field width; every character is printable seven-bit text, which
+     * excludes the control characters a forged log record needs and the multi-byte content a decoded
+     * record could carry; and it holds no digit run long enough to be an account or card number. A driver
+     * message quoting the value it rejected fails the last of those, a parser message quoting a token
+     * fails the first, and a stack-derived message fails the second.</p>
      *
-     * <p>Trade-offs: a library message that happened to satisfy all four would be rendered, and that is
-     * the residual risk accepted here. What is bought is that the six contracts promising reference
-     * wording are satisfiable at all without every service reaching into this class to say so. The
-     * balance is defensible because the terminator condition alone is not something a message written
-     * anywhere but this repository's catalogue ends with.</p>
+     * <p>Refactoring Rationale: the second shape exists because the terminator shape alone admitted only
+     * HALF the catalogue, so the contract defect this gate was introduced to remove survived for the
+     * other half. The terminator is a genuine property of the sign-on and transaction screens the
+     * original rationale was written from -- {@code app/cbl/COTRN01C.cbl} lines 149, 285 and 292 all end
+     * that way -- but it is NOT a property of the catalogue as a whole. The card maintenance program
+     * ends none of its sentences that way: {@code 'Card name not provided'},
+     * {@code 'Card Active Status must be Y or N'}, {@code 'Card expiry month must be between 1 and 12'}
+     * and {@code 'Invalid card expiry year'} are declared without a terminator at
+     * {@code app/cbl/COCRDUPC.cbl} lines 181 to 200. Counted across the nine service modules,
+     * thirty-three of the sixty-seven migrated message constants end with the terminator and thirty-four
+     * do not, and the card contract publishes two worked four-hundred examples whose bodies quote those
+     * untermintated sentences verbatim. Recognising one shape therefore left a published contract that no
+     * response could satisfy -- exactly the condition recorded above as the reason this gate was written.
+     * The second shape closes the other half by the same means rather than by a different one.</p>
+     *
+     * <p>Assumptions: the second shape is the reference-prose shape, and it is a measurement rather than
+     * a preference. It admits a sentence of no more than the reference field width in which every
+     * character is an ASCII letter, an ASCII digit, or one of the four characters recorded on
+     * {@link #REFERENCE_PROSE_EXTRA_CHARACTERS}, in which no digit run exceeds
+     * {@link #REFERENCE_PROSE_DIGIT_RUN}, and in which no full stop is followed by a lowercase letter.
+     * All three bounds were taken by harvesting the whole baseline catalogue, and each is recorded where
+     * it is applied; every one of its eighty-seven sentences and every one of the sixty-seven migrated
+     * constants satisfies one of the two shapes.</p>
+     *
+     * <p>Alternatives Considered: carrying a renderable flag on the exception, so that a raise site could
+     * declare its own message safe. It remains rejected, for the reason it was rejected the first time:
+     * it moves the decision to the place with the least reason to think about it and the most reason to
+     * want a shortcut -- a service wrapping a driver failure would set the flag to get a better message
+     * out, and nothing downstream could tell that apart from a catalogue constant. A shape test cannot be
+     * talked into anything, and adding a second shape keeps that property rather than trading it away.
+     * Rewording the card sentences to carry a terminator was also considered and rejected outright:
+     * transformation rule T8 carries every user-visible string across character for character, so
+     * changing the text to satisfy the gate would fix the gate by breaking the parity the gate exists to
+     * deliver.</p>
+     *
+     * <p>Trade-offs: on the axis this gate actually protects -- a sensitive VALUE reaching a response
+     * body or log storage -- the second shape is STRICTER than the first, not looser. It bounds a digit
+     * run at four against the first shape's twelve, so no identifier width this system carries can pass
+     * it, and it excludes every character a library uses to quote the token it could not read. Where it
+     * is looser is provenance: a library sentence that quotes nothing, labels nothing, names no dotted
+     * type and holds no long number -- {@code 'Index 5 out of bounds for length 3'} is the shape of it --
+     * would be rendered where the first shape refuses it. That residual is accepted for two reasons. It
+     * cannot arise on any path in this repository, because the only sentence that reaches here is the
+     * message of a {@link ClientInputException}, and the two sites in this class that synthesise one --
+     * for an absent required value and for an unconvertible one -- both pass
+     * {@link #MESSAGE_VALIDATION_FAILED} explicitly rather than the framework's own text, while a bare
+     * {@code IllegalArgumentException} deliberately falls through to
+     * {@link #onUnexpectedFailure(Exception, HttpServletRequest)} instead. And were it to arise, what
+     * would leak is a bound or a count rather than a customer value, which is a diagnostics verbosity
+     * concern and not a data exposure one.</p>
      *
      * @param message the sentence the failure carried, or {@code null} when it carried none
-     * @return the same sentence when all four conditions hold, otherwise {@code null}
+     * @return the same sentence when it satisfies either the terminator shape or the reference-prose
+     *     shape, otherwise {@code null}
      */
     private static String referenceMessageOrNull(String message) {
-        if (message == null || !message.endsWith(REFERENCE_MESSAGE_TERMINATOR)
-                || message.length() > MAX_REFERENCE_MESSAGE_LENGTH) {
+        if (message == null || message.length() > MAX_REFERENCE_MESSAGE_LENGTH) {
             return null;
         }
+
+        // WHY : Assumptions: the terminator shape is tested first and the prose shape second, purely so
+        //       that the sentences the gate already admitted keep taking the path they always took. The
+        //       two are independent, so the order changes no outcome; it only keeps the cheaper and
+        //       longer-established test in front.
+        if (message.endsWith(REFERENCE_MESSAGE_TERMINATOR)
+                && isPrintableWithinDigitRun(message, SENSITIVE_DIGIT_RUN)) {
+            return message;
+        }
+
+        return isReferenceProse(message) ? message : null;
+    }
+
+    /**
+     * Reports whether every character of a sentence is printable seven-bit text and no run of digits
+     * reaches the stated length.
+     *
+     * <p>Assumptions: this private helper carries the same complete Javadoc a public method does, for the
+     * reason recorded on {@link #isOfType(Throwable, String)}: the documentation audit sets its presence
+     * check down to private and disallows a partial block, so an undocumented or half-documented private
+     * method fails outright.</p>
+     *
+     * <p>Assumptions: the printable bound is the inclusive span from the space to the tilde, which is the
+     * whole of printable US-ASCII. Refusing everything below it removes the control characters a forged
+     * log record needs, and refusing everything above it removes the high bytes a decoded fixed-width
+     * record could carry when a zoned sign overpunch or a packed nibble has been read as text.</p>
+     *
+     * <p>Assumptions: the digit run is counted consecutively and reset by any non-digit, so a sentence
+     * naming two short numbers is not refused for their combined length while an identifier written as
+     * one unbroken run is.</p>
+     *
+     * @param message the sentence to inspect; must not be {@code null}
+     * @param maximumDigitRun the number of consecutive digits at which the sentence is refused; a run of
+     *     exactly this length is refused, so the greatest admitted run is one shorter
+     * @return {@code true} when every character is printable US-ASCII and no digit run reaches
+     *     {@code maximumDigitRun}, otherwise {@code false}
+     */
+    private static boolean isPrintableWithinDigitRun(String message, int maximumDigitRun) {
 
         int digitRun = 0;
         for (int index = 0; index < message.length(); index++) {
             char character = message.charAt(index);
             if (character < ' ' || character > '~') {
-                return null;
+                return false;
             }
             digitRun = character >= '0' && character <= '9' ? digitRun + 1 : 0;
-            if (digitRun >= SENSITIVE_DIGIT_RUN) {
-                return null;
+            if (digitRun >= maximumDigitRun) {
+                return false;
             }
         }
-        return message;
+        return true;
+    }
+
+    /**
+     * Reports whether a sentence has the shape of a reference screen message.
+     *
+     * <p>Assumptions: this private helper carries the same complete Javadoc a public method does, for the
+     * reason recorded on {@link #isPrintableWithinDigitRun(String, int)}.</p>
+     *
+     * <p>Assumptions: the admitted alphabet is ASCII letters, ASCII digits and the four characters on
+     * {@link #REFERENCE_PROSE_EXTRA_CHARACTERS}, and nothing else. The letter and digit tests are written
+     * against explicit ASCII ranges rather than through the locale-aware character predicates, because
+     * those predicates answer true for the accented and non-Latin letters a decoded record could carry
+     * and for the non-ASCII digits a hostile value could carry, either of which would widen the alphabet
+     * past the one the measurement was taken from.</p>
+     *
+     * <p>Assumptions: a full stop immediately followed by a LOWERCASE letter is refused, because that is
+     * the signature of a dotted type or package name and it occurs nowhere in the catalogue. The
+     * measurement is exact: across all eighty-seven baseline screen sentences and all sixty-seven migrated
+     * constants there is not one instance. The catalogue does put a letter straight after a full stop --
+     * {@code 'Changes validated.Press F5 to save'} and {@code 'PF03 pressed.Exiting              '} both do
+     * -- but always an uppercase one, because the mark is ending a sentence rather than separating an
+     * identifier. This is what keeps {@code java.lang.String} and {@code com.carddemo.Foo} out after the
+     * alphabet has admitted the full stop that ordinary prose needs.</p>
+     *
+     * <p>Assumptions: no length check is repeated here. The single caller bounds the length before it
+     * reaches this method, and duplicating the bound would leave two places to keep agreeing about the
+     * reference field width.</p>
+     *
+     * @param message the sentence to inspect; must not be {@code null}
+     * @return {@code true} when every character is in the admitted alphabet, no digit run exceeds
+     *     {@link #REFERENCE_PROSE_DIGIT_RUN} and no full stop is followed by a lowercase letter,
+     *     otherwise {@code false}
+     */
+    private static boolean isReferenceProse(String message) {
+
+        int digitRun = 0;
+        for (int index = 0; index < message.length(); index++) {
+            char character = message.charAt(index);
+            boolean digit = character >= '0' && character <= '9';
+            boolean lowercase = character >= 'a' && character <= 'z';
+            boolean letter = lowercase || (character >= 'A' && character <= 'Z');
+            if (!digit && !letter && REFERENCE_PROSE_EXTRA_CHARACTERS.indexOf(character) < 0) {
+                return false;
+            }
+            if (lowercase && index > 0 && message.charAt(index - 1) == '.') {
+                return false;
+            }
+            digitRun = digit ? digitRun + 1 : 0;
+            if (digitRun > REFERENCE_PROSE_DIGIT_RUN) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1243,6 +1461,60 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiError.of(CODE_FORBIDDEN,
                 MESSAGE_FORBIDDEN, HttpStatus.FORBIDDEN.value(), correlationId(), pathOf(request),
                 this.clock));
+    }
+
+    /**
+     * Renders a write refused during the nightly batch window as HTTP 503.
+     *
+     * <p>Purpose. The target equivalent of a write attempted against a closed VSAM file. The reference
+     * quiesced the online region for the duration of the posting chain with the operator command in
+     * {@code app/jcl/CLOSEFIL.jcl} and reopened it with {@code app/jcl/OPENFIL.jcl}; there, a program
+     * that wrote anyway received a file-status error and abended. Here the caller is told the window is
+     * closed and that nothing was applied.</p>
+     *
+     * <p>Assumptions: 503 rather than 409 or 403, and the distinction is the one a client acts on. The
+     * request is well formed and its caller is entitled to make it -- what is absent is the window in
+     * which it may be applied -- so a retry after the window succeeds with no change to the request. A
+     * 409 would tell a client its request conflicted with stored state, which is false, and a 403 would
+     * tell it to obtain an authority it already has.</p>
+     *
+     * <p>Assumptions: this is claimed as a distinct handler even though the exception is a
+     * {@link RuntimeException} that {@link #onRuntimeFailure} would otherwise reach. Spring selects the
+     * most specific handler, so this method takes precedence; without it the refusal would be rendered
+     * as an unclaimed failure with a 500 and an abend block, which would report a working control as a
+     * defect and would tell the caller not to retry.</p>
+     *
+     * <p>Trade-offs: no {@code Retry-After} header is set. The header's value would have to be an
+     * instant or a delay, and this service knows neither -- the window is reopened by a state machine
+     * whose remaining work it cannot see -- so any value would be a guess that a client would then
+     * schedule against. Omitting it leaves the retry decision with the client, which is the honest
+     * division given what is known here.</p>
+     *
+     * <p>Assumptions: logged at warning rather than error level, and at warning rather than info. It is
+     * not an error, because the control is working; it is not routine, because a refused write means a
+     * caller attempted one inside the window and an operator investigating a user's report needs to find
+     * it. The window's own opening and closing are recorded by the gate, so this line reports the
+     * consequence and the gate reports the cause.</p>
+     *
+     * @param failure the refusal raised by the gate, whether from a closed window or from a flag that
+     *     could not be read; its cause, when it has one, is logged rather than rendered, because the
+     *     underlying access denial or timeout is operational detail a client must not receive
+     * @param request the refused request, read only for its path
+     * @return HTTP 503 carrying {@link ApiError#CODE_WRITES_QUIESCED} and
+     *     {@link #MESSAGE_WRITES_QUIESCED}, never {@code null}
+     */
+    @ExceptionHandler(OnlineWritesDisabledException.class)
+    public ResponseEntity<ApiError> onWritesQuiesced(OnlineWritesDisabledException failure,
+            HttpServletRequest request) {
+
+        LOG.warn("event=api.writes.quiesced code={} status={} path={} exception={} cause={}",
+                ApiError.CODE_WRITES_QUIESCED, ApiError.SERVICE_UNAVAILABLE_STATUS, pathOf(request),
+                failure.getClass().getName(), ThrowableDigest.of(failure));
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ApiError.ofWritesQuiesced(MESSAGE_WRITES_QUIESCED,
+                        ApiError.Subsystem.APPLICATION, correlationId(), pathOf(request),
+                        this.clock));
     }
 
     /**
@@ -1762,14 +2034,17 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Narrows every account number in a path to a mask and its last four digits, preserving length.
+     * Withholds every protected identifier in a path, preserving the path's length.
      *
-     * <p>Assumptions: an account number is any run of {@value #ACCOUNT_NUMBER_MASK_THRESHOLD} or more
-     * digit characters bounded by non-digits, and the constant's own declaration records why that
-     * length is the boundary. Each withheld digit is overwritten with its own mask character rather
-     * than the run being collapsed to a fixed marker, so the narrowed path is exactly as long as the
-     * one the client called -- which is what lets a reader line a diagnostic path up against an access
-     * record without either one having to be re-parsed.</p>
+     * <p>Assumptions: a protected identifier is any run of {@value #IDENTIFIER_REDACTION_THRESHOLD} or
+     * more digit characters bounded by non-digits, and the constant's own declaration records why that
+     * length is the boundary. A run of {@value #CARD_NUMBER_WIDTH} or more keeps its last four digits,
+     * which is the rendering the platform already publishes for a card number; a shorter run keeps
+     * none, because no partial rendering of a customer or account identifier is published anywhere.
+     * Each withheld digit is overwritten with its own mask character rather than the run being
+     * collapsed to a fixed marker, so the narrowed path is exactly as long as the one the client called
+     * -- which is what lets a reader line a diagnostic path up against an access record without either
+     * one having to be re-parsed.</p>
      *
      * <p>Assumptions: the value is scanned rather than parsed. This advice is reached from every
      * service and must not know which path shapes exist, so no segment position, prefix or route
@@ -1778,15 +2053,16 @@ public class GlobalExceptionHandler {
      * in the clear until somebody remembers to extend the list, and the failure is silent.</p>
      *
      * <p>Assumptions: the operation is idempotent, and that property is relied upon rather than
-     * hoped for. Narrowing a qualifying run leaves only its four trailing digits as a digit run, which
-     * is below the threshold, so a path that has already been narrowed -- by a caller, or by the
-     * emitted shape's own canonical constructor, which applies the shared masker to whatever path it
-     * is given -- passes through this method unchanged.</p>
+     * hoped for. A withheld run leaves at most its four trailing digits as a digit run, which is below
+     * the threshold, so a path that has already been narrowed -- by a caller, or by the emitted shape's
+     * own canonical constructor, which applies the shared masker to whatever path it is given -- passes
+     * through this method unchanged.</p>
      *
      * @param path the request path to narrow, never {@code null}; a path whose longest digit run is
      *     shorter than the threshold is returned unchanged
-     * @return the path with every qualifying digit run reduced to mask characters and that run's last
-     *     four digits, of identical length to {@code path}
+     * @return the path with every qualifying digit run reduced to mask characters, retaining that run's
+     *     last four digits only when the run could be a card number, of identical length to
+     *     {@code path}
      */
     static String maskAccountNumbers(String path) {
         StringBuilder masked = null;
@@ -1801,18 +2077,28 @@ public class GlobalExceptionHandler {
             while (runEnd < length && isDigit(path.charAt(runEnd))) {
                 runEnd++;
             }
-            if (runEnd - scanned >= ACCOUNT_NUMBER_MASK_THRESHOLD) {
+            int runLength = runEnd - scanned;
+            if (runLength >= IDENTIFIER_REDACTION_THRESHOLD) {
                 if (masked == null) {
                     masked = new StringBuilder(path);
                 }
-                // WHY : Assumptions: the four retained digits are the LAST four, which is the only part
-                //       of a card number the migrated platform ever renders, so the mask writes over
-                //       every digit ahead of them and leaves those four where they were. Writing over
-                //       the leading digits in place, rather than replacing the run, is what keeps the
-                //       narrowed path the same length as the one the client called.
-                for (int position = scanned;
-                        position < runEnd - ACCOUNT_NUMBER_VISIBLE_DIGITS;
-                        position++) {
+                // WHY : Refactoring Rationale: how much of a run survives depends on WHICH protected
+                //       identifier its width can be. A run of at least CARD_NUMBER_WIDTH digits can be
+                //       a primary account number, and last-four is the rendering the platform already
+                //       publishes for one -- masked card numbers appear in list rows, in detail bodies
+                //       and in the card contract at line 192 of
+                //       services/card-service/src/main/resources/openapi/card-api.yaml -- so retaining
+                //       four discloses nothing a successful response would not have. A shorter run
+                //       cannot be a card number: it can only be the nine-digit customer identifier or
+                //       the eleven-digit account identifier, for which the platform publishes NO
+                //       partial rendering anywhere, so nothing justifies retaining part of one and the
+                //       whole run is withheld.
+                int retained = runLength >= CARD_NUMBER_WIDTH ? ACCOUNT_NUMBER_VISIBLE_DIGITS : 0;
+                // WHY : Assumptions: the withheld digits are overwritten in place rather than the run
+                //       being replaced by a fixed marker, so the narrowed path is exactly as long as
+                //       the one the client called -- which is what lets a reader line a diagnostic
+                //       path up against an access record without either one having to be re-parsed.
+                for (int position = scanned; position < runEnd - retained; position++) {
                     masked.setCharAt(position, ACCOUNT_NUMBER_MASK_CHARACTER);
                 }
             }

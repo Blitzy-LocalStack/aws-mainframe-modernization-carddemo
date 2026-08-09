@@ -62,27 +62,36 @@
 --   preference: it keeps this text safe to hand to a cursor unedited.
 --   It assumes, and does not verify:
 --     - data-migration/sql/V0__schemas_and_roles.sql has created the schemas,
---       and three owning migrations have created the five tables read below:
---       V1__account.sql for account.accounts, V1__ledger.sql for the three
---       ledger tables, and V1__reference.sql for reference.disclosure_groups.
---     - The session role holds USAGE on account, ledger and reference, plus
---       SELECT on those five tables. Which principals satisfy that was MEASURED
---       against a bootstrapped cluster rather than assumed, because the answer
---       is counter-intuitive: carddemo_reporting does NOT, despite its name and
---       despite this being a reporting-shaped query. V0 revokes its base-table
---       access outright at L1337-L1342 and leaves it USAGE on the reporting
---       schema alone, for the reason given at V0 L891-L895 -- it reads through
---       views, and granting it tables here would hand back "table access the
---       view arrangement exists to withhold". carddemo_batch DOES satisfy it,
---       reading all five. Note that carddemo_batch canNOT run the sibling pass,
---       which additionally reads auth.users; this pass touches no auth table, so
---       a principal sufficient here is not sufficient there. The owner role
---       carddemo_reporting_owner also reads all five but cannot log in, so it is
---       reachable only through SET ROLE. Run this as carddemo_batch, as the
---       operator principal that applied V0, or as a verification role granted
---       SELECT on exactly these five tables.
+--       three owning migrations have created the five tables the aggregate view
+--       reads -- V1__account.sql for account.accounts, V1__ledger.sql for the
+--       three ledger tables, V1__reference.sql for reference.disclosure_groups --
+--       and data-migration/sql/V3__verification_surfaces.sql has created that
+--       view.
+--     - The session role holds USAGE on the `reporting` schema and SELECT on
+--       reporting.v_verification_money_totals, and NOTHING ELSE is required.
+--       That is satisfied by carddemo_reporting, the least-privilege read-only
+--       role, which is the role this file is meant to be run as:
+--
+--         psql "$CARDDEMO_DB_URL" -v ON_ERROR_STOP=1 \
+--              -f data-migration/sql/verify/money_totals.sql
+--
+--       Refactoring Rationale: this note used to record, correctly, that
+--       carddemo_reporting could NOT run this file, and then directed an operator
+--       to run it as carddemo_batch instead. That direction was the more serious
+--       half of the problem. carddemo_batch is WRITE-CAPABLE: V0 grants it SELECT,
+--       INSERT and UPDATE across ledger and account, and V2__runtime_delete_grants
+--       .sql grants it DELETE on three tables. Running a verification pass as a
+--       principal that can modify the data it is verifying inverts the control the
+--       pass exists to provide -- and it made the pass's execution itself a
+--       row-level disclosure of every balance and amount in the system, for the
+--       sake of nine sums. V3 fixes the cause rather than the documentation, by
+--       publishing the nine aggregates as an owner-backed view and granting SELECT
+--       on that view alone. carddemo_batch is no longer mentioned as an option,
+--       because it should never have been one.
 --     - Nothing is written: no row, no object, no session setting. A principal
---       holding SELECT and nothing else is sufficient.
+--       holding SELECT on one view and nothing else is sufficient -- and, being
+--       unable to write anything anywhere, is incapable of altering the data it is
+--       verifying.
 --
 -- Returns exactly one result set of exactly nine rows, one per money column --
 -- five from account.accounts and one from each of the other four tables:
@@ -99,14 +108,20 @@
 --   line-diff the result rather than parse it.
 --
 -- Fails when:
---   - SQLSTATE 42P01 undefined_table -- a table is missing because its owning
---     migration has not been applied. Failing is correct and preferable to a
---     short report that silently omits the column it could not read.
+--   - SQLSTATE 42P01 undefined_table -- the aggregate view is missing because
+--     V3__verification_surfaces.sql has not been applied, or a base table beneath
+--     it is missing because its owning migration has not been applied. Failing is
+--     correct and preferable to a short report that silently omits the column it
+--     could not read.
 --   - SQLSTATE 42703 undefined_column -- a money column has been renamed in its
---     migration and this file was not updated with it. The names here are
---     transcribed from those migrations for exactly this reason; see WHY (7).
---   - SQLSTATE 42501 insufficient_privilege -- the session role lacks USAGE on a
---     schema or SELECT on a table, as described under session context.
+--     migration and the aggregate view was not updated with it. The names in the
+--     descriptor below are transcribed from those migrations for exactly this
+--     reason; see WHY (7). A rename now surfaces when the view is created rather
+--     than when this file runs, which is earlier and therefore better.
+--   - SQLSTATE 42501 insufficient_privilege -- the session role lacks USAGE on the
+--     `reporting` schema or SELECT on reporting.v_verification_money_totals, as
+--     described under session context. A privilege error can no longer be caused
+--     by a base table, because this file names none.
 --
 -- Misleads when: a total is read as proof of a correct load. Every case is
 --   enumerated under "What this pass CANNOT prove", and two readings deserve
@@ -119,15 +134,28 @@
 --
 -- WHY (non-obvious design decisions):
 --       (1) Assumptions: every aggregate stays in numeric and nothing is ever
---       cast to a binary floating-point type. Detail at the aggregate branches.
+--       cast to a binary floating-point type. The aggregation itself now lives in
+--       reporting.v_verification_money_totals, so that reasoning is recorded with
+--       it, in V3__verification_surfaces.sql, rather than restated here.
 --       (2) Assumptions: each total is wrapped in COALESCE against an empty
---       table. Detail at the first aggregate branch.
+--       table, at scale 2 so an empty table prints 0.00. Recorded with the
+--       aggregation, in V3.
 --       (3) Assumptions: no timestamp column appears in any predicate, grouping,
---       ordering or filter here. Detail at the aggregate branches.
+--       ordering or filter here or in the view. Detail below.
 --       (4) Alternatives Considered: COUNT(*) is reported beside every total
---       rather than the total alone. Detail at the first aggregate branch.
+--       rather than the total alone, and it is COUNT(*) rather than
+--       COUNT(<column>). Recorded with the aggregation, in V3.
 --       (5) Alternatives Considered: a count of negative rows is reported as the
---       signature of a sign-decode defect. Detail at that expression.
+--       signature of a sign-decode defect. Detail at that column's descriptor
+--       note below; the expression itself is in V3.
+--       (11) Refactoring Rationale: the nine aggregate branches that used to
+--       stand where the `aggregated` CTE now reads a view named five base tables
+--       across three schemas, which is why this file could not be run by the
+--       least-privilege verification role -- and why it previously directed an
+--       operator to a WRITE-CAPABLE one. The output shape is unchanged
+--       deliberately: eight columns, nine rows, the same descriptor and the same
+--       exact NUMERIC totals, so the paired harness and any recorded expected
+--       output remain valid across the change.
 --       (6) Assumptions: exactly these nine columns over exactly these five
 --       tables, and no others. Detail at the exclusion note below the
 --       descriptor.
@@ -276,108 +304,30 @@ WITH money_columns (sort_key, target_table, money_column, cobol_field,
 --       report disagree with itself between two runs over identical data. A SUM
 --       over a numeric column is inherently timestamp-independent, which is
 --       precisely why this pass takes this form and not a windowed one.
--- WHY : Assumptions: every table is named schema-qualified rather than left to
+-- WHY : Refactoring Rationale: the nine aggregates come from ONE view and this
+--       file names no base table at all. It used to name five, across three
+--       schemas, with a COUNT, a SUM and a filtered COUNT each -- which is why it
+--       could not be run by the least-privilege verification role and why its own
+--       session note directed an operator to the write-capable carddemo_batch
+--       instead. reporting.v_verification_money_totals, created by
+--       V3__verification_surfaces.sql, publishes exactly the (target_table,
+--       money_column, row_count, total, negative_rows) tuples those branches
+--       produced, computed under the view owner's privileges, and SELECT on it is
+--       granted to carddemo_reporting and to nothing else. The aggregates
+--       themselves are unchanged: the view's branches are the same nine
+--       expressions, moved rather than rewritten, including the exact NUMERIC sum,
+--       the scale-2 COALESCE and the strictly-negative row count.
+-- WHY : Assumptions: the view is named schema-qualified rather than left to
 --       search_path. This file runs both under psql and through a driver cursor
 --       whose session search_path is set by the calling role, so an unqualified
---       name could resolve to a different table between the two and the report
---       would state a total for a table it never read.
--- WHY : Trade-offs: one branch per COLUMN, so account.accounts is scanned five
---       times rather than once with five aggregates unpivoted afterwards.
---       Accepted deliberately. Each branch names one table and one column on
---       adjacent lines, which is what makes the inventory auditable by reading
---       the file -- and greppable against the owning migration, which is the
---       check that catches a renamed column before it becomes a 42703. The
---       repeated scans are of a fifty-row table, and the unpivot the alternative
---       requires would put the table-to-column pairing inside a transposition
---       step where neither a reader nor a grep could see it.
+--       name could resolve to a different relation between the two and the report
+--       would state totals it never read.
+-- WHY : Trade-offs: the column list is projected explicitly rather than with a
+--       star, so a column added to the view later cannot silently widen this CTE
+--       and change what the join below matches on.
 aggregated (target_table, money_column, row_count, total, negative_rows) AS (
-    -- WHY : (1) Assumptions: the total stays in numeric from the column through
-    --       SUM to the output, and is never cast to double precision, real or any
-    --       other binary floating-point type. This is not a preference. Addition
-    --       of binary floating-point values is not associative, so the total
-    --       would depend on the order the executor happened to read the rows in,
-    --       and two runs over byte-identical data could differ in the last place
-    --       -- which would make a parity pass report a difference that does not
-    --       exist, or hide one that does. PostgreSQL's SUM over numeric is exact,
-    --       carrying every digit. AAP rule T3 forbids floating point across the
-    --       whole money path for the same reason, and the equivalent prohibition
-    --       is enforced mechanically in the Java services by an ArchUnit rule;
-    --       SQL has no such linter, so here it is held by construction.
-    --       (2) Assumptions: the zero substituted by COALESCE is the literal
-    --       0.00, and both halves of that choice matter. SUM over zero rows
-    --       returns NULL, and a NULL in this column is indistinguishable in a
-    --       diff from an absent column or a query that failed outright, so an
-    --       empty table must report a number. The literal carries scale 2 so the
-    --       empty case prints 0.00 exactly as the populated cases do, keeping all
-    --       nine rows comparable and the output line-diffable; a bare 0 would
-    --       print as 0 and make ledger.transactions -- legitimately empty after
-    --       the ETL -- the one row whose format differs from every other.
-    --       (4) Alternatives Considered: COUNT(*) is projected beside every
-    --       total. A total on its own cannot distinguish "every row loaded and
-    --       one amount is wrong" from "one row never arrived", because both move
-    --       the sum; the pair separates them without the reader having to
-    --       cross-reference the sibling pass. COUNT(*) rather than
-    --       COUNT(<column>) because the latter skips NULLs and would under-report
-    --       a nullable column, understating the denominator of the total.
-    SELECT 'account.accounts', 'curr_bal',
-           COUNT(*), COALESCE(SUM(curr_bal), 0.00),
-
-           -- WHY : (5) Alternatives Considered: a count of strictly-negative rows,
-           --       reported beside the total as the signature of a sign-decode
-           --       defect. It is the cheapest available mitigation of this pass's
-           --       own documented blind spot: a compensating pair of errors can
-           --       leave the grand total intact, but a decoder that mishandles the
-           --       overpunch drives this count to ZERO whatever the total does, so
-           --       it detects a class of defect a sum cannot. Read it against the
-           --       column, not in the abstract: eight of the nine columns hold no
-           --       negative row in seed state, so zero is the CORRECT answer there
-           --       and only ledger.daily_transactions.amount makes this a live
-           --       detector today, at 50 of its 300 rows. Alternatives considered
-           --       and rejected: MIN and MAX alone, because a single outlier hides
-           --       inside the extremes of a fifty-row spread; and a per-row dump,
-           --       because its output is unbounded and a diff cannot consume it.
-           COUNT(*) FILTER (WHERE curr_bal < 0)
-    FROM account.accounts
-    UNION ALL
-    SELECT 'account.accounts', 'credit_limit',
-           COUNT(*), COALESCE(SUM(credit_limit), 0.00),
-           COUNT(*) FILTER (WHERE credit_limit < 0)
-    FROM account.accounts
-    UNION ALL
-    SELECT 'account.accounts', 'cash_credit_limit',
-           COUNT(*), COALESCE(SUM(cash_credit_limit), 0.00),
-           COUNT(*) FILTER (WHERE cash_credit_limit < 0)
-    FROM account.accounts
-    UNION ALL
-    SELECT 'account.accounts', 'curr_cyc_credit',
-           COUNT(*), COALESCE(SUM(curr_cyc_credit), 0.00),
-           COUNT(*) FILTER (WHERE curr_cyc_credit < 0)
-    FROM account.accounts
-    UNION ALL
-    SELECT 'account.accounts', 'curr_cyc_debit',
-           COUNT(*), COALESCE(SUM(curr_cyc_debit), 0.00),
-           COUNT(*) FILTER (WHERE curr_cyc_debit < 0)
-    FROM account.accounts
-    UNION ALL
-    SELECT 'ledger.transactions', 'amount',
-           COUNT(*), COALESCE(SUM(amount), 0.00),
-           COUNT(*) FILTER (WHERE amount < 0)
-    FROM ledger.transactions
-    UNION ALL
-    SELECT 'ledger.daily_transactions', 'amount',
-           COUNT(*), COALESCE(SUM(amount), 0.00),
-           COUNT(*) FILTER (WHERE amount < 0)
-    FROM ledger.daily_transactions
-    UNION ALL
-    SELECT 'ledger.transaction_category_balances', 'balance',
-           COUNT(*), COALESCE(SUM(balance), 0.00),
-           COUNT(*) FILTER (WHERE balance < 0)
-    FROM ledger.transaction_category_balances
-    UNION ALL
-    SELECT 'reference.disclosure_groups', 'interest_rate',
-           COUNT(*), COALESCE(SUM(interest_rate), 0.00),
-           COUNT(*) FILTER (WHERE interest_rate < 0)
-    FROM reference.disclosure_groups
+    SELECT v.target_table, v.money_column, v.row_count, v.total, v.negative_rows
+    FROM   reporting.v_verification_money_totals v
 )
 
 -- WHY : Assumptions: the join is on the (target_table, money_column) pair rather

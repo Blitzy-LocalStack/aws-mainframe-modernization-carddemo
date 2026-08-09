@@ -110,16 +110,24 @@ import org.springframework.transaction.annotation.Transactional;
  * primary key already covers, maintained on every write and answering no query the primary key does not
  * already answer.
  *
- * <p>Assumptions: the reference program performs THREE cross-context reads that this class deliberately
- * does not -- {@code GETCARDXREF-BYACCT} reads the card cross-reference through its account path at
- * L818, {@code GETACCTDATA-BYACCT} reads the account master at L869 and {@code GETCUSTDATA-BYCUST} reads
- * the customer master at L920. Those three records belong to {@code account-service} and
- * {@code card-service}, so they are recorded here as an INTERFACE dependency and not reproduced as
- * tables: this context declares no entity for any of them and imports no other service's
- * {@code domain} package, which {@code common-lib}'s architecture test asserts at build time. The
- * consequence is stated plainly rather than hidden -- the customer name, address, phone and account
- * limits the reference screen composed from those three reads are not this operation's to publish, and
- * the summary segment's own identifiers and totals are.
+ * <p>Refactoring Rationale: the reference program performs THREE cross-context reads, and this class now
+ * accounts for all three rather than declining all three. {@code GETCUSTDATA-BYCUST} at L920 is
+ * PERFORMED, through {@link AccountContextClient#customerDisplay(long)}: the four fields it supplies --
+ * the customer name, two address lines and a telephone number -- are declared by the record this
+ * operation publishes into, so omitting them was a functional-parity gap and not the design choice an
+ * earlier revision of this paragraph described it as. {@code GETACCTDATA-BYACCT} at L869 is NOT performed,
+ * because the two figures the screen takes from it -- the credit limit and the cash credit limit -- are
+ * already mirrored onto this context's own summary row by
+ * {@link com.carddemo.authorization.domain.PendingAuthSummary#refreshLimits} on every authorization, so a
+ * read would fetch what this context already holds. {@code GETCARDXREF-BYACCT} at L818 is NOT performed,
+ * because the screen displays nothing from it: the reference reads it only to reach the customer
+ * identifier, which this context's own segment carries.
+ *
+ * <p>Assumptions: the customer record is still NOT reproduced as a table here. The dependency is on the
+ * seam interface, so this context declares no entity for it and imports no other service's {@code domain}
+ * package, which {@code common-lib}'s architecture test asserts at build time. The seam also narrows what
+ * crosses it to the four fields the screen renders -- the customer master's national identifier,
+ * government-issued identifier and credit score are not among them and never enter this process.
  *
  * <p>Assumptions: no retry is declared on this class, and the reference program is what bounds the
  * decision rather than an omission. Its retryable set is exactly three transient infrastructure
@@ -231,6 +239,19 @@ public class PendingAuthSummaryService {
     private final PendingAuthViewMapper mapper;
 
     /**
+     * The seam the four customer display fields are read through.
+     *
+     * <p>Refactoring Rationale: this collaborator is added because the screen was publishing the segment's
+     * own identifiers and totals and nothing else, while the record it publishes into declares a customer
+     * name, two address lines and a telephone number that the reference composes from
+     * {@code GETCUSTDATA-BYCUST} at {@code cbl/COPAUS0C.cbl} L920. Assumptions: the dependency is on the
+     * INTERFACE and not on the account context's entities, so this context still declares no entity for
+     * the customer record and imports no other service's {@code domain} package -- which is what
+     * {@code common-lib}'s architecture test asserts at build time.</p>
+     */
+    private final AccountContextClient accounts;
+
+    /**
      * Builds the service over its two repositories and the view mapper.
      *
      * <p>Assumptions: the collaborators are injected through the constructor rather than assigned by the
@@ -241,13 +262,17 @@ public class PendingAuthSummaryService {
      * @param details the authorization repository; must not be {@code null}
      * @param mapper the view mapper that seals row selectors and masks card numbers; must not be
      *     {@code null}
+     * @param accounts the account-context seam the four customer display fields are read through; must
+     *     not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public PendingAuthSummaryService(PendingAuthSummaryRepository summaries,
-            PendingAuthDetailRepository details, PendingAuthViewMapper mapper) {
+            PendingAuthDetailRepository details, PendingAuthViewMapper mapper,
+            AccountContextClient accounts) {
         this.summaries = Objects.requireNonNull(summaries, "summaries must not be null");
         this.details = Objects.requireNonNull(details, "details must not be null");
         this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
+        this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
     }
 
     /**
@@ -291,6 +316,7 @@ public class PendingAuthSummaryService {
      * @throws PendingAuthViewMapper.InvalidSelectorException if {@code cursor} cannot be redeemed against
      *     this account and this subject
      */
+
     @Transactional(readOnly = true)
     public PendingAuthListView list(Long accountId, String cursor, String direction,
             String subject) {
@@ -361,7 +387,8 @@ public class PendingAuthSummaryService {
      */
     private PendingAuthListView unopenedAccountPage(Long accountId, String subject) {
         PendingAuthSummary zeroed = new PendingAuthSummary(accountId, UNKNOWN_CUSTOMER_ID);
-        return this.mapper.toListView(zeroed, List.of(), false, null, subject);
+        return this.mapper.toListView(zeroed, List.of(), false, false, null, subject,
+                customerDisplayOf(zeroed));
     }
 
     /**
@@ -387,7 +414,12 @@ public class PendingAuthSummaryService {
             String subject) {
         List<PendingAuthDetail> read = this.details
                 .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId, pageLimit());
-        return page(summary, read, subject);
+
+        // WHY : Assumptions: the opening page reports NOTHING before it, which is the reference's own
+        //       top-of-page state at L381 rather than an inference from the page carrying a leading
+        //       boundary token. Every page that returned rows names its first row, so inferring from that
+        //       token would tell the client an earlier page exists on the very first display.
+        return page(summary, read, false, subject);
     }
 
     /**
@@ -426,10 +458,13 @@ public class PendingAuthSummaryService {
             //       the sentence. The stateless equivalent is an empty page plus the sentence, and the
             //       published contract states the same thing on its boundary-message schema, so a
             //       conforming client keeps what it is displaying rather than clearing it.
-            return this.mapper.toListView(summary, List.of(), false,
-                    PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE, subject);
+            return this.mapper.toListView(summary, List.of(), false, false,
+                    PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE, subject,
+                customerDisplayOf(summary));
         }
-        return page(summary, read, subject);
+        // WHY : Assumptions: a forward move always has a page behind it -- the one whose closing position
+        //       the caller supplied -- so backward availability is settled without a second read.
+        return page(summary, read, true, subject);
     }
 
     /**
@@ -472,8 +507,9 @@ public class PendingAuthSummaryService {
             // WHY : Assumptions: the reference top-of-page state, reached at L381 when a backward move is
             //       attempted from the opening page, and informational on the same terms as the
             //       bottom-of-page state above.
-            return this.mapper.toListView(summary, List.of(), false,
-                    PendingAuthListView.MESSAGE_TOP_OF_PAGE, subject);
+            return this.mapper.toListView(summary, List.of(), false, false,
+                    PendingAuthListView.MESSAGE_TOP_OF_PAGE, subject,
+                customerDisplayOf(summary));
         }
 
         // WHY : Assumptions: the CLOSEST rows are kept and the furthest discarded, which is the opposite
@@ -494,7 +530,13 @@ public class PendingAuthSummaryService {
         PendingAuthDetailKey last = nearest.get(nearest.size() - 1).getId();
         boolean hasNext = !this.details.findOlderThan(accountId, last.getAuthDate(),
                 last.getAuthTime(), Limit.of(PROBE_ROWS)).isEmpty();
-        return this.mapper.toListView(summary, nearest, hasNext, null, subject);
+
+        // WHY : Assumptions: on a backward move the look-ahead row IS the answer to backward
+        //       availability -- it is a row lying further back than the page -- so the read already
+        //       performed settles it and no second probe is issued.
+        boolean hasPrevious = ascending.size() > PAGE_SIZE;
+        return this.mapper.toListView(summary, nearest, hasNext, hasPrevious, null, subject,
+                customerDisplayOf(summary));
     }
 
     /**
@@ -518,15 +560,19 @@ public class PendingAuthSummaryService {
      *
      * @param summary the account's summary row, never {@code null}
      * @param read the rows the repository returned, up to one more than the page size, never {@code null}
+     * @param hasPrevious whether a page precedes this one, which on a forward move is settled by whether
+     *     the caller supplied a position: the predicate is strictly beyond that position and the position
+     *     names a row the caller was already shown
      * @param subject the authenticated principal the page's boundary tokens are sealed against; never
      *     {@code null}
      * @return the rendered page with no boundary sentence, never {@code null}
      */
     private PendingAuthListView page(PendingAuthSummary summary, List<PendingAuthDetail> read,
-            String subject) {
+            boolean hasPrevious, String subject) {
         boolean hasNext = read.size() > PAGE_SIZE;
         List<PendingAuthDetail> rows = hasNext ? read.subList(0, PAGE_SIZE) : read;
-        return this.mapper.toListView(summary, rows, hasNext, null, subject);
+        return this.mapper.toListView(summary, rows, hasNext, hasPrevious, null, subject,
+                customerDisplayOf(summary));
     }
 
     /**
@@ -584,4 +630,41 @@ public class PendingAuthSummaryService {
                 "a paging direction is either " + DIRECTION_NEXT + " or " + DIRECTION_PREVIOUS);
     }
 
+
+    /**
+     * Reads the four customer display fields the screen shows, once for the whole page.
+     *
+     * <p>Refactoring Rationale: this call is added because the screen was publishing the segment's own
+     * identifiers and totals and nothing else, while the record it publishes into declares a customer name,
+     * two address lines and a telephone number. The reference composes all four from
+     * {@code GETCUSTDATA-BYCUST} at {@code cbl/COPAUS0C.cbl} L920, so their absence was a
+     * functional-parity gap and not the design choice this class's documentation described it as.</p>
+     *
+     * <p>Assumptions: ONE call per page, not one per row. Every authorization beneath a summary belongs to
+     * the same account and so the same customer, so a per-row read would make the screen's cost grow with
+     * the page size for data identical on every row. That is what bounded means here -- the number of
+     * cross-context calls this operation makes is one, whatever the page holds.</p>
+     *
+     * <p>Assumptions: an absent customer, and a segment that names no customer identifier, both yield
+     * {@code null} and the screen renders blanks. The reference has a not-found arm that leaves the fields
+     * unfilled and continues, so this preserves its behaviour rather than adding a refusal it does not
+     * have; refusing the whole screen because a display name could not be resolved would withdraw the
+     * authorization totals the operator can act on over the four fields they cannot.</p>
+     *
+     * <p>Trade-offs: a transport FAILURE is not caught here and propagates as the account context's own
+     * unavailable exception, unlike an absent record. The distinction is the point: a customer that does
+     * not exist is an answer, whereas one that could not be reached is not, and rendering blanks for the
+     * second would present an unreachable dependency as an empty record. The timeouts that bound how long
+     * such a failure takes to arrive are configured on the client rather than restated here.</p>
+     *
+     * @param summary the summary whose customer identifier is resolved; must not be {@code null}
+     * @return the display fields, or {@code null} when the segment names no customer or none was resolved
+     */
+    private AccountContextClient.CustomerDisplay customerDisplayOf(PendingAuthSummary summary) {
+        Long customerId = summary.getCustomerId();
+        if (customerId == null) {
+            return null;
+        }
+        return this.accounts.customerDisplay(customerId.longValue()).orElse(null);
+    }
 }

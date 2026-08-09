@@ -193,25 +193,34 @@ class SecurityConfigTest {
     }
 
     /**
-     * The administrative half of the matrix: fraud marking admits an administrator and nobody else.
+     * Fraud marking admits BOTH business groups, which is the authority the baseline grants.
      *
-     * <p>Assumptions: this is the assertion the narrowing on {@code FRAUD_PATH_PATTERN} is argued for, so
-     * it exercises the manager the chain installs rather than one built here from the same constant. The
-     * ordinary-user token is the case that matters most: it is a fully valid token for the configured
-     * pool holding a group this service recognises and admits everywhere else, so if the fraud rule ever
-     * widened to the read authority this is the only assertion that would notice.</p>
+     * <p>Refactoring Rationale: this case asserted that an ordinary user was REFUSED, and it now asserts
+     * the opposite for that group while keeping every other assertion. It was a test that held a parity
+     * break in place: the reference reaches this write from the main menu under the access byte
+     * {@code 'U'} -- {@code app/cpy/COMEN02Y.cpy} option 11 dispatching to {@code COPAUS0C} -- and the
+     * administrative menu table names the program nowhere, so refusing an ordinary user removes a
+     * capability from the group the reference gives it to. The argument for the narrowing is not
+     * dismissed; it is recorded at {@link SecurityConfig#fraudAccess()} together with what a deployment
+     * must do to adopt it deliberately.
+     *
+     * <p>Assumptions: the case still exercises the manager the CHAIN installs rather than one built here
+     * from the same constant, so a future narrowing of the rule fails this assertion rather than passing
+     * a test that agrees with itself. The unrecognised group is asserted refused as before, because
+     * widening to either business group must not widen to any group at all -- which is the mistake a
+     * blanket {@code authenticated()} would be, and it would satisfy the two positive assertions.
      */
     @Test
-    @DisplayName("fraud marking admits an administrator and refuses an ordinary user")
-    void fraudMarkingAdmitsAnAdministratorAndRefusesAnOrdinaryUser() {
+    @DisplayName("fraud marking admits both business groups and refuses an unrecognised one")
+    void fraudMarkingAdmitsBothBusinessGroupsAndRefusesAnUnrecognisedOne() {
         assertThat(grantedBy(SecurityConfig.fraudAccess(), JwtRoleConverter.ADMIN_AUTHORITY))
                 .as("an administrator must be able to mark an authorization fraudulent")
                 .isTrue();
         assertThat(grantedBy(SecurityConfig.fraudAccess(), JwtRoleConverter.USER_AUTHORITY))
-                .as("an ordinary user must NOT be able to mark an authorization fraudulent")
-                .isFalse();
+                .as("an ordinary user must be able to mark one too, which is the baseline's own authority")
+                .isTrue();
         assertThat(grantedBy(SecurityConfig.fraudAccess(), "carddemo-unknown"))
-                .as("an unrecognised group must not reach the administrative rule")
+                .as("an unrecognised group must not reach the rule, so this is not authenticated-only")
                 .isFalse();
     }
 
@@ -266,12 +275,15 @@ class SecurityConfigTest {
     /**
      * Confirms the two path patterns discriminate the published operations the way the chain relies on.
      *
-     * <p>Assumptions: the fraud pattern is a strict SUBSET of the read pattern, which is exactly why the
-     * chain declares the fraud rule first. This asserts the subset property rather than assuming it,
-     * because it is the premise of the ordering comment in the chain: if the fraud pattern ever stopped
-     * matching the fraud path, the request would fall to the read rule and the administrative narrowing
-     * would be gone with no rule appearing to have changed. The three paths used are the ones the
-     * contract publishes -- the search listing, the single-resource read and the fraud write.</p>
+     * <p>Assumptions: the fraud pattern is a strict SUBSET of the read pattern, which is why the chain
+     * declares the fraud rule first. This asserts the subset property rather than assuming it, because it
+     * is the premise of the chain's ordering: a request the fraud pattern stopped matching would fall to
+     * the read rule instead, so the rule that decided it would change with no rule appearing to have
+     * changed. Refactoring Rationale: the two decisions are equal today, so that fall-through would
+     * currently be harmless -- the property is asserted anyway, because the fraud rule exists precisely so
+     * that it can be narrowed later, and a subset relation that has silently lapsed is what would make
+     * such a narrowing ineffective. The three paths used are the ones the contract publishes -- the search
+     * listing, the single-resource read and the fraud write.</p>
      */
     @Test
     @DisplayName("the fraud pattern matches only the fraud route and is covered by the read pattern")
@@ -281,11 +293,11 @@ class SecurityConfigTest {
         String fraud = resource + "/fraud";
 
         assertThat(MATCHER.match(SecurityConfig.FRAUD_PATH_PATTERN, fraud))
-                .as("the administrative rule must match the fraud route")
+                .as("the fraud rule must match the fraud route")
                 .isTrue();
         for (String read : List.of(search, resource)) {
             assertThat(MATCHER.match(SecurityConfig.FRAUD_PATH_PATTERN, read))
-                    .as("%s must not be swept into the administrative rule", read)
+                    .as("%s must not be swept into the fraud rule", read)
                     .isFalse();
         }
         for (String published : List.of(search, resource, fraud)) {

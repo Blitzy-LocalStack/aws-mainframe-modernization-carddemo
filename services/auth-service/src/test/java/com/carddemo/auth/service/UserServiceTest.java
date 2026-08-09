@@ -12,12 +12,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.CreateUserRequest;
 import com.carddemo.auth.dto.UpdateUserRequest;
 import com.carddemo.auth.dto.UserResponse;
 import com.carddemo.auth.dto.UserSummary;
 import com.carddemo.auth.mapper.UserMapper;
+import com.carddemo.auth.repository.IdentitySyncTaskRepository;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
@@ -25,13 +27,20 @@ import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -41,6 +50,9 @@ import org.mockito.InOrder;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.domain.Limit;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.InternalErrorException;
 
 /**
  * Asserts the five user-administration operations and every reference sentence they report.
@@ -124,24 +136,105 @@ class UserServiceTest {
 
     private CursorToken sealer;
 
+    private IdentitySyncTaskRepository ledger;
+
     private UserService service;
 
     /**
-     * Builds the service over a substituted repository and provisioner and a real cursor sealer.
+     * Builds the service over substituted stores, a real cursor sealer and a real identity-sync ledger.
      *
-     * <p>This method takes no parameter and yields no value; it assigns the four collaborators every
-     * case below shares. It raises nothing under normal operation.</p>
+     * <p>This method takes no parameter and yields no value; it assigns the collaborators every case
+     * below shares. It raises nothing under normal operation.</p>
+     *
+     * <p>Assumptions: the identity-sync collaborator is the REAL one over an in-memory ledger rather than
+     * a substitute, and that choice is what keeps every provider assertion in this class meaningful after
+     * the two stores were separated. The three write paths no longer call the provider themselves -- they
+     * commit an intention and drain it afterwards -- so a substituted ledger service would make
+     * {@code verify(provisioning).synchronise(...)} and {@code verify(provisioning).withdraw(...)}
+     * unreachable, and the parity those cases carry would be lost rather than relocated.</p>
+     *
+     * <p>Assumptions: the transaction manager is substituted, which makes the template run its callback
+     * and commit nothing. That is sufficient here because what these cases assert is the ORDER of the
+     * calls and which store is touched, not that a database committed; the commit itself is asserted by
+     * the container-backed integration test in the repository test package.</p>
      */
     @BeforeEach
     void buildService() {
         users = mock(UserRepository.class);
         provisioning = mock(CognitoUserProvisioningService.class);
         sealer = new CursorToken(CURSOR_KEY, Duration.ofMinutes(5));
+        ledger = inMemoryLedger();
+        PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+        IdentitySyncService identitySync = new IdentitySyncService(ledger, provisioning,
+                Clock.fixed(Instant.parse("2022-07-18T03:00:00Z"), ZoneOffset.UTC), transactions);
         // Assumptions: the mapper is the REAL one rather than a substitute, because it is where the
         //   stored padding is stripped, and the unchanged-body comparison below depends on comparing
         //   logical values rather than stored images. A substituted mapper would let that comparison
         //   pass against padded values and the case would assert nothing.
-        service = new UserService(users, new UserMapper(), provisioning, sealer);
+        service = new UserService(users, new UserMapper(), provisioning, sealer, identitySync,
+                transactions);
+    }
+
+    /**
+     * Builds a ledger repository that keeps its rows in a map and assigns identifiers on save.
+     *
+     * <p>Assumptions: the identifier is assigned by reflection, because the column is declared
+     * {@code GENERATED BY DEFAULT AS IDENTITY} and the entity therefore exposes no setter for it -- a
+     * setter would let application code choose a value the sequence had not issued. Alternatives
+     * Considered: adding one for the benefit of tests, rejected because it widens the production type to
+     * serve a substitute; and stubbing {@code findById} to return the saved instance regardless of the
+     * identifier asked for, rejected because the applier's double-application check depends on asking for
+     * a specific row and being told about that row.</p>
+     *
+     * <p>Assumptions: this builder is declared inline here rather than shared with the sibling test of
+     * the ledger service, because this package's charter admits no shared helper: a vector or a stub is
+     * written in the file that reads it so a reader never opens a second file to learn what it does.</p>
+     *
+     * @return a substituted ledger repository backed by insertion-ordered storage; never {@code null}
+     */
+    private static IdentitySyncTaskRepository inMemoryLedger() {
+        IdentitySyncTaskRepository stub = mock(IdentitySyncTaskRepository.class);
+        Map<Long, IdentitySyncTask> rows = new LinkedHashMap<>();
+        AtomicLong sequence = new AtomicLong();
+
+        when(stub.save(any(IdentitySyncTask.class))).thenAnswer(call -> {
+            IdentitySyncTask task = call.getArgument(0);
+            if (task.getTaskId() == null) {
+                ReflectionTestUtils.setField(task, "taskId", sequence.incrementAndGet());
+            }
+            rows.put(task.getTaskId(), task);
+            return task;
+        });
+        when(stub.saveAndFlush(any(IdentitySyncTask.class)))
+                .thenAnswer(call -> stub.save(call.getArgument(0)));
+        when(stub.findById(any())).thenAnswer(
+                call -> Optional.ofNullable(rows.get(call.<Long>getArgument(0))));
+        when(stub.findByUserIdAndStatusOrderByTaskIdAsc(any(), any(), any(Limit.class)))
+                .thenAnswer(call -> selectFrom(rows, call.getArgument(1), call.getArgument(0),
+                        call.<Limit>getArgument(2)));
+        when(stub.findByStatusOrderByTaskIdAsc(any(), any(Limit.class)))
+                .thenAnswer(call -> selectFrom(rows, call.getArgument(0), null,
+                        call.<Limit>getArgument(1)));
+        return stub;
+    }
+
+    /**
+     * Selects the stored ledger rows of one status, optionally for one user, in identifier order.
+     *
+     * @param rows the ledger's backing storage
+     * @param status the status a row must carry to be selected
+     * @param userId the user a row must name, or {@code null} to select every user's rows
+     * @param limit the greatest number of rows to yield
+     * @return the selected rows in ascending identifier order; never {@code null}
+     */
+    private static List<IdentitySyncTask> selectFrom(Map<Long, IdentitySyncTask> rows, String status,
+            String userId, Limit limit) {
+        return rows.values().stream()
+                .filter(row -> status.equals(row.getStatus()))
+                .filter(row -> userId == null || userId.equals(row.getUserId()))
+                .sorted(Comparator.comparing(IdentitySyncTask::getTaskId))
+                .limit(limit.max())
+                .toList();
     }
 
     /**
@@ -299,7 +392,7 @@ class UserServiceTest {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
         UserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
@@ -391,7 +484,7 @@ class UserServiceTest {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", submitted))
                 .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
         UserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", submitted));
@@ -410,7 +503,7 @@ class UserServiceTest {
         UUID subject = UUID.fromString("11111111-2222-3333-4444-555555555555");
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(subject);
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
         UserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
@@ -429,7 +522,7 @@ class UserServiceTest {
 
         InOrder ordered = inOrder(provisioning, users);
         ordered.verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
-        ordered.verify(users).save(any(User.class));
+        ordered.verify(users).insertUser(any(), any(), any(), any(), any());
     }
 
     /**
@@ -464,7 +557,7 @@ class UserServiceTest {
                 .hasMessage("User ID already exist...");
 
         verifyNoInteractions(provisioning);
-        verify(users, never()).save(any(User.class));
+        verify(users, never()).insertUser(any(), any(), any(), any(), any());
     }
 
     /**
@@ -481,7 +574,7 @@ class UserServiceTest {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
-        when(users.save(any(User.class)))
+        when(users.insertUser(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
 
         // Assumptions: the race and the probe are the SAME outcome to a caller, which is what keeps the
@@ -512,7 +605,8 @@ class UserServiceTest {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
-        when(users.save(any(User.class))).thenThrow(new QueryTimeoutException("statement timed out"));
+        when(users.insertUser(any(), any(), any(), any(), any()))
+                .thenThrow(new QueryTimeoutException("statement timed out"));
 
         // Assumptions: this failure is attributed to the FIRST NAME and not to the identifier, which
         //   reads oddly and is nevertheless the contract. The reference arm at app/cbl/COUSR01C.cbl
@@ -655,7 +749,7 @@ class UserServiceTest {
     @DisplayName("an update body carrying no credential is valid on the update path")
     void anUpdateBodyCarryingNoCredentialIsValid() {
         when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         UserResponse updated = service.update("USER0001",
                 new UpdateUserRequest("Grace", "Hopper", "A"));
@@ -710,7 +804,7 @@ class UserServiceTest {
                 .as("the reference arm moves no cursor, so this refusal names no field")
                 .isNull();
 
-        verify(users, never()).save(any(User.class));
+        verify(users, never()).saveAndFlush(any(User.class));
         verifyNoInteractions(provisioning);
     }
 
@@ -804,7 +898,7 @@ class UserServiceTest {
     @DisplayName("a leading blank is a difference, because only the trailing pad run is stripped")
     void aLeadingBlankIsADifference() {
         when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         // Assumptions: the strip is TRAILING-ONLY, so a leading blank survives it and is data rather
         //   than padding. A declared-width column pads on the right, so a leading blank was never put
@@ -824,7 +918,7 @@ class UserServiceTest {
     @DisplayName("a changed update writes the row and synchronises the identity with both types")
     void aChangedUpdateSynchronisesTheIdentity() {
         when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         UserResponse updated = service.update("USER0001",
                 new UpdateUserRequest("Grace", "Hopper", "A"));
@@ -835,6 +929,111 @@ class UserServiceTest {
         //   removing and re-adding a group passes through a state in which the account holds none.
         assertThat(updated.userType()).isEqualTo("A");
         verify(provisioning).synchronise("USER0001", "Grace", "Hopper", "U", "A");
+
+        // Assumptions: the ORDER is the correction, not merely the fact that both stores were touched. The
+        //   row is written, the intention naming what the pool owes is recorded beside it, and only then is
+        //   the pool called. The previous arrangement called the pool from inside the transaction that
+        //   wrote the row, so a provider call that succeeded and was followed by a failed commit left the
+        //   pool holding a projection of a row that was never changed.
+        InOrder ordered = inOrder(users, ledger, provisioning);
+        ordered.verify(users).saveAndFlush(any(User.class));
+        ordered.verify(ledger).save(any(IdentitySyncTask.class));
+        ordered.verify(provisioning).synchronise("USER0001", "Grace", "Hopper", "U", "A");
+    }
+
+    /**
+     * Asserts an update whose pool call fails still succeeds and leaves the intention owed.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an update whose pool call fails still succeeds and leaves the intention owed")
+    void anUpdateSurvivesAFailedPoolCall() {
+        when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        doThrow(InternalErrorException.builder().message("the pool is unavailable").build())
+                .when(provisioning).synchronise(any(), any(), any(), any(), any());
+
+        // Assumptions: the change is reported as APPLIED, because it was: the row is committed and durable
+        //   before the pool is called at all. Reporting a failure would tell a caller its change did not
+        //   take effect when it did, and a client acting on that report would submit it again.
+        UserResponse updated = service.update("USER0001",
+                new UpdateUserRequest("Grace", "Hopper", "A"));
+
+        assertThat(updated.firstName()).isEqualTo("Grace");
+
+        // Assumptions: the intention stays PENDING, which is what the scheduled reconciliation pass reads.
+        //   This is the property the previous arrangement could not offer at all -- a lost provider call
+        //   left no record of itself anywhere.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0001",
+                        IdentitySyncTask.STATUS_PENDING, Limit.of(5)))
+                .singleElement()
+                .satisfies(owed -> assertThat(owed.getOperation())
+                        .isEqualTo(IdentitySyncTask.OPERATION_SYNCHRONISE));
+    }
+
+    /**
+     * Asserts a delete whose pool withdrawal fails still succeeds and leaves the withdrawal owed.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a delete whose pool withdrawal fails still succeeds and leaves it owed")
+    void aDeleteSurvivesAFailedWithdrawal() {
+        User stored = row("USER0001");
+        when(users.findById("USER0001")).thenReturn(Optional.of(stored));
+        doThrow(InternalErrorException.builder().message("the pool is unavailable").build())
+                .when(provisioning).withdraw("USER0001");
+
+        service.delete("USER0001");
+
+        verify(users).delete(stored);
+
+        // Assumptions: the withdrawal is still OWED rather than lost, and the direction this preserves is
+        //   the recoverable one. A row removed with its account still present is an identity refused at
+        //   every guarded route; the reverse -- an account removed while the row remains -- is the
+        //   direction no later operation repairs without reprovisioning, and calling the pool from inside
+        //   the transaction was what made it reachable.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0001",
+                        IdentitySyncTask.STATUS_PENDING, Limit.of(5)))
+                .singleElement()
+                .satisfies(owed -> assertThat(owed.getOperation())
+                        .isEqualTo(IdentitySyncTask.OPERATION_WITHDRAW));
+    }
+
+    /**
+     * Asserts a create whose compensating withdrawal fails records that withdrawal durably.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised when the keyed insert is refused and
+     *     captured by the assertion below
+     */
+    @Test
+    @DisplayName("a create whose compensating withdrawal fails records the withdrawal durably")
+    void aFailedCompensationIsRecordedDurably() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+        when(users.insertUser(any(), any(), any(), any(), any()))
+                .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
+        doThrow(InternalErrorException.builder().message("the pool is unavailable").build())
+                .when(provisioning).withdraw("USER0042");
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class)
+                .hasMessage("User ID already exist...");
+
+        // Assumptions: the compensation is RECORDED before it is attempted, so a withdrawal the pool
+        //   refuses is retried by the reconciliation pass rather than surviving only as a log line. The
+        //   orphaned account this closes can authenticate and holds no membership this context records,
+        //   and it makes its identifier permanently unusable for a later create.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0042",
+                        IdentitySyncTask.STATUS_PENDING, Limit.of(5)))
+                .singleElement()
+                .satisfies(owed -> assertThat(owed.getOperation())
+                        .isEqualTo(IdentitySyncTask.OPERATION_WITHDRAW));
     }
 
     /**
@@ -847,7 +1046,7 @@ class UserServiceTest {
     void anUpdateMutatesTheLoadedRowInPlace() {
         User loaded = row("USER0001");
         when(users.findById("USER0001")).thenReturn(Optional.of(loaded));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         service.update("USER0001", new UpdateUserRequest("Grace", "Hopper", "A"));
 
@@ -860,7 +1059,7 @@ class UserServiceTest {
         //   earlier read already holds. Load, mutate the loaded thing, flush what changed is exactly the
         //   managed-entity contract, so this case asserts that the instance handed to the save is the
         //   very instance the read returned -- a rebuilt one would be a different row.
-        verify(users).save(loaded);
+        verify(users).saveAndFlush(loaded);
         assertThat(loaded.getFirstName()).isEqualTo("Grace");
         assertThat(loaded.getLastName()).isEqualTo("Hopper");
         assertThat(loaded.getUserType()).isEqualTo("A");
@@ -876,7 +1075,7 @@ class UserServiceTest {
     void aLaterAcceptedUpdatePrevails() {
         User loaded = row("USER0001");
         when(users.findById("USER0001")).thenReturn(Optional.of(loaded));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         service.update("USER0001", new UpdateUserRequest("Grace", "Hopper", "A"));
         UserResponse second = service.update("USER0001", new UpdateUserRequest("Ada", "Hopper", "A"));
@@ -953,7 +1152,7 @@ class UserServiceTest {
     @DisplayName("a failed update reports the reference update sentence")
     void aFailedUpdateReportsTheReferenceSentence() {
         when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
-        when(users.save(any(User.class))).thenThrow(new QueryTimeoutException("statement timed out"));
+        when(users.saveAndFlush(any(User.class))).thenThrow(new QueryTimeoutException("statement timed out"));
 
         assertThatThrownBy(() -> service.update("USER0001",
                         new UpdateUserRequest("Grace", "Hopper", "A")))
@@ -1223,7 +1422,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a first page returns ten rows and reports the eleventh as a further page")
     void aFirstPageReportsAFurtherPage() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
@@ -1252,7 +1451,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a short final page reports no further page and names its own last row")
     void aShortFinalPageNamesItsOwnLastRow() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(4));
 
         PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
@@ -1281,7 +1480,7 @@ class UserServiceTest {
     @Test
     @DisplayName("an exhausted page is a success with an empty array")
     void anExhaustedPageIsASuccess() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(List.of());
 
         PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
@@ -1304,7 +1503,7 @@ class UserServiceTest {
     @Test
     @DisplayName("the forward cursor of one page positions the next page after its last row")
     void theForwardCursorPositionsTheNextPage() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1335,7 +1534,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a backward page is read descending and presented ascending")
     void aBackwardPageIsPresentedAscending() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1365,7 +1564,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a page reached by retreating reports a further page forwards")
     void aRetreatedPageReportsAFurtherPageForwards() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1395,7 +1594,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a cursor sealed for one direction is refused when presented with the other")
     void aCursorIsBoundToItsDirection() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1424,7 +1623,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a cursor issued to one caller is refused when replayed by another")
     void aCursorIsBoundToItsSubject() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1445,7 +1644,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a position naming a key with no row answers a page rather than a not-found")
     void aPositionNamingAKeyWithNoRowAnswersAPage() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
         PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
@@ -1476,7 +1675,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a store failure on the list reports the reference lookup sentence")
     void aStoreFailureOnTheListReportsTheReferenceSentence() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenThrow(new QueryTimeoutException("statement timed out"));
 
         // Assumptions: the reference writes this one sentence from THREE separate browse arms -- the
@@ -1497,6 +1696,7 @@ class UserServiceTest {
     @Test
     @DisplayName("a bare previous direction with no position reads the first page forwards")
     void aBarePreviousDirectionReadsTheFirstPageForwards() {
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class))).thenReturn(rows(3));
         when(users.findByUserIdGreaterThanOrderByUserIdAsc(any(String.class), any(Limit.class)))
                 .thenReturn(rows(3));
         when(users.findByUserIdLessThanOrderByUserIdDesc(any(String.class), any(Limit.class)))
@@ -1555,7 +1755,7 @@ class UserServiceTest {
     @Test
     @DisplayName("every boundary condition answers a page and never a refusal")
     void everyBoundaryConditionAnswersAPage() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(List.of());
         when(users.findByUserIdLessThanOrderByUserIdDesc(any(String.class), any(Limit.class)))
                 .thenReturn(List.of());
@@ -1612,7 +1812,7 @@ class UserServiceTest {
     @DisplayName("the reference message attribute separates refusal, advice and success")
     void theReferenceMessageAttributeSeparatesThreeOutcomes() {
         when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         // Assumptions: the reference's message colour attribute is its severity channel, and one program
         //   writes all three values into it -- red on the unchanged-body refusal at
@@ -1712,7 +1912,7 @@ class UserServiceTest {
     @Test
     @DisplayName("the list projection carries the four values the reference list screen shows")
     void theListProjectionCarriesFourValues() {
-        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq(""), any(Limit.class)))
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(1));
 
         PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
@@ -1788,14 +1988,14 @@ class UserServiceTest {
     private void assertUpdateIsAccepted(UpdateUserRequest request, String changed) {
         User loaded = row("USER0001");
         when(users.findById("USER0001")).thenReturn(Optional.of(loaded));
-        when(users.save(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
 
         UserResponse updated = service.update("USER0001", request);
 
         assertThat(updated)
                 .as("a body differing only in %s is a change and must be accepted", changed)
                 .isNotNull();
-        verify(users).save(loaded);
+        verify(users).saveAndFlush(loaded);
     }
 
     /**

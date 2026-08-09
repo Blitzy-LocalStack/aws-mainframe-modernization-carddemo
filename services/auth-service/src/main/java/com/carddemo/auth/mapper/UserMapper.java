@@ -322,27 +322,38 @@ public class UserMapper {
      *
      * <p>Assumptions: the guarantee the refusal was protecting is preserved, and it is preserved where
      * it can actually be honoured rather than where it can only be blocked. The sole caller,
-     * {@code com.carddemo.auth.service.UserService#update}, passes BOTH the previously stored type and
-     * the newly requested one to {@code CognitoUserProvisioningService#synchronise} inside the same
-     * transaction that writes this row, and that call moves the provider group whenever the two differ.
-     * So the column and the membership move together or neither does: a provider failure propagates and
-     * rolls the row back, and a row written without the provider being reached is not a reachable state.
-     * The invariant is therefore unchanged -- this column is never left naming an authority the provider
-     * does not confer -- while the published operation works.</p>
+     * {@code com.carddemo.auth.service.UserService#update}, commits this row together with a ledger entry
+     * in {@code auth.identity_sync_task} naming both the previously stored type and the newly requested
+     * one, and then applies that entry through {@code CognitoUserProvisioningService#synchronise} after
+     * the commit. The membership therefore moves for every committed change to this column, and an entry
+     * whose application does not succeed stays owed until the reconciliation pass applies it.</p>
+     *
+     * <p>Refactoring Rationale: that paragraph previously claimed something stronger and untrue -- that
+     * the provider call ran inside this row's transaction, so "a provider failure propagates and rolls
+     * the row back" and the column could never name an authority the provider does not confer. The
+     * provider is not a transaction participant: it does not roll back, so a group change that SUCCEEDED
+     * and was followed by a failed commit left the membership moved and this column unchanged, with the
+     * claimed invariant broken in exactly the direction that matters -- a revocation the operator was
+     * told had happened. The invariant is now stated as what it actually is: EVENTUAL, bounded by the
+     * ledger, and always recorded when it is not yet met.</p>
+     *
+     * <p>Trade-offs: between the commit and the post-commit application -- ordinarily sub-second, bounded
+     * by the reconciliation pass otherwise -- this column can name an authority the provider has not yet
+     * moved. Assumptions: that window cannot grant access it should not, because every authority a
+     * request is matched against is read from the signed claim on each request and never from this
+     * column, so a stale projection can only delay a change, never anticipate one.</p>
      *
      * <p>Alternatives Considered: keeping the refusal and routing the service through
      * {@code com.carddemo.auth.service.UserAuthorityService}, which moves the membership first and
-     * registers a rollback compensation. Rejected for this route, not as unsound: it would move the
-     * provider before the row is written, which is the opposite ordering from the one
-     * {@code UserService#update} documents and depends on -- there the database rollback IS the
-     * compensation, so no compensating provider call has to succeed after the failure that caused it.
-     * Preferring an ordering that needs a compensating remote call over one that needs none is the
-     * higher-risk choice, and both close the same window. That class remains the provider-first
-     * primitive for a caller that has no transaction of its own to roll back.</p>
+     * registers a rollback compensation. Rejected for this route: an in-memory compensation registered
+     * against a transaction synchronisation is lost with the process that holds it, so it closes the
+     * window only while that process survives -- which is precisely the case the ledger does not need to
+     * assume. That class remains the provider-first primitive for a caller that has no transaction at
+     * all.</p>
      *
      * @param request the validated {@code UpdateUserRequest} whose three components have already
      *     satisfied their declared constraints, so none is re-checked here
-     * @param user the managed {@code User} to mutate, loaded in the current transaction so that the
+     * @param user the {@code User} to mutate, loaded by the caller's write transaction so that the
      *     assignments below are visible to the provider's dirty checking
      * @throws NullPointerException when {@code request} or {@code user} is null, which is a defect in
      *     the calling code -- an update aimed at a row that does not exist is refused before a row

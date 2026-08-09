@@ -105,7 +105,9 @@ terraform {
     # Assumptions: `~> 6.56` establishes a floor inside the supported 6.x major
     #   line rather than pinning one minor series, and its floor is set by a
     #   requirement THIS root never exercises -- an Aurora Serverless v2 minimum
-    #   capacity of zero needs provider 5.81.0 or later, while the production
+    #   capacity of zero needs provider 5.80.0 or later and the auto-pause
+    #   argument it makes mandatory needs 5.81.0, flooring the pair at 5.81.0,
+    #   while the production
     #   Aurora minimum is held above zero in terraform.tfvars, so scale-to-zero
     #   and its resume latency are a development-only affordance. The pin is
     #   deliberately not narrowed for this root anyway, because the floor belongs

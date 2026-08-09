@@ -5,7 +5,7 @@
 #   The complete input surface of the `network` module -- the three-zone VPC
 #   that every other module in this tree is placed into, with its
 #   public, private-application and isolated-data subnet tiers, its NAT egress,
-#   its eight interface endpoints, its S3 gateway endpoint and its three
+#   its eight interface endpoints, its S3 gateway endpoint and its FOUR
 #   security groups. Every value a calling root may configure or share with a
 #   dependent module is declared here and nothing else is: anything absent
 #   from the list below is a property of the network fixed in main.tf, not a
@@ -18,7 +18,7 @@
 #   cannot be added ahead of the code that reads it, and a derived value
 #   belongs in main.tf's `locals` rather than here.
 #
-#   main.tf consumes all eleven variables and outputs.tf republishes the two
+#   main.tf consumes all thirteen variables and outputs.tf republishes the two
 #   shared ports so the environment root can pass the exact values enforced by
 #   the security groups into ecs-service and aurora-postgresql. That round trip
 #   is deliberate: a literal 8080 or 5432 repeated in three modules works only
@@ -29,15 +29,33 @@
 #   more weight in this module than in any other, because the two environment
 #   roots are required to be identical in TOPOLOGY and to differ only in sizing
 #   and retention. An input is therefore admissible here only if varying it
-#   cannot change the shape of the network. Exactly one input below is a
-#   genuine per-environment lever, flow_log_retention_days. The endpoint set and
-#   the two ports are shared contracts rather than environment levers: the
-#   endpoint validation requires the architecture's exact eight services, and
-#   both roots use the same port values. The five candidates that failed the
-#   topology test are named at the foot of this file, under deliberately absent
-#   inputs, so a reader who expects one learns it was considered.
+#   cannot change the shape of the network. Two inputs below are genuine
+#   per-environment levers: flow_log_retention_days, and
+#   identity_provider_egress_cidrs, which an environment may narrow to its
+#   provider's exact address ranges. Narrowing the latter changes what one
+#   security group may reach, not the shape of the network - the tiers, their
+#   routes and every group-to-group flow are identical whichever value is
+#   supplied - so it passes the topology test the same way retention does.
+#   The endpoint set and the two ports are shared contracts rather than
+#   environment levers: the endpoint validation requires the architecture's
+#   exact eight services, and both roots use the same port values. The five
+#   candidates that failed the topology test are named at the foot of this file,
+#   under deliberately absent inputs, so a reader who expects one learns it was
+#   considered.
 #
-# Parameters -- eleven, of which one is required:
+#   Refactoring Rationale: this count and the three copies of it in main.tf and
+#   outputs.tf read twelve while fourteen variables were declared, two of them
+#   naming one destination set twice -- identity_provider_egress_cidrs, which
+#   main.tf reads, and an identity_provider_egress_cidr_blocks that nothing read.
+#   The duplicate is withdrawn rather than wired, because the surviving input
+#   carries the same open default for the same stated reason and validates more:
+#   it is a set, so reordering cannot churn a plan, it rejects a malformed block,
+#   and the rule itself refuses a value naming this VPC's own CIDR. All four
+#   counts are then re-derived from the declarations rather than decremented,
+#   which is what the hand-written-count gate in the infrastructure workflow
+#   checks on every change.
+#
+# Parameters -- thirteen, of which one is required:
 #
 #   Naming and identity
 #     name_prefix              string       Leading component of each Name tag.
@@ -56,8 +74,19 @@
 #     interface_endpoint_services
 #                              set(string)  Exact eight AWS services reached by
 #                                           interface endpoint.
+#     identity_provider_egress_cidrs
+#                              set(string)  Destinations the application tier may
+#                                           reach on 443 for Cognito, which is
+#                                           not in the endpoint set above.
 #     app_container_port       number       Shared ALB-to-container port.
 #     database_port            number       Shared application-to-Aurora port.
+#
+#   Identity-provider reachability
+#     identity_provider_egress_cidrs
+#                              list(string) IPv4 destinations the application
+#                                           group may reach on 443 for issuer
+#                                           discovery, the key set and the user
+#                                           pools API. One rule per entry.
 #
 #   Tagging
 #     tags                     map(string)  Merged onto each taggable resource.
@@ -66,17 +95,23 @@
 #     flow_log_retention_days  number       Days the flow-log group retains
 #                                           events.
 #     flow_log_kms_key_arn     string       Customer-managed key encrypting the
-#                                           flow-log group; null selects the
-#                                           service default.
+#                                           flow-log group. Required unless the
+#                                           opt-out below is set.
+#     allow_service_managed_flow_log_encryption
+#                              bool         Explicit opt-out permitting
+#                                           service-default encryption; false,
+#                                           and unsupported in either root.
 #
-#   Security group ports -- each shared with a second module
-#     app_container_port       number       Port admitted from the load balancer
-#                                           to the application tier, and passed
-#                                           on as ecs-service's container_port.
-#     database_port            number       Port admitted from the application
-#                                           tier to the isolated data tier, and
-#                                           passed on as aurora-postgresql's
-#                                           port.
+#   Refactoring Rationale: this index carried app_container_port and database_port
+#   TWICE -- once under "Private service connectivity" and again under a "Security
+#   group ports" heading -- and the two copies described the same two inputs in
+#   different words. The duplicate heading is removed rather than the first
+#   listing, because the first sits in declaration order and this index states that
+#   it is "a map of the surface, not a second copy of it": a surface map that lists
+#   a member twice is already a second copy, and a reader counting inputs from it
+#   would have counted thirteen where twelve are declared. The port entries under
+#   "Private service connectivity" were extended with the cross-module purpose the
+#   removed heading carried, so nothing is lost.
 #
 #   Each block below carries the full `type` and `description` that tflint's
 #   terraform_typed_variables and terraform_documented_variables rules require.
@@ -87,9 +122,12 @@
 #
 # Return values:
 #   None. A variables.tf declares no output. The VPC identifier, the three
-#   per-tier subnet identifier lists and the three security group identifiers
-#   this module publishes to its caller are declared in
-#   infra/modules/network/outputs.tf.
+#   per-tier subnet identifier lists and the three consumer-facing security
+#   group identifiers this module publishes to its caller are declared in
+#   infra/modules/network/outputs.tf. main.tf creates FOUR security groups; the
+#   fourth guards the interface endpoints, has no consumer outside the module
+#   that creates it, and is therefore deliberately not published -- so "three"
+#   here counts published identifiers, not groups.
 #
 # Errors / Exceptions -- what fails, and when:
 #   - `environment` has no default, so omitting it stops the calling root with
@@ -343,15 +381,25 @@ variable "subnet_newbits" {
 #       keeps the architecture's exact private-service paths visible and
 #       testable at the module boundary.
 #
-# WHY : Assumptions: the validation requires equality with the eight services
+# WHY : Assumptions: the validation requires equality with the ten services
 #       named by the target design -- not merely a syntactically valid list.
 #       A missing entry silently sends that service's traffic through NAT, and
 #       an extra entry adds another billed endpoint and another network path.
 #       Neither is an environment variation: dev and prod must have the same
 #       topology. S3 is absent because it uses the gateway endpoint created
 #       unconditionally in main.tf rather than an interface endpoint.
+# WHY : Refactoring Rationale: this set held EIGHT names and the exact-set
+#       validation made that count authoritative, so the two services the runtime
+#       actually needs and this list omitted could not be added by a root as a
+#       variation -- the omission had to be corrected here. xray carries the
+#       telemetry sidecar's trace export and cognito-idp carries issuer and
+#       signing-key resolution plus the administrative pool operations; the
+#       reasoning for each is recorded at the endpoint resource in main.tf. With
+#       the application group's egress enumerated rather than allow-all, a service
+#       missing from this set is not routed through NAT -- it is dropped at the
+#       group, which is why an omission here is an outage and not a cost.
 variable "interface_endpoint_services" {
-  description = "Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls and ssm for configuration. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint."
+  description = "Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls, ssm for configuration, xray for the telemetry sidecar's trace export and cognito-idp for identity-provider issuer, signing-key and administrative calls. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint."
   type        = set(string)
   default = [
     "ecr.api",
@@ -362,6 +410,8 @@ variable "interface_endpoint_services" {
     "sqs",
     "states",
     "ssm",
+    "xray",
+    "cognito-idp",
   ]
 
   validation {
@@ -378,8 +428,71 @@ variable "interface_endpoint_services" {
       "sqs",
       "states",
       "ssm",
+      "xray",
+      "cognito-idp",
     ])
-    error_message = "interface_endpoint_services must contain exactly ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm; the endpoint set is identical in every environment."
+    error_message = "interface_endpoint_services must contain exactly ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp; the endpoint set is identical in every environment."
+  }
+}
+
+# WHY : Refactoring Rationale: this input exists because the identity provider
+#       is the one managed dependency on a task's start-up path that has no
+#       private interface endpoint in the specified eight-service set. Every
+#       service is an OAuth2 resource server that resolves its Cognito issuer and
+#       fetches the JWK set while the application context is still starting, so
+#       with no egress rule for it the tasks do not degrade - they fail their
+#       health checks and never enter service. Making the destination an input
+#       rather than a literal in main.tf is what keeps the rule narrowable: an
+#       environment that knows its provider's addresses can pin them here without
+#       editing the module, and the value it used is visible in that
+#       environment's tfvars rather than buried in a shared file.
+#
+#       Alternatives Considered: (a) omitting the input and writing 0.0.0.0/0
+#       into main.tf directly - rejected, that is indistinguishable from the
+#       allow-all rule this module deliberately removed and gives an operator no
+#       way to tighten it; (b) making the input required with no default -
+#       rejected, there is no value that is correct in every account, so a
+#       required input would make the module unusable until an operator
+#       researched provider addresses that AWS may change underneath them;
+#       (c) a boolean toggle - rejected, it can only choose between "open" and
+#       "broken" and cannot express a narrowed set at all.
+#       Trade-offs: the default admits any destination on 443, so out of the box
+#       this is one open outbound flow. What bounds it is that it is TLS-only,
+#       that it is a named rule carrying its purpose in its description so it is
+#       identifiable in a plan diff and in a flow log, that it is the only such
+#       rule in the module, and that an environment can replace the default with
+#       an exact set. A set type is used rather than a list so ordering cannot
+#       churn the plan, and main.tf keys one rule per entry so tightening the
+#       set removes rules individually.
+variable "identity_provider_egress_cidrs" {
+  description = "Destination CIDR blocks the application security group may reach on TCP 443 for Cognito identity-provider calls: the JWK set every service fetches at start-up and the user-pool admin API auth-service calls. One egress rule is created per entry. The default permits any destination because the provider is a public regional endpoint whose addresses AWS may change; an environment that has determined the exact ranges may narrow this set without editing the module."
+  type        = set(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    # WHY : Assumptions: an empty set is rejected rather than treated as "no
+    #       egress needed". Silently creating no rules would leave every service
+    #       unable to start, and the failure would surface as a task that never
+    #       passes its health check rather than as a plan error - the most
+    #       expensive place to discover it. An operator who genuinely wants no
+    #       identity-provider egress has to say so by removing the rule, which
+    #       is a code change that gets reviewed.
+    condition     = length(var.identity_provider_egress_cidrs) > 0
+    error_message = "identity_provider_egress_cidrs must contain at least one CIDR block; every service fetches the Cognito JWK set during start-up, so an empty set prevents all nine services from entering service."
+  }
+
+  validation {
+    # WHY : Assumptions: cidrhost fails the plan on anything that is not a
+    #       well-formed CIDR block, so it validates shape without this module
+    #       carrying an address-format regex of its own. Alternatives Considered:
+    #       a regex over dotted-quad plus prefix length. Rejected - it would
+    #       accept 999.0.0.0/8 and reject nothing that matters, whereas the
+    #       built-in function applies the provider's own parser.
+    condition = alltrue([
+      for block in var.identity_provider_egress_cidrs :
+      can(cidrhost(block, 0))
+    ])
+    error_message = "Every entry in identity_provider_egress_cidrs must be a well-formed IPv4 CIDR block, for example 0.0.0.0/0 or 52.94.0.0/16."
   }
 }
 
@@ -402,6 +515,24 @@ variable "app_container_port" {
     #       conversion diagnostic.
     condition     = var.app_container_port == floor(var.app_container_port) && var.app_container_port >= 1024 && var.app_container_port <= 65535
     error_message = "app_container_port must be a whole number from 1024 to 65535; every service container runs as a non-root user."
+  }
+
+  validation {
+    # WHY : Assumptions: 443 is refused specifically, and the reason is a
+    #       property of another rule rather than of this port. The interface
+    #       endpoint ENIs share the application security group, so the
+    #       task-to-endpoint flow is a SELF-referencing rule on that group at
+    #       443. While no task listens on 443 that rule reaches no application
+    #       listener; set this input to 443 and the same rule would silently
+    #       become a task-to-task allowance, which is the widening the isolated
+    #       tiers exist to prevent. Refusing the value here makes that bound
+    #       enforced rather than merely true today.
+    #       Alternatives Considered: allowing 443 and narrowing the self
+    #       reference to the endpoint ENIs' addresses. Rejected because an
+    #       endpoint ENI's address is assigned at creation and is not knowable
+    #       when the rule is planned, so the narrowing cannot be expressed.
+    condition     = var.app_container_port != 443
+    error_message = "app_container_port must not be 443; the application security group self-references 443 for the interface endpoint ENIs, so a 443 container port would turn that rule into a task-to-task allowance."
   }
 }
 
@@ -490,23 +621,31 @@ variable "flow_log_retention_days" {
   }
 }
 
-# WHY : Alternatives Considered: for this being optional rather than required,
-#       requiring it, so a flow-log group could never be created without a
-#       customer-managed key. Rejected, because this module depends on no other
-#       module, and a required key ARN would create a hard dependency on the
-#       sibling kms module -- the network could then not be planned or applied
-#       on its own, which is how it is exercised in isolation.
-#       Trade-offs: with null the log group falls back to the CloudWatch Logs
-#       service-default encryption, which is weaker than a customer-managed key
-#       because the key is not one this account controls, rotates or revokes.
+# WHY : Assumptions: the key is REQUIRED, and the requirement is enforced by the
+#       validation on the block below rather than by removing the null default.
+#       Requiring it outright would make this module -- which depends on no other
+#       module -- unplannable on its own, because the ARN comes from the sibling kms
+#       module. The gate keeps standalone planning available behind an explicit
+#       boolean while making the encrypted path the only one a caller reaches by
+#       default.
+#       Trade-offs: with the opt-out taken, the log group falls back to CloudWatch
+#       Logs service-default encryption, which is weaker than a customer-managed key
+#       because the key is not one this account controls, rotates or revokes. That is
+#       why the opt-out is named, defaulted false, and documented as unsupported for
+#       either environment root.
 #
-# WHY : Assumptions: that trade-off is acceptable because both environment roots
-#       DO pass the customer-managed key ARN the kms module produces, so the
-#       encrypted path is the one that actually ships. The null default exists
-#       for module-level composability, not as the intended production
-#       configuration. Stating that plainly is what keeps the policy scan
-#       honest; the alternative is a suppression comment asserting the same
-#       thing where nothing can check it.
+# WHY : Refactoring Rationale: this block previously argued that the optional form
+#       was acceptable "because both environment roots DO pass the customer-managed
+#       key ARN the kms module produces, so the encrypted path is the one that
+#       actually ships". Two things were wrong with resting the control there. It
+#       made the encryption of a network audit trail a property of caller habit
+#       rather than of the module's contract, so any new caller -- or a conditional
+#       in an existing one that evaluated to null -- silently got the weaker path
+#       with a clean plan. And it is precisely the reasoning a policy scan cannot
+#       check, which the same note claimed to be avoiding: "stating that plainly is
+#       what keeps the policy scan honest" describes a comment, and a comment is what
+#       a suppression is. The requirement is now a plan-time condition, so the claim
+#       and the enforcement are the same artifact.
 #
 # WHY : Assumptions: an ARN is named here as a CONTRACT, in a module that
 #       hard-codes no identifier of any kind. This is configuration flowing IN
@@ -528,10 +667,68 @@ variable "flow_log_retention_days" {
 #       fails at apply with the service's own diagnostic, which names the key;
 #       a wrong-shaped one such a regex admitted would fail identically.
 variable "flow_log_kms_key_arn" {
-  description = "ARN of a customer-managed KMS key with which to encrypt the CloudWatch Logs group receiving this VPC's flow logs. Null leaves that group on the CloudWatch Logs service-default encryption, which is what allows this module to be planned and applied without the kms module; both environment roots pass a real key, so null is the composability default rather than the intended production setting."
+  description = "ARN of a customer-managed KMS key with which to encrypt the CloudWatch Logs group receiving this VPC's flow logs. Required unless allow_service_managed_flow_log_encryption is explicitly set true, which is the opt-out reserved for planning this module in isolation without the kms module. Both environment roots pass the key the kms module produces."
   type        = string
   default     = null
   nullable    = true
+
+  # WHY : Refactoring Rationale: this validation is NEW and it reverses how the
+  #       null default behaves. The block above previously reasoned that null was
+  #       acceptable because "both environment roots DO pass the customer-managed
+  #       key ARN", and that was true of the tree as it stood -- but it made the
+  #       encryption of a network audit trail a property of what every caller
+  #       happens to pass rather than of what this module will accept. A caller who
+  #       omitted the argument, or who passed a value that resolved to null through
+  #       a conditional, got a flow-log group on service-default encryption, a clean
+  #       plan and no diagnostic anywhere. That is failing OPEN on a security
+  #       control, and the composability argument for it survives intact below as an
+  #       explicit, named opt-out rather than as a silent default.
+  # WHY : Assumptions: the opt-out is a separate boolean rather than a magic value
+  #       in this string, because the two carry different information and a reviewer
+  #       needs to see both. This variable answers "which key"; the boolean answers
+  #       "is unencrypted acceptable here". A sentinel string such as "none" would
+  #       fold the second question into the first, so a diff that turned encryption
+  #       off would look like a diff that changed a key.
+  # WHY : Alternatives Considered: removing the null default and making the ARN
+  #       unconditionally required, which is the simplest fail-closed form.
+  #       Rejected because this module deliberately depends on no other module, and
+  #       an unconditional requirement makes `terraform plan` on the module alone
+  #       impossible -- the isolation in which its addressing arithmetic and its
+  #       endpoint validation are exercised. The gate keeps that capability while
+  #       making its use deliberate and visible.
+  # WHY : Assumptions: cross-variable references in a validation condition are
+  #       available because versions.tf pins required_version to >= 1.15.0 and
+  #       Terraform has supported them since 1.9. A lifecycle precondition on the
+  #       log-group resource would express the same rule; a variable validation is
+  #       chosen because it reports against the INPUT the caller got wrong rather
+  #       than against a resource the caller did not write.
+  validation {
+    condition     = var.flow_log_kms_key_arn != null || var.allow_service_managed_flow_log_encryption
+    error_message = "flow_log_kms_key_arn is required: the VPC flow-log group carries a network audit trail and must be encrypted with a customer-managed key. Pass the kms module's flow-log key ARN. To plan this module in isolation without the kms module, set allow_service_managed_flow_log_encryption = true explicitly, which is not a supported configuration for either environment root."
+  }
+}
+
+# WHY : Assumptions: this input exists ONLY so that the fail-closed requirement on
+#       flow_log_kms_key_arn has an explicit escape hatch, and it is declared as its
+#       own variable so that using the hatch is a visible line in a caller's module
+#       block rather than an omission. Its default is false, so the safe behaviour
+#       is what a caller gets without deciding anything -- which is the property a
+#       silent null default did not have.
+# WHY : Assumptions: it deliberately does not appear in either environment root.
+#       Both pass a real key, so both leave this at false, and a future edit that
+#       introduced it into a root would be a one-line diff a reviewer cannot miss.
+#       That visibility is the whole mechanism: the control is not stronger than
+#       before in what it permits, it is stronger in what it makes someone say out
+#       loud.
+# WHY : Trade-offs: one more input on a module whose input surface is deliberately
+#       narrow. Accepted because the alternative shapes are worse -- an
+#       unconditional requirement removes standalone planning, and no requirement at
+#       all is the defect being fixed.
+variable "allow_service_managed_flow_log_encryption" {
+  description = "Whether this module may create the VPC flow-log group on CloudWatch Logs service-default encryption instead of a customer-managed key. False, the default, makes flow_log_kms_key_arn required. True is reserved for planning this module in isolation without the kms module and is not a supported setting for the dev or prod roots."
+  type        = bool
+  default     = false
+  nullable    = false
 }
 
 # =============================================================================
@@ -543,6 +740,20 @@ variable "flow_log_kms_key_arn" {
 # lint rule that governs everything above -- terraform_unused_declarations --
 # until main.tf were changed to read it, which is the point at which the
 # reasoning recorded here would have to be overturned rather than overlooked.
+#
+# Refactoring Rationale: TWO entries were removed from this block because each
+# asserted the absence of an input that is declared above it. One read "No
+# `interface_endpoint_services`" and one read "No application or database port
+# input"; all three of those inputs exist, with defaults and validations, and the
+# port pair carries its own Refactoring Rationale recording its restoration. An
+# absent-inputs register is read as an authority on what the module does NOT take,
+# so a stale entry is worse here than anywhere else in the file: a reader looking
+# for the endpoint set would conclude it must be edited in main.tf and would not
+# find the validated input that governs it. The port entry additionally claimed
+# that "infra/modules/aurora-postgresql validates its port as exactly 5432" -- it
+# validates the range 1150 to 65535 -- so removing the entry also removes a
+# measured statement that was wrong. The reasoning worth keeping was already on the
+# variables themselves and is not restated here.
 #
 #   - No `single_nat_gateway`. Alternatives Considered: a boolean collapsing
 #     the per-zone NAT gateways to one, which is the standard development cost
@@ -570,33 +781,6 @@ variable "flow_log_kms_key_arn" {
 #     environment silently resolve a service to a public address while its plan
 #     stayed clean and its security groups stayed unchanged, which is the
 #     failure mode hardest to notice.
-#
-#   - No `interface_endpoint_services`. Refactoring Rationale: a list input of
-#     that name WAS declared in this module at commit dd9a535 and was removed at
-#     commit ab8fe1b, and unlike the two port inputs restored above it is
-#     recorded as absent rather than restored, because the two removals are not
-#     the same kind of thing. A port is a value a SECOND module must agree with,
-#     so it needs one settable source; the endpoint list is consumed by nothing
-#     outside this module, so an input buys no agreement and only widens what a
-#     root can change. Alternatives Considered: keeping it as a list so an
-#     environment could extend the set without editing the module. Rejected for
-#     the same reason as the per-endpoint booleans directly above -- a list is
-#     that switch with a different spelling, and it fails worse in one respect:
-#     a boolean can only turn a named endpoint off, whereas a list can also
-#     SHORTEN silently, so an environment that dropped `secretsmanager` from its
-#     tfvars would plan cleanly, apply cleanly, and then resolve that service
-#     over the public path with no diagnostic anywhere. Assumptions: the set is
-#     fixed rather than derived, and it is fixed by the target architecture
-#     rather than by this module's preference -- AAP §0.4.1.6 names the eight
-#     interface endpoints (ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs,
-#     states, ssm) and the S3 gateway endpoint as the network module's
-#     contents, so varying the set changes which resources exist and is
-#     topology by this file's own admissibility test. Trade-offs: a root needing
-#     a ninth interface endpoint must change main.tf rather than a tfvars value,
-#     which is accepted precisely because it forces the change to be reviewed
-#     against that requirement instead of landing as an unreviewed value.
-#     docs/architecture/security-and-identity.md is the document that cited this
-#     input, and it names the endpoint set directly now that no input carries it.
 #
 #   - No `create_*` or `enabled` module-level switch. Alternatives Considered:
 #     a boolean gating every resource, so a root could call the module and
@@ -627,14 +811,5 @@ variable "flow_log_kms_key_arn" {
 #     diagnostic naming neither input. One source for the Region cannot
 #     disagree with itself.
 #
-#   - No application or database port input. Assumptions: the network contract is
-#     fixed at TCP 8080 from the load balancer to service tasks and TCP 5432 from
-#     service tasks to Aurora. infra/modules/ecs-service validates its container
-#     port as exactly 8080 and infra/modules/aurora-postgresql validates its port
-#     as exactly 5432, so exposing either value here would recreate independently
-#     configurable halves of one security-group rule. Alternatives Considered:
-#     a shared pair of root-level port variables passed through all three
-#     modules. Rejected because neither port is an environment difference or a
-#     supported deployment choice; fixed validation at each consuming boundary
-#     fails closer to the misconfiguration and leaves no value that can drift.
 # =============================================================================
+

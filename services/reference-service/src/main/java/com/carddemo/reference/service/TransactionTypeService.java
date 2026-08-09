@@ -3,6 +3,7 @@ package com.carddemo.reference.service;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.RecordConflictException;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
@@ -141,11 +142,17 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>Two limits on what this class can claim</h2>
  *
- * <p>Trade-offs: no value in this class is held in IEEE-754 binary form, and that prohibition rests here
- * on review rather than on a build gate. The layering test that mechanically forbids the binary forms
- * scopes its subject set to the shared money package, so it does not inspect this class; this class
- * simply has no monetary field, its only numeric state being a version counter and a row count. The
- * honest statement is that the property holds and that nothing automated is checking it here.
+ * <p>Trade-offs: no value in this class is held in IEEE-754 binary form, and a build gate enforces that.
+ * The claim previously made in this position -- that the layering test scopes its subject set to the
+ * shared money package and therefore does not inspect this class -- was FALSE and is corrected here.
+ * Rule A3 in {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
+ * is scoped to {@code com.carddemo..}, the whole analysed root, and that rule set is executed against
+ * every module's own compiled classes, so a {@code float}, {@code double}, {@code Float} or
+ * {@code Double} declared here as a field, a parameter or a return type would fail the build. This class
+ * has no monetary field in any case, its only numeric state being a version counter and a row count. The
+ * cost the original wording was trying to record is real but belongs elsewhere: what A3 cannot see is a
+ * binary value that exists only as a local or an intermediate expression, and that residue does rest on
+ * review.
  *
  * <p>Assumptions: the parity evidence for this class is transcription against the programs, the table
  * definitions and the host structure, and NOT a byte comparison. The existing COBOL oracle covers the
@@ -307,21 +314,30 @@ public class TransactionTypeService {
      * is available from the page number instead, at physical lines 780 and 781. The absence of a fourth
      * component on the envelope is therefore fidelity to the source rather than an omission.
      *
+     * <p>Refactoring Rationale: the position is now sealed against the CALLER, the FILTERS and the
+     * DIRECTION as well as against this browse, and a direction stated without a position is refused.
+     * Both were defects rather than simplifications, and they are described where the shared assembly
+     * applies them, on {@code ReferencePaging.binding} and
+     * {@code ReferencePaging.requireCursorForDirection}.</p>
+     *
      * @param request the validated paging and filter parameters; must not be {@code null}
      * @param cursorToken the sealer that mints and opens the opaque positions; must not be {@code null}
+     * @param subject the authenticated caller's identity, sealed into every position this page mints so
+     *     that a position is not transferable between callers; must not be {@code null}
      * @return one page of types with both positions sealed and a flag stating whether more follow,
      *     never {@code null}
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if the supplied position is not
-     *     one this browse minted
+     *     one this browse minted, for this caller, under these filters and for this direction
      * @throws ClientInputException if a supplied filter matches no row anywhere in the table, which the
-     *     baseline reports as a field refusal on the filter rather than as an empty page
+     *     baseline reports as a field refusal on the filter rather than as an empty page, or if a paging
+     *     direction arrives without the position it would move from
      */
     @Transactional(readOnly = true)
     public PageResponse<TransactionTypeResponse> list(
-            TransactionTypeListRequest request, CursorToken cursorToken) {
+            TransactionTypeListRequest request, CursorToken cursorToken, String subject) {
 
-        String position =
-                request.cursor() == null ? null : cursorToken.open(CURSOR_BINDING, request.cursor());
+        ReferencePaging.requireCursorForDirection(request.cursor(), request.direction());
+
         boolean backward = request.direction() == PageDirection.PREVIOUS;
         Limit limit = Limit.of(PAGE_SIZE + 1);
 
@@ -333,6 +349,13 @@ public class TransactionTypeService {
         String descriptionFilter =
                 TransactionTypeRepository.descriptionFilterPattern(request.description());
         boolean filtered = typeCodeFilter != null || descriptionFilter != null;
+
+        // WHY : Assumptions: the NORMALISED filters are what the binding names, not the values as the
+        //       caller typed them. Two spellings that normalise to one query -- an absent value and a
+        //       blank one -- select the same rows, so binding the raw forms would refuse a position for a
+        //       difference the walk itself cannot see.
+        String position = ReferencePaging.openPosition(cursorToken, CURSOR_BINDING, subject,
+                request.cursor(), request.direction(), typeCodeFilter, descriptionFilter);
 
         if (filtered) {
             requireFilterMatchesSomething(typeCodeFilter, descriptionFilter, request);
@@ -347,8 +370,12 @@ public class TransactionTypeService {
                 ? readBackwardWindow(typeCodeFilter, descriptionFilter, position, filtered, limit)
                 : readForwardWindow(typeCodeFilter, descriptionFilter, position, filtered, limit);
 
-        return ReferencePaging.page(rows, PAGE_SIZE, backward, CURSOR_BINDING, cursorToken,
-                TransactionTypeMapper::toResponse, TransactionType::getTypeCd);
+        return ReferencePaging.page(rows, PAGE_SIZE, backward, position != null,
+                ReferencePaging.binding(CURSOR_BINDING, subject, true, typeCodeFilter,
+                        descriptionFilter),
+                ReferencePaging.binding(CURSOR_BINDING, subject, false, typeCodeFilter,
+                        descriptionFilter),
+                cursorToken, TransactionTypeMapper::toResponse, TransactionType::getTypeCd);
     }
 
     /**
@@ -549,11 +576,40 @@ public class TransactionTypeService {
     @Transactional
     public TransactionTypeResponse create(TransactionTypeCreateRequest request) {
         if (this.types.findByTypeCd(request.typeCd()).isPresent()) {
-            throw new RecordConflictException(RecordConflictException.Kind.STALE_VERSION);
+            // WHY : Refactoring Rationale: the kind raised is REFERENCED_ROW and it used to be
+            //       STALE_VERSION. The published contract states what a caller receives here: creating a
+            //       code that already exists "is refused with 409 ... which the shared advice reaches
+            //       through the same integrity branch as a restricted delete and therefore answers with
+            //       the referential sentence the Conflict response gives", and that consequence is
+            //       registered as D-REFERENCE-INTEGRITY-SENTENCE. STALE_VERSION renders a DIFFERENT
+            //       sentence -- the before-image data-changed wording -- so the pre-read refusal
+            //       contradicted both the document and its own registered divergence, and told a caller
+            //       that someone else had edited a row it was trying to create.
+            // WHY : Assumptions: the same kind is raised by the constraint path below, so a duplicate
+            //       found by this read and a duplicate found by the unique constraint are
+            //       indistinguishable to a caller. Answering the raced one differently would make the
+            //       answer depend on timing.
+            throw new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW);
         }
+        TransactionType candidate = TransactionTypeMapper.toNewEntity(request);
         try {
-            return TransactionTypeMapper.toResponse(
-                    this.types.save(TransactionTypeMapper.toNewEntity(request)));
+            // WHY : Refactoring Rationale: an explicit INSERT, where this called save. Neither save nor
+            //       saveAndFlush can insert this entity, and that was MEASURED rather than reasoned:
+            //       TransactionType carries an assigned String identifier and a primitive long @Version,
+            //       so the framework's newness test finds a non-null version and a non-null identifier
+            //       and routes every save through EntityManager.merge. Merge loads the row that
+            //       identifier names and writes an UPDATE against it, so a create for an existing code
+            //       raised an optimistic-locking failure where the stored version differed -- and would
+            //       have silently REPLACED the existing description, answering success, wherever the
+            //       stored version happened to match the zero on the new instance. Either way the catch
+            //       below could not run, so the duplicate classification the published contract depends
+            //       on was unreachable for the one condition it exists to answer.
+            // WHY : Assumptions: a native INSERT issues its statement immediately rather than at flush,
+            //       so the unique-constraint violation arrives INSIDE this try. That is what the catch
+            //       needs; a statement deferred to commit would be wrapped by the framework's own
+            //       transaction advice and reach the shared handler unclassified.
+            this.types.insertType(candidate.getTypeCd(), candidate.getDescription());
+            return TransactionTypeMapper.toResponse(candidate);
         } catch (DataIntegrityViolationException failure) {
             throw classifyIntegrityViolation(failure);
         }
@@ -601,45 +657,74 @@ public class TransactionTypeService {
     public TransactionTypeResponse replace(String typeCd, TransactionTypeUpdateRequest request) {
         TransactionType stored = require(typeCd);
 
+        // WHY : Refactoring Rationale: the version precondition is evaluated BEFORE the no-change
+        //       short-circuit, where the two used to be the other way round. The published contract makes
+        //       the precondition unconditional -- "when the stored row has moved on since that read the
+        //       write is refused with 409" -- so a submission carrying a stale token had to be refused
+        //       whatever its description said. With the short-circuit first, a caller holding a token
+        //       from before somebody else's edit received 200 and the CURRENT row, which reads as
+        //       confirmation that its own submission was applied to the state it had read. Both facts it
+        //       would infer from that are false: its token was stale, and the row it was handed is not
+        //       the row it based the submission on.
+        // WHY : Trade-offs: the case this reorders is narrow -- a stale token whose description happens
+        //       to equal the stored one -- and the previous ordering was argued from the baseline, on the
+        //       ground that a write altering no column can lose no update. That is true of the WRITE and
+        //       beside the point for the ANSWER: the baseline reaches its own no-change sentence only
+        //       after its before-image comparison has already passed, so evaluating the precondition
+        //       first is the baseline's order rather than a departure from it.
+        if (stored.getVersion() != request.version()) {
+            throw new RecordConflictException(
+                    RecordConflictException.Kind.STALE_VERSION, stored.getVersion());
+        }
+
         // WHY : Alternatives Considered: reporting a submission that differs in nothing as the
         //       data-changed conflict, which would have folded two baseline outcomes into one. Rejected
         //       because the baseline keeps them apart and answers them differently: physical lines 743
         //       to 750 of COTRTUPC.cbl run the comparison and, when nothing differs, leave the edit path
         //       WITHOUT reaching the write at all, displaying the sentence at physical lines 179 and 180.
         //       'You changed nothing' is an idempotent no-op; 'someone else changed it' is a conflict.
-        //       Returning the stored row here is safe even against a stale version, because a write that
-        //       would alter no column can lose no update.
         if (describesSameStoredValues(stored, request.description())) {
             return TransactionTypeMapper.toResponse(stored);
         }
-
-        boolean dataChanged = stored.getVersion() != request.version();
         boolean lockUnavailable = false;
         DataIntegrityViolationException integrityFailure = null;
         TransactionType saved = null;
 
-        if (!dataChanged) {
-            try {
-                TransactionTypeMapper.applyUpdate(request, stored);
-                saved = this.types.save(stored);
-            } catch (CannotAcquireLockException failure) {
-                // WHY : Assumptions: this is the migrated form of the SQLCODE -911 arm at physical lines
-                //       1870 to 1879, which the baseline reaches on a deadlock or a lock timeout. It is
-                //       caught apart from the integrity failure below because the baseline reports the
-                //       two apart, and a caller told the wrong one retries the wrong way: a lock
-                //       timeout should be retried unchanged, while a version that lost must be re-read
-                //       first.
-                lockUnavailable = true;
-            } catch (DataIntegrityViolationException failure) {
-                integrityFailure = failure;
-            }
+        try {
+            TransactionTypeMapper.applyUpdate(request, stored);
+            // WHY : Refactoring Rationale: saveAndFlush and not save, because the two catches below are
+            //       the point of this try. A plain save on a MANAGED row registers the change with the
+            //       persistence context and issues the UPDATE when the context is flushed, which for a
+            //       transactional method is at commit -- after this method and its catches have returned.
+            //       A lock timeout or a constraint refusal would then surface from the transaction's
+            //       commit rather than from this statement, so neither catch could run and both of the
+            //       classifications this method publishes were unreachable for the conditions they were
+            //       written for. Flushing here issues the statement inside the try.
+            saved = this.types.saveAndFlush(stored);
+        } catch (CannotAcquireLockException failure) {
+            // WHY : Assumptions: this is the migrated form of the SQLCODE -911 arm at physical lines
+            //       1870 to 1879, which the baseline reaches on a deadlock or a lock timeout. It is
+            //       caught apart from the integrity failure below because the baseline reports the
+            //       two apart, and a caller told the wrong one retries the wrong way: a lock
+            //       timeout should be retried unchanged, while a version that lost must be re-read
+            //       first.
+            lockUnavailable = true;
+        } catch (DataIntegrityViolationException failure) {
+            integrityFailure = failure;
         }
 
         // WHY : Assumptions: the outcome is resolved AFTER the statement rather than before it, which is
         //       where the baseline resolves it too -- its classifier at physical lines 1580 to 1589 runs
         //       below the statement's own EVALUATE, so success is the absence of a recorded error rather
         //       than a flag the successful arm sets.
-        return switch (resolveWriteOutcome(lockUnavailable, integrityFailure != null, dataChanged)) {
+        // WHY : Refactoring Rationale: the data-changed argument is now the constant false, because the
+        //       stale-version precondition is evaluated and thrown BEFORE this write rather than being
+        //       carried past it as a flag. The classifier keeps its data-changed arm because it
+        //       transcribes the baseline's own precedence order, which the enum documents; what changed is
+        //       that this call site can no longer reach that arm, and the wrapping "if not changed"
+        //       guard around the write is gone with it rather than left as a condition that is always
+        //       true.
+        return switch (resolveWriteOutcome(lockUnavailable, integrityFailure != null, false)) {
             case LOCK_ERROR ->
                     throw new RecordConflictException(RecordConflictException.Kind.LOCK_UNAVAILABLE);
             case UPDATE_FAILED -> throw classifyIntegrityViolation(integrityFailure);
@@ -689,6 +774,15 @@ public class TransactionTypeService {
 
         try {
             this.types.delete(stored);
+            // WHY : Refactoring Rationale: the delete is FLUSHED inside the try, because the catch below
+            //       is the point of it. A delete only marks the row for removal in the persistence
+            //       context; the DELETE statement is issued when the context is flushed, which for a
+            //       transactional method is at commit -- after this catch has returned. A category row
+            //       inserted against this type between the count above and this statement would then
+            //       violate the foreign key at commit rather than here, so the referential
+            //       classification was unreachable on exactly the race it exists to answer. There is no
+            //       deleteAndFlush, so the flush is issued explicitly.
+            this.types.flush();
         } catch (DataIntegrityViolationException failure) {
             throw classifyIntegrityViolation(failure);
         }
@@ -749,8 +843,21 @@ public class TransactionTypeService {
      * @return {@code true} when the submission would alter no column, {@code false} otherwise
      */
     private static boolean describesSameStoredValues(TransactionType stored, String submitted) {
-        String storedText = TransactionTypeMapper.trimForStorage(stored.getDescription());
-        String submittedText = TransactionTypeMapper.trimForStorage(submitted);
+        // WHY : Refactoring Rationale: both values are stripped on BOTH ends before comparison, where
+        //       they were previously put through the STORAGE normalisation, which removes trailing
+        //       blanks only. The two are separate decisions and the baseline makes them separately: it
+        //       stores through a trim whose behaviour differs across its three writers, but every
+        //       description COMPARISON it makes goes through a trim -- COTRTLIC.cbl L1065 and L1069,
+        //       COTRTUPC.cbl L791 and L795 -- and a bare FUNCTION TRIM removes blanks from both ends. So
+        //       the baseline treats surrounding blanks as insignificant for equality, and reusing the
+        //       storage rule here made a submission differing only in leading blanks look like a CHANGE,
+        //       which then went to the database as a write the baseline would not have made.
+        // WHY : Assumptions: this narrows the divergence rather than widening it. The stored form still
+        //       keeps a leading blank -- registered as D-REFERENCE-TRIM-TRAILING-ONLY, because the
+        //       baseline is genuinely three-way inconsistent about storage and no one rule can match all
+        //       three writers -- but equality now behaves as all three of them do.
+        String storedText = strippedForComparison(stored.getDescription());
+        String submittedText = strippedForComparison(submitted);
         // WHY : Assumptions: neither value can be absent on the published path -- the column is declared
         //       not null and the request component is constrained non-blank -- so this arm exists only so
         //       that an internal caller cannot turn a missing value into a thrown exception from a
@@ -759,6 +866,32 @@ public class TransactionTypeService {
             return storedText == null && submittedText == null;
         }
         return storedText.toUpperCase(Locale.ROOT).equals(submittedText.toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * Removes blanks from both ends of a description before it is compared for equality.
+     *
+     * <p>Purpose: this is the target form of the baseline's own comparison discipline. Every description
+     * comparison the baseline makes passes its operands through {@code FUNCTION TRIM} with no
+     * {@code LEADING} or {@code TRAILING} operand, which strips both ends -- at
+     * {@code COTRTLIC.cbl} L1065 and L1069, and at {@code COTRTUPC.cbl} L791 and L795.</p>
+     *
+     * <p>Assumptions: this is deliberately NOT the storage normalisation. Storage keeps a leading blank,
+     * for the reason registered as {@code D-REFERENCE-TRIM-TRAILING-ONLY}; equality ignores blanks at
+     * both ends, because that is what the baseline does when it asks whether two descriptions are the
+     * same. Using one member for both would force one of the two answers to be wrong.</p>
+     *
+     * <p>Assumptions: {@code strip} is used rather than {@code trim}, because it removes every Unicode
+     * whitespace character rather than only the code points at or below the space. A description arrives
+     * from a caller rather than from a fixed-width record, so a non-breaking space is a value it can
+     * actually carry, and treating one as content here would report two descriptions a reader cannot
+     * tell apart as different.</p>
+     *
+     * @param value the description as stored or as submitted, which may be {@code null}
+     * @return the value with surrounding whitespace removed, or {@code null} when the value is absent
+     */
+    private static String strippedForComparison(String value) {
+        return value == null ? null : value.strip();
     }
 
     /**
@@ -810,24 +943,40 @@ public class TransactionTypeService {
      * from the constraint that raised it rather than copied from a branch that does not exist. The
      * divergence is documented in {@code docs/architecture/cobol-to-service-traceability.md}.
      *
-     * <p>Refactoring Rationale: the vendor text goes to the log and the stable sentence goes to the
-     * caller, which is a two-channel arrangement the baseline had no room for. Its own composition ran
-     * through {@code CSDB2RPY.cpy}, which builds the message into {@code WS-LONG-MSG PIC X(800)}
-     * (declared at physical line 235 of {@code COTRTLIC.cbl}) and then, at line 84 of that copybook,
-     * moves the result into a {@code PIC X(75)} field -- discarding 725 bytes. Because the vendor text is
-     * concatenated LAST, that truncation removes precisely the diagnostic detail and keeps the prefix,
-     * which is why the sentence at physical line 1883 reads 'Update failed with' and simply stops: it was
-     * written to be followed by text that the move then cut off. Splitting the two channels preserves
-     * the stable sentence for the caller and restores the detail for the operator, without either
-     * displacing the other.
+     * <p>Refactoring Rationale: what reaches the log is the SQLSTATE and this method's own
+     * classification of it, and NOT the provider's message text. The text was logged, and it is the one
+     * value on this path that cannot be bounded: a provider composes it, so its content is the
+     * provider's choice rather than this system's, and for a constraint violation it characteristically
+     * carries the constraint's name together with the BOUND VALUES that violated it -- which on these
+     * tables are a transaction type code and, through the referencing constraint, category rows. The
+     * migration's logging contract admits a type or category code, a status code, a date, a version
+     * counter and a bounded response code, and it admits them because each is a value this system
+     * declared and can enumerate. Provider text is none of those things, and a diagnostic whose content
+     * is decided elsewhere cannot be reviewed here.
      *
-     * <p>Assumptions: the detail is recorded at debug level and never placed in a response body, and the
-     * baseline itself is the authority for that. Its one path that emits the whole 800-byte buffer is
+     * <p>Assumptions: nothing needed for triage is lost with it. The two conditions this method
+     * distinguishes are distinguished BY the SQLSTATE, so the SQLSTATE plus the classification names the
+     * condition exactly; and for the third case -- a state neither constant matches -- the SQLSTATE is
+     * the value an operator looks up, which is precisely why it is logged rather than the sentence built
+     * around it. Alternatives Considered: keeping the text at debug level on the argument that debug is
+     * off in production. Rejected because a level is configuration, not a control: raising it is a
+     * one-line change an operator makes while diagnosing exactly the failure that emits the value, so
+     * the value would be written at the moment it was most likely to be captured. Also considered:
+     * logging the provider's exception CLASS name in its place, which is stable and carries no value;
+     * it is not added because the SQLSTATE already identifies the condition more precisely than the
+     * class does.
+     *
+     * <p>Assumptions: no detail reaches a response body either, and the baseline itself is the authority
+     * for that. Its own composition ran through {@code CSDB2RPY.cpy}, which builds the message into
+     * {@code WS-LONG-MSG PIC X(800)} (declared at physical line 235 of {@code COTRTLIC.cbl}) and then,
+     * at line 84 of that copybook, moves the result into a {@code PIC X(75)} field -- discarding 725
+     * bytes. Because the vendor text is concatenated LAST, that truncation removes precisely the vendor
+     * detail and keeps the prefix, which is why the sentence at physical line 1883 reads 'Update failed
+     * with' and simply stops. Its one path that emits the whole 800-byte buffer is
      * {@code SEND-LONG-TEXT} at physical line 2085, and the comment above it at physical lines 2082 and
-     * 2083 states that it is primarily for debugging and should not be used in the regular course. It
+     * 2083 states that it is primarily for debugging and should not be used in the regular course; it
      * also ends in a bare {@code EXEC CICS RETURN} with no communication area, which abandons the
-     * conversation. Returning vendor text to a caller would publish database internals that the
-     * program's own author declined to publish.
+     * conversation. The caller therefore receives the stable sentence and nothing else.
      *
      * @param failure the violation the provider raised; must not be {@code null}
      * @return the refusal to throw: the contention kind the SQLSTATE names, or the original violation
@@ -837,16 +986,43 @@ public class TransactionTypeService {
             DataIntegrityViolationException failure) {
 
         String sqlState = sqlStateOf(failure);
-        LOG.debug("event=reference.type.integrity-violation sqlState={} detail={}",
-                sqlState, failure.getMostSpecificCause().getMessage());
+
+        // WHY : Refactoring Rationale: the log line carries the SQLSTATE and a type-and-frame digest, and
+        //       no longer the provider's own most-specific-cause text. That text is composed by the
+        //       driver and QUOTES the values that violated the constraint -- PostgreSQL appends a detail
+        //       clause naming the key columns and the offending key -- so the earlier form copied caller
+        //       data into log storage, which is the one destination the masking applied at the API edge
+        //       does not reach. This service's own key is a two-character code, but the helper is reached
+        //       from three write paths and the hazard is a property of the driver's message rather than
+        //       of this table.
+        // WHY : Assumptions: nothing an operator acts on is lost. The SQLSTATE names WHICH constraint
+        //       class refused the statement, which is what selects the branch below and what an alert
+        //       rule matches on, and the digest names the exception chain and the frames that raised it.
+        //       The constraint NAME would be the one remaining useful detail, and it is not extracted
+        //       because reaching it means parsing the same message this line exists to stop carrying.
+        // WHY : Trade-offs: the previous wording defended the vendor text on the ground that the
+        //       baseline's own 800-byte buffer truncated it away and that restoring it for an operator
+        //       displaced nothing. That reasoning held for the CALLER channel, which is unchanged and
+        //       still receives only the stable sentence, and it did not hold for the log channel, where
+        //       the value persists and is searchable. The two-channel arrangement is kept; what changed
+        //       is that the operator channel now carries provenance rather than content.
+        LOG.debug("event=reference.type.integrity-violation sqlState={} failure={}",
+                sqlState, ThrowableDigest.of(failure));
 
         if (SQLSTATE_UNIQUE_VIOLATION.equals(sqlState)) {
             LOG.warn("event=reference.type.duplicate-key sqlState={}", sqlState);
+            // WHY : Refactoring Rationale: REFERENCED_ROW, where this returned STALE_VERSION. The two
+            //       kinds render different sentences -- the before-image data-changed wording and the
+            //       referential wording -- and the published contract states which one a duplicate
+            //       create receives: the referential sentence, reached "through the same integrity branch
+            //       as a restricted delete", with the consequence registered as
+            //       D-REFERENCE-INTEGRITY-SENTENCE. Returning the data-changed kind reported a duplicate
+            //       primary key as somebody else's concurrent edit.
             // WHY : Assumptions: the SAME refusal the sequential existence read raises, so a duplicate
             //       caught by the constraint and a duplicate caught by the read are indistinguishable to
             //       a caller. Answering the raced one differently would make the answer depend on
             //       timing.
-            return new RecordConflictException(RecordConflictException.Kind.STALE_VERSION);
+            return new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW);
         }
         if (SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
             LOG.warn("event=reference.type.referenced-row sqlState={}", sqlState);

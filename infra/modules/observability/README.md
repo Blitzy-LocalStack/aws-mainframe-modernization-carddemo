@@ -51,7 +51,7 @@ those signals are brought together:
   `cloudfront-spa` each publish metrics or log records that this module's
   widgets and alarms read.
 
-What it owns outright is narrower than what it displays: one dashboard, eleven
+What it owns outright is narrower than what it displays: one dashboard, thirteen
 metric alarms, one SNS topic with its policy and optional subscriptions, one
 shared access-log bucket, and a log group **only** for a producer that owns no
 group resource of its own.
@@ -202,7 +202,7 @@ notification to a named recipient; it was addressed to a TSO user id.
 - Assumptions: **no contact detail appears anywhere in this repository.** The
   `alarm_email_endpoints` input defaults to empty, and subscriptions are
   supplied at apply time. The same discipline covers every generated name: the
-  topic, the dashboard, the log groups and all eleven alarms are composed from a
+  topic, the dashboard, the log groups and all thirteen alarms are composed from a
   prefix and an environment, so no account identifier, endpoint or hostname
   appears in a name this module creates.
 
@@ -607,7 +607,7 @@ a variable, an output, a version constraint or a resource — the command is in
 |------|-------------|
 | <a name="output_access_log_bucket_arn"></a> [access\_log\_bucket\_arn](#output\_access\_log\_bucket\_arn) | ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN. |
 | <a name="output_access_log_bucket_name"></a> [access\_log\_bucket\_name](#output\_access\_log\_bucket\_name) | Name of the shared terminal access-log destination this module owns. A calling root passes it into the alb module's access\_logs\_bucket input and the s3-datasets module's access\_log\_bucket\_name input, so both delivery services write into one destination whose public-access block, encryption, versioning, lifecycle rules and exact-source bucket policy are reviewed together. Both of those arguments take a bucket name and reject an ARN. |
-| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all eleven alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the three single-instance alarms. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. |
+| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api\_5xx, aurora\_cpu, aurora\_capacity); the remaining two are present only when their gate is open -- aurora\_connections when database\_connection\_threshold is set, and cloudfront\_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. |
 | <a name="output_dashboard_arn"></a> [dashboard\_arn](#output\_dashboard\_arn) | ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant. |
 | <a name="output_dashboard_name"></a> [dashboard\_name](#output\_dashboard\_name) | Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository. |
 | <a name="output_managed_log_group_arns"></a> [managed\_log\_group\_arns](#output\_managed\_log\_group\_arns) | Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map inside their lambda\_logs IAM policy document to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed\_log\_group\_names exactly, so the two maps are indexed with one key set. |
@@ -846,7 +846,7 @@ read in one place. Each carries one of Rule 1's four category names.
 - Alternatives Considered: **no invented service-level objective** — an invented
   figure is indistinguishable in form from a derived one.
   [§11](#11-what-this-module-deliberately-does-not-create)
-- Assumptions: **seven of the eleven alarms are structural** — the condition is a
+- Assumptions: **seven of the thirteen alarms are structural** — the condition is a
   failure by definition rather than by comparison with a chosen number.
   [§5](#5-alarms-condition-question-action)
 - Assumptions: **the dead-letter threshold is derived from `maxReceiveCount` =

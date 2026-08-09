@@ -1,5 +1,5 @@
 /**
- * Pins that every production screen supplies the header band a server-derived paint instant.
+ * @file Pins that every production screen supplies the header band a server-derived paint instant.
  *
  * WHY this file exists — Refactoring Rationale: `ScreenHeader` documents one obligation on its
  * callers, that they pass `now` a SERVER-derived instant, and states plainly why the obligation is

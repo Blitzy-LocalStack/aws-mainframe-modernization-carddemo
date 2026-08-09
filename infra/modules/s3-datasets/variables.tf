@@ -2,7 +2,7 @@
 # infra/modules/s3-datasets/variables.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The public input surface of the `s3-datasets` module: twelve variables,
+#   The public input surface of the `s3-datasets` module: THIRTEEN variables,
 #   every one explicitly typed and described. The module provisions the single
 #   versioned, customer-managed-key-encrypted S3 bucket that replaces the
 #   mainframe baseline's generation data groups, carrying one prefix and one
@@ -26,7 +26,7 @@
 #   should be added.
 #
 # Parameters:
-#   The twelve `variable` blocks below ARE this file's parameters, so the
+#   The thirteen `variable` blocks below ARE this file's parameters, so the
 #   name, type and description obligation is discharged on each block directly
 #   rather than duplicated into a list here that could drift from it. In
 #   declaration order: name_prefix, environment, kms_key_arn,
@@ -34,8 +34,14 @@
 #   noncurrent_version_transition_days,
 #   noncurrent_version_transition_storage_class,
 #   abort_incomplete_multipart_upload_days, access_log_bucket_name,
-#   force_destroy and tags. Exactly two of them -- `environment` and
-#   `kms_key_arn` -- have no default and are therefore required of the caller.
+#   s3_gateway_endpoint_id, force_destroy and tags. Exactly THREE of them --
+#   `environment`, `kms_key_arn` and `s3_gateway_endpoint_id` -- have no default
+#   and are therefore required of the caller.
+#   Refactoring Rationale: the count moved from twelve to thirteen and the
+#   required set from two to three when `s3_gateway_endpoint_id` was added. Both
+#   figures are stated because the second is the one that breaks a caller: a
+#   module whose required set grows is a module every existing instantiation must
+#   be revisited for, and both environment roots were updated in the same change.
 #
 # Return values:
 #   None. This file returns nothing: it IS the module's input contract. The
@@ -636,6 +642,54 @@ variable "access_log_bucket_name" {
 #       abort_incomplete_multipart_upload action, which cleans up abandoned
 #       multipart uploads and is a storage-hygiene concern rather than a retention
 #       policy.
+
+variable "s3_gateway_endpoint_id" {
+  description = "Identifier of the VPC S3 gateway endpoint that dataset object reads and writes must arrive through, shaped vpce-<hex>. The bucket policy denies s3:GetObject, s3:GetObjectVersion and s3:PutObject to any request whose aws:SourceVpce is not this endpoint, so the dataset contents are reachable only from inside the VPC. Required, with no default: an omitted value would leave the deny statement unable to name an endpoint and would silently reduce the control to nothing."
+  type        = string
+
+  # WHY : Refactoring Rationale: this input is NEW. The bucket previously carried
+  #       one policy statement -- a transport-security deny -- so an object read
+  #       from outside the VPC was refused only if it arrived over plain HTTP. A
+  #       correctly-formed HTTPS request bearing any principal with an IAM grant
+  #       reached the dataset generations from anywhere on the internet, and those
+  #       generations hold records derived from the cardholder masters. The network
+  #       boundary belongs here rather than on the gateway endpoint itself: the
+  #       sibling network module records why an endpoint policy cannot carry it
+  #       without breaking ECR image pulls, and a bucket policy can name one bucket
+  #       and three actions where an endpoint policy names a whole service.
+  #
+  # WHY : Assumptions: the input is REQUIRED rather than nullable, and this differs
+  #       deliberately from access_log_bucket_name above. That one degrades to a
+  #       missing diagnostic; this one degrades to a missing security control, and a
+  #       nullable security input is a control that is off by default in exactly the
+  #       environments nobody reviews. Both environment roots pass
+  #       module.network.s3_gateway_endpoint_id, so requiring it costs a caller
+  #       nothing and makes an omission a plan error rather than a silent opening.
+  #
+  # WHY : Trade-offs: an operator can no longer download a dataset generation or a
+  #       generated report from a workstation, and that is the control working
+  #       rather than a defect to be worked around. Retrieval has to happen from
+  #       inside the VPC -- from a task, or from an instance in the private
+  #       application tier. A presigned URL does not evade it either, because the
+  #       redemption is what carries aws:SourceVpce and a redemption from outside
+  #       carries none. docs/runbooks/batch-operations.md is where that procedure
+  #       belongs; naming the constraint here is what stops it being discovered
+  #       during an incident.
+  #
+  # WHY : Alternatives Considered: denying every s3 action rather than the three
+  #       object data-plane ones. Rejected on a concrete consequence: Terraform runs
+  #       from outside the VPC, and both roots set force_destroy from
+  #       !var.deletion_protection, so a dev destroy legitimately issues
+  #       version-aware deletes and bucket-configuration reads from there. A blanket
+  #       deny would make `terraform destroy` fail -- breaking the teardown
+  #       criterion this package is accepted against -- while adding nothing to
+  #       confidentiality, because bucket metadata is not the dataset. The three
+  #       named actions are the ones that move dataset CONTENT.
+  validation {
+    condition     = can(regex("^vpce-[0-9a-f]{8,}$", var.s3_gateway_endpoint_id))
+    error_message = "s3_gateway_endpoint_id must be a VPC endpoint identifier shaped vpce- followed by at least eight lowercase hexadecimal characters. A bucket name, an ARN or an interface-endpoint identifier for another service would produce a policy that denies every object read, including the batch tasks' own."
+  }
+}
 
 variable "force_destroy" {
   description = "Whether Terraform may delete this bucket while it still holds objects, including noncurrent versions. False makes a destroy of a non-empty bucket fail rather than discard its contents."

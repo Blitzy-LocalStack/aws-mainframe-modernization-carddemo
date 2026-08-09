@@ -112,8 +112,9 @@ terraform {
     #       so a major-version provider bump -- where this provider's breaking
     #       changes land -- cannot arrive unreviewed. Assumptions: the floor is
     #       set by a concrete capability rather than a preference: a
-    #       zero-minimum Aurora serverless capacity requires provider 5.81.0
-    #       or later, and 6.56 clears that with margin. Trade-offs: every
+    #       zero-minimum Aurora serverless capacity requires provider 5.80.0
+    #       or later, and the auto-pause argument it makes mandatory requires
+    #       5.81.0, so the pair floors at 5.81.0 and 6.56 clears it with margin. Trade-offs: every
     #       module in this package declares this identical constraint, because
     #       a calling root resolves ONE provider version for all the
     #       modules at once and a divergent constraint in any single module

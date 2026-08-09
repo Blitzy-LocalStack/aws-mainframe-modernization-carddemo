@@ -163,16 +163,57 @@ class _Cursor(Protocol):
     """
 
     def execute(self, query: str, params: Sequence[Any] | None = ..., /) -> Any:
-        """Execute one statement, optionally with bound parameters."""
+        """Execute one statement, optionally with bound parameters.
+
+        Parameters
+        ----------
+        query : str
+            The statement to execute.
+        params : Sequence[Any] | None, optional
+            Values bound by the driver, or ``None`` for a statement carrying no parameter.
+
+        Returns
+        -------
+        Any
+            Whatever the driver's own cursor returns, which this module never reads; rows
+            are taken from :meth:`fetchall` instead so the protocol stays satisfiable by a
+            test double that returns nothing useful here.
+        """
 
     def fetchall(self) -> Sequence[Any]:
-        """Return every remaining row of the current result."""
+        """Return every remaining row of the current result.
+
+        Returns
+        -------
+        Sequence[Any]
+            The rows, each indexable by column position. Empty when the statement selected
+            nothing, which is how a missing credential is reported to this module.
+        """
 
     def __enter__(self) -> _Cursor:
-        """Enter the cursor's context manager."""
+        """Enter the cursor's context manager.
+
+        Returns
+        -------
+        _Cursor
+            This cursor, so a ``with`` statement binds the same object the caller opened.
+        """
 
     def __exit__(self, *exc_info: object) -> None:
-        """Leave the cursor's context manager, closing it."""
+        """Leave the cursor's context manager, closing it.
+
+        Parameters
+        ----------
+        *exc_info : object
+            The exception triple Python supplies, ignored here: this protocol declares no
+            suppression behaviour, so an exception raised inside the block propagates.
+
+        Returns
+        -------
+        None
+            Nothing. A falsey return is what lets the exception propagate, and returning
+            ``None`` states that explicitly rather than relying on the default.
+        """
 
 
 class _Connection(Protocol):
@@ -186,7 +227,14 @@ class _Connection(Protocol):
     """
 
     def cursor(self) -> _Cursor:
-        """Return a new cursor over this connection."""
+        """Return a new cursor over this connection.
+
+        Returns
+        -------
+        _Cursor
+            A cursor usable as a context manager, which is the only shape this module
+            drives it in.
+        """
 
 
 def service_role_names() -> tuple[str, ...]:
@@ -379,6 +427,14 @@ def apply_role_credential(
     iterations : int, optional
         PBKDF2 iteration count, defaulting to :data:`SCRAM_DEFAULT_ITERATIONS`.
 
+    Returns
+    -------
+    None
+        Nothing. The effect is the altered role on the server, and the caller's own
+        transaction decides whether it becomes durable; returning a value would invite a
+        caller to treat the result as advisory when the only outcomes are success and the
+        exception below.
+
     Raises
     ------
     RoleCredentialError
@@ -516,6 +572,13 @@ def verify_role_credentials(connection: _Connection) -> None:
     ----------
     connection : _Connection
         Open connection whose current role can read ``pg_authid``.
+
+    Returns
+    -------
+    None
+        Nothing, deliberately. Returning normally is the assertion that every service role
+        holds a credential; the trade-off recorded above is that a value a caller could
+        discard is exactly how the original gap stayed invisible.
 
     Raises
     ------

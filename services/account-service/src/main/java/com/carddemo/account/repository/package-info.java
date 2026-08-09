@@ -10,6 +10,13 @@
  *
  * <h2>The three interfaces</h2>
  *
+ * <p>Assumptions: beside the three interfaces this package declares one record, {@code AccountScreenRow},
+ * and it is not a fourth port. It is the shape ONE query returns -- the account screen's three-table
+ * composition -- and it exists because a single statement is what gives that screen one snapshot. It is
+ * declared here rather than in {@code com.carddemo.account.dto} because it carries ENTITIES and is never
+ * serialised to a caller; a transfer record carrying entities would put persistence types on the published
+ * boundary, which is exactly what the mapper seam exists to prevent.</p>
+ *
  * <ul>
  *   <li>{@code AccountRepository}, over {@code com.carddemo.account.domain.Account}. The entity
  *       derives from {@code ACCOUNT-RECORD}, declared at {@code app/cpy/CVACT01Y.cpy} L4, whose L2
@@ -168,8 +175,14 @@
  *   <li>No dependency on a sibling service. The only intra-reactor dependency permitted is
  *       {@code common-lib}, and no member names another context's package in any form.</li>
  *   <li>No association to navigate. The three entities declare no association and the schema declares
- *       no foreign key between the three tables, so every cross-table reach is a separate scalar-keyed
- *       query and {@code card_xref} is the only path from a card to an account.</li>
+ *       no foreign key between the three tables, so {@code card_xref} is the only path from a card to an
+ *       account. Refactoring Rationale: this bullet also read "so every cross-table reach is a separate
+ *       scalar-keyed query", and that clause is withdrawn. One member now spans all three tables in a
+ *       single statement -- the account screen's composition -- because three statements under this
+ *       datasource's read-committed isolation each take their own snapshot and could compose an account
+ *       from before a concurrent update with a customer from after it. The join is written as an explicit
+ *       predicate rather than as a navigation, so the absence of an association is unchanged: nothing here
+ *       asserts a referential guarantee the database does not enforce.</li>
  *   <li>No accessor generator, no mapping generator, no resilience library, no circuit breaker, no
  *       cache tier, no message broker, no read replica, no second data source, no batch framework, no
  *       outbox, no distributed commit and no compensating-transaction orchestration. On the outbox in

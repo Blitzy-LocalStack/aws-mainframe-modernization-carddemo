@@ -307,7 +307,8 @@
  * said 21. Assumptions: a total no build gate re-derives is worse than no total, because it is read as
  * a closed inventory and drifts the moment any package gains a class. That is what happened: the
  * kernel-wide figures went stale twice more after this paragraph was written, reaching 35 classes in 45
- * compilation units across 10 charters.</p>
+ * compilation units across 10 charters; the measured figures are now 39, 50 and 11, and they are stated
+ * in the sibling charters that carry a labelled sum rather than restated again here.</p>
  *
  * <p>Alternatives Considered: recomputing the canon here by hand. Rejected, because it reproduces the
  * same failure one measurement later. What was adopted instead is the third option this paragraph did

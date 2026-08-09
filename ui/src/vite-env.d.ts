@@ -1,3 +1,13 @@
+/**
+ * @file Ambient Vite client typings for the CardDemo SPA's build-time environment surface.
+ *
+ * Assumptions: the purpose, the mechanism and the two rejected alternatives are recorded in full in
+ * the header block immediately below, which predates this tag, and are deliberately NOT repeated
+ * here. The tag is what the `jsdoc/require-file-overview` rule in `ui/eslint.config.js` reads, and a
+ * second copy of the header's prose would be two descriptions of one file free to drift apart --
+ * which is the defect this file's own header goes to some length to avoid elsewhere.
+ */
+
 // =============================================================================
 // ui/src/vite-env.d.ts
 // -----------------------------------------------------------------------------

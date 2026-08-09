@@ -499,10 +499,17 @@ class InterestRateLookupTest {
      * Confirms the record's documentation states the accrual contract it does not execute.
      *
      * <p>Assumptions: these are documentation expectations and they are asserted because the
-     * contract is the reason this type is preferred to a bare decimal. The rounding divergence, the
+     * contract is the reason this type is preferred to a bare decimal. The rounding mode, the
      * multiply-before-divide order and the sum-of-reduced-values property are each invisible in the
      * reference source -- the ABSENCE of a {@code ROUNDED} phrase is what establishes the first --
      * so a reader who cannot find them here has no other place to find them.</p>
+     *
+     * <p>Refactoring Rationale: this expectation required the strings "rounded half up" and
+     * "C-ROUNDING". It now requires "truncated toward zero" and both mode constants by name, because
+     * the accrual truncates as the reference does and the divergence that identifier named has been
+     * withdrawn. Requiring BOTH constants is the point of the change rather than a side effect: this
+     * type's documentation has to state which of the two modes governs the accrual, and naming only
+     * one would leave a reader unable to tell whether the other exists.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
@@ -511,15 +518,15 @@ class InterestRateLookupTest {
      *     is a failure of the expectation rather than of the type under test
      */
     @Test
-    @DisplayName("documentation records the rounding divergence, the order and the reduction point")
+    @DisplayName("documentation records the rounding mode, the order and the reduction point")
     void arithmeticContractIsDocumentedEvenThoughItIsExecutedElsewhere() throws IOException {
         String source = Files.readString(lookupRecordSourcePath());
 
         assertThat(source)
-                .as("the one rounding contract, and the registered divergence from the reference")
-                .contains("rounded half up")
-                .contains("GENERAL_ROUNDING")
-                .contains("C-ROUNDING");
+                .as("the accrual's own rounding contract, and the general one it is distinct from")
+                .contains("truncated toward zero")
+                .contains("BASELINE_INTEREST_ROUNDING")
+                .contains("GENERAL_ROUNDING");
         assertThat(source)
                 .as("the order of the two operations, and the scale-4 intermediate it protects")
                 .contains("the product is formed before the quotient")
@@ -528,7 +535,7 @@ class InterestRateLookupTest {
                 .as("the accumulation property that rounding does not distribute over")
                 .contains("the sum of per-category reduced values");
         assertThat(source)
-                .as("the divergence vector that makes the rounding choice concrete")
+                .as("the discriminating vector that makes the rounding choice concrete")
                 .contains("2.08")
                 .contains("2.09");
         assertThat(source)

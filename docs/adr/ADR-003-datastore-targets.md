@@ -599,10 +599,17 @@ service properties the configuration has to satisfy.
   whose capacity behaviour silently differs from everything documented here —
   which is why the distinction is recorded rather than left to the provisioning
   code to imply.
-- **The provisioning provider has a version floor of its own.** A provider release
-  at or after **5.81.0** is required to accept a floor of zero. The pinned
-  constraint is `~> 6.56`, which clears it with room; the pin itself belongs to
-  [ADR-009](ADR-009-iac-tool.md) and is not re-decided here.
+- **The provisioning provider has a version floor of its own, and it is set by two
+  changes rather than one.** A provider at or after **5.80.0** is required to accept a
+  capacity floor of zero, and one at or after **5.81.0** is required for the
+  auto-pause-seconds argument that a zero floor then makes mandatory — so the
+  effective floor for this configuration is the later of the two, **5.81.0**. The
+  pinned constraint is `~> 6.56`, which clears it with room; the pin itself belongs to
+  [ADR-009](ADR-009-iac-tool.md) and is not re-decided here. *WHY (Refactoring
+  Rationale):* this bullet credited **5.81.0** with accepting the zero floor. That is
+  off by one release — 5.80.0 introduced it — and since this record owns the capacity
+  model while ADR-009 owns the pin, the misattribution sat in precisely the document a
+  reader would consult to learn which capacity feature needed which release.
 - **Resuming from a paused state takes on the order of fifteen seconds.** This is
   a cited service behaviour, not an estimate of any kind about this project's
   work.

@@ -9,6 +9,7 @@ import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.oas.models.servers.Server;
+import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -265,6 +266,26 @@ public class OpenApiConfig {
      */
     private static final String REQUIRED_SCOPE_EXTENSION_NAME = "x-carddemo-required-scope";
 
+    /**
+     * The vendor-extension member on the security scheme that names the scope the two customer-record
+     * operations require instead of the default one.
+     *
+     * <p>Refactoring Rationale: a SECOND member exists because there are now two scopes and the member
+     * above can name only one. It named the only scope there was, and that one scope governed the
+     * customer scan and the keyed customer record read as well as the decision-path reads -- so a document
+     * reader was told, correctly for the code as it then stood, that a credential admitting a
+     * cross-reference lookup also admitted enumerating the customer master. Publishing the second scope
+     * beside the first is what lets a reader see that the two groups are separated without reading the
+     * filter chain.</p>
+     *
+     * <p>Alternatives Considered: replacing the member above with a LIST of both scopes. Rejected because
+     * a list says which scopes exist and not which operation needs which, so a caller would still have to
+     * guess; the pair of named members says both, and each operation in the committed contract that
+     * departs from the default declares this same member on itself.</p>
+     */
+    private static final String CUSTOMER_MASTER_SCOPE_EXTENSION_NAME =
+            "x-carddemo-customer-master-scope";
+
     // Assumptions: these two are the specification's lower-case transport token and an
     //   informational token format. Neither validates anything at run time, which is the whole
     //   point of decision D4 recorded on the scheme method below.
@@ -280,9 +301,17 @@ public class OpenApiConfig {
             key both hold. It is not an identity-provider token and it is not interchangeable with \
             one: the identity provider's tokens are accepted by this context's human filter chain, \
             and a token of this scheme is accepted only on the internal read paths. The token names \
-            this service as its audience and carries exactly one scope, so a token minted for \
-            another callee or another purpose is refused rather than accepted for the wrong path. \
-            Presenting nothing usable yields 401.
+            this service as its audience, names its own service as the subject from a closed set this \
+            verifier admits, and carries exactly one scope -- so a token minted for another callee, \
+            by an unnamed workload, or for the other group of routes is refused rather than accepted \
+            for the wrong path. Presenting nothing usable yields 401.
+
+            Two scopes exist and each governs one group of routes. The five decision-path reads \
+            require the scope named by x-carddemo-required-scope on this scheme. The two operations \
+            that disclose a whole customer record -- the ascending scan and the keyed record read -- \
+            require the scope named by x-carddemo-customer-master-scope instead, and each declares \
+            that requirement on itself in the contract of record. A token carrying one scope does not \
+            satisfy the other group.
 
             The rationale for choosing a minted token over a client-credentials grant, over mutual \
             TLS and over a static shared header is recorded once on this scheme in the contract of \
@@ -427,15 +456,22 @@ public class OpenApiConfig {
     }
 
     /**
-     * Declares the single reusable security scheme every published operation is documented as
+     * Declares the single reusable security scheme every published internal operation is documented as
      * requiring.
      *
      * <p>The scheme is descriptive only. It tells a caller what to present and what to expect when
      * it presents nothing usable; it enforces none of that itself.</p>
      *
+     * <p>Assumptions: ONE scheme carries TWO scopes rather than two schemes carrying one each. The
+     * credential is the same in every respect a scheme describes -- the same transport, the same token
+     * format, the same signing key, the same audience -- and only the scope claim inside it differs, so
+     * two schemes would duplicate every one of those members in order to vary a value the specification
+     * has no field for. The differing value is published as the two named extensions instead, and the
+     * operations that depart from the default declare theirs on themselves.</p>
+     *
      * @return the {@link SecurityScheme} of HTTP type declaring the bearer transport, its
-     *     informational token format and the description of what a caller must present on an
-     *     internal read path; never {@code null}
+     *     informational token format, both published scopes and the description of what a caller must
+     *     present on an internal read path; never {@code null}
      */
     private static SecurityScheme internalServiceTokenScheme() {
         // WHY : Assumptions: decision D4 -- this object is METADATA and not policy, and the
@@ -443,8 +479,9 @@ public class OpenApiConfig {
         //       a security defect that could not be here. Nothing on it is consulted at run time.
         //       Enforcement for the paths this document publishes belongs entirely to
         //       InternalApiSecurityConfig in this package, which verifies a presented token against
-        //       the signing key supplied by the carddemo.internal-identity.signing-key property and
-        //       requires the authority it composes from the same scope constant named above.
+        //       the signing key supplied by the carddemo.internal-identity.signing-key property, and
+        //       requires per route group the authority it composes from whichever of the two scope
+        //       constants named above governs that group.
         //       Everything else this context serves is governed by SecurityConfig, which owns the
         //       identity-provider filter chain, the conversion of that provider's group claim into
         //       authorities through com.carddemo.common.security.JwtRoleConverter, and the ordering
@@ -464,6 +501,22 @@ public class OpenApiConfig {
         //       vocabulary rather than an OAuth scope a token endpoint would issue. The value is
         //       read from the same constant InternalApiSecurityConfig composes its required
         //       authority from, so the two cannot disagree.
+        // WHY : Refactoring Rationale: the extension now names BOTH internal scopes rather than one.
+        //       A single value was accurate while one authority governed every internal address, and
+        //       it stopped being accurate when the two whole-customer-record reads moved onto
+        //       SCOPE_CUSTOMER_MASTER_READ. Publishing the one value would now tell a reader that a
+        //       token carrying the decision scope reaches every internal operation this document
+        //       declares, which is exactly the escalation the split removed -- so the wrong
+        //       documentation here would describe a system less safe than the one that ships, and a
+        //       caller acting on it would mint a token its request is refused with. Both values are
+        //       read from the same constants InternalApiSecurityConfig composes its two required
+        //       authorities from, so neither can disagree with what is enforced.
+        // WHY : Trade-offs: the extension carries the two scopes as a list on ONE scheme rather than
+        //       declaring two schemes. Both authorities are verified by the same chain, the same
+        //       decoder and the same issuer and audience validators -- the credential is identical
+        //       and only the claim value differs -- so two schemes would describe one mechanism
+        //       twice. Which of the two a given operation requires is stated per operation in the
+        //       committed contract document, which is where an operation-specific fact belongs.
         // Assumptions: the extension is added in a separate statement rather than chained, because
         //   addExtension on this type returns void where every other setter returns the scheme, so
         //   chaining it does not compile.
@@ -472,8 +525,14 @@ public class OpenApiConfig {
                 .scheme(BEARER_HTTP_SCHEME)
                 .bearerFormat(BEARER_TOKEN_FORMAT)
                 .description(INTERNAL_TOKEN_SCHEME_DESCRIPTION);
+        // Refactoring Rationale: the single account-context read scope this extension named was split into
+        //   one scope per operation family, so all three are published rather than the one. Publishing the
+        //   withdrawn name would tell a caller to mint a scope no verifier admits.
         scheme.addExtension(REQUIRED_SCOPE_EXTENSION_NAME,
-                InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ);
+                List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                        InternalServiceToken.SCOPE_ACCOUNT_READ,
+                        InternalServiceToken.SCOPE_CUSTOMER_READ,
+                        InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));
         return scheme;
     }
 }

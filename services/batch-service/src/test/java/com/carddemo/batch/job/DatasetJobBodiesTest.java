@@ -158,10 +158,9 @@ class DatasetJobBodiesTest {
     @Test
     @DisplayName("the export job writes accounts, cross-references and transactions")
     void theExportJobWritesTheThreeOwnedRecordTypes() {
-        when(accounts.findAllByOrderByAccountIdAsc())
-                .thenReturn(Stream.of(account(1L)), Stream.of(account(1L)));
-        when(crossReferences.findFirstByAccountIdOrderByCardNumAsc(1L))
-                .thenReturn(Optional.of(new CardXref(CARD, 555L, 1L)));
+        when(accounts.findAllByOrderByAccountIdAsc()).thenReturn(Stream.of(account(1L)));
+        when(crossReferences.findAllByOrderByCardNumAsc())
+                .thenReturn(Stream.of(new CardXref(CARD, 555L, 1L)));
         when(transactions.findAllByOrderByTransactionIdAsc())
                 .thenReturn(Stream.of(transaction("0000000000000001")));
 
@@ -173,15 +172,75 @@ class DatasetJobBodiesTest {
     }
 
     /**
-     * An account with no cross-reference contributes no cross-reference record.
+     * A MULTI-CARD account contributes one cross-reference record per card, not one per account.
+     *
+     * <p>Refactoring Rationale: this case is the one the export body previously failed. It walked the
+     * account master a second time and took the lowest-numbered card of each account, so an account
+     * holding three cards exported ONE cross-reference record and the other two were absent -- with
+     * nothing reporting it, because the dataset stayed well formed and every record in it stayed
+     * correct. {@code app/cbl/CBEXPORT.cbl:47-51} opens the cross-reference
+     * {@code ACCESS MODE IS SEQUENTIAL} and {@code :376-389} reads it until end of file, so the
+     * reference writes one record per CARD, and an account legitimately holds many: the by-account
+     * index is {@code NONUNIQUEKEY} at {@code app/jcl/XREFFILE.jcl:74-75}.</p>
+     *
+     * <p>Assumptions: the byte length is asserted rather than the record contents, because the count
+     * is what was lost. Three cards under ONE account give four records -- one account plus three
+     * cross-references -- where the previous shape gave two, so the two shapes are distinguishable by
+     * length alone and the assertion cannot pass under a regression.</p>
      */
     @Test
-    @DisplayName("an account with no card contributes no cross-reference record")
-    void anAccountWithNoCardContributesNoCrossReferenceRecord() {
-        when(accounts.findAllByOrderByAccountIdAsc())
-                .thenReturn(Stream.of(account(1L)), Stream.of(account(1L)));
-        when(crossReferences.findFirstByAccountIdOrderByCardNumAsc(1L))
-                .thenReturn(Optional.empty());
+    @DisplayName("export one cross-reference record per card of a multi-card account")
+    void aMultiCardAccountContributesOneRecordPerCard() {
+        when(accounts.findAllByOrderByAccountIdAsc()).thenReturn(Stream.of(account(1L)));
+        when(crossReferences.findAllByOrderByCardNumAsc()).thenReturn(Stream.of(
+                new CardXref("4111111111111111", 555L, 1L),
+                new CardXref("4111111111111112", 555L, 1L),
+                new CardXref("4111111111111113", 555L, 1L)));
+        when(transactions.findAllByOrderByTransactionIdAsc()).thenReturn(Stream.empty());
+
+        assertThat(ExportJob.writeExport(BUSINESS_DATE, accounts, crossReferences, transactions,
+                objectStore, BUCKET, CLOCK)).isEqualTo(BatchReturnCode.CLEAN);
+
+        int reclen = ExportRecordMapper.recordLayout().reclen();
+        ArgumentCaptor<RequestBody> body = ArgumentCaptor.forClass(RequestBody.class);
+        verify(objectStore).putObject(any(PutObjectRequest.class), body.capture());
+        assertThat(body.getValue().optionalContentLength())
+                .as("one account record plus THREE cross-reference records")
+                .contains(4L * reclen);
+    }
+
+    /**
+     * The cross-reference walk is a single ordered pass, not one query per account.
+     *
+     * <p>Assumptions: this asserts the SHAPE of the access rather than the output, because the two
+     * shapes can agree on the output for single-card accounts and disagree on every multi-card one.
+     * The account master is walked exactly once -- for the account records -- and the by-account
+     * finder, which is bounded to a single row and belongs to the interest flow, is never called.</p>
+     */
+    @Test
+    @DisplayName("walk the cross-reference table once and never per account")
+    void theCrossReferenceWalkIsOneOrderedPass() {
+        when(accounts.findAllByOrderByAccountIdAsc()).thenReturn(Stream.of(account(1L), account(2L)));
+        when(crossReferences.findAllByOrderByCardNumAsc())
+                .thenReturn(Stream.of(new CardXref(CARD, 555L, 1L)));
+        when(transactions.findAllByOrderByTransactionIdAsc()).thenReturn(Stream.empty());
+
+        ExportJob.writeExport(BUSINESS_DATE, accounts, crossReferences, transactions, objectStore,
+                BUCKET, CLOCK);
+
+        verify(crossReferences, org.mockito.Mockito.times(1)).findAllByOrderByCardNumAsc();
+        verify(crossReferences, never()).findFirstByAccountIdOrderByCardNumAsc(any());
+        verify(accounts, org.mockito.Mockito.times(1)).findAllByOrderByAccountIdAsc();
+    }
+
+    /**
+     * An empty cross-reference table contributes no cross-reference record.
+     */
+    @Test
+    @DisplayName("an empty cross-reference table contributes no cross-reference record")
+    void anEmptyCrossReferenceTableContributesNoRecord() {
+        when(accounts.findAllByOrderByAccountIdAsc()).thenReturn(Stream.of(account(1L)));
+        when(crossReferences.findAllByOrderByCardNumAsc()).thenReturn(Stream.empty());
         when(transactions.findAllByOrderByTransactionIdAsc()).thenReturn(Stream.empty());
 
         assertThat(ExportJob.writeExport(BUSINESS_DATE, accounts, crossReferences, transactions,
@@ -204,10 +263,9 @@ class DatasetJobBodiesTest {
     @Test
     @DisplayName("the import job separates the dataset into one output per record type")
     void theImportJobSeparatesByRecordType() throws java.io.IOException {
-        when(accounts.findAllByOrderByAccountIdAsc())
-                .thenReturn(Stream.of(account(1L)), Stream.of(account(1L)));
-        when(crossReferences.findFirstByAccountIdOrderByCardNumAsc(1L))
-                .thenReturn(Optional.of(new CardXref(CARD, 555L, 1L)));
+        when(accounts.findAllByOrderByAccountIdAsc()).thenReturn(Stream.of(account(1L)));
+        when(crossReferences.findAllByOrderByCardNumAsc())
+                .thenReturn(Stream.of(new CardXref(CARD, 555L, 1L)));
         when(transactions.findAllByOrderByTransactionIdAsc())
                 .thenReturn(Stream.of(transaction("0000000000000001")));
 

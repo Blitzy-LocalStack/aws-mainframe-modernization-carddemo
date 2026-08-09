@@ -154,7 +154,6 @@ public class PostingValidationService {
      * @throws NullPointerException if either argument is {@code null}
      */
     public PostingValidationService(CardXrefRepository crossReferences, AccountRepository accounts) {
-        // WHAT: both collaborators arrive through the constructor and are held final.
         // WHY : Assumptions: the migration plan's design-pattern section makes constructor injection
         //       the rule for this tree, and it is what lets every case below be driven without a
         //       database. Field or setter injection would additionally admit a half-built instance,
@@ -165,16 +164,19 @@ public class PostingValidationService {
     }
 
     /**
-     * Validates one daily transaction, resolving the cross-reference and the account itself.
+     * Validates one daily transaction, resolving the cross-reference and the account itself, and
+     * hands back both resolved records alongside the outcome.
      *
      * <p>This is the transcription of {@code 1500-VALIDATE-TRAN} at
      * {@code app/cbl/CBTRN02C.cbl:370}, including the guard at {@code :372} that stops the account
-     * lookup running once the cross-reference lookup has failed.</p>
+     * lookup running once the cross-reference lookup has failed. It is the ONLY production entry
+     * point of this class: the two reads, the guard between them and the four conditions are reached
+     * through here and nowhere else.</p>
      *
      * @param transaction the daily transaction being validated, of type {@link DailyTransaction};
      *     must not be {@code null}
-     * @return the one outcome the reference reports for this transaction, as a
-     *     {@link PostingValidationResult} carrying at most one reason, never {@code null}
+     * @return the outcome together with whatever the two reads resolved, as a {@link PostingDecision}
+     *     whose {@link PostingDecision#outcome()} carries at most one reason, never {@code null}
      * @throws NullPointerException if {@code transaction} is {@code null}
      * @throws ArithmeticException if the projected balance needs more integer digits than
      *     {@code WS-TEMP-BAL} declares, propagated unchanged from
@@ -182,25 +184,22 @@ public class PostingValidationService {
      * @throws org.springframework.dao.DataAccessException if either read cannot be carried out,
      *     propagated unchanged from the repository
      */
-    public PostingValidationResult validate(DailyTransaction transaction) {
+    public PostingDecision validate(DailyTransaction transaction) {
         Objects.requireNonNull(transaction, "transaction must not be null");
 
-        // WHAT: this entry point owns both reads, where an earlier revision of this class owned
-        //       neither.
-        // WHY : Refactoring Rationale: that revision accepted the cross-reference and the account
-        //       already resolved and held no repository at all, which left the guard at :372 outside
-        //       the class that transcribes :370. Two things followed. The skipped read could not be
-        //       demonstrated here, because a caller had necessarily performed it before calling, so
-        //       the distinction between reason 100 EXCLUDING reason 101 and merely outranking it was
-        //       untestable at this level. And the reads themselves were unverifiable against
-        //       app/jcl/XREFFILE.jcl, so nothing prevented a caller resolving the card through the
-        //       alternate index rather than the base cluster. Owning both reads restores the guard
-        //       to the paragraph it belongs to; the overload below keeps the caller that needs the
-        //       entities from paying for a second read.
+        // WHY : Refactoring Rationale: an earlier revision of this class owned neither read. It
+        //       accepted the cross-reference and the account already resolved and held no repository
+        //       at all, which left the guard at :372 outside the class that transcribes :370. Two
+        //       things followed. The skipped read could not be demonstrated here, because a caller
+        //       had necessarily performed it before calling, so the distinction between reason 100
+        //       EXCLUDING reason 101 and merely outranking it was untestable at this level. And the
+        //       reads themselves were unverifiable against app/jcl/XREFFILE.jcl, so nothing prevented
+        //       a caller resolving the card through the alternate index rather than the base cluster.
+        //       Owning both reads restores the guard to the paragraph it belongs to; the overload
+        //       below keeps the caller that needs the entities from paying for a second read.
         Optional<CardXref> crossReference = lookupCrossReference(transaction);
 
-        // WHAT: the :372 guard -- the account read is reached only while no reason has been assigned.
-        // WHY : Assumptions: flatMap expresses that guard exactly, because it does not invoke its
+        // WHY : Assumptions: flatMap expresses the :372 guard exactly, because it does not invoke its
         //       function when the optional is empty, so an unresolved card leaves the account path
         //       genuinely unread rather than read and discarded. The reference is explicit that the
         //       lookup does not happen: :372 tests the reason and :373 performs the paragraph only
@@ -213,16 +212,19 @@ public class PostingValidationService {
         //       reason would agree while the reads no longer matched the reference.
         Optional<Account> account = crossReference.flatMap(this::lookupAccount);
 
-        return validate(transaction, crossReference, account);
+        return new PostingDecision(decide(transaction, crossReference, account), crossReference,
+                account);
     }
 
     /**
-     * Validates one daily transaction against a cross-reference and account already resolved.
+     * Decides the outcome for one daily transaction against a cross-reference and account already
+     * resolved, applying the four conditions and nothing else.
      *
-     * <p>This overload exists for the caller that must hold both entities anyway. The posting job
-     * writes the transaction, the category balance and the account inside one unit of work, at
-     * {@code app/cbl/CBTRN02C.cbl:440-442}, so it reads both records before validating and needs
-     * them afterwards.</p>
+     * <p>This is the decision half of {@code 1500-VALIDATE-TRAN}, separated from the reads so that
+     * each condition can be driven directly. It performs NO read and it is deliberately not public:
+     * the guard at {@code :372} is a property of the reads, so a caller reaching the conditions
+     * without them would be able to present a combination the reference cannot produce -- an absent
+     * cross-reference beside a present account, for instance.</p>
      *
      * @param transaction the daily transaction being validated, of type {@link DailyTransaction};
      *     must not be {@code null}
@@ -237,15 +239,15 @@ public class PostingValidationService {
      *     {@code WS-TEMP-BAL} declares, propagated unchanged from
      *     {@link #computeProjectedBalance(Account, DailyTransaction)}
      */
-    public PostingValidationResult validate(DailyTransaction transaction,
+    PostingValidationResult decide(DailyTransaction transaction,
             Optional<CardXref> crossReference, Optional<Account> account) {
 
         Objects.requireNonNull(transaction, "transaction must not be null");
         Objects.requireNonNull(crossReference, "crossReference must not be null");
         Objects.requireNonNull(account, "account must not be null");
 
-        // WHAT: this overload is kept alongside the resolving one rather than replacing it.
-        // WHY : Trade-offs: two entry points cost a slightly wider surface and buy one read of each
+        // WHY : Trade-offs: this overload is kept alongside the resolving one rather than replacing
+        //       it. Two entry points cost a slightly wider surface and buy one read of each
         //       record per feed row. The posting job needs the cross-reference to key the category
         //       balance and the account to carry the balance update, which the reference performs at
         //       :440 and :441 in the same unit of work as the write at :442; had it to call the
@@ -255,8 +257,8 @@ public class PostingValidationService {
         boolean accountMissing = account.isEmpty();
 
         if (crossReferenceMissing || accountMissing) {
-            // WHAT: neither boundary is reported, and no projection accompanies these outcomes.
-            // WHY : Assumptions: both boundary tests sit inside the account read's NOT INVALID KEY
+            // WHY : Assumptions: neither boundary is reported here, and no projection accompanies
+            //       these outcomes. Both boundary tests sit inside the account read's NOT INVALID KEY
             //       branch at :400, so neither is evaluated without an account record, and the
             //       projection at :403-405 is formed from fields of that record. Reporting a
             //       boundary finding here would require inventing a limit and a date, and passing a
@@ -270,17 +272,15 @@ public class PostingValidationService {
         Account resolved = account.get();
         Money projectedBalance = computeProjectedBalance(resolved, transaction);
 
-        // WHAT: both boundary conditions are evaluated, and neither suppresses the other.
-        // WHY : Assumptions: :413 closes the credit-limit block and :414 opens the expiration block
-        //       with no IF WS-VALIDATION-FAIL-REASON = 0 between them, unlike the guard at :372, so
+        // WHY : Assumptions: both boundary conditions are evaluated and neither suppresses the other.
+        //       :413 closes the credit-limit block and :414 opens the expiration block with no
+        //       IF WS-VALIDATION-FAIL-REASON = 0 between them, unlike the guard at :372, so
         //       the reference evaluates the expiration test even after assigning the credit-limit
         //       reason. Guarding the second evaluation on the first finding would drop the very
         //       overwrite at :417 that decides the outcome for a transaction failing both.
         boolean overCreditLimit = isOverCreditLimit(projectedBalance, resolved);
         boolean pastAccountExpiration = isReceivedAfterExpiration(resolved, transaction);
 
-        // WHAT: the two findings are handed over as findings, and the surviving reason is chosen
-        //       by the result type.
         // WHY : Alternatives Considered: an if/else-if over the two conditions in the order the
         //       source reads them, which is what a direct transcription produces. Rejected because
         //       the reference's two assignments are not alternatives: with no guard between :413 and
@@ -316,15 +316,15 @@ public class PostingValidationService {
 
         String cardNumber = transaction.getCardNum();
 
-        // WHAT: a feed record carrying no card number is reported as an unresolved card, not as an
-        //       error.
-        // WHY : Assumptions: the reference cannot distinguish the two. :382 moves the field into the
-        //       key and :383 reads on it, so a blank card number is read as a blank key, finds no
-        //       row and takes the INVALID KEY branch at :384 like any other miss. The column is
-        //       nullable in the target -- ledger.daily_transactions.card_num -- and the feed entity
-        //       stores what it was given, whose own charter states that validation belongs to this
-        //       service and that raising there would replace a counted reject carrying a reason code
-        //       with an exception carrying none. Reporting absence keeps that reject counted.
+        // WHY : Assumptions: a feed record carrying no card number is reported as an unresolved card
+        //       rather than as an error, because the reference cannot distinguish the two. :382 moves
+        //       the field into the key and :383 reads on it, so a blank card number is read as a
+        //       blank key, finds no row and takes the INVALID KEY branch at :384 like any other
+        //       miss. The column is nullable in the target -- ledger.daily_transactions.card_num --
+        //       and the feed entity stores what it was given, whose own charter states that
+        //       validation belongs to this service and that raising there would replace a counted
+        //       reject carrying a reason code with an exception carrying none. Reporting absence
+        //       keeps that reject counted.
         // WHY : Trade-offs: this also keeps the repository's stated contract intact, which requires a
         //       non-null card number; passing the null through to satisfy a single code path would
         //       trade a business outcome for a failed step.
@@ -332,10 +332,10 @@ public class PostingValidationService {
             return Optional.empty();
         }
 
-        // WHAT: the read goes through the by-card finder and never the by-account one.
-        // WHY : Assumptions: the card number is the base cluster's whole key, all sixteen bytes from
+        // WHY : Assumptions: the read goes through the by-card finder and never the by-account one,
+        //       because the card number is the base cluster's whole key -- all sixteen bytes from
         //       byte zero per app/jcl/XREFFILE.jcl, matching the head of the fifty-byte layout at
-        //       app/cpy/CVACT03Y.cpy:5, so this lookup is single valued. The sibling by-account
+        //       app/cpy/CVACT03Y.cpy:5 -- so this lookup is single valued. The sibling by-account
         //       finder reads the NONUNIQUEKEY alternate index defined over eleven bytes at offset 25
         //       and belongs to the interest flow; using it here would answer a different question
         //       and could not be single valued.
@@ -364,9 +364,8 @@ public class PostingValidationService {
 
         Long accountId = crossReference.getAccountId();
 
-        // WHAT: a cross-reference row naming no account is reported as an account that was not
-        //       found.
-        // WHY : Assumptions: this matches what the reference does with the same data. :394 moves
+        // WHY : Assumptions: a cross-reference row naming no account is reported as an account that
+        //       was not found, which matches what the reference does with the same data. :394 moves
         //       XREF-ACCT-ID into the key and :395 reads on it, so an absent identifier is read as a
         //       blank key and takes the INVALID KEY branch at :396, which is reason 101. Reporting
         //       absence therefore reproduces the reject the reference counts, where handing the
@@ -396,8 +395,8 @@ public class PostingValidationService {
         Objects.requireNonNull(account, "account must not be null");
         Objects.requireNonNull(transaction, "transaction must not be null");
 
-        // WHAT: the two operands are the CYCLE accumulators, and the debit is SUBTRACTED.
-        // WHY : Assumptions: :403-405 reads COMPUTE WS-TEMP-BAL = ACCT-CURR-CYC-CREDIT -
+        // WHY : Assumptions: the two operands are the CYCLE accumulators and the debit is SUBTRACTED,
+        //       because :403-405 reads COMPUTE WS-TEMP-BAL = ACCT-CURR-CYC-CREDIT -
         //       ACCT-CURR-CYC-DEBIT + DALYTRAN-AMT. The subtraction is transcribed as written even
         //       though the debit accumulator holds signed values rather than magnitudes -- :551 adds
         //       a negative amount into it -- because the statement is the contract and reversing the
@@ -414,11 +413,11 @@ public class PostingValidationService {
                 .subtract(account.getCurrCycDebit())
                 .add(transaction.getAmount());
 
-        // WHAT: the expression is evaluated at full precision and reduced to cents exactly once.
-        // WHY : Assumptions: a COBOL COMPUTE evaluates its whole expression before storing the
-        //       result into the receiving field, so reducing after the third operand is what
-        //       matches :403-405; reducing at each step would impose the target's width on two
-        //       intermediates the reference never stores. Every operand is already at two decimal
+        // WHY : Assumptions: the expression is evaluated at full precision and reduced to cents
+        //       exactly once, because a COBOL COMPUTE evaluates its whole expression before
+        //       storing the result into the receiving field, so reducing after the third operand
+        //       is what matches :403-405; reducing at each step would impose the target's width on
+        //       two intermediates the reference never stores. Every operand is already at two decimal
         //       places, so the reduction is exact rather than a rounding.
         // WHY : Trade-offs: the picture-bounded factory is chosen over the general one so the bound
         //       is the nine integer digits WS-TEMP-BAL declares at :187 rather than the ten of the
@@ -446,10 +445,10 @@ public class PostingValidationService {
         Objects.requireNonNull(projectedBalance, "projectedBalance must not be null");
         Objects.requireNonNull(account, "account must not be null");
 
-        // WHAT: the finding is taken from the shared money type's strict breach test.
-        // WHY : Alternatives Considered: writing the comparison here with an inclusive operator,
-        //       which reads correctly against the >= at :407 and is the wrong transcription of it.
-        //       That line is a PASS guard, so its reject arm at :409-413 is reached only on a
+        // WHY : Alternatives Considered: writing the comparison here with an inclusive operator
+        //       rather than taking the finding from the shared money type's strict breach test. The
+        //       inclusive form reads correctly against the >= at :407 and is the wrong transcription
+        //       of it. That line is a PASS guard, so its reject arm at :409-413 is reached only on a
         //       strictly greater projection; an inclusive reject test would refuse the
         //       exactly-at-limit transaction the reference posts, and
         //       tests/golden/posting/boundary_exact_limit/dalyrejs.expected is empty with a return
@@ -481,15 +480,14 @@ public class PostingValidationService {
         LocalDate expirationDate = account.getExpirationDate();
         LocalDateTime originatingStamp = transaction.getOrigTs();
 
-        // WHAT: an absent originating stamp is reported as within the expiration, and an absent
-        //       expiration date as beyond it.
-        // WHY : Assumptions: :414 compares two character fields, so the reference's answer for a
-        //       blank operand follows from the collating sequence rather than from a decision it
-        //       makes. A blank sorts below a digit in both the EBCDIC the datasets carry and the
-        //       ASCII the harness compiles for, so a real expiration date against a blank stamp
-        //       satisfies the inclusive guard and posts, while a blank expiration date against a
-        //       real stamp fails it and is reported. Testing the stamp first also gives two blanks
-        //       the equal comparison the reference makes of them.
+        // WHY : Assumptions: an absent originating stamp is reported as within the expiration and an
+        //       absent expiration date as beyond it. :414 compares two character fields, so the
+        //       reference's answer for a blank operand follows from the collating sequence rather
+        //       than from a decision it makes. A blank sorts below a digit in both the EBCDIC the
+        //       datasets carry and the ASCII the harness compiles for, so a real expiration date
+        //       against a blank stamp satisfies the inclusive guard and posts, while a blank
+        //       expiration date against a real stamp fails it and is reported. Testing the stamp
+        //       first also gives two blanks the equal comparison the reference makes of them.
         // WHY : Trade-offs: the ordering of these two tests is the whole of their behaviour, so it
         //       is stated rather than left to fall out of the code. The originating stamp is
         //       nullable in the target while the expiration date is declared NOT NULL, so only the
@@ -503,8 +501,8 @@ public class PostingValidationService {
             return true;
         }
 
-        // WHAT: the comparison is made on calendar dates rather than on ten characters.
-        // WHY : Assumptions: the equivalence is licensed by the record mapper that produces these
+        // WHY : Assumptions: the comparison is made on calendar dates rather than on ten characters,
+        //       and the equivalence is licensed by the record mapper that produces these
         //       values, com.carddemo.batch.mapper.AccountRecordMapper, which records that the stored
         //       ten-character form is already ISO ordered so a lexical comparison of it is
         //       equivalent to a chronological one, and names :414 as the line relying on that. The
@@ -516,5 +514,64 @@ public class PostingValidationService {
         //       tests/golden/posting/boundary_expiry_equal/dalyrejs.expected is empty with a return
         //       code of zero, and only one dated later is reported.
         return expirationDate.isBefore(originatingStamp.toLocalDate());
+    }
+
+    /**
+     * The outcome of validating one daily transaction together with whatever its two reads resolved.
+     *
+     * <p>Purpose: the posting path needs three things from validation and not one. It needs the
+     * decision, to choose between posting and rejecting; it needs the cross-reference, because
+     * {@code app/cbl/CBTRN02C.cbl:469} keys the category balance on {@code XREF-ACCT-ID} and the feed
+     * record carries no account at all; and it needs the account, because {@code :441} rewrites it in
+     * the same unit of work. Carrying all three back from one call is what lets the reads, the guard
+     * between them and the decision live in one place while each record is still read once.</p>
+     *
+     * <p>Assumptions: both records are present on every accepted outcome and this type does not
+     * enforce that, deliberately. The invariant is a consequence of the guard rather than of the
+     * shape: an outcome can only be accepted after the account read succeeded, which can only happen
+     * after the cross-reference read succeeded. Encoding it as two non-null components would make the
+     * type unable to express the three REJECTED shapes, which are exactly the ones a reject row is
+     * written from.</p>
+     *
+     * <p>Alternatives Considered: returning the two records as nullable components rather than as
+     * optionals, which reads more directly at the accepted call site. Rejected because a null
+     * component would put the burden of remembering which outcomes carry a record onto every reader,
+     * and because the two reads already answer with optionals -- converting them to nulls here and
+     * back to a presence test at the caller would be two conversions that can each be got wrong.</p>
+     *
+     * <p>Alternatives Considered: a top-level type in {@code com.carddemo.batch.dto} beside
+     * {@link PostingValidationResult}. Rejected because this record is not a boundary shape: it never
+     * crosses a service boundary, is never serialised, and has exactly one producer and one consumer.
+     * Nesting it inside its producer is the same choice {@code BatchConfig.LedgerGuardedStep} and
+     * {@code ExportRecordMapper.ExportRecord} already make in this module, and it keeps the dto
+     * package to the types that genuinely describe a contract.</p>
+     *
+     * @param outcome the one outcome the reference reports for this transaction, carrying at most one
+     *     reason; never {@code null}
+     * @param crossReference the row the card number resolved to, or an EMPTY optional when it
+     *     resolved to nothing; never {@code null}
+     * @param account the account the cross-reference named, or an EMPTY optional when the
+     *     cross-reference was absent or that read found nothing; never {@code null}
+     */
+    public record PostingDecision(PostingValidationResult outcome,
+            Optional<CardXref> crossReference, Optional<Account> account) {
+
+        /**
+         * Refuses a decision assembled with any component absent.
+         *
+         * @param outcome the one outcome the reference reports for this transaction
+         * @param crossReference the row the card number resolved to, empty when it resolved to
+         *     nothing
+         * @param account the account the cross-reference named, empty when it was not read or found
+         *     nothing
+         * @throws NullPointerException if any component is {@code null}, which is a wiring defect in
+         *     the producer rather than a condition a consumer should tolerate -- an absent optional
+         *     is how this type says "not resolved", so a null component says nothing at all
+         */
+        public PostingDecision {
+            Objects.requireNonNull(outcome, "outcome must not be null");
+            Objects.requireNonNull(crossReference, "crossReference must not be null");
+            Objects.requireNonNull(account, "account must not be null");
+        }
     }
 }

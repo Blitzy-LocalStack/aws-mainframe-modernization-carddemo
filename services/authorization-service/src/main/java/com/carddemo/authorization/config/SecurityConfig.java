@@ -259,42 +259,69 @@ public class SecurityConfig {
     /**
      * The authorization decision the fraud rule installs, exposed for the same reason as the read one.
      *
-     * <p>Assumptions: this returns exactly what {@code hasAuthority(...)} would have built, that builder
+     * <p>Refactoring Rationale: this manager admitted an ADMINISTRATOR AND NOBODY ELSE and it now admits
+     * either business group, which is the authority the baseline grants. The evidence is set out on
+     * {@link #FRAUD_PATH_PATTERN} and it was never in doubt: the reference reaches this write from the
+     * MAIN menu under the access byte {@code 'U'}, and the administrative table names the program nowhere.
+     * The narrowing was therefore a behavioural change against the oracle, and the specification sanctions
+     * exactly five security deviations from it -- the password not carried forward, account-number masking,
+     * card-verification-value suppression, identifier encryption and network isolation -- of which this is
+     * not one. A migration may not add an authorization check the reference does not perform and call it
+     * parity, however defensible the check would be on its own terms, because the group that loses the
+     * capability is the group the reference gives it to and the loss is silent to everyone except the user
+     * who is refused.
+     *
+     * <p>Trade-offs: what that costs is stated plainly rather than argued away, because it is the reason
+     * the narrowing was attractive. A durable, state-changing write is reachable by every signed-in holder
+     * of a {@link JwtRoleConverter#USER_AUTHORITY} token, and the confirmation step the migrated screen
+     * shows beforehand is a client-side affordance with no server-side rule behind it -- so it stops an
+     * accidental click and nothing else. That is the reference system's own posture: its three transaction
+     * definitions carry {@code RESSEC(NO) CMDSEC(NO)}, so no per-resource or per-command check ran there
+     * either. A deployment that wants the narrower rule can have it by changing this one method, and doing
+     * so is a deliberate behavioural divergence that has to be registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md} and published in the contract before it
+     * ships -- which is precisely what was missing when the rule was narrowed here.
+     *
+     * <p>Assumptions: this returns exactly what {@code hasAnyAuthority(...)} would have built, that builder
      * method being a one-line wrapper around
-     * {@link AuthorityAuthorizationManager#hasAuthority(String)}, so naming the manager changes the rule
-     * not at all and its testability entirely. It is the administrative half of this context's matrix and
-     * the only place the two halves differ, which is precisely why it is the half worth being able to
-     * assert without a servlet container: the evidence for narrowing it is set out on
-     * {@link #FRAUD_PATH_PATTERN}, and evidence that cannot be checked by a test is evidence that decays.
-     * The authority predicate is used and the role predicate is not, because
-     * {@link JwtRoleConverter} adds no prefix -- a role predicate would look for a prefixed authority
-     * that is never minted, match nothing, and refuse every administrative request at run time rather
-     * than failing where the mistake would be seen.</p>
+     * {@link AuthorityAuthorizationManager#hasAnyAuthority(String...)}, so naming the manager changes the
+     * rule not at all and its testability entirely. The authority predicate is used and the role predicate
+     * is not, because {@link JwtRoleConverter} adds no prefix -- a role predicate would look for a prefixed
+     * authority that is never minted, match nothing, and refuse every request at run time rather than
+     * failing where the mistake would be seen.
      *
-     * <p>Trade-offs: exposing this widens the class's public surface by one method that no other
-     * production code calls. Two alternatives were weighed and both cost more. Leaving the rule inline
-     * would confine it to the builder lambda, where the only way to exercise it is to stand up a servlet
-     * context and issue a request -- and this module cannot do that cheaply, because the decoder built
-     * below resolves the issuer's discovery document eagerly, so a context needs a reachable issuer that
-     * a unit test has no business requiring. Having the test construct its own manager from the same
-     * constant would make the assertion agree with the test rather than with the chain, so a rule
-     * widened to admit either group would keep the test green -- the exact failure this class already
-     * records against the read rule.</p>
+     * <p>Assumptions: this method is RETAINED although it now returns the same decision as
+     * {@link #businessAccess()}, and it is retained deliberately rather than by inertia. The fraud route is
+     * the only state-changing route this context publishes, so its authority decision is the one most
+     * likely to be revisited; keeping it a separate, separately-asserted method means a future narrowing is
+     * one line with its evidence attached beside it, whereas folding it into the read decision would make
+     * the same change require prising the two apart first. Alternatives Considered: deleting both this
+     * method and the route's own rule so the read rule covered the path. Rejected because it would discard
+     * the baseline evidence assembled on {@link #FRAUD_PATH_PATTERN} and leave the strongest capability in
+     * the context with no rule naming it.
      *
-     * @return the manager that grants only a principal holding
-     *     {@link JwtRoleConverter#ADMIN_AUTHORITY}, never {@code null}
+     * <p>Trade-offs: the two decisions being equal means the chain's ordering no longer decides anything
+     * for this path, where it previously decided everything. That is stated at the chain itself so a reader
+     * who moves the rules is not misled by an ordering comment that has stopped being load-bearing.
+     *
+     * @return the manager that grants a principal holding either of {@link #BUSINESS_AUTHORITIES}, never
+     *     {@code null}
      */
     public static AuthorizationManager<RequestAuthorizationContext> fraudAccess() {
-        return AuthorityAuthorizationManager.hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY);
+        return AuthorityAuthorizationManager.hasAnyAuthority(
+                BUSINESS_AUTHORITIES.toArray(String[]::new));
     }
 
     /**
      * The paths that mark an authorization as fraudulent.
      *
-     * <p>Refactoring Rationale: this rule admits an administrator and nobody else, and that is an
-     * authorization check the baseline does not perform, so it is argued here from evidence rather than
-     * asserted. Three independent facts about the baseline's structure establish what the migrated
-     * system inherits if no rule is added, and all three were read rather than assumed. First, the
+     * <p>Refactoring Rationale: this rule admitted an administrator and nobody else and now admits either
+     * business group, which is the authority the baseline grants; the reversal is argued at
+     * {@link #fraudAccess()}, where the decision itself lives. The evidence below is retained UNCHANGED
+     * because none of it was wrong -- it establishes what posture the migrated system inherits, and the
+     * error was in the conclusion drawn from it rather than in the reading. Three independent facts about
+     * the baseline's structure establish that posture, and all three were read rather than assumed. First,
+     * the
      * extension's own resource definitions switch resource and command security off on every one of its
      * three transactions: {@code RESSEC(NO) CMDSEC(NO)} stands at lines 46, 56 and 66 of
      * {@code app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd}, for {@code CPVD}, {@code CPVS} and
@@ -329,16 +356,17 @@ public class SecurityConfig {
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl}. The capability an ordinary user
      * reaches is therefore a durable write, not a view.</p>
      *
-     * <p>Alternatives Considered: carrying that arrangement across unchanged -- no administrative rule
-     * on this path, the read authority applied to it like any other. It is a genuinely available option,
-     * which is why it is named here instead of passed over. The consequence of taking it is concrete: a
-     * state-changing operation would be reachable by every signed-in holder of a
-     * {@link JwtRoleConverter#USER_AUTHORITY} token, and the confirmation step the migrated screen shows
-     * beforehand is a client-side affordance with no server-side rule standing behind it, so it would
-     * stop an accidental click and nothing else. The migration adds a path here; it does not remove one,
-     * and the baseline this evidence was read from stays byte-identical, because it is the behavioural
-     * oracle the migrated behaviour is checked against. The identity mapping the rule rests on is
-     * recorded in {@code docs/adr/ADR-008-security-and-identity.md}.</p>
+     * <p>Refactoring Rationale: carrying that arrangement across unchanged -- the read authority applied
+     * to this path like any other -- is what is now done, and it was previously listed here as the
+     * rejected alternative. What decided it is not a re-weighing of the security argument, which stands:
+     * it is that the reference reaches this write from the ORDINARY-USER menu, so narrowing the rule
+     * removes a capability from the group the reference grants it to, and the specification permits a
+     * behavioural change against the oracle only where it names one. It names five security deviations and
+     * this is not among them. The consequence of the restored rule is stated in full at
+     * {@link #fraudAccess()} rather than repeated here. The baseline this evidence was read from stays
+     * byte-identical, because it is the behavioural oracle the migrated behaviour is checked against, and
+     * the identity mapping the rule rests on is recorded in
+     * {@code docs/adr/ADR-008-security-and-identity.md}.</p>
      *
      * <p>Assumptions: the pattern carries the published {@code /api/v1} prefix because that is the path
      * this service actually RECEIVES, and this is the single most easily mis-set value in the class. Three
@@ -475,10 +503,18 @@ public class SecurityConfig {
                         //       only configured consumer is the task-local collector and it presents
                         //       no token. See METRIC_SCRAPE_PATH.
                         .requestMatchers(METRIC_SCRAPE_PATH).access(loopbackOnly())
-                        // WHY : Assumptions: the fraud rule stays FIRST because the chain matches in
-                        //       declaration order and the read pattern below also covers this path.
-                        //       Reversing the two would silently downgrade the administrative gate on
-                        //       fraud marking to the read authority.
+                        // WHY : Assumptions: the fraud rule is declared FIRST because the chain matches
+                        //       in declaration order and the read pattern below also covers this path, so
+                        //       the first rule to match is the one that decides.
+                        // WHY : Refactoring Rationale: the ordering used to decide the outcome and now
+                        //       decides nothing, because fraudAccess() was narrowed to the administrative
+                        //       authority and has been restored to the authority the baseline grants --
+                        //       either business group. The comment is corrected rather than left standing:
+                        //       it read that reversing the two rules would silently downgrade an
+                        //       administrative gate, and a reader acting on that would be defending a gate
+                        //       that is no longer there. The rule stays first so that narrowing it later
+                        //       takes effect where its evidence is written, and stays SEPARATE so that
+                        //       this context's only state-changing route has a rule naming it.
                         .requestMatchers(FRAUD_PATH_PATTERN)
                         .access(fraudAccess())
                         // WHY : Assumptions: EITHER group satisfies the read surface, which is the

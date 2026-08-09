@@ -457,9 +457,64 @@ variable "explicit_auth_flows" {
     error_message = "Every explicit_auth_flows entry must carry the ALLOW_ prefix -- for example \"ALLOW_USER_PASSWORD_AUTH\". The pinned provider rejects the legacy unprefixed spellings once any prefixed value is present, and the rejection arrives during apply rather than at plan."
   }
 
+  # WHY : Refactoring Rationale: this validation is NEW and it closes a gap the
+  #       three around it could not. The prefix check above accepts ANY string
+  #       beginning with ALLOW_, so an invented name -- ALLOW_NOT_A_FLOW, or a
+  #       plausible-looking ALLOW_USER_SRP_AUTHENTICATION -- passed every check here
+  #       and failed during apply, after the user pool had been created, with a
+  #       service diagnostic about an enumeration value rather than about this input.
+  #       The service's own enumeration is CLOSED, so it can be checked at plan time
+  #       and there is no reason not to.
+  # WHY : Assumptions: the set below is the complete ALLOW_-generation
+  #       ExplicitAuthFlows enumeration -- admin password, custom, refresh token,
+  #       choice-based user auth, user password and user SRP. It is stated in full,
+  #       including the three flows the Trade-offs note above explains are
+  #       deliberately not enabled by default and the one the validation below
+  #       forbids outright, because this check answers "does Cognito accept this
+  #       name" and not "should this deployment use it". Conflating the two would
+  #       make the enum grow every time a policy decision changed, and would give a
+  #       reader adding a flow one message for two different mistakes.
+  # WHY : Trade-offs: the prefix validation above is now implied by this one -- every
+  #       member of the set carries the prefix -- and it is kept anyway. The two
+  #       diagnose different errors: the prefix check tells an author who wrote a
+  #       LEGACY unprefixed spelling exactly that, which is the likeliest mistake
+  #       because the legacy names are what older documentation shows, whereas this
+  #       check reports an unrecognised name. Collapsing them would answer the common
+  #       case with the less specific message.
+  # WHY : Assumptions: ALLOW_REFRESH_TOKEN_AUTH appears here and is still refused by
+  #       the validation below, and that ordering is deliberate rather than
+  #       contradictory. This check establishes that the name is real; the next one
+  #       records that it is incompatible with the refresh-token rotation main.tf
+  #       enables. An author who reaches the second message therefore knows the flow
+  #       exists and that the objection is this deployment's, not a typo.
+  validation {
+    condition = alltrue([
+      for flow in var.explicit_auth_flows : contains([
+        "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+        "ALLOW_CUSTOM_AUTH",
+        "ALLOW_REFRESH_TOKEN_AUTH",
+        "ALLOW_USER_AUTH",
+        "ALLOW_USER_PASSWORD_AUTH",
+        "ALLOW_USER_SRP_AUTH",
+      ], flow)
+    ])
+    error_message = "Every explicit_auth_flows entry must be one of Cognito's supported flows: ALLOW_ADMIN_USER_PASSWORD_AUTH, ALLOW_CUSTOM_AUTH, ALLOW_REFRESH_TOKEN_AUTH, ALLOW_USER_AUTH, ALLOW_USER_PASSWORD_AUTH or ALLOW_USER_SRP_AUTH. An unrecognised name is accepted by the prefix check but rejected by the service during apply, after the user pool exists."
+  }
+
   validation {
     condition     = contains(var.explicit_auth_flows, "ALLOW_USER_PASSWORD_AUTH")
     error_message = "explicit_auth_flows must include \"ALLOW_USER_PASSWORD_AUTH\". It is the flow services/auth-service uses to authenticate the credential submitted by the sign-on screen transcribed from app/bms/COSGN00.bms; without it the pool refuses that call and no user can sign in."
+  }
+
+  # WHY : Assumptions: a duplicate is refused rather than tolerated. Cognito accepts
+  #       the list and the provider forwards it, so a repeated flow does not fail --
+  #       it simply makes the plan diff and the console listing disagree with the
+  #       authored value, and it hides a copy-paste error in a list whose whole
+  #       purpose is to enumerate an exact permission set. Checking length against
+  #       the distinct count is the narrowest expression of that.
+  validation {
+    condition     = length(var.explicit_auth_flows) == length(toset(var.explicit_auth_flows))
+    error_message = "explicit_auth_flows must not repeat a flow. A duplicate is silently accepted by the service, so the authored list and the client's effective permission set stop agreeing without any diagnostic."
   }
 
   validation {

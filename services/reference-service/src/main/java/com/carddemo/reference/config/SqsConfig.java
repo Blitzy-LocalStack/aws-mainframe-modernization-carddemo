@@ -1,6 +1,9 @@
 package com.carddemo.reference.config;
 
+import com.carddemo.common.messaging.QueueClientBudget;
 import io.awspring.cloud.autoconfigure.core.AwsClientBuilderConfigurer;
+import java.time.Duration;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -39,12 +42,65 @@ public class SqsConfig {
     /**
      * Supplies the synchronous queue client the date-conversion consumer publishes with.
      *
+     * <p>Refactoring Rationale: the client is given a whole-call bound and a per-attempt bound, and it had
+     * neither. The software development kit's default for both is no bound at all, so a stalled publish
+     * retried indefinitely -- and this publish happens INSIDE the message handler, before the listener
+     * returns, so an unbounded call is an unbounded handler. A handler that outlives its message's
+     * visibility period does not merely run late: the queue makes the request visible again, a second
+     * consumer takes it, and two handlers act on one request at once. {@link QueueClientBudget} is what
+     * refuses that arrangement at startup, by requiring the whole-call bound to be strictly shorter than
+     * the visibility period the queue is provisioned with.</p>
+     *
+     * <p>Assumptions: the visibility period is a PROPERTY here rather than a value read from the queue.
+     * It is set by {@code infra/modules/sqs}, whose {@code visibility_timeout_seconds} defaults to 60, and
+     * the default below is that same 60 so an unconfigured context validates against what the
+     * infrastructure actually provisions. Reading it from the queue at startup was the alternative and is
+     * rejected: it would make context refresh depend on a reachable queue, and it would silently pass in
+     * every test and local run where no queue exists.</p>
+     *
+     * <p>Trade-offs: the bounds are applied through the CONSUMER form of
+     * {@code overrideConfiguration}, which mutates the configuration the starter's configurer already
+     * built. The value form would replace it, discarding the retry policy, the user agent and any
+     * execution interceptor the starter had installed -- a loss that shows up only as absent telemetry
+     * and absent retries, neither of which fails a test.</p>
+     *
+     * <p>Assumptions: what remains of one message's handling after this call -- the database work -- is
+     * bounded by the connection pool and driver settings this service configures, not here, so it is not
+     * added to the sum below. The sum this class can verify is the queue call against visibility, and
+     * overstating what it verifies would be worse than stating the part it owns.</p>
+     *
      * @param configurer the starter's client-builder configurer; must not be {@code null}
+     * @param apiCallTimeoutMillis the whole-call bound in milliseconds, from
+     *     {@link QueueClientBudget#PROPERTY_API_CALL_TIMEOUT}; must be positive and shorter than the
+     *     visibility period
+     * @param apiCallAttemptTimeoutMillis the per-attempt bound in milliseconds, from
+     *     {@link QueueClientBudget#PROPERTY_API_CALL_ATTEMPT_TIMEOUT}; must be positive and must not
+     *     exceed the whole-call bound
+     * @param visibilityTimeoutSeconds how long a received message stays invisible to other consumers,
+     *     from {@link QueueClientBudget#PROPERTY_VISIBILITY_TIMEOUT}; must be positive
      * @return the queue client, never {@code null}
+     * @throws IllegalStateException if the three bounds do not satisfy {@link QueueClientBudget}, so the
+     *     failure arrives at startup naming the relationship that does not hold
      */
     @Bean
     @ConditionalOnMissingBean
-    public SqsClient sqsClient(AwsClientBuilderConfigurer configurer) {
-        return configurer.configure(SqsClient.builder()).build();
+    public SqsClient sqsClient(AwsClientBuilderConfigurer configurer,
+            @Value("${" + QueueClientBudget.PROPERTY_API_CALL_TIMEOUT + ":10000}")
+            long apiCallTimeoutMillis,
+            @Value("${" + QueueClientBudget.PROPERTY_API_CALL_ATTEMPT_TIMEOUT + ":5000}")
+            long apiCallAttemptTimeoutMillis,
+            @Value("${" + QueueClientBudget.PROPERTY_VISIBILITY_TIMEOUT + ":60}")
+            long visibilityTimeoutSeconds) {
+
+        QueueClientBudget budget = new QueueClientBudget(
+                Duration.ofMillis(apiCallTimeoutMillis),
+                Duration.ofMillis(apiCallAttemptTimeoutMillis),
+                Duration.ofSeconds(visibilityTimeoutSeconds));
+
+        return configurer.configure(SqsClient.builder())
+                .overrideConfiguration(override -> override
+                        .apiCallTimeout(budget.apiCallTimeout())
+                        .apiCallAttemptTimeout(budget.apiCallAttemptTimeout()))
+                .build();
     }
 }

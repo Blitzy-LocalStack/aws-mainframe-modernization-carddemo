@@ -1,5 +1,5 @@
 /**
- * Vitest setup module for the CardDemo SPA test suite.
+ * @file Vitest setup module for the CardDemo SPA test suite.
  *
  * Purpose
  * -------

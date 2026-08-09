@@ -11,7 +11,7 @@
 # Parameters:
 #   None are declared here. Every input this file reads is declared in the
 #   sibling variables.tf, which is the one place a caller's arguments are
-#   accepted, typed and validated. Fifty-six variables are declared there
+#   accepted, typed and validated. Fifty-eight variables are declared there
 #   and every one of them is consumed inside this module, which has no other
 #   consumer of them. That reconciliation is a standing constraint
 #   rather than tidiness: this directory is never applied directly, so
@@ -59,8 +59,8 @@
 #     addresses the log group. Alphabetical order was the alternative and
 #     would have opened with the autoscaling policy and split the two roles
 #     around the target group.
-#   - Assumptions: three of the resources are conditional, because one of the
-#     eight instantiations is not a long-running service at all. The gating is
+#   - Assumptions: three of the resources are conditional, because two of the
+#     nine instantiations are not long-running services at all. The gating is
 #     explained once, at the target group, and reused at the service and the
 #     autoscaling pair.
 # =============================================================================
@@ -110,7 +110,7 @@ locals {
   # WHY : Refactoring Rationale: the log-group name is composed here rather
   #       than left for the provider to generate, because the execution role's
   #       policy has to scope logs:PutLogEvents to this one group's ARN. The
-  #       /aws/ecs/ prefix is what files all eight services under one path, so
+  #       /aws/ecs/ prefix is what files all nine workloads under one path, so
   #       an operator reading logs during the batch window is not hunting
   #       across unrelated prefixes.
   log_group_name = "/aws/ecs/${local.resource_name}"
@@ -354,9 +354,39 @@ locals {
     #       an online service must read that entry at request time to decide whether
     #       writes are currently accepted; injecting the value once at task start
     #       would freeze the answer for the life of the task.
+    # WHY : Refactoring Rationale: admitting the name is NOT sufficient on its own, and
+    #       treating it as sufficient was the defect. Because the value is read at
+    #       request time, the reader is the application under the TASK role -- not the
+    #       ECS agent under the execution role, whose ssm:GetParameters grant below
+    #       resolves the injection arrays once before the container starts. The task
+    #       role held no ssm permission whatsoever, so a service that read this flag
+    #       would have been denied and the quiesce would have stopped nothing. The name
+    #       is therefore now bound by the two biconditional clauses at the foot of this
+    #       file to (a) exactly the write-gated services and (b) the presence of
+    #       online_write_gate_parameter_arn, which selects the module-composed inline
+    #       policy granting ssm:GetParameter on that one ARN. Name, holder set and
+    #       permission now stand or fall together at plan time.
     "CARDDEMO_ONLINE_WRITES_PARAMETER",
     "CARDDEMO_PARAMETER_PREFIX",
-    "CARDDEMO_SERVER_TLS_ENABLED",
+    # WHY : Refactoring Rationale: CARDDEMO_SERVER_TLS_ENABLED was admitted here and
+    #       is REMOVED. It was dead in the strict sense -- no source in the repository
+    #       read it, no environment root passed it, and it is not the relaxed-binding
+    #       spelling of any Spring property. The listener's scheme comes from
+    #       `server.ssl.enabled: true` authored directly in each service's
+    #       application.yml, whose env-var spelling would be SERVER_SSL_ENABLED.
+    #       Leaving a name in an EXACT allow-list that nothing consumes defeats the
+    #       purpose stated at the head of this block: a reader cannot tell an
+    #       unreviewed addition from a retired one.
+    # WHY : Alternatives Considered: admitting SERVER_SSL_ENABLED instead, so the
+    #       intended property becomes settable -- the other resolution available here.
+    #       REJECTED, because the only value such a channel could carry that differs
+    #       from the authored one is `false`, and that value cannot produce a working
+    #       deployment: this module constrains the target-group protocol to the single
+    #       value HTTPS, so a cleartext listener receives every health probe over TLS,
+    #       never turns healthy, and is replaced in a loop while its own logs look
+    #       clean. An allow-list entry whose only effect is to enable that outcome is
+    #       not a capability worth admitting, so TLS on this hop stays a property of
+    #       the image rather than a deployment input.
     "CARDDEMO_TRUSTED_PROXY_PATTERN",
     "CARDDEMO_VERSION",
     "JAVA_TOOL_OPTIONS",
@@ -468,23 +498,34 @@ locals {
     #       in step through a client-secret rotation.
     "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
     "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
-    # WHY : Assumptions: this is the only admissible secret name in this list that TWO
-    #       services legitimately receive, and that is inherent to what it is: a
-    #       symmetric signing key, so the party that signs and the party that verifies
-    #       must hold the same bytes. The authorization service mints an internal bearer
-    #       token with it and the account service verifies that token on its three
-    #       internal account-context read paths. Every other name here is held by one
-    #       holder, which is why the precondition below gates this one on a pair and the
-    #       others on a single service.
-    #       Alternatives Considered: an asymmetric key pair, which would let the account
-    #       service hold only a public verification key and would remove the shared
-    #       secret entirely. Rejected as disproportionate here: it would require key
-    #       distribution and rotation machinery for a single caller inside one private
-    #       network, and the signing key is already confined to two task roles by the
+    # WHY : Assumptions: these are the only admissible secret names in this list that TWO
+    #       services legitimately receive, and that is inherent to what they are:
+    #       symmetric signing keys, so the party that signs and the party that verifies
+    #       must hold the same bytes. Each name belongs to ONE calling service -- the
+    #       authorization context signs with the first and the transaction context with
+    #       the second -- and the account context holds both, because it verifies both.
+    #       Every other name here is held by a single holder, which is why the
+    #       precondition below gates each of these on a pair and the others on one
+    #       service.
+    # WHY : Refactoring Rationale: this was ONE name shared by three services. A single
+    #       key meant either caller could sign a token carrying the other's subject, and
+    #       the verifier could not tell -- so its audit record named a caller it had no
+    #       way to check, and a caller entitled to one address was authorised for every
+    #       internal address of the callee. One key per caller lets the verifier select
+    #       the key by the subject a token names, so an impersonation fails its
+    #       signature check. The change is visible here because a name this list does not
+    #       admit cannot be supplied by any root: the task-definition precondition below
+    #       refuses it.
+    #       Alternatives Considered: an asymmetric key pair per caller, which would let
+    #       the account service hold only public verification keys and would remove the
+    #       shared secrets entirely. Rejected as disproportionate here: it would require
+    #       key distribution and rotation machinery for two callers inside one private
+    #       network, and each signing key is already confined to two task roles by the
     #       gate below. The trade-off is recorded because it is the change to make if a
-    #       third verifier is ever added -- at that point a shared secret held by four
-    #       parties stops being defensible.
-    "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+    #       key ever has to be held by a party that only verifies and cannot be trusted
+    #       to mint.
+    "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
+    "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY",
     "CARDDEMO_MASK_HMAC_KEY",
     # WHY : Assumptions: this is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY above,
     #       and the separation is the point rather than an accident of naming. The
@@ -499,30 +540,76 @@ locals {
     #       identities, and rotating either purpose would require a coordinated stop of
     #       an interactive consumer and a batch workload at once.
     "CARDDEMO_MESSAGING_HMAC_KEY",
-    # WHY : Refactoring Rationale: this name was absent from this set while four
-    #       services could not start without it, and the absence was the whole defect.
+    # WHY : Refactoring Rationale: this name was absent from this set while every
+    #       service holding the dependency could not start without it, and the absence
+    #       was the whole defect.
     #       services/common-lib/.../CardDemoCommonAutoConfiguration.java resolves
     #       carddemo.pagination.cursor.signing-key with NO default and WITHHOLDS the
-    #       CursorToken bean when it is unset; six components across transaction,
-    #       reference, reporting and authorization require that bean in their
-    #       constructors, so each of those contexts failed to refresh. Because this set
-    #       did not admit the name, a root could not even supply it -- the
+    #       CursorToken bean under @ConditionalOnProperty when it is unset. Because this
+    #       set did not admit the name, a root could not even supply it -- the
     #       task-definition precondition below refuses a name it does not admit, so the
     #       fix had to start here rather than in the roots.
+    # WHY : Refactoring Rationale: the holder set stated here was FOUR services and SIX
+    #       components, naming only transaction, reference, reporting and authorization.
+    #       Re-measured across the integrated tree, it is NINE components in SEVEN
+    #       services: auth (service/UserService.java), account
+    #       (service/AccountViewService.java), card (service/CardListService.java),
+    #       transaction (api/TransactionController.java), reference
+    #       (api/AddressLookupController.java, api/TransactionCategoryController.java,
+    #       api/TransactionTypeController.java), authorization
+    #       (mapper/PendingAuthViewMapper.java) and reporting (api/ReportController.java)
+    #       -- each declaring a final CursorToken field and accepting it as a constructor
+    #       argument. AUTH AND CARD WERE THE TWO MISSING, and because the precondition
+    #       below is biconditional their omission did not merely fail to require the key,
+    #       it FORBADE supplying it, so both contexts crash-looped and no root-side change
+    #       could have repaired them. The two workloads correctly outside the set are
+    #       batch, which publishes no HTTP surface, and data-migration, which is not a
+    #       Java workload. The count is checkable rather than asserted: a component
+    #       belongs here exactly when it declares a final CursorToken field and takes one
+    #       in a constructor.
     # WHY : Assumptions: it is a SECRET channel rather than a parameter one because it
     #       is key material. A cursor sealed with it is unforgeable only while the key
     #       is confidential; published through Parameter Store as a plain value it
     #       would appear in the task definition's clear-text environment array, and any
     #       principal able to describe the task definition could then forge a cursor
     #       and page into rows no query scoped to it.
-    # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY
+    # WHY : Assumptions: it is a SEPARATE name from the two internal-identity signing keys
     #       and CARDDEMO_MESSAGING_HMAC_KEY above, and the separation is purpose-scoping
-    #       rather than naming habit. Its holder set is the list-publishing services;
-    #       the internal-identity key's is three and the messaging key's is one. Sharing
+    #       rather than naming habit. Its holder set is the seven services enumerated
+    #       above; the internal-identity key's is three and the messaging key's is one. Sharing
     #       one value across the three purposes would mean a service able to seal a
     #       cursor could also mint an internal bearer token, and rotating any purpose
     #       would invalidate all three at once.
     "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
+    # WHY : Assumptions: this keys the OBJECT KEY under which the reporting service
+    #       publishes a statement, and it is admitted here -- in the secret channel --
+    #       rather than in parameter_environment_names because it is key material.
+    #       config/ArtifactIdentityConfig.java binds
+    #       carddemo.reporting.artifact.hmac-key through a fallback-free @Value and
+    #       refuses a blank value, so the name has to be admissible for the workload to
+    #       start at all; and a Parameter Store value lands in the task definition's
+    #       clear-text `environment` array, which DescribeTaskDefinition returns to any
+    #       principal holding ECS read access. Published there, the key would let such a
+    #       principal recompute any cardholder's artifact token and locate that
+    #       cardholder's statement objects by listing a prefix.
+    # WHY : Assumptions: an object key is METADATA rather than content. The store
+    #       records it in its own access log for every request that touches the object,
+    #       indexes it for listing, and reports it in a bucket inventory -- none of which
+    #       server-side encryption reaches. That is why the key is tokenised at all, and
+    #       why the tokeniser is KEYED rather than a bare digest: an account identifier
+    #       is eleven digits, so an unkeyed digest is confirmed by enumeration and would
+    #       disclose the value it was meant to withhold while looking like a control.
+    # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY,
+    #       CARDDEMO_MESSAGING_HMAC_KEY and CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY
+    #       above, and the separation is purpose-scoping rather than naming habit. Each
+    #       of those has a different holder set -- the migration workload, the
+    #       authorization consumer, the list-publishing services -- and this one is held
+    #       by reporting alone. Sharing one value would mean a holder of any single
+    #       capability could exercise the others, and rotating one purpose would
+    #       invalidate all of them at once. The gate below asserts the holder set
+    #       biconditionally, so a root handing this key to another workload fails at plan
+    #       rather than widening who can name a cardholder's stored statement.
+    "CARDDEMO_REPORTING_ARTIFACT_HMAC_KEY",
     # WHY : Assumptions: this keys the opaque selector the CARD service addresses a
     #       row by. card-service/.../config/CardSelectorConfig.java binds
     #       carddemo.security.card-selector.signing-key through a fallback-free
@@ -792,6 +879,17 @@ locals {
     auth = toset([
       "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
       "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
+      # WHY : Refactoring Rationale: this name was MISSING from the auth set, and the
+      #       omission was a crash loop rather than a missing feature.
+      #       service/UserService.java declares `private final CursorToken cursorToken`
+      #       and takes it as an unconditional constructor argument, while common-lib's
+      #       CardDemoCommonAutoConfiguration publishes that bean under
+      #       @ConditionalOnProperty(name = "carddemo.pagination.cursor.signing-key").
+      #       With the key unset the bean does not exist, so the only constructor of a
+      #       required @Service cannot be satisfied and the context refresh aborts --
+      #       the task never becomes healthy. Requiring the name here turns a
+      #       container-start failure into a plan-time one that names what was omitted.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
@@ -826,7 +924,17 @@ locals {
     #       /api/v1/card-xrefs/search-by-account, so BOTH paged reads of this context
     #       depend on the name and neither could be withdrawn to drop the requirement.
     account = toset([
-      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      # WHY : Assumptions: account requires BOTH internal-identity keys because it is the
+      #       verifying half of two independent pairs. Holding one and not the other would
+      #       leave it able to verify one caller and refuse the other with a 401 naming no
+      #       property, which is worse than failing to start: one caller's traffic keeps
+      #       working, so an operator investigates the failing caller rather than the
+      #       verifier. config/InternalApiSecurityConfig.java reads both through
+      #       fallback-free @Value bindings and refuses a blank or short value naming the
+      #       property, so a deployment missing either fails at container start -- and
+      #       requiring them here turns that into a plan-time failure.
+      "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
+      "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY",
       "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
@@ -841,21 +949,51 @@ locals {
     #       config/CardSelectorConfig.java binds it with no fallback. A deployment
     #       without it does not start, so the plan must report the omission rather
     #       than the task discovering it.
+    # WHY : Refactoring Rationale: CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY is required
+    #       of this service too, and its absence was the same class of defect as the
+    #       selector key's with the same symptom. service/CardListService.java takes
+    #       CursorToken as a constructor argument to seal each browse boundary, and
+    #       common-lib's CardDemoCommonAutoConfiguration withholds that bean when the
+    #       property is unset -- so a card task without the name does not serve an
+    #       unpaged list, it fails context refresh and crash-loops while the plan reports
+    #       nothing. Requiring the name here is what turns that into a plan-time failure.
+    #       Assumptions: the two card keys are BOTH required and neither substitutes for
+    #       the other. The selector seals one row's identity and the cursor seals a page
+    #       boundary, so sharing one key between them would make a row selector and a
+    #       page position interchangeable -- a caller could present a selector where a
+    #       cursor was expected and have it open.
     card = toset([
       "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY",
+      # WHY : Refactoring Rationale: this name was MISSING from the card set for the
+      #       same reason, and with the same consequence.
+      #       service/CardListService.java declares `private final CursorToken
+      #       cursorToken` and takes it as an unconditional constructor argument, so the
+      #       conditional bean's absence aborts the context refresh. Note that the two
+      #       selector-style keys this context holds are NOT interchangeable and neither
+      #       substitutes for the other: the card-selector key seals the opaque
+      #       single-card identifier that mapper/CardMapper.java opens, whereas this key
+      #       seals the page boundaries of the card browse. A deployment holding only
+      #       the first still crash-loops.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
       "SPRING_FLYWAY_PASSWORD",
     ])
-    # WHY : Assumptions: this service holds the internal-identity signing key because it
+    # WHY : Assumptions: this service holds ITS OWN internal-identity signing key because it
     #       PRESENTS a token rather than verifying one. Its account-context client mints a
     #       short-lived bearer credential per request through
     #       config/InternalIdentityConfig.java, which reads the key through a fallback-free
     #       @Value, so a deployment without it starts and then fails every add and every
     #       payment with a refusal no message names.
+    # WHY : Assumptions: it holds the TRANSACTION key and not the authorization one, and the
+    #       asymmetry is the control. A token minted with this key names this service, and the
+    #       closed table in common-lib InternalServiceToken permits this service the
+    #       cross-reference and account scopes only -- not the customer scope, which reaches a
+    #       national identifier this context never reads. Holding the other caller's key would
+    #       let it mint under that caller's name and reach the customer addresses too.
     transaction = toset([
-      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY",
       # WHY : Assumptions: this service requires the cursor signing key because at least
       #       one of its components takes CursorToken as a constructor argument, and
       #       common-lib withholds that bean when the key is unset. The failure is a
@@ -912,12 +1050,13 @@ locals {
     #       input, and requiring them would oblige a root to inject shared listener material
     #       -- the state the per-task mint exists to remove.
     authorization = toset([
-      # WHY : Assumptions: authorization requires the same signing key account does,
-      #       because it is the signing half of the same symmetric pair. Its
+      # WHY : Assumptions: authorization requires its OWN signing key, one of the two the
+      #       account context verifies against, because it is the signing half of one
+      #       symmetric pair. Its
       #       config/InternalIdentityConfig.java reads it through a fallback-free
       #       @Value, so a deployment without it fails at container start rather than
       #       consuming authorizations it can never resolve an account context for.
-      "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
       "CARDDEMO_MESSAGING_HMAC_KEY",
       # WHY : Assumptions: this service requires the cursor signing key because at least
       #       one of its components takes CursorToken as a constructor argument, and
@@ -938,6 +1077,17 @@ locals {
       #       context-refresh abort and a crash loop, not a degraded list, so requiring
       #       the name here turns a container-start failure into a plan-time one.
       "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
+      # WHY : Assumptions: required rather than merely admissible, because
+      #       config/ArtifactIdentityConfig.java binds it through a fallback-free @Value
+      #       and refuses a blank value, so a root that omits it produces a task that
+      #       cannot refresh its context. Requiring it here reports the omission at plan
+      #       time with the name that is missing, instead of leaving it to a crash loop.
+      # WHY : Trade-offs: this is required of reporting and of no other workload, which
+      #       is narrower than the cursor key above. Only this context publishes a stored
+      #       statement, so only this context needs to name one; the biconditional clause
+      #       in the precondition below asserts the same set from the other side, so
+      #       adding a second holder in one place without the other fails at plan.
+      "CARDDEMO_REPORTING_ARTIFACT_HMAC_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
     ])
@@ -1048,7 +1198,7 @@ data "aws_iam_policy_document" "task_assume_role" {
 # Alternatives Considered: attaching the AWS-managed
 #       AmazonECSTaskExecutionRolePolicy was rejected. That policy grants ECR
 #       pull and log write against every resource in the account, so each of
-#       the eight services would be able to pull every other service's image
+#       the nine workloads would be able to pull every other one's image
 #       and write into every other service's log group. Every statement below
 #       instead names its actions and scopes them to the ARNs this
 #       instantiation was handed, which is what makes the per-service boundary
@@ -1072,12 +1222,25 @@ data "aws_iam_policy_document" "execution" {
   }
 
   # WHY : Assumptions: these three actions are the image pull itself, and they
-  #       are scoped to the single repository this service's image lives in, so
+  #       are scoped to the repositories this task's images live in, so
   #       a compromised execution role cannot pull another bounded context's
   #       image. The repository ARN arrives as an input from infra/modules/ecr
   #       through the root rather than being reconstructed from the image URI,
   #       because parsing an ARN out of a registry reference would encode the
   #       registry hostname format in this module.
+  # WHY : Refactoring Rationale: the Resource list holds the SECOND repository
+  #       too, and the omission it corrects would have stopped every task. A task
+  #       with the telemetry sidecar pulls two images, and the mirrored collector
+  #       lives in its own repository so that ordinary service releases cannot
+  #       expire it out of a shared one -- so a role granted only the service's
+  #       repository can pull the application container and not its sidecar, and a
+  #       task whose sidecar cannot be pulled does not start degraded, it fails to
+  #       start.
+  #       Assumptions: compact() removes the null rather than a conditional
+  #       expression choosing between two lists, so a caller that names no mirror
+  #       grants exactly one repository and the statement never carries an empty
+  #       or null element -- a policy with a null Resource is rejected at apply
+  #       time with a message naming neither the input nor the statement.
   statement {
     sid    = "AllowEcrImagePull"
     effect = "Allow"
@@ -1088,7 +1251,10 @@ data "aws_iam_policy_document" "execution" {
       "ecr:GetDownloadUrlForLayer",
     ]
 
-    resources = [var.ecr_repository_arn]
+    resources = compact([
+      var.ecr_repository_arn,
+      var.telemetry_collector_repository_arn,
+    ])
   }
 
   # WHY : Assumptions: logs:CreateLogGroup is deliberately absent, and its
@@ -1283,7 +1449,7 @@ resource "aws_iam_role_policy" "execution" {
 
 # Alternatives Considered: composing a union of every service's needs
 #       inside this module was rejected outright. Because one module body has
-#       to satisfy all eight instantiations, that union would grant the
+#       to satisfy all nine instantiations, that union would grant the
 #       reporting service the authorization service's queues and the auth
 #       service's secrets -- every service every other service's access, which
 #       is the exact opposite of the per-service least privilege that stands in
@@ -1325,6 +1491,45 @@ resource "aws_iam_role_policy" "task_sqs" {
   name   = "${local.resource_name}-task-sqs"
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task_sqs[0].json
+}
+
+# WHY : Assumptions: the action is ssm:GetParameter SINGULAR and the resource is one
+#       ARN, which together are the whole permission a write gate needs. The plural
+#       ssm:GetParameters granted to the EXECUTION role above is a different
+#       permission for a different purpose -- the ECS agent resolves the secret and
+#       parameter arrays with it once, before the container starts -- and it is held by
+#       a role the application never assumes. A task that reads the flag per request
+#       needs its own grant, and this is it.
+# WHY : Assumptions: no kms:Decrypt companion is required here, unlike the parameter
+#       reads on the execution role. Both roots create this flag as a plain String
+#       parameter rather than a SecureString, because its value is the single token
+#       "true" or "false" -- an operational state that is not confidential and that the
+#       batch state machine's own execution history already discloses. Adding a decrypt
+#       grant for a key that never encrypts it would widen the role for no effect.
+# WHY : Trade-offs: kept as a separate inline policy rather than folded into
+#       task_role_policy_json, for the same reason the queue boundary above is
+#       separate. The document a root supplies is assembled from sibling-module
+#       outputs and is unknown at plan time, so a caller could neither be checked for
+#       including this statement nor prevented from replacing it. Composing it here
+#       makes the action and the resource properties of the module that a tfvars file
+#       cannot influence.
+data "aws_iam_policy_document" "task_online_write_gate" {
+  count = var.online_write_gate_parameter_arn == null ? 0 : 1
+
+  statement {
+    sid       = "AllowOnlineWriteFlagRead"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = [var.online_write_gate_parameter_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "task_online_write_gate" {
+  count = var.online_write_gate_parameter_arn == null ? 0 : 1
+
+  name   = "${local.resource_name}-task-online-write-gate"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_online_write_gate[0].json
 }
 
 # WHY : Assumptions: for_each over a set here rather than count over the list,
@@ -1376,7 +1581,7 @@ data "aws_iam_policy_document" "task_telemetry" {
   }
 }
 
-# WHY : Alternatives Considered: requiring every one of the eight callers to
+# WHY : Alternatives Considered: requiring every one of the nine callers to
 #       repeat these statements was rejected because the permissions are a
 #       property of this module-created sidecar, not of any bounded context.
 #       Keeping them here means disabling the sidecar removes the policy too,
@@ -1413,7 +1618,8 @@ resource "aws_ecs_task_definition" "this" {
 
   # WHY : Alternatives Considered: EC2 and Lambda were both rejected, per
   #       ADR-002. EC2 would add instance patching and capacity management for
-  #       a workload that is eight uniform request-response services. Lambda
+  #       a workload that is seven uniform request-response services plus two
+  #       task-only workloads. Lambda
   #       cannot host them: the batch steps that share this module's task
   #       definitions exceed its fifteen-minute execution ceiling, and a warm
   #       JDBC connection pool has no natural home in an invocation-scoped
@@ -1730,13 +1936,20 @@ resource "aws_ecs_task_definition" "this" {
       #       as adding "a fifth clause". They were written in separate passes and the
       #       later one subsumed the earlier; leaving both left a reader counting six
       #       clauses against two conflicting descriptions of which was fifth.)
-      # WHY : Assumptions: the internal-identity clause below is gated on THREE services
-      #       rather than on one, and the asymmetry is required rather than stylistic. The
-      #       value is a symmetric signing key: authorization and transaction each sign an
-      #       internal bearer token with it, and account verifies those tokens against it,
-      #       so all three must hold it. It is still biconditional -- any holder can mint a
-      #       token the account service accepts for its internal reads, so the clause
-      #       asserts that exactly these three receive it and that no other service does.
+      # WHY : Assumptions: there are TWO internal-identity clauses below and each is gated on
+      #       a PAIR, and both the pairing and the split are required rather than stylistic.
+      #       Each value is a symmetric signing key belonging to one caller: authorization
+      #       signs with the first, transaction signs with the second, and account verifies
+      #       both, so each key has exactly two holders. Each clause is still biconditional --
+      #       any holder of a key can mint a token the account service accepts under that
+      #       key's caller, so each asserts that exactly its pair receives it and no other
+      #       service does.
+      # WHY : Refactoring Rationale: this was ONE clause gated on three services, which is
+      #       what allowed either caller to mint under the other's name. Splitting it into two
+      #       pairs is what makes the subject in a token verifiable rather than merely
+      #       claimed, and expressing it as two clauses rather than one over a set is
+      #       deliberate: the two keys have different holder pairs, so a single clause could
+      #       not say which service may hold which.
       #       Assumptions: the account-context address clause names TWO services for the
       #       same reason in the other direction: both callers bind the address with no
       #       fallback, and a root handing the address of a cardholder-data dependency to a
@@ -1752,7 +1965,8 @@ resource "aws_ecs_task_definition" "this" {
         #       The forward half is asserted from the other side by the card entry in the
         #       required-secret map above, so omitting it in either place fails at plan time.
         (var.service_name == "card") == contains(keys(var.secret_arns), "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY") &&
-        contains(["authorization", "account", "transaction"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY") &&
+        contains(["authorization", "account"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY") &&
+        contains(["transaction", "account"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY") &&
         contains(["authorization", "transaction"], var.service_name) == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL") &&
         # WHY : Assumptions: biconditional on the ACCOUNT service alone. Only that context
         #       reads the reference address allow-lists, and the reverse half matters as much
@@ -1766,6 +1980,17 @@ resource "aws_ecs_task_definition" "this" {
 
         (var.service_name == "reporting") == contains(keys(var.environment_variables), "CARDDEMO_TRUSTED_PROXY_PATTERN") &&
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET") &&
+        # WHY : Assumptions: biconditional on the REPORTING service alone, and both halves
+        #       earn their place. Missing, config/ArtifactIdentityConfig.java cannot build
+        #       the tokeniser and the context does not refresh -- so the workload that owns
+        #       the statement artifacts is the one that cannot start. Present on any other
+        #       workload, that workload can recompute the token for any account identifier
+        #       it can guess and then locate that cardholder's stored statement by listing a
+        #       prefix, which is precisely the capability the key exists to withhold -- and
+        #       it needs no read on the object itself, because the disclosure is in the key.
+        #       The forward half is asserted from the other side by the reporting entry in
+        #       the required-secret map above, so omitting it in either place fails at plan.
+        (var.service_name == "reporting") == contains(keys(var.secret_arns), "CARDDEMO_REPORTING_ARTIFACT_HMAC_KEY") &&
         (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET") &&
 
         # WHY : Assumptions: the cursor clause is gated on the list-publishing services
@@ -1785,7 +2010,54 @@ resource "aws_ecs_task_definition" "this" {
         #       the gate is widened rather than the requirement being worked around. The
         #       same component now also seals the boundaries of the by-account
         #       cross-reference walk, so two published reads rest on the key rather than one.
-        contains(["account", "transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY")
+        # WHY : Refactoring Rationale: AUTH AND CARD WERE MISSING FROM THIS SET, and
+        #       because the clause is biconditional their absence did not merely fail to
+        #       require the key -- IT FORBADE SUPPLYING IT. A root that correctly wired
+        #       the key to either service failed this very validation, so the defect could
+        #       not be repaired from the root at all and had to be repaired here first.
+        #       Both hold an unconditional constructor dependency, measured in the
+        #       integrated tree rather than inferred: auth-service
+        #       service/UserService.java and card-service service/CardListService.java each
+        #       declare `private final CursorToken cursorToken` and accept it as a
+        #       constructor argument, while common-lib publishes that bean under
+        #       @ConditionalOnProperty(name = "carddemo.pagination.cursor.signing-key").
+        #       The membership test is therefore "does any component of this context take
+        #       CursorToken as a constructor argument", and the answer is yes for seven of
+        #       the nine workloads. The two that are correctly absent are batch, whose
+        #       repository/package-info.java records that neither the page envelope nor
+        #       CursorToken is used because it publishes no HTTP surface, and
+        #       data-migration, which is not a Java workload.
+        contains(["auth", "account", "card", "transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY") &&
+
+        # WHY : Refactoring Rationale: these two clauses close the online-write gate at
+        #       the point a deployment is planned. Before them the flag's NAME was merely
+        #       ADMISSIBLE: a root could inject it, omit it, or inject it while granting
+        #       the task no way to read it, and every one of those planned cleanly. The
+        #       middle case is the one that mattered -- the AAP's QuiesceOnlineWrites state
+        #       exists to stop online writes for the batch window, and a flag no task can
+        #       read stops nothing while looking fully wired.
+        # WHY : Assumptions: the gated set is the SEVEN request-serving services, measured
+        #       rather than assumed: each of auth, account, card, transaction, reference,
+        #       authorization and reporting publishes at least one mutating HTTP mapping or
+        #       message listener. The two exclusions are deliberate and are not symmetric
+        #       with each other. batch is excluded because it is the workload the quiesce
+        #       PROTECTS -- gating it would make the batch window unable to post the very
+        #       transactions it was quiesced for, which inverts the control. data-migration
+        #       is excluded because it is a one-off load workload with no request surface.
+        # WHY : Assumptions: biconditional in both directions, as every clause here is.
+        #       Missing from a gated service, mutating requests are accepted during the
+        #       window and the quiesce is a fiction. Present on an excluded workload, the
+        #       task acquires an ssm read it has no use for and batch acquires a reason to
+        #       stop working mid-window.
+        contains(["auth", "account", "card", "transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.environment_variables), "CARDDEMO_ONLINE_WRITES_PARAMETER") &&
+
+        # WHY : Assumptions: the flag's name and the permission to read it are required to
+        #       travel together, because either alone is a silent failure. The name without
+        #       the grant is an access-denied on every gated request; the grant without the
+        #       name is a permission the task cannot use. Pairing them here is why the
+        #       module takes the ARN as a typed input rather than trusting the caller's own
+        #       policy document, which is unknown at plan time.
+        contains(keys(var.environment_variables), "CARDDEMO_ONLINE_WRITES_PARAMETER") == (var.online_write_gate_parameter_arn != null)
       )
       error_message = "service-specific secret and trust configuration was distributed to the wrong bounded context."
     }
@@ -1867,8 +2139,9 @@ resource "aws_ecs_task_definition" "this" {
 #       reason to know. That is also why no aws_lb, aws_lb_listener or
 #       aws_lb_listener_rule appears anywhere in this file.
 #       Trade-offs: count gates this resource on two inputs rather than one.
-#       attach_load_balancer is false for the batch instantiation, which has a
-#       task definition and no service at all, and create_service is the
+#       attach_load_balancer is false for the batch and data-migration
+#       instantiations, each of which has a task definition and no service at
+#       all, and create_service is the
 #       broader gate; requiring both means a target group is never created with
 #       nothing that could register in it.
 #       Alternatives Considered: a separate ecs-task module for the batch shape
@@ -1876,7 +2149,11 @@ resource "aws_ecs_task_definition" "this" {
 #       the log group -- precisely the duplication this module exists to
 #       prevent -- and the two shapes would then drift apart on everything
 #       except the parts that differ. The accepted cost is three boolean inputs
-#       that seven of the eight callers never touch. count rather than for_each
+#       whose non-default value only two of the nine callers need. Assumptions:
+#       the roots pass all three for EVERY instantiation, because one `for_each`
+#       block configures them all from each.value.online, so seven receive the
+#       default `true` explicitly rather than by omission -- which is why this
+#       says "need" rather than "touch". count rather than for_each
 #       because a zero-or-one conditional is what count expresses directly;
 #       for_each would need a synthetic key carrying no meaning.
 resource "aws_lb_target_group" "this" {

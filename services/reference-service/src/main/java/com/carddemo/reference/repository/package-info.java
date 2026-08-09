@@ -19,9 +19,9 @@
 //       browse rulings, because a citation a reader cannot verify is worse than
 //       no citation at all.
 /**
- * Data access for the reference-data bounded context: six Spring Data JPA repository interfaces over
- * the six tables of the PostgreSQL {@code reference} schema, one interface per table, together with the
- * keyset queries that replace the baseline's cursor paging.
+ * Data access for the reference-data bounded context: seven Spring Data JPA repository interfaces over
+ * the six tables of the PostgreSQL {@code reference} schema, together with the keyset queries that
+ * replace the baseline's cursor paging.
  *
  * <h2>Purpose</h2>
  *
@@ -35,7 +35,7 @@
  * to a type in this package is the one this descriptor constrains: how a row is located, and in what
  * order rows are returned.</p>
  *
- * <p>Assumptions: all six types in this package are {@code interface} declarations with no
+ * <p>Assumptions: all seven types in this package are {@code interface} declarations with no
  * implementation authored anywhere, because the persistence provider derives one at run time from the
  * method names and the query annotations. This matters for documentation rather than for behaviour:
  * {@code config/checkstyle/checkstyle.xml} lists {@code INTERFACE_DEF} first among the tokens its
@@ -52,38 +52,51 @@
  * emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty tag would be reported
  * rather than credited.</p>
  *
- * <h2>The six repositories, the entities they read, and their identities</h2>
+ * <h2>The seven repositories, the entities they read, and their identities</h2>
  *
- * <p>Assumptions: all six are landed as compilation units beside this descriptor, so a reader who
- * cannot open one has found a gap rather than the expected state. The closed set is seven compilation
- * units: this descriptor and the six interfaces. The pairing below is settled here and enumerated
+ * <p>Assumptions: all seven are landed as compilation units beside this descriptor, so a reader who
+ * cannot open one has found a gap rather than the expected state. The closed set is eight compilation
+ * units: this descriptor and the seven interfaces. The pairing below is settled here and enumerated
  * nowhere else, which is why it is written out in full rather than left to be inferred from a file
  * name.</p>
  *
- * <p>Assumptions: the mapping is exactly one interface per table, with no table carrying a second.</p>
+ * <p>Assumptions: the mapping is one interface per table for five of the six tables. The sixth,
+ * {@code reference.us_phone_area_codes}, carries TWO, and the division between them is by question:
+ * one retrieves rows and the other evaluates a classification-scoped predicate and retrieves none. No
+ * other table carries a second interface, and the exception is stated here rather than left to be
+ * discovered from a directory listing.</p>
  *
  * <p>Refactoring Rationale: this directory held NINE interfaces over these six tables. Three of them --
  * {@code PhoneAreaCodeRepository}, {@code StateRepository} and {@code StateZipPrefixRepository} -- were
- * second interfaces over the same three entities the {@code Us}-prefixed three already address, and this
- * charter described the duplication as one deliberate division of one table by question. That
- * description did not survive measurement: the duplication covered three tables rather than one, and
- * none of the three had a single consumer anywhere in the codebase, while the {@code Us}-prefixed three
- * are the ones {@code api/AddressLookupController} injects. Two interfaces over one entity is not a
- * division of labour when nothing calls either side of it; it is two derivations of the same query
- * surface that a later reader has to choose between with no basis for choosing. All three are withdrawn.
+ * second interfaces over the same three entities the {@code Us}-prefixed three already address, and each
+ * duplicated the other's whole query surface: the same walks and the same keyed finder, derived twice,
+ * with no basis for a reader to choose between them. {@code StateRepository} and
+ * {@code StateZipPrefixRepository} remain withdrawn for that reason and are recorded here as names not
+ * to reintroduce. {@code PhoneAreaCodeRepository} has been reinstated, and it is reinstated as ONE
+ * method rather than as the seven it previously duplicated, so the objection that withdrew it does not
+ * apply to what it now declares.
  *
- * <p>Assumptions: two methods went with them and their loss is accounted for rather than incidental.
- * {@code existsByAreaCodeAndCodeClass} answered whether a code belongs to a named classification, and
- * {@code findByAreaCode} on the surviving interface answers strictly more -- it returns the row WITH its
- * classification, which is what the published item route serves and what the account context's adapter
- * compares. {@code countByCodeClass} answered a per-classification census that no published route asks
- * for. Neither had a caller.
+ * <p>Refactoring Rationale: the ground given for withdrawing the area-code interface was that
+ * {@code findByAreaCode} on the surviving interface "answers strictly more", because it returns the row
+ * WITH its classification. That conflated returning more DATA with answering the same QUESTION. The
+ * baseline's account-maintenance path tests {@code IF VALID-GENERAL-PURP-CODE} at
+ * {@code app/cbl/COACTUPC.cbl} line 2298 -- a membership predicate over ONE of the three condition-name
+ * lists at {@code app/cpy/CSLKPCDY.cpy} lines 30, 521 and 931. A finder hands a row to a caller and
+ * leaves that caller to compare its classification, which puts a parity-relevant comparison outside the
+ * layer that owns the column; a predicate evaluates the comparison in the query and returns the verdict.
+ * The two are different queries answering different questions over the same rows, so both are declared.
+ *
+ * <p>Assumptions: {@code countByCodeClass} did NOT come back with it. It answered a
+ * per-classification census that no published route asks for, and the counts it would have reported are
+ * asserted directly by the integration tests instead, which is where a fact about the seed belongs.
  *
  * <p>Assumptions: the withdrawn area-code interface additionally claimed that the account context's
  * address validation reaches this data through that interface's existence check. The claim named the
- * wrong mechanism: that context holds no repository over this schema at all, and its
- * {@code service/RestReferenceAddressLookup} reads the three published item routes over HTTP. The
- * surviving interface makes no such claim.
+ * wrong mechanism and the reinstated interface does not repeat it: that context holds no repository over
+ * this schema at all, and its {@code service/RestReferenceAddressLookup} reads the three published item
+ * routes over HTTP. No class in this module injects the reinstated interface either; it is verified
+ * directly by {@code PhoneAreaCodeRepositoryIT} against the seeded schema, and its own documentation
+ * says so rather than naming a consumer it does not have.
  *
  * <dl>
  *   <dt>{@code TransactionTypeRepository}</dt>
@@ -111,9 +124,19 @@
  *   <dd>Over {@code UsPhoneAreaCode}, table {@code reference.us_phone_area_codes}, identity
  *       {@code String}. Six walks and a keyed finder: three over the whole table and three narrowed
  *       by the classification column, because the baseline holds one broad allow-list and two
- *       sublists of it. Assumptions: this is the ONLY interface over that table. Its keyed finder
- *       returns the row together with its classification, which is what the published item route serves
- *       and what a caller asking a membership question compares against.</dd>
+ *       sublists of it. Assumptions: this is the interface that RETRIEVES ROWS from that table, and
+ *       it is one of two over it. Its keyed finder returns the row together with its classification,
+ *       which is what the published item route serves and what the account context's adapter
+ *       compares once it has read that route.</dd>
+ *
+ *   <dt>{@code PhoneAreaCodeRepository}</dt>
+ *   <dd>Over the same entity and the same table, identity {@code String}. One method and no walk:
+ *       {@code existsByAreaCodeAndCodeClass}, the classification-scoped membership predicate that
+ *       {@code app/cbl/COACTUPC.cbl} line 2298 tests through {@code IF VALID-GENERAL-PURP-CODE}.
+ *       Assumptions: it retrieves no row, so it declares no window, no position and no ordering. The
+ *       union-scoped predicate over all 490 codes is the inherited {@code existsById}, which that
+ *       interface names in its own documentation rather than re-declaring, so one query keeps one
+ *       derivation.</dd>
  *
  *   <dt>{@code UsStateRepository}</dt>
  *   <dd>Over {@code UsState}, table {@code reference.us_states}, identity {@code String}. Three walks

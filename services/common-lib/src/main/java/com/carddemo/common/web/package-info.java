@@ -262,10 +262,10 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>35 production classes</b> and <b>10</b> package
- * charters -- one at the kernel root and one for each subpackage -- for <b>45</b>
- * compilation units in total. This package contributes three of the thirty-five
- * and one of the ten. The breakdown is given so that a reader can re-derive the
+ * <p>The shared kernel holds <b>40 production classes</b> and <b>11</b> package
+ * charters -- one at the kernel root and one for each subpackage -- for <b>51</b>
+ * compilation units in total. This package contributes three of the forty
+ * and one of the eleven. The breakdown is given so that a reader can re-derive the
  * total instead of trusting it:
  *
  * <pre>
@@ -279,21 +279,22 @@
  * observability                      3
  * time                               1
  * validation                         2
- * messaging                          2
+ * messaging                          3
+ * control                            4
  * </pre>
  *
- * <p>Those ten sum to 35, the kernel root itself contributing one -- the
+ * <p>Those eleven sum to 40, the kernel root itself contributing one -- the
  * auto-configuration class that registers this package's filter, and the meter
  * filter, the money codec module and the error advice, in every service:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
  * </pre>
  *
- * <p>Adding the ten charters gives 45:
+ * <p>Adding the eleven charters gives 51:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
  * </pre>
  *
  * <p>This package's own share is:
@@ -302,8 +303,8 @@
  * this package: web 3 production + 1 charter = 4 compilation units
  * </pre>
  *
- * <p>Assumptions: the authoritative totals are <strong>35 production classes and
- * 45 compilation units, 10 of the latter being charters</strong>. The canon above
+ * <p>Assumptions: the authoritative totals are <strong>39 production classes and
+ * 50 compilation units, 11 of the latter being charters</strong>. The canon above
  * is stated as a breakdown and not merely as a total for a reason: a bare total
  * invites a reader to trust it, whereas a per-subpackage list can be re-derived,
  * so any figure that does not reproduce these two sums is wrong on its face.
@@ -312,7 +313,10 @@
  * canon -- 21 classes, 9 charters, 30 units, and a nine-row breakdown. The delivered
  * kernel exceeded it in four subpackages and had gained a tenth, {@code messaging},
  * that the breakdown did not list at all, so a reader re-deriving the total from the
- * table reached a figure the tree contradicts. This package's own contribution of
+ * table reached a figure the tree contradicts. An eleventh, {@code control}, has since
+ * been added deliberately, and the distinction between the two events is the point: one
+ * was a subpackage the table had failed to notice, the other a subpackage argued in with
+ * a recorded reason and entered in the table in the same change. This package's own contribution of
  * three was the one row that was already right, which is exactly why a stale table is
  * dangerous: a correct row lends the wrong ones credibility. Every figure above is now
  * a measurement, and {@code SharedKernelInventoryTest} re-derives each labelled addend,

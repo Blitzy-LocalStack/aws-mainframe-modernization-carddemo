@@ -925,9 +925,17 @@ carddemo:
     #       compiled-in key would be a credential published in this repository, and a
     #       per-instance random key would mint tokens the account context cannot verify,
     #       so the service would start and then fail every call.
-    #       (4) Assumptions: it is the SAME value the account context verifies with and
-    #       the pending-authorization context signs with, because it is one symmetric
-    #       key. infra/modules/ecs-service asserts that exactly those three services
-    #       receive it and that no fourth does.
-    signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+    #       (4) Refactoring Rationale: this is THIS SERVICE'S OWN key and no longer the
+    #       one the pending-authorization context signs with. The account context holds
+    #       both and selects between them by the subject a presented token names, so a
+    #       token minted here under another service's name fails its signature check --
+    #       which is what makes the caller in an audit record verifiable rather than
+    #       merely claimed. infra/modules/ecs-service asserts that exactly this service
+    #       and the account context receive this key, and that no third does.
+    #       (5) Assumptions: the token this key signs carries only the scopes THIS
+    #       context is entitled to -- the cross-reference and account families -- and
+    #       not the customer family, which reaches a national identifier this context
+    #       never reads. The closed table lives in common-lib InternalServiceToken and
+    #       both the minter and the verifier read it, so neither can widen alone.
+    transaction-signing-key: ${CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY}
     token-lifetime-seconds: 60

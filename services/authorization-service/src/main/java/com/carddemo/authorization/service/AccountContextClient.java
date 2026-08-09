@@ -99,6 +99,58 @@ public interface AccountContextClient {
     boolean customerExists(long customerId);
 
     /**
+     * Reads the customer display fields the pending-authorization summary screen shows.
+     *
+     * <p>Refactoring Rationale: this operation exists because the summary screen was publishing the
+     * segment's own identifiers and totals and NOTHING ELSE, while the record it publishes into declares
+     * a customer name, two address lines and a telephone number. The reference program composes all four
+     * from {@code GETCUSTDATA-BYCUST} at {@code cbl/COPAUS0C.cbl} L920, so omitting them left the screen
+     * short of four fields the baseline showed -- a functional-parity gap rather than a design choice,
+     * even though this context correctly declines to own the customer record itself.</p>
+     *
+     * <p>Assumptions: this is ONE call per screen, not one per row. Every authorization beneath a summary
+     * belongs to the same account and therefore the same customer, so the fields are read once for the
+     * whole page. Alternatives Considered: reading them per list row, which would make the screen's cost
+     * grow with the page size for data that is identical on every row; and denormalising them into this
+     * context's own summary table, which was rejected because the customer record belongs to the account
+     * context and a copy here would go stale with no owner responsible for it.</p>
+     *
+     * <p>Assumptions: an ABSENT customer returns an empty optional rather than raising, and the caller
+     * publishes blanks. That mirrors the reference, whose own read has a not-found arm that leaves the
+     * screen fields unfilled and continues -- the authorization totals are what the screen is for, and
+     * refusing the whole screen because a display name could not be resolved would withdraw information
+     * the operator can act on over information they cannot.</p>
+     *
+     * <p>Assumptions: a transport FAILURE still raises, and the distinction from absence is deliberate. A
+     * customer that does not exist is an answer; a customer that could not be reached is not, and
+     * rendering blanks for it would present an unreachable dependency as an empty record.</p>
+     *
+     * @param customerId the customer the summary's segment names
+     * @return the display fields, or an empty optional when no such customer exists
+     * @throws AccountContextUnavailableException if the account context cannot be reached
+     */
+    Optional<CustomerDisplay> customerDisplay(long customerId);
+
+    /**
+     * The four customer fields the summary screen renders, and nothing else.
+     *
+     * <p>Assumptions: this record carries exactly what the screen shows and no more, which is the point of
+     * it being declared here rather than being the account context's whole customer record. The customer
+     * master holds a national identifier, a government-issued identifier and a credit score; none of the
+     * three is on this screen, so none of the three crosses this seam. Narrowing the contract is what
+     * keeps the exposure narrow -- an interface that returned the whole record would make widening the
+     * screen a matter of nobody's decision.</p>
+     *
+     * @param customerName the customer's name as the screen displays it, or {@code null} when unset
+     * @param addressLine1 the first address line, or {@code null} when unset
+     * @param addressLine2 the second address line, or {@code null} when unset
+     * @param phoneNumber1 the customer's first telephone number, or {@code null} when unset
+     */
+    record CustomerDisplay(String customerName, String addressLine1, String addressLine2,
+            String phoneNumber1) {
+    }
+
+    /**
      * The cross-reference row that resolves a card to an account and a customer.
      *
      * <p>Assumptions: only the two identifiers are carried, because the cross-reference record holds

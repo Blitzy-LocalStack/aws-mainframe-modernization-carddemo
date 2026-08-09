@@ -1,5 +1,5 @@
 /**
- * Proves the three card screens render their screen-level outcome through the
+ * @file Proves the three card screens render their screen-level outcome through the
  * shared message band rather than through a component of their own.
  *
  * Purpose
@@ -92,6 +92,7 @@ const EMPTY_PAGE: PageResponse<CardSummary> = {
   firstKey: null,
   lastKey: null,
   hasNext: false,
+  hasPrevious: false,
 };
 
 /*

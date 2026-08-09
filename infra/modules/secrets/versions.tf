@@ -51,8 +51,9 @@ terraform {
     #   the whole infra/ tree so that composed modules have an intersecting range
     #   -- Terraform selects one exact version satisfying every constraint in the
     #   configuration. The 6.56 floor is inherited from the sibling
-    #   aurora-postgresql module, which needs >= 5.81.0 to express a zero-minimum
-    #   Aurora Serverless capacity range.
+    #   aurora-postgresql module, which needs >= 5.80.0 to express a zero-minimum
+    #   Aurora Serverless capacity range and >= 5.81.0 for the auto-pause argument
+    #   a zero minimum makes mandatory, so the pair floors at 5.81.0.
     # Trade-offs: `~> 6.56` admits later 6.x minors but refuses 7.0.0, so a
     #   provider major cannot change the resource schemas this module is written
     #   against between one `init` and the next. An exact constraint was rejected

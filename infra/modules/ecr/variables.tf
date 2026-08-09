@@ -31,7 +31,7 @@
 #
 # Return values:
 #   None. A variables file declares what a module accepts and returns nothing
-#   itself. The module's return surface -- for each of the ten repositories
+#   itself. The module's return surface -- for each of the eleven repositories
 #   its URL, name, ARN and registry identifier, all of them attributes the
 #   registry computes at apply time -- lives in infra/modules/ecr/outputs.tf.
 #   Recorded explicitly rather than omitted, so a reader can tell "this file
@@ -110,10 +110,10 @@
 #       state and inputs alone, so the same configuration would produce
 #       different repositories on different machines.
 variable "repository_names" {
-  description = "Trailing name segment of each container image repository to create, one per deployable artifact; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Defaults to the ten deployables of this migration: the eight services plus the browser SPA and the ETL image."
+  description = "Trailing name segment of each container image repository to create; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Defaults to the ten deployables of this migration -- the eight services plus the browser SPA and the ETL image -- together with `aws-otel-collector`, which mirrors the pinned telemetry sidecar image so a task pulls it over the private registry endpoints rather than from a public registry the application tier's enumerated egress does not reach."
   type        = set(string)
 
-  # WHY : Trade-offs: shipping the ten names as a default rather than demanding
+  # WHY : Trade-offs: shipping the eleven names as a default rather than demanding
   #       them from each root. The cost is that a generic-looking module knows
   #       its application; the benefit is one authoritative list instead of
   #       two copies in two root configurations, which is where the
@@ -130,14 +130,15 @@ variable "repository_names" {
     "reporting-service",
     "ui",
     "data-migration",
+    "aws-otel-collector",
   ]
 
   # WHY : Assumptions: `nullable = false` makes an explicit null resolve to the
-  #       ten names above rather than become the value. Left at its true
+  #       eleven names above rather than become the value. Left at its true
   #       default, `nullable` would let a root that threads an unset local
   #       hand main.tf a null collection, and `for_each` would fail on it --
-  #       so the effect here is that an explicit null still provisions the ten
-  #       repositories rather than failing.
+  #       so the effect here is that an explicit null still provisions the
+  #       eleven repositories rather than failing.
   nullable = false
 
   # WHY : Trade-offs: a few lines of HCL for a readable `plan`-time failure. An
@@ -149,14 +150,15 @@ variable "repository_names" {
     error_message = "repository_names must contain at least one entry; an empty set provisions no repositories, so every image push would fail against an apparently healthy registry."
   }
 
-  # WHY : Assumptions: the TEN deployables are topology, not preference, so the
-  #       set is asserted rather than merely defaulted. The migration ships
+  # WHY : Assumptions: the repository inventory is topology, not preference, so the
+  #       set is asserted rather than merely defaulted. The migration builds
   #       exactly ten container images -- the eight Spring Boot services, the
-  #       browser SPA and the ETL -- and dev and prod are required to differ only
+  #       browser SPA and the ETL -- and mirrors one more that it does not build,
+  #       and dev and prod are required to differ only
   #       in sizing and retention, never in what exists. Before this check the
-  #       exact-ten default could be replaced wholesale by any non-empty set that
-  #       satisfied the name pattern, so a root could apply cleanly against nine
-  #       repositories or against ten under other names, and the failure would
+  #       exact default could be replaced wholesale by any non-empty set that
+  #       satisfied the name pattern, so a root could apply cleanly against fewer
+  #       repositories or against the same count under other names, and the failure would
   #       arrive later and elsewhere: the deploy workflow pushes to a repository
   #       URI composed from the prefix and the service name, so a missing or
   #       renamed repository presents as a push failure in continuous
@@ -174,8 +176,31 @@ variable "repository_names" {
   #       single repository would satisfy it; the count closes that, because a
   #       set already holds no duplicates, so ten members drawn from a set of ten
   #       is that set exactly.
+  # WHY : Refactoring Rationale: the set is ELEVEN entries and not ten, and the
+  #       eleventh is a different kind of thing from the other ten, which is why it
+  #       is called out rather than folded into the sentence above. Ten are this
+  #       migration's own deployables, built from this repository by
+  #       .github/workflows/deploy.yml. `aws-otel-collector` is a MIRROR of a
+  #       pinned third-party image, and it exists because
+  #       infra/modules/ecs-service creates the telemetry sidecar for every
+  #       workload by default while infra/modules/network enumerates the
+  #       application tier's egress rather than allowing 0.0.0.0/0. The public
+  #       registry the collector was pulled from has no interface endpoint and no
+  #       managed prefix list, so with that egress enumerated NO task could pull
+  #       its sidecar and therefore no task could start at all -- a total outage
+  #       that planned cleanly. Mirroring the image into this registry puts the
+  #       pull on the ecr.api and ecr.dkr endpoints the tasks already reach.
+  #       Alternatives Considered: reopening a 0.0.0.0/0 egress rule on 443 for
+  #       the pull. Rejected outright: that is the allow-all the enumerated egress
+  #       replaced, and it would admit every outbound destination in order to
+  #       reach one registry.
+  #       Alternatives Considered: pushing the collector into one of the ten
+  #       deployable repositories under a distinct tag, which would have kept the
+  #       count at ten. Rejected because a repository's lifecycle policy expires
+  #       images by count, so a third-party image sharing a repository with a
+  #       service's builds would be expired by ordinary service releases.
   validation {
-    condition = length(var.repository_names) == 10 && setunion(var.repository_names, [
+    condition = length(var.repository_names) == 11 && setunion(var.repository_names, [
       "auth-service",
       "account-service",
       "card-service",
@@ -186,6 +211,7 @@ variable "repository_names" {
       "reporting-service",
       "ui",
       "data-migration",
+      "aws-otel-collector",
       ]) == toset([
       "auth-service",
       "account-service",
@@ -197,8 +223,9 @@ variable "repository_names" {
       "reporting-service",
       "ui",
       "data-migration",
+      "aws-otel-collector",
     ])
-    error_message = "repository_names must be exactly the ten deployables of this migration: auth-service, account-service, card-service, transaction-service, reference-service, batch-service, authorization-service, reporting-service, ui and data-migration. The image inventory is fixed topology, and dev and prod must not differ in it."
+    error_message = "repository_names must be exactly the ten deployables of this migration -- auth-service, account-service, card-service, transaction-service, reference-service, batch-service, authorization-service, reporting-service, ui and data-migration -- plus aws-otel-collector, the mirror of the pinned telemetry sidecar image. The image inventory is fixed topology, and dev and prod must not differ in it."
   }
 
   # WHY : Assumptions: the registry rejects a malformed repository name rather
@@ -266,7 +293,7 @@ variable "name_prefix" {
 #       infra/envs/dev and infra/envs/prod instantiate this module with
 #       identical topology, differing only in sizing and retention. Without an
 #       environment segment the second root applied into one account would
-#       collide on all ten repository names. Promotion was rejected on a
+#       collide on all eleven repository names. Promotion was rejected on a
 #       sharper ground than the collision: the module is instantiated once per
 #       root, so a shared registry would place one set of resource addresses
 #       under two Terraform states, each apply contesting the other's, and a
@@ -284,7 +311,7 @@ variable "name_prefix" {
 #       local invention: the queues, the dataset bucket and the container
 #       cluster are all named per environment the same way.
 variable "environment" {
-  description = "Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all ten repository names within one account and region."
+  description = "Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all eleven repository names within one account and region."
   type        = string
 
   # WHY : Assumptions: because this input has no default, `nullable = false`
@@ -421,7 +448,7 @@ variable "scan_on_push" {
 
   # WHY : Assumptions: the infrastructure pipeline's policy scan asserts that
   #       scan-on-push is enabled, so `false` here would hand that gate a
-  #       finding on every one of the ten repositories. The enabled default is
+  #       finding on every one of the eleven repositories. The enabled default is
   #       what lets the gate pass by construction instead of by suppression.
   default = true
 

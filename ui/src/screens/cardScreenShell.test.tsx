@@ -1,5 +1,5 @@
 /**
- * Proves the three card screens compose the shared shell in full and render only baseline text.
+ * @file Proves the three card screens compose the shared shell in full and render only baseline text.
  *
  * Purpose
  * -------
@@ -102,6 +102,7 @@ const ONE_ROW_PAGE: PageResponse<CardSummary> = {
   firstKey: null,
   lastKey: null,
   hasNext: false,
+  hasPrevious: false,
 };
 
 /** One card detail, whose masked rendering is what a non-administrative read returns. */

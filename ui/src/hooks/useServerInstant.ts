@@ -1,5 +1,5 @@
 /**
- * Supplies the screen header band its server-derived paint instant.
+ * @file Supplies the screen header band its server-derived paint instant.
  *
  * WHY this hook exists — Refactoring Rationale: `ScreenHeader` accepts a `now` prop and its contract
  * places one obligation on whoever composes it: pass a SERVER-derived instant, because the baseline

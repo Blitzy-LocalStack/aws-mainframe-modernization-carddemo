@@ -11,17 +11,20 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Asserts that the keyed tokeniser this context derives queue metadata through is supplied, is keyed from
- * configuration alone, and refuses to exist without a key.
+ * Asserts the keyed tokeniser this context holds is supplied, is keyed from configuration alone, and
+ * refuses to exist without a key.
  *
  * <h2>Purpose</h2>
- * <p>Refactoring Rationale: no bean supplied this tokeniser, and the omission is the whole of finding
- * C-04. The consequence was not a missing feature but an active exposure: with no tokeniser, the only
- * per-card stable value the reply path held was the card number, so the card number became the
- * first-in-first-out group identity and was written into the outbox row and published as SQS message
- * metadata on every reply. Message metadata sits outside the encrypted body, is reported in queue
- * telemetry, and reaches every log and metric that observes the queue. These tests assert the wiring
- * exists and that it cannot be satisfied by a default.</p>
+ * <p>Refactoring Rationale: no bean supplied this tokeniser at all, and these tests were written when the
+ * omission left the reply path publishing the card number as its first-in-first-out group identity for
+ * want of any other per-card stable value. That framing no longer describes the reply path: specification
+ * &sect;0.4.1.8 freezes {@code MessageGroupId} as {@code card_num} and {@code MessageDeduplicationId} as
+ * {@code transaction_id}, so both are published literally by design and the exposure is registered as
+ * divergence {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} rather than derived away. What these tests
+ * still assert is the property that outlives the framing: a keyed tokeniser exists, its key comes from
+ * configuration and nowhere else, no default can satisfy it, and the values it produces are stable per
+ * input, distinct across inputs and free of the input's digits. Every derived-identity surface in this
+ * context depends on all four.</p>
  *
  * <p>Assumptions: the configuration is exercised by calling the factory method directly rather than by
  * starting a context. What is under test is the key handling -- which forms are accepted, what happens
@@ -125,17 +128,16 @@ class MessagingIdentityConfigTest {
     }
 
     /**
-     * Verifies the derived group identity is stable per card, distinct across cards, and PAN-free.
+     * Verifies a per-card derivation is stable per card, distinct across cards, and PAN-free.
      *
-     * <p>Assumptions: all three properties are asserted together because the fix is only correct if all
-     * three hold. Stability alone would be satisfied by a constant, which would collapse every card into
-     * one first-in-first-out group and serialise the whole service. Distinctness alone would be satisfied
-     * by a random value, which would scatter one card's messages across as many groups as there are
-     * messages and remove the ordering guarantee. Absence of the number alone would be satisfied by
-     * either of those.</p>
+     * <p>Assumptions: all three properties are asserted together because a derivation is only usable if
+     * all three hold. Stability alone would be satisfied by a constant, which would make every card
+     * indistinguishable. Distinctness alone would be satisfied by a random value, which would make two
+     * derivations of one card disagree and correlate nothing. Absence of the number alone would be
+     * satisfied by either of those.</p>
      */
     @Test
-    @DisplayName("the group identity is stable per card, distinct across cards and carries no digits of it")
+    @DisplayName("a per-card derivation is stable per card, distinct across cards and free of its digits")
     void theGroupIdentityIsStableDistinctAndPanFree() {
         OpaqueIdentifier tokeniser = this.config.messagingOpaqueIdentifier(RAW_KEY);
 
@@ -143,10 +145,10 @@ class MessagingIdentityConfigTest {
         String again = tokeniser.token(CsvAuthCodec.GROUP_PURPOSE, CARD_NUMBER);
         String other = tokeniser.token(CsvAuthCodec.GROUP_PURPOSE, OTHER_CARD_NUMBER);
 
-        assertThat(first).as("equal cards must land in one group").isEqualTo(again);
-        assertThat(first).as("different cards must proceed in parallel").isNotEqualTo(other);
+        assertThat(first).as("one input must derive one value").isEqualTo(again);
+        assertThat(first).as("two inputs must derive two values").isNotEqualTo(other);
         assertThat(first)
-                .as("the token is metadata and must disclose no part of the number")
+                .as("a derived value must disclose no part of its input")
                 .doesNotContain(CARD_NUMBER)
                 .doesNotContain(CARD_NUMBER.substring(0, 6))
                 .doesNotContain(CARD_NUMBER.substring(CARD_NUMBER.length() - 4));
@@ -156,9 +158,8 @@ class MessagingIdentityConfigTest {
      * Verifies the group and correlation purposes yield different tokens under one key.
      *
      * <p>Assumptions: purpose scoping is what keeps one key usable for two identities. Without it a
-     * correlation value and a group value derived from the same card would be the same string, so
-     * anything holding one would hold the other and the two could be substituted for each other on the
-     * wire.</p>
+     * correlation value and a per-card value derived from the same card would be the same string, so
+     * anything holding one would hold the other and the two could be substituted for each other.</p>
      */
     @Test
     @DisplayName("the two purposes yield different tokens under one key")

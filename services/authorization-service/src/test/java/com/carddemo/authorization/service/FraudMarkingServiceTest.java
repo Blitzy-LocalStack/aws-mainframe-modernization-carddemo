@@ -13,7 +13,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.AuthFraud;
-import com.carddemo.authorization.domain.AuthFraudKey;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
@@ -21,6 +20,7 @@ import com.carddemo.authorization.dto.FraudMarkRequest;
 import com.carddemo.authorization.dto.FraudMarkResponse;
 import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.repository.AuthFraudRepository;
+import com.carddemo.authorization.repository.AuthFraudUpserter;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.web.CursorToken;
@@ -111,6 +111,9 @@ class FraudMarkingServiceTest {
     /** The fraud-row repository double. */
     private AuthFraudRepository fraudRows;
 
+    /** The single-statement fraud writer that replaced the probe-then-write pair. */
+    private AuthFraudUpserter fraudUpserts;
+
     /** The real mapper, which both seals the selector a test presents and redeems it under test. */
     private PendingAuthViewMapper mapper;
 
@@ -125,6 +128,7 @@ class FraudMarkingServiceTest {
         this.details = mock(PendingAuthDetailRepository.class);
         this.summaries = mock(PendingAuthSummaryRepository.class);
         this.fraudRows = mock(AuthFraudRepository.class);
+        this.fraudUpserts = mock(AuthFraudUpserter.class);
         PendingAuthSummary parent =
                 new PendingAuthSummary(ACCOUNT_ID, Long.valueOf(CUSTOMER_ID_DIGITS));
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(parent));
@@ -137,6 +141,7 @@ class FraudMarkingServiceTest {
         //       assertion passing while the production path read a different source.
         when(this.fraudRows.currentDate()).thenReturn(REPORT_DATE);
         this.service = new FraudMarkingService(this.details, this.summaries, this.fraudRows,
+                this.fraudUpserts,
                 this.mapper);
     }
 
@@ -149,7 +154,8 @@ class FraudMarkingServiceTest {
      * wording drift.</p>
      *
      * <p>Refactoring Rationale: the inserted row's two identifier columns are captured and asserted here
-     * rather than left to {@code verify(save(any()))}, because they are the only two of the twenty-six that
+     * rather than left to {@code verify(insertFraudRowIfAbsent(any()))}, because they are the only two of
+     * the twenty-six that
      * are NOT copied from the segment being marked. The account must be the one the redeemed key names and
      * the customer must be the one the parent summary holds; a row filed against either a caller-stated or
      * a defaulted identifier would still satisfy an {@code any()} verification.</p>
@@ -158,7 +164,7 @@ class FraudMarkingServiceTest {
     @DisplayName("a first mark inserts the fraud row and reports the reference insert sentence")
     void firstMarkInsertsTheFraudRow() {
         givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
 
         FraudMarkingService.FraudMarkOutcome outcome =
                 this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
@@ -168,7 +174,7 @@ class FraudMarkingServiceTest {
                 .isEqualTo(FraudMarkResponse.UPDATE_STATUS_SUCCESS);
         assertThat(outcome.body().message()).isEqualTo(FraudMarkResponse.MESSAGE_ADD_SUCCESS);
         ArgumentCaptor<AuthFraud> inserted = ArgumentCaptor.forClass(AuthFraud.class);
-        verify(this.fraudRows).save(inserted.capture());
+        verify(this.fraudUpserts).upsert(inserted.capture());
         assertThat(inserted.getValue().getAcctId())
                 .as("the account is the one the redeemed selector's key carries")
                 .isEqualTo(ACCOUNT_ID);
@@ -196,12 +202,12 @@ class FraudMarkingServiceTest {
     @DisplayName("an account with no parent summary cannot file a fraud row")
     void anAccountWithNoParentSummaryCannotFileAFraudRow() {
         givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
 
         assertThatExceptionOfType(NoSuchElementException.class).isThrownBy(() -> this.service
                 .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
-        verify(this.fraudRows, never()).save(any(AuthFraud.class));
+        verify(this.fraudUpserts, never()).upsert(any(AuthFraud.class));
     }
 
     /**
@@ -216,24 +222,37 @@ class FraudMarkingServiceTest {
      * when it was inserted stays as it was; that is asserted here on the amount, which no path rewrites.</p>
      */
     @Test
-    @DisplayName("a second mark replaces the state on the existing row and reports the update sentence")
+    @DisplayName("a second mark reports the update sentence and proposes the requested state")
     void secondMarkReplacesTheExistingRow() {
-        PendingAuthDetail row = givenExistingRow();
-        AuthFraud existing = AuthFraud.from(row, expectedAuthTs(), ACCOUNT_ID, 11L,
-                PendingAuthDetail.FRAUD_REPORTED, LocalDate.of(2026, 8, 4));
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.of(existing));
+        givenExistingRow();
+        // WHY : Refactoring Rationale: this test used to seed an EXISTING AuthFraud, stub the probe to
+        //       return it, and then assert on that object's mutated fields. None of that survives the
+        //       change to a single atomic statement: the service no longer reads the row and no longer
+        //       mutates a managed entity, so there is no in-memory row for a unit test to inspect. The
+        //       stub is now the upserter reporting FALSE, which is what "a row already existed" means at
+        //       this boundary.
+        // WHY : Assumptions: the two properties this test can still settle are the ones that live in this
+        //       service -- that the outcome is reported as a transition rather than a creation, and that
+        //       the sentence published for it is the update sentence the reference reports at
+        //       cbl/COPAUS2C.cbl L232. It additionally asserts that the row PROPOSED to the statement
+        //       carries the requested state, which is the service's remaining share of the write.
+        // WHY : Trade-offs: the two column restrictions this test used to assert -- that the state and the
+        //       date change and that the twenty-four-column snapshot does not -- are now properties of the
+        //       statement's DO UPDATE clause and cannot be observed through a mock. They are asserted
+        //       against a real engine by the repository integration test instead, which is the only place
+        //       they were ever really settled: a mutation of a detached object proved that this service
+        //       CALLED applyState, never that the database left the other columns alone.
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(false);
+        ArgumentCaptor<AuthFraud> proposed = ArgumentCaptor.forClass(AuthFraud.class);
 
         FraudMarkingService.FraudMarkOutcome outcome =
                 this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REMOVED), SUBJECT);
 
         assertThat(outcome.created()).isFalse();
         assertThat(outcome.body().message()).isEqualTo(FraudMarkResponse.MESSAGE_UPDATE_SUCCESS);
-        assertThat(existing.getAuthFraud()).isEqualTo(PendingAuthDetail.FRAUD_REMOVED);
-        assertThat(existing.getFraudRptDate()).isEqualTo(LocalDate.of(2026, 8, 6));
-        assertThat(existing.getTransactionAmt())
-                .as("the snapshot the row took when it was inserted is not rewritten")
-                .isEqualByComparingTo(new BigDecimal("250.00"));
-        verify(this.fraudRows, never()).save(any(AuthFraud.class));
+        verify(this.fraudUpserts).upsert(proposed.capture());
+        assertThat(proposed.getValue().getAuthFraud()).isEqualTo(PendingAuthDetail.FRAUD_REMOVED);
+        assertThat(proposed.getValue().getFraudRptDate()).isEqualTo(REPORT_DATE);
     }
 
     /**
@@ -254,14 +273,18 @@ class FraudMarkingServiceTest {
     @DisplayName("the fraud key composes the acquirer date with the positionally decoded time key")
     void fraudKeyComposesTheAcquirerDateWithThePositionalTimeKey() {
         givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
 
-        ArgumentCaptor<AuthFraudKey> probed = ArgumentCaptor.forClass(AuthFraudKey.class);
-        verify(this.fraudRows).findById(probed.capture());
-        assertThat(probed.getValue().getCardNum()).isEqualTo(CARD_NUMBER);
-        assertThat(probed.getValue().getAuthTs()).isEqualTo(expectedAuthTs());
+        // WHY : Refactoring Rationale: the composed key used to be captured off the PROBE argument, and
+        //       there is no probe any more. It is captured off the row PROPOSED to the atomic statement
+        //       instead, which carries the same key -- the statement's conflict target is that key, so a
+        //       wrong composition still addresses a wrong row and this assertion still catches it.
+        ArgumentCaptor<AuthFraud> keyed = ArgumentCaptor.forClass(AuthFraud.class);
+        verify(this.fraudUpserts).upsert(keyed.capture());
+        assertThat(keyed.getValue().getId().getCardNum()).isEqualTo(CARD_NUMBER);
+        assertThat(keyed.getValue().getId().getAuthTs()).isEqualTo(expectedAuthTs());
     }
 
     /**
@@ -278,7 +301,7 @@ class FraudMarkingServiceTest {
     @DisplayName("the authorization row is marked with the segment's month-first report date")
     void theAuthorizationRowIsMarkedWithTheSegmentDate() {
         PendingAuthDetail row = givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REMOVED), SUBJECT);
 
@@ -315,12 +338,12 @@ class FraudMarkingServiceTest {
     @DisplayName("both report dates one operation writes are the same day")
     void bothReportDatesOneOperationWritesAreTheSameDay() {
         PendingAuthDetail row = givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
 
         ArgumentCaptor<AuthFraud> inserted = ArgumentCaptor.forClass(AuthFraud.class);
-        verify(this.fraudRows).save(inserted.capture());
+        verify(this.fraudUpserts).upsert(inserted.capture());
         LocalDate rowDay = inserted.getValue().getFraudRptDate();
         LocalDate segmentDay = LocalDate.parse(row.getFraudReportDate(),
                 DateTimeFormatter.ofPattern("MM/dd/yy"));
@@ -338,12 +361,12 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a selector naming no row is not found")
     void selectorNamingNoRowIsNotFound() {
-        when(this.details.findById(any(PendingAuthDetailKey.class)))
+        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.empty());
 
         assertThatExceptionOfType(NoSuchElementException.class).isThrownBy(() -> this.service
                 .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
-        verifyNoInteractions(this.fraudRows);
+        verifyNoInteractions(this.fraudUpserts);
     }
 
     /**
@@ -359,12 +382,12 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a row with an unparseable original date cannot be marked and reports a fault")
     void rowWithUnparseableOriginalDateCannotBeMarked() {
-        when(this.details.findById(any(PendingAuthDetailKey.class)))
+        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.of(rowWithOriginalDate("      ")));
 
         assertThatExceptionOfType(IllegalStateException.class).isThrownBy(() -> this.service
                 .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
-        verify(this.fraudRows, never()).save(any(AuthFraud.class));
+        verify(this.fraudUpserts, never()).upsert(any(AuthFraud.class));
     }
 
     /**
@@ -397,8 +420,9 @@ class FraudMarkingServiceTest {
     @DisplayName("a failure of the second write shares one boundary with the first, so neither survives")
     void aFailureOfTheSecondWriteRollsTheFirstBackWithIt() throws NoSuchMethodException {
         PendingAuthDetail row = spy(rowWithOriginalDate(AUTH_ORIG_DATE));
-        when(this.details.findById(any(PendingAuthDetailKey.class))).thenReturn(Optional.of(row));
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
+                .thenReturn(Optional.of(row));
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
         // WHY : Assumptions: the second write is the authorization row's own state change, so the failure is
         //       injected there rather than on a repository double. Failing a repository would only prove
         //       that a mock throws; failing the entity operation reproduces the shape the reference guards
@@ -410,8 +434,7 @@ class FraudMarkingServiceTest {
         assertThatExceptionOfType(IllegalStateException.class).isThrownBy(() -> this.service
                 .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
 
-        verify(this.fraudRows)
-                .save(any(AuthFraud.class));
+        verify(this.fraudUpserts).upsert(any(AuthFraud.class));
         assertThat(FraudMarkingService.class
                 .getMethod("mark", String.class, FraudMarkRequest.class, String.class)
                 .getAnnotation(Transactional.class))
@@ -433,14 +456,19 @@ class FraudMarkingServiceTest {
     @DisplayName("the row is re-read by composite key before either write is staged")
     void theRowIsReReadByKeyBeforeEitherWriteIsStaged() {
         givenExistingRow();
-        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        when(this.fraudUpserts.upsert(any(AuthFraud.class))).thenReturn(true);
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
 
-        InOrder sequence = inOrder(this.details, this.fraudRows);
-        sequence.verify(this.details).findById(any(PendingAuthDetailKey.class));
-        sequence.verify(this.fraudRows).findById(any(AuthFraudKey.class));
-        sequence.verify(this.fraudRows).save(any(AuthFraud.class));
+        InOrder sequence = inOrder(this.details, this.fraudUpserts);
+        // WHY : Refactoring Rationale: this sequence was read-the-authorization, probe-the-fraud-row,
+        //       write. The middle step no longer exists, and its removal is the point of the change rather
+        //       than a casualty of it. What still has to hold -- and is what this test was really for -- is
+        //       that the authorization is re-read BEFORE anything is written, because the row the write
+        //       projects from is the row that read returned. A write ordered ahead of the read would
+        //       project from stale state.
+        sequence.verify(this.details).findWithLockById(any(PendingAuthDetailKey.class));
+        sequence.verify(this.fraudUpserts).upsert(any(AuthFraud.class));
     }
 
     /**
@@ -450,7 +478,7 @@ class FraudMarkingServiceTest {
      */
     private PendingAuthDetail givenExistingRow() {
         PendingAuthDetail row = rowWithOriginalDate(AUTH_ORIG_DATE);
-        when(this.details.findById(any(PendingAuthDetailKey.class)))
+        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.of(row));
         return row;
     }

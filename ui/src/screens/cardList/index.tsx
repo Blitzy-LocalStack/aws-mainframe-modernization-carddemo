@@ -1,3 +1,30 @@
+/**
+ * @file The card browse screen, migrated from `app/cbl/COCRDLIC.cbl` and its mapset
+ * `app/bms/COCRDLI.bms` (72 `DFHMDF` fields), reached at route `/cards`.
+ *
+ * Purpose
+ * -------
+ * Render one keyset-paged page of cards with the reference screen's own narrowing fields, its
+ * per-row selection action and its PF-key workflow, and publish the label, message and action-code
+ * constants the screen tests assert against. It replaces CICS transaction CCLI, which
+ * `app/csd/CARDDEMO.CSD` L357-L358 binds to that program.
+ *
+ * Paging contract
+ * ---------------
+ * Assumptions: paging is by KEY and not by page number. PF7 and PF8 are bound to the previous and
+ * next availability the service's page envelope reports, which is what the reference itself
+ * expresses -- it carries a first-key and last-key pair plus a next-page indicator in the
+ * communication area and discovers one more record than fits. antd's own offset pagination is
+ * deliberately disabled: under concurrent inserts an offset skips and repeats rows, which a
+ * browse-by-key does not, so using it would change observable behaviour the golden masters fix.
+ *
+ * Disclosure
+ * ----------
+ * Assumptions: every card number reaching this screen is already masked by the service, and each row
+ * carries an opaque selector used for navigation. Nothing here reconstructs a number, so a screen
+ * capture, an edge access log and the browser history all hold the masked form only.
+ */
+
 import { Button, Flex, Input, Space, Table, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { useEffect, useState } from 'react';
@@ -329,7 +356,15 @@ export function CardListScreen(): ReactElement {
    * @returns {void} Completion is represented by the screen's own state.
    */
   function pageBackward(): void {
-    if (page?.firstKey === null || page?.firstKey === undefined) {
+    /*
+     * WHY : Refactoring Rationale: availability is read from `hasPrevious` rather than from the presence
+     *       of `firstKey`. Every page that returns rows names its own first row, so gating on that
+     *       presence enabled this control on the OPENING page and answered the caller with an empty page
+     *       -- where the source redisplays the page it is on and reports that no earlier record exists
+     *       (`app/cbl/COCRDLIC.cbl` L903, L1301-L1302). `firstKey` is still what the request is issued
+     *       from once the answer is yes.
+     */
+    if (page?.hasPrevious !== true || page.firstKey === null || page.firstKey === undefined) {
       setError(CARD_LIST_PAGING_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY);
       return;
     }

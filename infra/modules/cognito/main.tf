@@ -23,7 +23,7 @@
 #   again beside the password policy it produces.
 #
 # Parameters:
-#   All twenty-five inputs declared in the sibling variables.tf, every one of
+#   All twenty-six inputs declared in the sibling variables.tf, every one of
 #   which is consumed here -- the module is linted with
 #   terraform_unused_declarations enabled, so an unconsumed input is a build
 #   failure rather than dead weight. Each input's USE is explained at the
@@ -44,8 +44,17 @@
 #     - API vocabulary .... resource_server_identifier, resource_server_scopes
 #     - hosted UI ......... domain_prefix
 #     - environment ....... deletion_protection, secret_recovery_window_in_days
-#     - identities ........ seed_users
+#     - identities ........ seed_users, seed_user_credential_revision
 #     - tagging ........... tags
+#
+#   WHY the count is stated and the inventory is exhaustive: an earlier revision
+#   of this header said twenty-five and omitted seed_user_credential_revision,
+#   which is the input that regenerates every seed user's temporary password. An
+#   inventory that silently drops the one input with a destructive effect is
+#   worse than no inventory, because a reader who finds the other twenty-five
+#   present has no reason to doubt it. The count is therefore restated whenever
+#   an input is added, and it is checkable against
+#   `grep -c '^variable "' variables.tf`.
 #
 # Returns:
 #   Resource attributes, read by the sibling outputs.tf and consumed by other
@@ -171,9 +180,14 @@ locals {
   #       AAP identity contract rather than composed from var.name_prefix, so a
   #       caller can rename environment resources without silently renaming the
   #       authorities every service recognises. The converter constructor also
-  #       checks the two configured outputs during service startup, turning any
+  #       checks the two configured names during service startup, turning any
   #       cross-layer drift into a startup failure rather than a deployment in
   #       which every protected request is denied.
+  #       Refactoring Rationale: that startup check is the LAST line of defence,
+  #       not the only one -- it fires after an apply has already replaced the
+  #       groups. Each group resource below therefore carries a lifecycle
+  #       precondition pinning its frozen value, so editing either literal here
+  #       fails the plan and names every consumer that must change with it.
   admin_group_name = "carddemo-admin"
   user_group_name  = "carddemo-user"
 
@@ -763,71 +777,116 @@ resource "terraform_data" "app_client_secret_rotation" {
       ROTATED_FILE="$TEMPORARY_DIRECTORY/rotated.json"
       MANAGED_FILE="$TEMPORARY_DIRECTORY/managed.json"
 
+      # WHY : Assumptions: this call returns DESCRIPTORS ONLY -- ClientSecretId,
+      #       CreatedDate and LastModifiedDate -- and never ClientSecretValue.
+      #       Cognito returns a secret's value exactly once, from the call that
+      #       creates it, and no API returns it again afterwards. Everything below
+      #       is shaped by that one constraint, so the list is used to count and to
+      #       identify secrets and never to read one.
       aws cognito-idp list-user-pool-client-secrets \
         --region "$REGION" \
         --user-pool-id "$CARDDEMO_USER_POOL_ID" \
         --client-id "$CARDDEMO_APP_CLIENT_ID" \
         --output json > "$DESCRIPTORS_FILE"
 
+      # WHY : Assumptions: one or two is the whole legal range. The CloudFormation
+      #       app client is declared with GenerateSecret true, so exactly one exists
+      #       after the stack applies, and Cognito caps a client at two active
+      #       secrets. Zero means the client was tampered with out of band and two
+      #       plus one more is impossible, so both bounds are refusals rather than
+      #       cases to handle.
       SECRET_COUNT="$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1], encoding="utf-8")).get("ClientSecrets", [])))' "$DESCRIPTORS_FILE")"
       if [ "$SECRET_COUNT" -lt 1 ] || [ "$SECRET_COUNT" -gt 2 ]; then
         echo "Cognito app client must have one or two active secrets before rotation." >&2
         exit 1
       fi
 
-      INITIALISE_SECRET="true"
+      # WHY : Assumptions: the managed payload is the only place a previously-minted
+      #       secret's IDENTITY can be learned, because a descriptor carries no value
+      #       to match against. KNOWN_SECRET_ID is set only when the stored payload
+      #       names this client AND records a client_secret_id AND that id is still
+      #       among the active descriptors. Any other state -- no stored payload, a
+      #       payload for a different client, a payload written before ids were
+      #       recorded, or an id Cognito no longer lists -- leaves it empty, which
+      #       selects the re-initialisation path below rather than failing. That is
+      #       deliberate: a secret this script cannot identify is one it also cannot
+      #       preserve, and refusing to proceed would leave the deployment with no
+      #       usable credential at all.
+      KNOWN_SECRET_ID=""
       if aws secretsmanager get-secret-value \
         --region "$REGION" \
         --secret-id "$CARDDEMO_APP_CLIENT_SECRET" \
         --query SecretString \
         --output text > "$CURRENT_FILE" 2>/dev/null; then
-        STORED_CLIENT_ID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("client_id", ""))' "$CURRENT_FILE")"
-        if [ "$STORED_CLIENT_ID" = "$CARDDEMO_APP_CLIENT_ID" ]; then
-          INITIALISE_SECRET="false"
-        fi
+        KNOWN_SECRET_ID="$(python3 -c 'import json, sys; stored=json.load(open(sys.argv[1], encoding="utf-8")); ids={item.get("ClientSecretId", "") for item in json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", [])}; candidate=stored.get("client_secret_id", ""); print(candidate if stored.get("client_id", "") == sys.argv[3] and candidate in ids else "")' "$CURRENT_FILE" "$DESCRIPTORS_FILE" "$CARDDEMO_APP_CLIENT_ID")"
       fi
 
-      if [ "$INITIALISE_SECRET" = "false" ]; then
-        CURRENT_SECRET_ID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("client_secret_id", ""))' "$CURRENT_FILE")"
-        if [ -z "$CURRENT_SECRET_ID" ]; then
-          CURRENT_SECRET_ID="$(python3 -c 'import hmac, json, sys; current=json.load(open(sys.argv[1], encoding="utf-8"))["client_secret"]; descriptors=json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", []); matches=[item.get("ClientSecretId", "") for item in descriptors if hmac.compare_digest(item.get("ClientSecretValue", ""), current)]; print(matches[0] if len(matches) == 1 else "")' "$CURRENT_FILE" "$DESCRIPTORS_FILE")"
+      # WHY : Assumptions: a slot must be freed before a secret can be added,
+      #       because Cognito permits at most two and the add below always creates
+      #       one. Which secret is pruned depends on what is known: with a
+      #       recognised managed secret the OTHER one is stale by definition and goes;
+      #       without one, nothing distinguishes the two except age, so the oldest by
+      #       CreatedDate is pruned. Deleting before adding is forced by the cap and
+      #       is safe in both branches, because the value held in Secrets Manager is
+      #       either the survivor or already unusable.
+      if [ "$SECRET_COUNT" -eq 2 ]; then
+        if [ -n "$KNOWN_SECRET_ID" ]; then
+          STALE_SECRET_ID="$(python3 -c 'import json, sys; current=sys.argv[1]; stale=[item.get("ClientSecretId", "") for item in json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId") != current]; print(stale[0] if len(stale) == 1 else "")' "$KNOWN_SECRET_ID" "$DESCRIPTORS_FILE")"
+        else
+          STALE_SECRET_ID="$(python3 -c 'import json, sys; items=[item for item in json.load(open(sys.argv[1], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId")]; items.sort(key=lambda item: item.get("CreatedDate", "")); print(items[0].get("ClientSecretId", "") if len(items) == 2 else "")' "$DESCRIPTORS_FILE")"
         fi
-        if [ -z "$CURRENT_SECRET_ID" ]; then
-          echo "The managed secret does not identify exactly one active Cognito client secret." >&2
+        if [ -z "$STALE_SECRET_ID" ]; then
+          echo "Unable to identify exactly one stale Cognito client secret." >&2
           exit 1
         fi
-
-        if [ "$SECRET_COUNT" -eq 2 ]; then
-          STALE_SECRET_ID="$(python3 -c 'import json, sys; current=sys.argv[1]; stale=[item.get("ClientSecretId", "") for item in json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId") != current]; print(stale[0] if len(stale) == 1 else "")' "$CURRENT_SECRET_ID" "$DESCRIPTORS_FILE")"
-          if [ -z "$STALE_SECRET_ID" ]; then
-            echo "Unable to identify exactly one stale Cognito client secret." >&2
-            exit 1
-          fi
-          aws cognito-idp delete-user-pool-client-secret \
-            --region "$REGION" \
-            --user-pool-id "$CARDDEMO_USER_POOL_ID" \
-            --client-id "$CARDDEMO_APP_CLIENT_ID" \
-            --client-secret-id "$STALE_SECRET_ID" \
-            >/dev/null
-        fi
-
-        aws cognito-idp add-user-pool-client-secret \
+        aws cognito-idp delete-user-pool-client-secret \
           --region "$REGION" \
           --user-pool-id "$CARDDEMO_USER_POOL_ID" \
           --client-id "$CARDDEMO_APP_CLIENT_ID" \
-          --output json > "$ROTATED_FILE"
-        DESCRIPTOR_KIND="rotated"
-        DESCRIPTOR_FILE="$ROTATED_FILE"
-      else
-        if [ "$SECRET_COUNT" -ne 1 ]; then
-          echo "Cognito app-client secret initialization requires exactly one active secret." >&2
-          exit 1
-        fi
-        DESCRIPTOR_KIND="initial"
-        DESCRIPTOR_FILE="$DESCRIPTORS_FILE"
+          --client-secret-id "$STALE_SECRET_ID" \
+          >/dev/null
       fi
 
-      python3 -c 'import json, sys; source=json.load(open(sys.argv[1], encoding="utf-8")); descriptor=(source["ClientSecrets"][0] if sys.argv[2]=="initial" else source["ClientSecretDescriptor"]); secret_id=descriptor.get("ClientSecretId", ""); secret_value=descriptor.get("ClientSecretValue", ""); assert secret_id and secret_value, "Cognito returned an incomplete app-client secret"; json.dump({"client_id":sys.argv[3],"client_secret":secret_value,"client_secret_id":secret_id},open(sys.argv[4],"w",encoding="utf-8"),separators=(",", ":"))' "$DESCRIPTOR_FILE" "$DESCRIPTOR_KIND" "$CARDDEMO_APP_CLIENT_ID" "$MANAGED_FILE"
+      # WHY : Refactoring Rationale: BOTH the initialisation and the rotation path
+      #       now mint a new secret here, and the branch that read an existing one is
+      #       gone. It could not work: the initialisation path took
+      #       ClientSecrets[0] from the list response and asserted its
+      #       ClientSecretValue was non-empty, and that field is never present in a
+      #       list response, so the assertion aborted EVERY first apply -- the whole
+      #       stack could not be provisioned once. A second consequence of the same
+      #       mistake was a fallback that tried to identify the managed secret by
+      #       comparing its value against each descriptor's ClientSecretValue with
+      #       hmac.compare_digest; every comparison was against the empty string, so
+      #       that path could only ever fail. Both are replaced by minting, because
+      #       AddUserPoolClientSecret is the only call in this API that returns a
+      #       value and it is the one the rotation path already depended on.
+      #       Trade-offs: the CloudFormation-generated secret is therefore never
+      #       persisted and never used -- it is pruned on the first rotation, as the
+      #       stale predecessor. That costs one extra API call on first apply and buys
+      #       two things: the credential that actually authenticates was created by
+      #       this script and has never been returned to any other caller, and there
+      #       is exactly ONE code path to reason about instead of an initialisation
+      #       path that no apply ever exercised successfully.
+      #       Assumptions: after this call two secrets are active -- the predecessor
+      #       and the new one -- and that overlap is intentional, not a leak. It is
+      #       what lets auth-service reload the new value while the old one still
+      #       authenticates, and the next rotation prunes the predecessor through the
+      #       branch above.
+      aws cognito-idp add-user-pool-client-secret \
+        --region "$REGION" \
+        --user-pool-id "$CARDDEMO_USER_POOL_ID" \
+        --client-id "$CARDDEMO_APP_CLIENT_ID" \
+        --output json > "$ROTATED_FILE"
+
+      # WHY : Assumptions: the id and the value are BOTH required and both come from
+      #       this one response. The value is what auth-service computes SECRET_HASH
+      #       with; the id is what the next run matches against a descriptor to tell
+      #       the current secret from the stale one, and omitting it is what forced
+      #       the removed value-comparison fallback to exist. The assertion is kept
+      #       because a response missing either field means the service contract
+      #       changed, and persisting a partial payload would fail later at
+      #       authentication time rather than here.
+      python3 -c 'import json, sys; descriptor=json.load(open(sys.argv[1], encoding="utf-8"))["ClientSecretDescriptor"]; secret_id=descriptor.get("ClientSecretId", ""); secret_value=descriptor.get("ClientSecretValue", ""); assert secret_id and secret_value, "Cognito returned an incomplete app-client secret"; json.dump({"client_id":sys.argv[2],"client_secret":secret_value,"client_secret_id":secret_id},open(sys.argv[3],"w",encoding="utf-8"),separators=(",", ":"))' "$ROTATED_FILE" "$CARDDEMO_APP_CLIENT_ID" "$MANAGED_FILE"
       aws secretsmanager put-secret-value \
         --region "$REGION" \
         --secret-id "$CARDDEMO_APP_CLIENT_SECRET" \
@@ -925,6 +984,35 @@ resource "aws_cognito_user_group" "admin" {
   #       infra/modules/ecs-service's task roles; this module creates no IAM
   #       role, and role_arn is left unset for that reason rather than by
   #       oversight.
+
+  lifecycle {
+    # WHY : Trade-offs: this condition compares a literal to the same literal,
+    #       which is why it needs justifying rather than deleting. Its value is
+    #       not the comparison, it is the ERROR MESSAGE: renaming
+    #       local.admin_group_name is a one-line edit that plans clean and then
+    #       breaks every protected request, because the name Cognito puts in the
+    #       cognito:groups claim would no longer be the name the consumers
+    #       recognise. Pinning the frozen value in a second place turns that
+    #       rename into a plan failure carrying the list of files that must
+    #       change in the same commit. The cost is one deliberate edit in two
+    #       places when the contract genuinely changes; the alternative cost is
+    #       an authorization outage discovered in production.
+    #       Alternatives Considered: (1) a check block, which reports the same
+    #       condition as a WARNING and lets the apply proceed -- rejected
+    #       because a warning on a change that denies every request is not
+    #       proportionate; (2) injecting the names into the services as
+    #       environment values so the dependency is plan-visible, which is the
+    #       other resolution this finding allows -- rejected because
+    #       JwtRoleConverter compiles ADMIN_AUTHORITY and USER_AUTHORITY and its
+    #       constructor REFUSES STARTUP when a configured name differs, so an
+    #       injected channel could only ever carry the one value Java already
+    #       fixes. Modelling an unvariable value as configuration would make a
+    #       rename look supported when it is a coordinated three-language change.
+    precondition {
+      condition     = local.admin_group_name == "carddemo-admin"
+      error_message = "local.admin_group_name must remain \"carddemo-admin\": it is a cross-language authorization contract, not a naming preference. Renaming it requires the same change in services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java (ADMIN_AUTHORITY), ui/src/hooks/useAuth.ts (ADMIN_GROUP), and the carddemo.security.admin-group-name default in the application.yml of all seven request-serving services."
+    }
+  }
 }
 
 # WHY : Assumptions: the reasoning for declaring exactly two explicit groups, for
@@ -937,6 +1025,18 @@ resource "aws_cognito_user_group" "user" {
   user_pool_id = aws_cognito_user_pool.this.id
   description  = "Ordinary users. Carries SEC-USR-TYPE value 'U', the condition name CDEMO-USRTYP-USER at app/cpy/COCOM01Y.cpy L28, which is the ELSE arm at app/cbl/COSGN00C.cbl L235 routing a user to the main menu."
   precedence   = 10
+
+  lifecycle {
+    # WHY : Assumptions: the reasoning for guarding the name at all, and for
+    #       preferring a precondition over both a check block and an injected
+    #       environment value, is recorded on the administrator group above and
+    #       applies here unchanged. Only the value and the consumer symbols
+    #       differ, so only those are restated.
+    precondition {
+      condition     = local.user_group_name == "carddemo-user"
+      error_message = "local.user_group_name must remain \"carddemo-user\": it is a cross-language authorization contract, not a naming preference. Renaming it requires the same change in services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java (USER_AUTHORITY), ui/src/hooks/useAuth.ts (USER_GROUP), and the carddemo.security.user-group-name default in the application.yml of all seven request-serving services."
+    }
+  }
 }
 
 # WHY : Alternatives Considered: provisioning the hosted UI unconditionally,

@@ -424,27 +424,17 @@ server:
 #       serialises as a JSON number in violation of the migration's fixed-point
 #       money rule. A document-wide Jackson default set here is the same hazard
 #       approached from the other side.
-
-# WHY : Alternatives Considered: a spring.jackson block, and in particular a
-#       global non-null inclusion policy. Rejected, and the reasoning is the
-#       reason no such key appears anywhere below. The argument FOR one is real:
-#       the report submission response has to omit its execution identifier
-#       entirely, not send it as null, for the two confirm outcomes that submit
-#       nothing. The argument against is decisive, because the same global
-#       setting reaches every serialised type -- it would also suppress the
-#       deliberately nullable first-key and last-key cursor tokens of the shared
-#       keyset page envelope, turning a four-component envelope into a
-#       three-component one on a first page and breaking the contract the browser
-#       client is written against. Presence and absence are therefore a
-#       per-property concern belonging to the DTO and to the shared kernel types,
-#       not a document-wide default. There is a second, independent reason to
-#       leave Jackson alone from configuration: config/OpenApiConfig.java
-#       deliberately declares no object-mapper bean, because declaring one backs
-#       off the framework's Jackson autoconfiguration and would leave the shared
-#       money module unbound, at which point every money field silently
-#       serialises as a JSON number in violation of the migration's fixed-point
-#       money rule. A document-wide Jackson default set here is the same hazard
-#       approached from the other side.
+# WHY : Refactoring Rationale: this block stood twice, byte-identically, immediately
+#       above this line. One copy was removed and this one kept because it is the
+#       one adjacent to what it explains -- the `spring:` mapping below, in which no
+#       `jackson` key appears. The duplication was not merely untidy: a rationale
+#       held in two places is edited in one, and the surviving stale copy then reads
+#       as though it were current, which is the same failure mode that let a
+#       superseded claim survive elsewhere in this checkpoint. Both assertions above
+#       were re-verified against the code before the copy was dropped: `grep jackson`
+#       over this service's resources matches only this comment, and
+#       `config/OpenApiConfig.java` names ObjectMapper only to record that it
+#       declares no such bean.
 spring:
 
   # WHY : Assumptions: this value has two consumers that must agree, and it was
@@ -1299,3 +1289,47 @@ carddemo:
       #       place in every environment.
       report-prefix: reports/transaction-detail/
       statement-prefix: statements/
+
+    artifact:
+
+      # WHY : (1) Purpose: a per-request statement artifact is stored under a key
+      #       that has to name WHICH statement it is, and the obvious key names it
+      #       with the account identifier and the card number's last four digits.
+      #       That is the defect this key exists to remove: an object key is
+      #       metadata, it appears in a bucket listing, in an access log, in a
+      #       lifecycle report and in a storage-inventory export, and every one of
+      #       those surfaces is read by principals who are not entitled to the
+      #       cardholder data the artifact holds. Listing a prefix would enumerate
+      #       the portfolio without a single object ever being read. The key is
+      #       therefore derived through common-lib's OpaqueIdentifier, which emits
+      #       a twenty-two character token, and the account identifier and the
+      #       masked tail appear nowhere in it.
+      #       (2) Alternatives Considered: an unkeyed digest of the same inputs, or
+      #       a keyed digest with a published salt. Both rejected for the same
+      #       reason the queue group identity in the authorization context rejects
+      #       them: an account identifier is an eleven-digit number and a masked
+      #       tail is four digits, so the candidate space is small enough to
+      #       enumerate, and anyone holding a listing could confirm which account
+      #       produced which object. Only a secret key makes the token
+      #       unconfirmable, which is the entire property being bought.
+      #       (3) Alternatives Considered: a random token recorded in a lookup
+      #       table. Rejected because it makes the key unreproducible: a rerun
+      #       would store a second artifact rather than replacing the first, which
+      #       contradicts the delete-then-allocate replace semantics the
+      #       statement-prefix block above inherits from CREASTMT.JCL L66. A keyed
+      #       derivation is deterministic, so the same request writes the same key
+      #       and a rerun replaces.
+      #       (4) Assumptions: this is a DIFFERENT secret from the pagination
+      #       cursor signing key and from the authorization context's messaging
+      #       key. The three have different holders and different trust purposes,
+      #       so sharing one value would let a holder of any of them compute the
+      #       others' tokens and would make rotating one require stopping all
+      #       three.
+      #       (5) Assumptions: the value arrives as a container secret from the
+      #       deployment's secret store, in base64 or as raw text, and it is never
+      #       a literal in this file or in any tfvars file. It carries no fallback:
+      #       config/ArtifactIdentityConfig.java refuses a blank value at start-up
+      #       and refuses anything shorter than the tokeniser's minimum key length,
+      #       because a default would publish real cardholder metadata under a key
+      #       every deployment could reproduce.
+      hmac-key: ${CARDDEMO_REPORTING_ARTIFACT_HMAC_KEY}

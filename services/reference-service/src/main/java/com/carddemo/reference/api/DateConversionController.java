@@ -5,7 +5,8 @@ import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.reference.dto.DateConversionRequest;
 import com.carddemo.reference.dto.DateConversionResponse;
-import com.carddemo.reference.service.DateConversionMessageListener;
+import com.carddemo.reference.mapper.DateInquiryReplyMapper;
+import com.carddemo.reference.service.DateConversionService;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -49,14 +50,14 @@ import org.springframework.web.bind.annotation.RestController;
  * <h2>The reply the sibling route carries, and why this class does not compose it</h2>
  *
  * <p>Assumptions: the queue reply is a forty-six-character string whose shape is load-bearing, and it
- * is composed by {@link DateConversionMessageListener} rather than here. Its two labels are exactly
- * fourteen characters each, published as {@link DateConversionMessageListener#DATE_PREFIX} and
- * {@link DateConversionMessageListener#TIME_PREFIX}: the word, a space, four letters, a space, a colon
- * and a trailing space, so the space on BOTH sides of the colon and the trailing space are part of the
- * label. The composition at {@code app/app-vsam-mq/cbl/CODATE01.cbl} L355 to L360 concatenates them
- * with the values under {@code DELIMITED BY SIZE}, which inserts NOTHING between the date value and
- * the second label. The total is therefore 14 + 10 + 14 + 8 = 46, published as
- * {@link DateConversionMessageListener#REPLY_CONTENT_LENGTH}, over the two declared value widths
+ * is composed by {@link DateInquiryReplyMapper} rather than here. Its two labels are exactly fourteen
+ * characters each, {@code 'SYSTEM DATE : '} and {@code 'SYSTEM TIME : '}: the word, a space, four
+ * letters, a space, a colon and a trailing space, so the space on BOTH sides of the colon and the
+ * trailing space are part of the label. The composition at
+ * {@code app/app-vsam-mq/cbl/CODATE01.cbl} L355 to L360 concatenates them with the values under
+ * {@code DELIMITED BY SIZE}, which inserts NOTHING between the date value and the second label. The
+ * total is therefore 14 + 10 + 14 + 8 = 46, published as
+ * {@link DateInquiryReplyMapper#REPLY_BODY_LENGTH}, over the two declared value widths
  * {@code WS-MMDDYYYY PIC X(10)} at L37 and {@code WS-TIME PIC X(8)} at L38. Inserting a space, a comma
  * or a line break between the date value and the second label would leave every label present and the
  * total wrong, which is the one way that shape breaks without looking broken.</p>
@@ -75,10 +76,11 @@ import org.springframework.web.bind.annotation.RestController;
  * reports on a date a caller submits, so it needs no instant and reads none: there is no clock call in
  * this class and no clock member on it. The route that does need one, the reply composition described
  * above, takes it from a {@code java.time.Clock} supplied to
- * {@link DateConversionMessageListener} at construction. That is the supported path rather than a
- * preference, because {@code com.carddemo.common.time.TimestampFormatter} publishes a member taking a
- * clock and deliberately publishes no argument-free equivalent, and it is what lets a reply be
- * asserted byte for byte instead of only pattern-matched.</p>
+ * {@code com.carddemo.reference.service.DateInquiryMessageListener} at construction. That is the
+ * supported path rather than a preference, because
+ * {@code com.carddemo.common.time.TimestampFormatter} publishes a member taking a clock and
+ * deliberately publishes no argument-free equivalent, and it is what lets a reply be asserted byte for
+ * byte instead of only pattern-matched.</p>
  *
  * <h2>Why one shared validator is the faithful shape and not an abstraction invented here</h2>
  *
@@ -197,30 +199,31 @@ public class DateConversionController {
                     + MIN_DATE_WIDTH + " characters for the unseparated ordering and "
                     + MAX_DATE_WIDTH + " for the separated one";
 
-    /** The holder of the migrated date rules, shared with the queue route. */
-    private final DateConversionMessageListener evaluator;
+    /** The holder of the migrated date rules this handler delegates to. */
+    private final DateConversionService evaluator;
 
     /**
-     * Builds the controller over the shared holder of the date rules.
+     * Builds the controller over the holder of the date rules.
      *
      * <p>Alternatives Considered: taking {@code DateEditValidator} directly and calling it from the
      * handler. It was rejected because the member reached below does two things beyond calling those
      * rules -- it applies the default picture when a caller sends none, and it assembles the six
-     * members of the reply -- so calling the rules straight from here would fork both of those away
-     * from the queue route, and the two transports could then answer one input differently. The rules
-     * are still held in one place either way; what this choice settles is the ROUTE to them.</p>
+     * members of the reply -- so calling the rules straight from here would put both of those in the
+     * boundary layer, whose whole obligation is to hold no date rule. The rules are held in one place
+     * either way; what this choice settles is the ROUTE to them.</p>
      *
-     * <p>Trade-offs: the compromise accepted is that a controller depends on a type whose name
-     * describes a queue listener, which reads oddly at this call site. It is accepted because the
-     * alternative duplicates the default picture and the assembly of the six members
-     * {@link DateConversionResponse} declares, and a duplicated assembly drifts silently while an oddly
-     * named dependency is merely conspicuous.</p>
+     * <p>Refactoring Rationale: this parameter was typed
+     * {@code DateConversionMessageListener}, and its own documentation recorded the oddity of a
+     * controller depending on a type named for a queue listener as an accepted trade-off. That type no
+     * longer exists: it also carried a second queue consumer competing with
+     * {@code DateInquiryMessageListener} for the same request queue, and consolidating that flow left
+     * this evaluation as the only member it still needed to hold. The dependency is now typed for what
+     * it is, and the trade-off it used to justify has been removed rather than restated.</p>
      *
-     * @param evaluator the shared holder of the migrated date rules, as a
-     *     {@link DateConversionMessageListener}; the container supplies the single instance the queue
-     *     route also uses, and it must not be {@code null}
+     * @param evaluator the holder of the migrated date rules, as a {@link DateConversionService};
+     *     must not be {@code null}
      */
-    public DateConversionController(DateConversionMessageListener evaluator) {
+    public DateConversionController(DateConversionService evaluator) {
         this.evaluator = evaluator;
     }
 
@@ -265,35 +268,50 @@ public class DateConversionController {
             @Size(min = MIN_MASK_WIDTH, max = MASK_WIDTH) String mask) {
 
         try {
-            // WHY : Alternatives Considered: composing a verdict here from the rules directly. The
-            //       member called is the one the queue route calls, and reaching the rules through it
-            //       is what makes the two transports answer one input identically rather than
-            //       similarly; a second composition would agree on the day it was written and drift
-            //       afterwards. The picture is handed on exactly as received, including as null, so
-            //       that the default is applied in the one place that also echoes which picture was
-            //       used.
+            // WHY : Alternatives Considered: composing a verdict here from the rules directly.
+            //       Rejected because the member called applies the default picture and assembles the
+            //       six members of the reply, so composing here would put a date rule in the boundary
+            //       layer and would give the two behaviours two homes. The picture is handed on exactly
+            //       as received, including as null, so that the default is applied in the one place
+            //       that also echoes which picture was used.
+            // WHY : Refactoring Rationale: this comment used to justify the call by saying the member
+            //       reached is "the one the queue route calls", so that "the two transports answer one
+            //       input identically". That was false in fact: the queue route is
+            //       DateInquiryMessageListener, it emits the current system date and time, it reads no
+            //       field of its request, and it has never called this evaluation. The two routes
+            //       answer different questions and share no evaluation, and the justification is
+            //       restated as what actually holds rather than deleted, because a reader who believed
+            //       the old one would look for a shared path that does not exist.
             return this.evaluator.convert(new DateConversionRequest(date, mask));
-        } catch (IllegalArgumentException widthRefusal) {
+        } catch (DateEditValidator.DateWidthException widthRefusal) {
             // WHY : Refactoring Rationale: the width mismatch is re-raised as a caller refusal rather
             //       than allowed to propagate, because the shared advice tests for the caller-refusal
             //       type and deliberately not for its supertype -- widening it there would report
             //       every internal invariant in the migration as a 400 the caller should act on. Left
             //       to propagate, this one would answer 500 while the contract states the case is 400,
             //       telling a caller its own input was the service's fault.
-            // WHY : Assumptions: relabelling is safe for exactly this catch, because the width
-            //       disagreement is the only INPUT-DEPENDENT refusal of this type the call above can
-            //       reach. A picture the rules do not recognise is RETURNED as the unusable-pattern
-            //       verdict rather than raised; a component that is not numeric, a month or day
-            //       outside its domain and a day below the supported calendar floor are each returned
-            //       as their own verdict; and a null candidate is excluded by the presence bound on
-            //       the parameter above.
-            // WHY : Trade-offs: the catch names the supertype rather than a refusal type of its own,
-            //       so a defect in the shared holder's own feedback catalog -- the one remaining raise
-            //       on this path, an invariant its own tests pin -- would be reported against the date
-            //       parameter instead of as a service failure. That is accepted because the narrower
-            //       alternative is to decide at the boundary which picture demands which width, and
-            //       that association is a date rule; stating it here would put a second copy of a rule
-            //       in the layer whose whole obligation is to hold none.
+            // WHY : Refactoring Rationale: the caught type is now the validator's OWN width condition
+            //       and no longer its supertype, and the compromise previously recorded here is
+            //       withdrawn rather than restated. Catching the supertype swept up every internal
+            //       invariant the validator raises -- a feedback record whose severity contradicts its
+            //       own code, an unknown date-component identity, a year outside the four-digit domain,
+            //       a value too wide for a four-digit field -- and reported each of them to the caller
+            //       as a four-hundred naming the date parameter. Two things were lost at once: a caller
+            //       was told to correct a request it had sent correctly, and a genuine service defect
+            //       never reached the five-hundred channel the alerting watches. The narrow catch was
+            //       previously said to require deciding at this boundary which picture demands which
+            //       width; it does not, because the decision moved to the validator, which is where the
+            //       rule already lived.
+            // WHY : Assumptions: no other input-dependent refusal reaches this catch, so narrowing it
+            //       loses no case. A picture the rules do not recognise is RETURNED as the
+            //       unusable-pattern verdict rather than raised; a component that is not numeric, a
+            //       month or day outside its domain and a day below the supported calendar floor are
+            //       each returned as their own verdict; and a null candidate is excluded by the presence
+            //       bound on the parameter above.
+            // WHY : Assumptions: the caught condition is deliberately not passed through. Its message
+            //       names the picture the caller supplied and both widths, so forwarding it would echo
+            //       up to MASK_WIDTH characters of caller input into an operational record and would
+            //       give the same refusal a different sentence for every request.
             throw new ClientInputException(ApiError.CODE_VALIDATION, PARAM_DATE,
                     WIDTH_REFUSAL_MESSAGE);
         }

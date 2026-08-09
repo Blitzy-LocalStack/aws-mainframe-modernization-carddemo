@@ -9,14 +9,27 @@
 #   against this document rather than against a reading of this module's Java.
 #
 # The two surfaces this document covers, and how to tell them apart:
-#   THREE INTERNAL READS, tagged internal, are consumed by the
-#   pending-authorization context. Its client is
+#   SEVEN INTERNAL READS, tagged internal, are consumed by neighbouring bounded
+#   contexts rather than by a browser. Five are DECISION-PATH reads that the
+#   pending-authorization and transaction contexts issue while deciding: the
+#   three cross-reference lookups, the account lookup and the customer presence
+#   check. The remaining two -- the ascending customer scan and the keyed
+#   customer record read -- are the migrated surface of app/cbl/CBCUS01C.cbl and
+#   disclose a whole customer record; they require a DIFFERENT scope, declared on
+#   each as an x-carddemo-required-scope, and no caller in this deployment issues
+#   either. The decision-path client is
 #   services/authorization-service/src/main/java/com/carddemo/authorization/
 #   service/RestAccountContextClient.java, which builds each path itself and
-#   deserialises each response into its own record. The two modules are separate
+#   deserialises each response into its own record. The modules are separate
 #   deployables and the layering rules forbid either importing the other's
 #   types, so no compiler and no build sees both halves of that agreement. This
 #   document is the only place the whole of it is written down.
+#
+#   Refactoring Rationale: this count read THREE and named one consuming context.
+#   It was accurate when the internal surface was three cross-reference lookups
+#   and it stopped being accurate as the surface grew, twice over -- so a reader
+#   counting operations found seven where the document promised three, and had no
+#   way to tell which of the two numbers was the mistake.
 #
 #   THREE END-USER OPERATIONS, tagged end-user, are consumed by the browser
 #   client. They are the migrated forms of the two account screens and of the
@@ -49,28 +62,42 @@
 #   Requests carry input in four forms and each is described again where it is
 #   declared.
 #     - Two path parameters: the account identifier and the customer
-#       identifier, both integers, declared under components/parameters.
-#     - Two request bodies: CardXrefLookupRequest on the internal
-#       cross-reference lookup, whose card number travels in a body rather than
-#       in a path for the reason recorded on that operation; and
-#       AccountUpdateRequest on the end-user update.
+#       identifier, both integers, declared under components/parameters. Both are
+#       carried ONLY by end-user operations and by the keyed customer record
+#       read; no decision-path lookup places an identifier in a path.
+#     - Four request bodies: CardXrefLookupRequest, AccountLookupRequest and
+#       CustomerLookupRequest on the internal lookups, each carrying in a body an
+#       identifier that would otherwise reach the load balancer's access record
+#       through the request line; and AccountUpdateRequest on the end-user
+#       update.
 #     - One required request header: If-Match on the update, carrying the
 #       revision the caller was given. It is required rather than optional
 #       because an optional precondition is one a caller opts out of by omitting
 #       it, and opting out means the silent overwrite the check exists to
 #       remove.
-#     - No query parameter is accepted by any operation. The correlation header
-#       the platform propagates is accepted on every path in this system and is
-#       not redeclared per operation here.
+#     - Query parameters on the two PAGED walks only: cursor and direction on the
+#       by-account cross-reference search, cursor and size on the customer scan.
+#       Each carries a position or a bound and never an identifier, so none of
+#       them puts a prohibited value in a request line. Refactoring Rationale:
+#       this entry read "No query parameter is accepted by any operation", which
+#       was true of the three-operation surface it was written for and false of
+#       both paged walks added since.
+#     - The correlation header the platform propagates is accepted on every path
+#       in this system and is not redeclared per operation here.
 #
 # Return values:
-#     - CardXrefView, from the internal cross-reference lookup: the account and
-#       the customer the card belongs to. It does not echo the card number.
-#     - AccountContextView, from the internal account read: the credit limit,
+#     - CardXrefView, from the two internal cross-reference lookups: the account
+#       and the customer the card belongs to. It does not echo the card number.
+#     - CardXrefPage, from the internal by-account cross-reference search: one
+#       keyed page of rows with its two boundary tokens.
+#     - AccountContextView, from the internal account lookup: the credit limit,
 #       the cash credit limit and the posted balance, each rendered as a JSON
 #       string.
-#     - No body at all from the internal customer probe. Its whole answer is
-#       its status.
+#     - No body at all from the internal customer presence check. Its whole
+#       answer is its status, on both outcomes.
+#     - CustomerPage from the internal customer scan and CustomerResponse from the
+#       internal keyed record read. These are the two operations that disclose a
+#       whole customer record and are the reason they carry a scope of their own.
 #     - AccountViewResponse, from the end-user view: the account's ten fields
 #       beside its customer's eighteen, with the revision in an ETag header.
 #     - AccountUpdateResponse, from the end-user update: the committed state and
@@ -96,9 +123,12 @@
 # Authorization:
 #   The internal reads are governed by a dedicated filter chain,
 #   src/main/java/com/carddemo/account/config/InternalApiSecurityConfig.java,
-#   ordered ahead of the application chain and matching exactly their three
-#   paths. It requires a bearer token issued by the calling service and carrying
-#   the scope named on each. An identity-provider token does not satisfy it.
+#   ordered ahead of the application chain and matching exactly the seven
+#   method-and-address pairs below. It requires a bearer token issued by the
+#   calling service, naming itself as the token subject from the closed set the
+#   verifier admits, and carrying the scope that route's group requires -- the
+#   decision-path scope for five of them and the customer-master scope for the
+#   two that disclose a record. An identity-provider token does not satisfy it.
 #   The end-user operations are governed by the application chain in
 #   src/main/java/com/carddemo/account/config/SecurityConfig.java, whose
 #   catch-all admits either business group -- so each declares
@@ -462,10 +492,10 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/v1/accounts/{accountId}:
-    get:
+  /api/v1/accounts/lookup:
+    post:
       tags: [internal, account]
-      operationId: readAccountContext
+      operationId: lookupAccountContext
       summary: Read the limits and posted balance of one account.
       description: >-
         Replaces the keyed read of the account master at app/cbl/CBACT01C.cbl.
@@ -473,10 +503,31 @@ paths:
         decision examines; the remaining account columns are deliberately not
         published, because a consumer that does not read a value should not
         receive it.
+
+
+        Refactoring Rationale: this operation was GET /api/v1/accounts/{accountId}
+        and the identifier travelled in the path. It is now a POST carrying the
+        identifier in a body, for the same reason the two account-keyed
+        cross-reference operations above give: a load balancer composes its access
+        record from the request line before any application code runs, and the
+        migration's sensitive-data logging contract names account identifiers among
+        the values a durable diagnostic may not hold. The keyed form is REMOVED
+        rather than retained as an alias, because an alias would leave that
+        disclosure reachable by anyone who addressed it.
+
+
+        Trade-offs: as a POST the operation is neither cacheable nor idempotent by
+        method semantics. Neither costs its two consumers anything -- both are
+        internal service clients calling it once inside a transaction they are
+        about to commit or roll back, so neither would reuse a cached answer.
       security:
         - internalServiceToken: []
-      parameters:
-        - $ref: '#/components/parameters/AccountIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountLookupRequest'
       responses:
         '200':
           description: The account exists. Every monetary value is a JSON string.
@@ -502,6 +553,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/v1/accounts/{accountId}:
     put:
       tags: [end-user, account]
       operationId: updateAccount
@@ -541,7 +593,7 @@ paths:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
       parameters:
-        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/AccountIdEndUserPath'
         - $ref: '#/components/parameters/IfMatchHeader'
       requestBody:
         required: true
@@ -606,6 +658,8 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /api/v1/accounts/{accountId}/view:
     get:
@@ -645,7 +699,7 @@ paths:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
       parameters:
-        - $ref: '#/components/parameters/AccountIdPath'
+        - $ref: '#/components/parameters/AccountIdEndUserPath'
       responses:
         '200':
           description: >-
@@ -707,6 +761,25 @@ paths:
         is denied to end users by the filter chain -- it carries the by-card
         lookup, which takes a whole primary account number and is reachable only
         from inside the network.
+
+
+        Refactoring Rationale: this operation returned the WHOLE of an account's
+        cross-reference rows in one array and now returns a bounded keyset page of
+        at most seven. The unbounded shape had no ceiling of any kind: the
+        by-account index is not unique, so the row count is whatever the data
+        holds, and every row carries a primary account number -- so one request
+        decided how much cardholder data the service read and serialised. Seven is
+        the reference screen's own capacity rather than a number chosen here.
+        Trade-offs: a caller wanting every row now issues several requests; what
+        that buys is that no single request can be made arbitrarily large by the
+        data.
+
+
+        The page is positioned by KEY and never by offset or page number, for the
+        reason the customer scan records: an offset is evaluated against the table
+        as it stands when each page is fetched, so a row inserted or removed
+        between two fetches shifts the window and the caller skips a row or
+        receives one twice.
       servers:
         - url: /
           description: >-
@@ -718,24 +791,60 @@ paths:
       x-required-authorities: [carddemo-admin, carddemo-user]
       parameters:
         - $ref: '#/components/parameters/AccountIdPath'
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            The opaque boundary a previous page of THIS account's walk issued,
+            resumed strictly beyond it. Absent reads the opening page; a blank
+            value also reads the opening page, because blank is treated as a
+            subset of error rather than as a third state.
+
+
+            Assumptions: the token is sealed against the query, the authenticated
+            caller, the ACCOUNT in the path and the direction together, so a page
+            issued to one caller walking one account cannot reposition another
+            caller or another account. The account is part of the seal because the
+            value the token carries is a card number, and the same card number
+            under a different account is a valid position the caller never saw --
+            so without it a page could begin part way through another account's
+            rows, or come back empty, with nothing in the response saying so.
+          schema:
+            type: string
+            maxLength: 256
+        - name: direction
+          in: query
+          required: false
+          description: >-
+            Which way to step from the cursor. Meaningful only alongside one: with
+            no cursor supplied the opening page is returned whichever direction is
+            named, because a backward walk is expressible only from a set already
+            returned.
+          schema:
+            type: string
+            enum: [next, previous]
+            default: next
       responses:
         '200':
           description: >-
-            The account's cross-reference rows in ascending card-number order.
-            An account with no card yields an EMPTY array rather than a 404,
-            matching an alternate-index browse that ends immediately: an account
-            legitimately has no card, and that is not an absence of the account.
-            Every card number is masked to its last four digits.
+            One page of at most seven of the account's cross-reference rows in
+            ascending card-number order, with both sealed boundaries and both
+            availability indicators. An account with no card yields an EMPTY page
+            rather than a 404, matching an alternate-index browse that ends
+            immediately: an account legitimately has no card, and that is not an
+            absence of the account. Every card number is masked to its last four
+            digits.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/CardXrefResponse'
+                $ref: '#/components/schemas/CardXrefPage'
         '400':
           description: >-
-            The account identifier in the path would not convert to a number. The
-            fieldErrors array names accountId.
+            The account identifier in the path would not convert to a number, the
+            direction is not one of the two admitted words, or the cursor could not
+            be opened -- altered, expired, or issued for another query, caller,
+            account or direction. The fieldErrors array names accountId, direction
+            or cursor accordingly.
           content:
             application/problem+json:
               schema:
@@ -756,9 +865,16 @@ paths:
     #       it; SecurityConfig accordingly denies this whole subtree to both
     #       business groups, on the ground that granting one would add a
     #       capability no baseline screen had.
+    # WHY : Assumptions: this operation and the keyed record read below it require a
+    #       DIFFERENT scope from every other internal operation in this document,
+    #       declared on each as an x-carddemo-required-scope of its own. The reason
+    #       is recorded in full at the record read; in short, these two are the
+    #       operations that disclose a whole customer record and they shared one
+    #       scope with the decision-path reads.
     get:
       tags: [internal, customer]
       operationId: listCustomers
+      x-carddemo-required-scope: internal:customer-master.read
       summary: Read one ascending page of the customer master.
       description: >-
         Replaces the whole-file sweep of app/cbl/CBCUS01C.cbl, which walks the
@@ -767,6 +883,13 @@ paths:
         key declared at L32 beside ACCESS MODE IS SEQUENTIAL at L31 -- and the
         page bound is the one accepted difference, because an operation answering
         a request cannot stream an entire master into one response.
+
+
+        Requires the internal:customer-master.read scope rather than the
+        decision-read scope the lookups use, because this answer carries whole
+        customer records and can be walked to the end of the master. Sharing the
+        decision scope let a token minted to resolve one card number page the
+        entire file.
 
 
         The page is positioned by KEY and never by offset or page number. The
@@ -823,56 +946,26 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/v1/customers/{customerId}:
+  /api/v1/customers/lookup:
 
-    # WHY : Assumptions: BOTH methods are declared, and HEAD is declared first
-    #       because HEAD is the method the only consumer actually issues -- see
-    #       RestAccountContextClient, which calls head() on this path. Declaring
-    #       only GET would have described a surface the caller never uses and
-    #       would have left a reader of this document unable to tell whether HEAD
-    #       was supported at all.
-    #       Assumptions: one handler serves both. It is declared as a GET mapping
-    #       and the framework answers HEAD from a GET mapping by discarding the
-    #       body, which is why the two entries below describe identical status
-    #       codes rather than differing ones. They are NOT two operations that
-    #       could diverge: a change to one changes both.
-    head:
-      tags: [internal, customer]
-      operationId: customerExistsHead
-      summary: Report whether the customer master holds one customer, without a body.
-      description: >-
-        The form the pending-authorization context uses. Semantically identical
-        to the GET below, which is the same handler: the answer is carried
-        entirely by the status code, so a caller that needs only presence has no
-        reason to request a body it would discard.
-      security:
-        - internalServiceToken: []
-      parameters:
-        - $ref: '#/components/parameters/CustomerIdPath'
-      responses:
-        '204':
-          description: The customer master holds the row.
-        # WHY : Refactoring Rationale: 400, 403 and 500 are declared here where an
-        #       earlier revision declared none of them and recorded that this
-        #       operation "declares no 400 because an unparseable identifier
-        #       cannot reach it". That was measured and is false: the identifier
-        #       is bound as a number, a segment that will not convert raises a
-        #       conversion failure at the binding stage, and the shared advice
-        #       answers it as caller input. A status a caller can provoke and the
-        #       document denies is worse than an undocumented one, because the
-        #       document is what a caller trusts.
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          description: The customer master holds no such row.
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-    get:
+    # WHY : Refactoring Rationale: ONE operation replaces the HEAD and GET pair
+    #       this document previously declared at /api/v1/customers/{customerId}.
+    #       Two facts drove the change. The consuming context had already moved to
+    #       this address with a JSON body -- see RestAccountContextClient in
+    #       authorization-service -- so while only the keyed forms were published,
+    #       every existence check reached this service as a dispatcher 404, which
+    #       the caller cannot tell apart from "no such customer" and would read as
+    #       a legitimate decision input. And the identifier left the request line
+    #       because a load balancer composes its access record from that line
+    #       before any application code runs, and the migration's sensitive-data
+    #       logging contract names customer identifiers among the values a durable
+    #       diagnostic may not hold.
+    #       Assumptions: collapsing the pair loses nothing. One handler served
+    #       both -- the framework answers HEAD from a GET mapping by discarding the
+    #       body -- and both declared the same status codes, so the document
+    #       described one behaviour twice. The answer was never in a body, so this
+    #       operation still transfers none.
+    post:
       tags: [internal, customer]
       operationId: customerExists
       summary: Report whether the customer master holds one customer.
@@ -887,15 +980,34 @@ paths:
 
         A successful answer is 204 rather than 200 because there is no
         representation to return; 200 would announce one. This operation
-        therefore returns no body on either answer, which is what makes the HEAD
-        form above identical rather than merely similar.
+        therefore returns no body on either answer.
+
+
+        Trade-offs: POST is not idempotent by method semantics, which reads oddly
+        for a check that changes nothing. It is accepted for the same reason the
+        sibling lookups accept it; the alternative that would have preserved
+        method semantics -- keeping HEAD and moving the identifier into a header
+        -- was rejected because a resource identifier in a header is not
+        addressable, leaves the request no longer self-describing, and would still
+        have to be excluded from the access log's header set by inspection rather
+        than by construction.
       security:
         - internalServiceToken: []
-      parameters:
-        - $ref: '#/components/parameters/CustomerIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerLookupRequest'
       responses:
         '204':
           description: The customer master holds the row. There is no body.
+        # WHY : Assumptions: 400 is declared because a caller can provoke it. The
+        #       identifier is bound as a bounded number, so a non-numeric or
+        #       out-of-range value is refused at the binding stage and the shared
+        #       advice answers it as caller input. A status a caller can provoke
+        #       and the document denies is worse than an undocumented one, because
+        #       the document is what a caller trusts.
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -904,30 +1016,38 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           description: >-
-            The customer master holds no such row. There is no body on this
-            answer either, so that a HEAD request and a GET request receive the
-            same shape.
+            The customer master holds no such row. There is no body on this answer
+            either, so both outcomes of the check have one shape.
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/v1/customers/{customerId}/record:
+  /api/v1/customers/record:
 
-    # WHY : Assumptions: the keyed read is published HERE and not at the address
-    #       above, although that is where a representation of one customer would
-    #       ordinarily sit. That address already carries the presence probe, whose
-    #       contract is a status and no body on either answer, and the
-    #       pending-authorization context depends on exactly that shape. One
-    #       address cannot carry both a status-only contract and a representation
-    #       without making the response shape depend on something other than the
-    #       address.
+    # WHY : Assumptions: the keyed read is published at a segment of its own rather
+    #       than sharing an address with the existence check above. Both now carry
+    #       their key in a body, so neither has a keyed address to occupy, and the
+    #       two must still be distinguishable because their responses differ in
+    #       shape -- one is a status with no body, the other a whole record. A
+    #       segment of its own keeps the response shape a property of the address
+    #       rather than of the request.
     # WHY : Alternatives Considered: naming the segment /view, the segment the
     #       account read above uses. Rejected because in this document /view names
     #       a screen projection and this reference has no screen; the segment is
     #       named for what the reference writes, DISPLAY CUSTOMER-RECORD at L78
     #       over the group item declared at L4 of app/cpy/CVCUS01Y.cpy.
-    get:
+    # WHY : Refactoring Rationale: this operation and the master scan above require
+    #       the internal:customer-master.read scope, where both previously answered
+    #       to internal:account-context.read -- the same value the single-key
+    #       decision reads use. That was an escalation and not merely an imprecise
+    #       name: the two contexts holding the decision scope mint it to resolve
+    #       ONE card number, and while these two shared it, a token issued for that
+    #       lookup could return every field of any customer record and page the
+    #       whole master. The scheme object lists every scope this document uses;
+    #       which one an operation requires is stated per operation, here.
+    post:
       tags: [internal, customer]
       operationId: readCustomerRecord
+      x-carddemo-required-scope: internal:customer-master.read
       summary: Read one customer of the customer master by its key.
       description: >-
         The keyed arm of the access surface app/cbl/CBCUS01C.cbl declares, taken
@@ -942,10 +1062,19 @@ paths:
         encrypted, and only their disclosure treatment coincides -- L17 is
         declared PIC 9(09), numeric, while L18 is declared PIC X(20),
         alphanumeric.
+
+
+        Requires the internal:customer-master.read scope rather than the
+        decision-read scope the lookups above accept, because this answer carries
+        a whole customer record.
       security:
         - internalServiceToken: []
-      parameters:
-        - $ref: '#/components/parameters/CustomerIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerLookupRequest'
       responses:
         '200':
           description: >-
@@ -987,8 +1116,26 @@ components:
       #   legal; it is dropped because 3.1 defines those names as not exchanged in-band, so the list
       #   is documentation either way, and a populated one reads as an OAuth scope to every 3.0-era
       #   reader and tool. An x- member says plainly that this is the system's own vocabulary. The
-      #   value is the same constant InternalApiSecurityConfig composes its required authority from.
-      x-carddemo-required-scope: internal:account-context.read
+      #   values are the same constants InternalApiSecurityConfig composes its required authorities
+      #   from.
+      # WHY : Refactoring Rationale: the extension names FOUR scopes where it named one. A single value
+      #   was accurate while one authority governed every internal address, and stopped being accurate
+      #   twice over: the two whole-customer-record reads moved onto internal:customer-master.read, and
+      #   the decision reads were then split one scope per operation family so that a credential minted
+      #   to resolve a card number no longer reads an account's balance or a customer's identifiers.
+      #   Keeping the one value would tell a reader that one token reaches every internal operation
+      #   here -- exactly the escalation the split removed, so the stale documentation would describe a
+      #   system less safe than the one that ships.
+      # WHY : Trade-offs: both scopes sit on ONE scheme rather than two schemes being declared. Both
+      #   are verified by the same chain, decoder and issuer and audience validators -- the credential
+      #   is identical and only the claim value differs -- so two schemes would describe one mechanism
+      #   twice. Which of the two an operation requires is stated in that operation's description,
+      #   which is where an operation-specific fact belongs.
+      x-carddemo-required-scope:
+        - internal:account-context.card-xref.read
+        - internal:account-context.account.read
+        - internal:account-context.customer.read
+        - internal:customer-master.read
       description: >-
         A bearer token minted by the calling service and verified by this one
         against a signing key both hold. It is not an identity-provider token
@@ -1007,10 +1154,22 @@ components:
         credential.
 
 
-        The token names this service as its audience and carries exactly one
-        scope, so a token minted for another callee or another purpose is
-        refused rather than accepted for the wrong path. Its lifetime is bounded
-        at five minutes and the caller mints a fresh one per request.
+        The token names this service as its audience, names its own service as
+        the subject from a closed set this verifier admits, and carries exactly
+        one scope -- so a token minted for another callee, by an unnamed workload,
+        or for the other group of routes is refused rather than accepted for the
+        wrong path. Its lifetime is bounded at five minutes and the caller mints
+        a fresh one per request.
+
+
+        Four scopes exist and each governs one group of routes. The five
+        decision-path reads take one scope per operation family -- three
+        cross-reference reads, one account read and one customer read -- each
+        named in x-carddemo-required-scope above. The two operations that
+        disclose a whole customer record require
+        x-carddemo-customer-master-scope instead, and each declares that
+        requirement on itself. A token carrying one scope does not satisfy any
+        other group.
 
     bearerAuth:
       type: http
@@ -1085,6 +1244,15 @@ components:
         declares it as an eleven-digit unsigned display field, which is why it
         is an integer here rather than a string: it is a numeric key in the
         baseline as well as in the target, and no leading zero is significant.
+
+
+        The floor is zero because the operation that carries this parameter
+        applies NO screen key edit: the by-account cross-reference listing serves
+        the migrated CXACAIX access path, and the reference reaches that path
+        from a stored row rather than from a typed field, so refusing an
+        all-zeroes value here would turn a data condition into a validation
+        failure the caller cannot act on. The two operations that DO apply the
+        reference's own key edit carry AccountIdEndUserPath instead.
       schema:
         type: integer
         format: int64
@@ -1092,19 +1260,15 @@ components:
         maximum: 99999999999
       example: 12345678901
 
-    CustomerIdPath:
-      name: customerId
-      in: path
-      required: true
-      description: >-
-        The customer identifier, a nine-digit unsigned display field in the
-        reference layout at app/cpy/CVCUS01Y.cpy.
-      schema:
-        type: integer
-        format: int64
-        minimum: 0
-        maximum: 999999999
-      example: 987654321
+  # WHY : Refactoring Rationale: there is no CustomerIdPath parameter. One was
+  #       declared here and referenced by the three customer operations while each
+  #       carried its key in the request line. All three moved -- two into a request
+  #       body and one to a cursor -- so the component became unreferenced, and an
+  #       unreferenced path parameter for an identifier this document has decided not
+  #       to put in a path is an invitation to reintroduce the disclosure. It is
+  #       removed rather than retained. AccountIdPath above is NOT removed: three
+  #       end-user account operations still key on the path, which is a deliberate
+  #       difference recorded on the observability document rather than an oversight.
 
   responses:
     BadRequest:
@@ -1142,6 +1306,34 @@ components:
         previous revision declared it on none, which left a client with no branch
         for the one refusal it can provoke by presenting the wrong credential type
         to the right path.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       content:
         application/problem+json:
           schema:
@@ -2002,10 +2194,10 @@ components:
     CustomerPage:
       type: object
       additionalProperties: false
-      required: [items, firstKey, lastKey, hasNext]
+      required: [items, firstKey, lastKey, hasNext, hasPrevious]
       description: >-
         One page of the customer scan in the shared keyset envelope. The envelope
-        has exactly these four members and carries no total count and no page
+        has exactly these five members and carries no total count and no page
         number, because the reference browse state it replaces carries neither: at
         app/cbl/COCRDLIC.cbl L230 to L244 it holds a trailing key pair, a leading
         key pair, a screen ordinal, a last-screen flag and a further-rows
@@ -2052,6 +2244,72 @@ components:
             app/cbl/COCRDLIC.cbl L242 to L244 is a single flag raised by
             discovering one record beyond what the screen holds. The surplus row
             is trimmed before this page is published and appears nowhere in it.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
+    CardXrefPage:
+      type: object
+      additionalProperties: false
+      required: [items, firstKey, lastKey, hasNext, hasPrevious]
+      description: >-
+        One page of an account's cross-reference walk in the shared keyset
+        envelope. The five members are the shared ones and are described on
+        CustomerPage; only the row type and the ordering differ.
+
+
+        Assumptions: the ordering is ascending card number and is part of the
+        CONTRACT rather than an artefact of the query, because an alternate-index
+        read returns its rows in index order and a caller diffing two pages depends
+        on that order being stable. It is the base cluster's own order, which
+        app/cbl/CBACT03C.cbl states with ACCESS MODE IS SEQUENTIAL at L31 beside
+        RECORD KEY IS FD-XREF-CARD-NUM at L32.
+      properties:
+        items:
+          type: array
+          description: >-
+            The rows of this page in ascending card-number order, at most seven of
+            them. Empty when the account holds no card.
+          items:
+            $ref: '#/components/schemas/CardXrefResponse'
+        firstKey:
+          oneOf:
+            - type: string
+              maxLength: 256
+            - type: 'null'
+          description: >-
+            The opaque boundary of the FIRST row of this page, to be sent back as
+            the cursor of a backward request. Null on an empty page.
+        lastKey:
+          oneOf:
+            - type: string
+              maxLength: 256
+            - type: 'null'
+          description: >-
+            The opaque boundary of the LAST row of this page, to be sent back as
+            the cursor of a forward request. Null on an empty page.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further row follows this page. Settled by reading one row
+            more than the page carries and observing whether it arrived, never by
+            counting -- which is the reference's own method at
+            app/cbl/COCRDLIC.cbl L242 to L244. The surplus row is trimmed before
+            the page is published and appears nowhere in it.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, for the reason CustomerPage records.
 
     AccountLookupRequest:
       type: object
@@ -2075,10 +2333,38 @@ components:
             PIC 9(11) declares at L7 of app/cpy/CVACT03Y.cpy.
           example: 12345678901
 
+    CustomerLookupRequest:
+      type: object
+      additionalProperties: false
+      required: [customerId]
+      description: >-
+        Names the customer to check for or to read. The single property is required
+        and is range-checked before any lookup is attempted. It is a body rather
+        than a path segment because a load balancer composes its access record from
+        the request line before any application code runs, and the migration's
+        sensitive-data logging contract names customer identifiers among the values
+        a durable diagnostic may not hold.
+
+
+        Assumptions: ONE record serves both the existence check and the keyed
+        record read, because the two constrain the same nine-digit key to the same
+        range. A second record would be the same constraint in a second place, and
+        the two copies would drift the first time the width changed.
+      properties:
+        customerId:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 999999999
+          description: >-
+            The customer identifier, within the nine-digit range CUST-ID
+            PIC 9(09) declares at L5 of app/cpy/CVCUS01Y.cpy.
+          example: 987654321
+
     CardXrefPage:
       type: object
       additionalProperties: false
-      required: [items, hasNext]
+      required: [items, hasNext, hasPrevious]
       description: >-
         One page of cross-reference rows together with the two boundary tokens and
         the further-page indicator a caller needs to walk the set by key. It
@@ -2118,7 +2404,18 @@ components:
             the page and observing whether it arrived, never from a tally of how
             many rows exist. It is true only alongside a present lastKey, so a
             caller told to continue always holds the position to continue from.
-
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
 
     Money:
       type: string

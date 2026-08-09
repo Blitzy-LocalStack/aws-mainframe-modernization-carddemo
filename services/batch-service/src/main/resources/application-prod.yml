@@ -118,7 +118,18 @@
 #     `spring.batch.job.enabled` left false, so that job selection stays with
 #       the container command and nothing here gives the task a second source of
 #       truth;
-#     and no listening socket of any kind.
+#     and the loopback-bound, health-only listener -- `server.port` 8080 with
+#       `server.address` 127.0.0.1, and `management.endpoints.web.exposure.include`
+#       narrowed to `health` with details suppressed -- inherited exactly as
+#       application.yml declares it.
+#       Refactoring Rationale: this entry read "and no listening socket of any
+#       kind." It was the last element of a list whose whole purpose is to tell a
+#       reader what this overlay inherits, so the one false element was also the
+#       one a reader would act on: application.yml declares both server keys, the
+#       precision at L39-50 of this file states the listener exists, and the same
+#       document therefore asserted both sides of the question. The socket is
+#       restated here with the three properties that bound it, because "inherited"
+#       is only reassuring if what is inherited is named.
 #   It also leaves the process exit-status contract entirely alone -- 0 clean, 4
 #   completed with rejects, 8 or more a hard failure -- which
 #   BatchApplication.exitStatusOf translates from the BatchReturnCode constants.
@@ -151,11 +162,30 @@
 #     numbers for every record in the input feed.
 #
 # Deliberate omissions, so that each absence reads as a decision:
-#   - Assumptions: no management.* and no server.*, even though peer overlays in
-#     other contexts set management.endpoints.web.exposure.include. This module
-#     declares neither the actuator nor the web starter -- its pom.xml argues
-#     both rejections beside its dependency set -- so both namespaces would bind
-#     to nothing here and be accepted without complaint.
+#   - Assumptions: no management.* and no server.* in THIS overlay, even though
+#     peer overlays in other contexts set
+#     management.endpoints.web.exposure.include. Both namespaces ARE declared, and
+#     declared exactly once, in application.yml; the inherited-topology list above
+#     names the four keys and their values rather than repeating them here, because
+#     two copies of a literal value are two places it can be edited apart. They
+#     are absent from this overlay because they are TOPOLOGY, and the governing
+#     constraint at the head of this file puts topology in the base document alone
+#     -- an overlay that restated either namespace would let `prod` drift from
+#     `dev` in the one dimension this file is not permitted to vary.
+#     Refactoring Rationale: this entry previously explained the absence by
+#     asserting that "this module declares neither the actuator nor the web
+#     starter -- its pom.xml argues both rejections beside its dependency set --
+#     so both namespaces would bind to nothing here". Every clause of that was
+#     inverted. pom.xml declares spring-boot-starter-actuator at L197-200 and
+#     spring-boot-starter-web at L223-226, and the comments beside them argue why
+#     each is PRESENT -- the actuator to give the image HEALTHCHECK a target, the
+#     web starter to carry the servlet that answers it -- not why either is
+#     rejected. Both namespaces therefore bind to something real, so an override
+#     written here would take effect silently rather than be ignored, which
+#     reverses the risk the note was warning about: a reader told the keys are
+#     inert is a reader who will set one. The absence is still correct; only its
+#     stated reason was wrong, so the reason is replaced rather than the entry
+#     deleted.
 #   - Trade-offs: no logback-spring.xml and no retention key. Retention is a
 #     property of the CloudWatch log group infra/modules/observability
 #     provisions, not of this artifact: the container writes to standard output
@@ -186,11 +216,24 @@
 #     divergence between the two is documented in the traceability register
 #     rather than introduced here, and no key in this file may disturb either.
 #   - Assumptions: no springdoc.* and no spring.security.oauth2.*. This module
-#     publishes no contract and serves no request, so there is nothing to
-#     advertise and nothing to authorise; there is no
+#     publishes no API contract and serves no BUSINESS request, so there is
+#     nothing to advertise and nothing to authorise; there is no
 #     services/batch-service/src/main/resources/openapi/ directory for the same
 #     reason, and this module's pom.xml records beside its dependency set why the
-#     request-driven starters are absent.
+#     security starter is absent.
+#     Refactoring Rationale: this entry read "serves no request" without
+#     qualification, and the loopback health endpoint is a request it does serve.
+#     The two words are added because the unqualified form contradicted the
+#     precision at L39-50 in the same direction as the two errors corrected above,
+#     and because the distinction is the whole justification for the absences: the
+#     one request this module answers is deliberately UNAUTHENTICATED and is not
+#     part of any published contract, which is why neither springdoc nor a
+#     resource-server configuration has anything to act on. "request-driven
+#     starters are absent" was also wrong as written -- pom.xml declares
+#     spring-boot-starter-web at L223-226 precisely to carry that endpoint; what it
+#     declines is the SECURITY starter, under its own "THIS MODULE DECLARES NO
+#     SECURITY STARTER" heading, so the claim is narrowed to the dependency that is
+#     genuinely absent.
 #   - Trade-offs: no statement_timeout, no read replica, no second datasource,
 #     no cache and no queue-listener enablement. The first is argued at the
 #     session bounds below; the rest are absent from the base as well, so adding

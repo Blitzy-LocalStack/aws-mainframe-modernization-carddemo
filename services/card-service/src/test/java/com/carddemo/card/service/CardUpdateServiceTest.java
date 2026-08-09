@@ -400,6 +400,72 @@ class CardUpdateServiceTest {
     }
 
     /**
+     * Asserts a stale caller is refused even when its submission happens to equal the stored row.
+     *
+     * <p>Assumptions: this is the case the review named, and it is the only one in which the two
+     * comparisons the service makes disagree. {@code hasNoChanges} compares the submission against the row
+     * as it stands NOW rather than against the before-image the caller was shown, so if another writer has
+     * already moved the row to the values this caller is submitting, the submission equals the current row
+     * while the caller's revision does not. Answering 200 there would tell the caller its edit had been
+     * accepted when what it is looking at is somebody else's.</p>
+     *
+     * <p>Assumptions: the reference refuses it too, by a different mechanism reaching the same outcome.
+     * Its no-change test at {@code app/cbl/COCRDUPC.cbl:680-682} compares the new screen values against
+     * {@code CCUP-OLD-*}, the before-image the screen carried, so a row changed underneath the caller fails
+     * that test, reaches {@code 9200-WRITE-PROCESSING}, and is stopped by
+     * {@code 9300-CHECK-CHANGE-IN-REC} at {@code :1498-1511}, which sets
+     * {@code DATA-WAS-CHANGED-BEFORE-UPDATE} and abandons the write.</p>
+     *
+     * <p>Assumptions: the echo is built from the stored record itself, so the submission is byte-identical
+     * to what is stored and only the revision differs. That is what makes the case attributable: any
+     * refusal it produces can only come from the revision gate.</p>
+     *
+     * @throws IOException if the fixture record cannot be read
+     */
+    @Test
+    @DisplayName("a stale token is refused even when the submission equals the stored row")
+    void aStaleTokenIsRefusedEvenWhenNothingWouldChange() throws IOException {
+        String record = onlyRecordOf(VALID_ACTIVE_RESOURCE);
+        Card stored = cardFrom(record);
+        assertThat(stored.getVersion()).isEqualTo(STORED_VERSION);
+        when(this.cards.findById(cardNumberOf(record))).thenReturn(Optional.of(stored));
+
+        CardUpdateRequest unchangedButStale = echoOf(record, STALE_VERSION);
+
+        assertThatThrownBy(() -> this.service.update(selectorFor(record), unchangedButStale))
+                .as("the revision gate must run ahead of the no-change short circuit")
+                .isInstanceOf(RecordConflictException.class)
+                .satisfies(failure -> assertThat(((RecordConflictException) failure).kind())
+                        .isEqualTo(RecordConflictException.Kind.STALE_VERSION));
+
+        verify(this.cards, never()).saveAndFlush(any(Card.class));
+    }
+
+    /**
+     * Asserts the accepted-and-not-written outcome still stands for a caller holding the CURRENT revision.
+     *
+     * <p>Assumptions: this is the other half of the case above and is asserted beside it deliberately.
+     * Moving the revision gate earlier must refuse the stale caller WITHOUT also refusing the current one,
+     * and a single case could not show both. The reference reaches this outcome through
+     * {@code NO-CHANGES-DETECTED} at {@code app/cbl/COCRDUPC.cbl:682}, which leaves the edit paragraph with
+     * all four attribute flags valid and never advances to the write.</p>
+     *
+     * @throws IOException if the fixture record cannot be read
+     */
+    @Test
+    @DisplayName("an unchanged submission from a current caller is still accepted without a write")
+    void anUnchangedSubmissionFromACurrentCallerIsStillAcceptedWithoutAWrite() throws IOException {
+        String record = onlyRecordOf(VALID_ACTIVE_RESOURCE);
+        Card stored = cardFrom(record);
+        when(this.cards.findById(cardNumberOf(record))).thenReturn(Optional.of(stored));
+
+        CardDetail answered = this.service.update(selectorFor(record), echoOf(record, STORED_VERSION));
+
+        assertThat(answered.version()).isEqualTo(STORED_VERSION);
+        verify(this.cards, never()).saveAndFlush(any(Card.class));
+    }
+
+    /**
      * Asserts that resubmitting what is already stored is accepted and writes nothing.
      *
      * <p>Assumptions: this is the target form of the dispatcher's SECOND early exit, at

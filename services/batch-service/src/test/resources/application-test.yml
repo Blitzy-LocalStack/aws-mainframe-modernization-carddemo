@@ -43,7 +43,7 @@
 # Exceptions or errors:
 #   A misspelled Spring property is silently ignored. A wrong value can instead
 #   negotiate TLS against a container that serves none, select `public`, demand
-#   tables four other bounded contexts own, contact AWS, or launch every job bean
+#   tables three other bounded contexts own, contact AWS, or launch every job bean
 #   at context refresh. The last of those is the most damaging and the least
 #   obvious: a job that ran during a unit test would post transactions and accrue
 #   interest against whatever database the context resolved, and the test would
@@ -180,10 +180,11 @@ spring:
     # WHY : (1) Assumptions: `schemas` names every schema Flyway manages, while
     #       `default-schema` decides where its history table and unqualified
     #       objects resolve. Both name `batch` ALONE, and that is the important
-    #       part: this module reads four other schemas through explicitly qualified
-    #       entity mappings and must never migrate any of them. Widening either
-    #       value would let this module's migration place objects in, or record
-    #       history against, a bounded context it does not own.
+    #       part: this module reads three other schemas -- ledger, account and
+    #       reference -- through explicitly qualified entity mappings and must
+    #       never migrate any of them. Widening either value would let this
+    #       module's migration place objects in, or record history against, a
+    #       bounded context it does not own.
     #       (2) Trade-offs: both values restate the base profile. The duplication
     #       exposes the complete ownership boundary in the test overlay and stops a
     #       base edit from changing what the suite proves without a visible
@@ -199,10 +200,15 @@ spring:
     #       V1 deliberately contains no CREATE SCHEMA, CREATE ROLE or GRANT, so
     #       false makes the first qualified CREATE TABLE fail on an absent schema.
     #       True is the sanctioned test substitute for schema existence.
-    #       (2) Trade-offs: this creates `batch` only. The four schemas this module
+    #       (2) Trade-offs: this creates `batch` only. The three schemas this module
     #       reads are NOT created by it, which is exactly why the schema validation
     #       mode below is `none` rather than `validate`; a test that needs those
-    #       tables supplies them itself. Reproducing V0 here was rejected because it
+    #       tables supplies them itself -- PostingUnitOfWorkIT and
+    #       CrossSchemaFeedRepositoryIT hand
+    #       db/testharness/test-harness-schemas-and-foreign-tables.sql to the
+    #       container as its init script, so ledger, account and reference exist
+    #       before Flyway opens its first connection and creates `batch` beside
+    #       them. Reproducing V0 here was rejected because it
     #       would duplicate cluster-level DDL, and the whole privilege graph, into a
     #       per-service test resource and let the copy drift from its authority.
     create-schemas: true
@@ -225,25 +231,30 @@ spring:
 
     # Assumptions: `user` and `password` are deliberately ABSENT here while
     #   application.yml binds both to SPRING_FLYWAY_* with no fallback, and the
-    #   absence resolves rather than conflicts. Boot only reads those two keys
-    #   through PropertiesFlywayConnectionDetails, which
-    #   FlywayAutoConfiguration creates @ConditionalOnMissingBean
-    #   (FlywayConnectionDetails.class). The container below carries
-    #   @ServiceConnection, whose JdbcConnectionDetails is adapted into a
-    #   FlywayConnectionDetails bean by
-    #   JdbcAdaptingFlywayConnectionDetailsFactory -- measured, not assumed: with
-    #   the keys added and no SPRING_FLYWAY_USER in the environment, the context
-    #   reached Flyway and failed on the SQL below rather than on an unresolved
-    #   placeholder. So the container's own generated credential migrates here,
-    #   and no stand-in credential has to be invented for a role this profile
-    #   never creates with a password.
+    #   absence resolves rather than conflicts -- but NOT by way of
+    #   @ServiceConnection, which this module cannot use: spring-boot-testcontainers
+    #   is absent from its POM, so no JdbcConnectionDetails bean exists to be
+    #   adapted into a FlywayConnectionDetails by
+    #   JdbcAdaptingFlywayConnectionDetailsFactory. Each integration test instead
+    #   registers `spring.flyway.user` and `spring.flyway.password` in its own
+    #   @DynamicPropertySource beside the three `spring.datasource.*` keys, reading
+    #   both from the container it started. Boot binds them through
+    #   PropertiesFlywayConnectionDetails, which FlywayAutoConfiguration creates
+    #   @ConditionalOnMissingBean(FlywayConnectionDetails.class), and a dynamic
+    #   registration outranks the unresolved base placeholder -- measured, not
+    #   assumed: with those two keys registered and no SPRING_FLYWAY_USER in the
+    #   environment, the context reached Flyway and failed on the SQL below rather
+    #   than on an unresolved placeholder. So the container's own generated
+    #   credential reaches Flyway, and no stand-in credential has to be invented
+    #   for a role this profile never creates with a password.
     #
     # Refactoring Rationale: `init-sqls` IS restated, and it has to be. The base
     #   file's single statement is `SET ROLE carddemo_batch_owner`, naming the
     #   NOLOGIN role data-migration/sql/V0__schemas_and_roles.sql creates and this
-    #   container has never heard of; left inherited, every test in the four
-    #   *RepositoryIT classes failed context load with
-    #   `role "carddemo_batch_owner" does not exist`.
+    #   container has never heard of; left inherited, every test in the three
+    #   integration classes of com.carddemo.batch.repository --
+    #   BatchRunRepositoryIT, PostingUnitOfWorkIT and CrossSchemaFeedRepositoryIT --
+    #   failed context load with `role "carddemo_batch_owner" does not exist`.
     #
     # Alternatives Considered: overriding this to an empty list, or to a no-op
     #   statement, so the ownership split simply does not happen under test.
@@ -280,26 +291,28 @@ spring:
     hibernate:
       # WHY : (1) Assumptions: `none` here, which is an intentional DIVERGENCE from
       #       the base document's `validate` and from every sibling test profile,
-      #       and the reason is ownership rather than laxity. This module maps five
-      #       entities across FOUR schemas it does not own - Account and CardXref in
-      #       `account`, Transaction in `ledger`, DisclosureGroup in `reference`,
-      #       each carrying an explicit schema on its @Table - and only BatchRun in
-      #       the `batch` schema its own migration creates. Validation checks every
-      #       mapped table, so against a container holding only `batch` it aborts
-      #       context refresh on four tables this module is forbidden to create.
+      #       and the reason is ownership rather than laxity. This module maps eight
+      #       entities across four schemas, and it owns only one of the four -
+      #       Account and CardXref in `account`, Transaction, DailyTransaction,
+      #       TransactionReject and TransactionCategoryBalance in `ledger`,
+      #       DisclosureGroup in `reference`, each carrying an explicit schema on its
+      #       @Table - and only BatchRun in the `batch` schema its own migration
+      #       creates. Validation checks every mapped table, so against a container
+      #       holding only `batch` it aborts context refresh on the seven tables this
+      #       module is forbidden to create.
       #       (2) Alternatives Considered: copying the three peer migrations onto
       #       this module's test classpath so that `validate` could succeed.
       #       Rejected because it would duplicate three other bounded contexts' DDL
       #       into this module's test resources, where the copies would drift from
       #       their authorities and a passing validation would then assert
       #       agreement with a stale copy rather than with the real schema. The
-      #       cross-schema mapping agreement is checked where all eight migrations
-      #       have actually run.
+      #       cross-schema mapping agreement is checked where every owning module's
+      #       migration has actually run.
       #       (3) Trade-offs: entity drift against a peer schema is therefore not
       #       caught by this profile. A job test that needs those tables applies
       #       the peer migrations itself and may raise this value for its own
       #       context, which is a visible act in a reviewable test rather than a
-      #       shared default that quietly demands four other modules' DDL.
+      #       shared default that quietly demands three other modules' DDL.
       ddl-auto: none
 
     # WHY : Assumptions: this restates the base value so a repository test cannot

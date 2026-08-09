@@ -2,6 +2,7 @@ package com.carddemo.authorization.config;
 
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.messaging.MessageExpiry;
+import com.carddemo.common.messaging.QueueClientBudget;
 import com.carddemo.common.observability.MetricsConfig;
 import com.carddemo.common.web.CorrelationIdFilter;
 import io.awspring.cloud.autoconfigure.core.AwsClientBuilderConfigurer;
@@ -12,7 +13,6 @@ import io.awspring.cloud.sqs.listener.acknowledgement.AcknowledgementOrdering;
 import io.awspring.cloud.sqs.listener.acknowledgement.handler.AcknowledgementMode;
 import java.time.Duration;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,10 +55,25 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * message group is one group per card, which keeps requests for one card ordered while requests for
  * different cards stay parallel, and the deduplication identifier is the transaction identifier.</p>
  *
- * <p>Assumptions: the group identity is DERIVED from the card number through the keyed tokeniser
- * {@link MessagingIdentityConfig} supplies, and is never the card number itself, because a group
- * identifier is metadata that sits outside the message body and reaches queue telemetry, logs and
- * traces. Equal cards still produce equal groups, which is the whole of the ordering guarantee.</p>
+ * <p>Assumptions: both identities are the LITERAL values the specification freezes -- the group
+ * identity is {@code card_num} and the deduplication identity is {@code transaction_id}, at
+ * &sect;0.4.1.8 and again at &sect;0.7.6. Neither is derived. Refactoring Rationale: an earlier
+ * revision derived both through a keyed tokeniser so that no primary account number reached message
+ * metadata, and the derivation is withdrawn because it broke the guarantees it sat on top of. A group
+ * identity is only an ordering guarantee if it is EQUAL for equal cards across every producer on the
+ * queue, and a deduplication identity is only a suppression guarantee if the REQUESTER that may resend
+ * can predict it; a value keyed from this service's own secret is neither, so a second producer built
+ * to the specification would split one card across two groups and a redelivery arriving by any other
+ * path would be accepted as new.</p>
+ *
+ * <p>Trade-offs: the card number therefore appears in message metadata, which server-side encryption of
+ * the body does not cover, and that consequence is registered as divergence
+ * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than treated as unremarkable. Three
+ * provisioned controls bound it: the queues are encrypted under a customer-managed key, they are
+ * reachable only through an interface endpoint inside the private network, and read access is scoped to
+ * the task roles of this service and of the requesting producer. Revisiting the trade means revisiting
+ * the specification, not this file.</p>
  *
  * <p>Trade-offs: deduplication is exactly-once acceptance within a FIVE-MINUTE window, not unbounded
  * exactly-once. Outside that window the same transaction identifier is accepted again, and the
@@ -211,8 +226,8 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * L391 of that same option set adds the fail-if-quiescing option, which is how the baseline declines
  * to start a new get once its region has begun shutting down. The target equivalent is graceful
  * termination of the listener container on signal, configured by
- * {@link #authorizationListenerContainerOptions(long, long)} together with the graceful web shutdown
- * and per-phase timeout this module's {@code application.yml} declares.</p>
+ * {@link #authorizationListenerContainerOptions(long, long, java.time.Duration)} together with the
+ * graceful web shutdown and per-phase timeout this module's {@code application.yml} declares.</p>
  *
  * <h2>Publication sits outside the transaction in both directions</h2>
  *
@@ -292,14 +307,41 @@ public class SqsConfig {
     public static final String FIFO_QUEUE_SUFFIX = ".fifo";
 
     /**
+     * The scheme every queue ADDRESS this context sends to begins with.
+     *
+     * <p>Assumptions: an address rather than a bare name is required of a reply destination because the
+     * drain passes each one unchanged as the destination of a send, and a send accepts an address only.
+     * The scheme is checked rather than the whole address parsed: what distinguishes an address from the
+     * two shapes that fail at send time -- a bare name and a resource name -- is exactly this prefix,
+     * and parsing further would give this check an opinion about a host and a path it was not given.</p>
+     */
+    public static final String QUEUE_URL_SCHEME = "https://";
+
+    /**
+     * The prefix a resource name carries, which neither the listener nor a send can resolve.
+     */
+    public static final String RESOURCE_NAME_PREFIX = "arn:";
+
+    /**
      * The receive sentinel that requests every message attribute a message carries.
      *
      * <p>Assumptions: the transport spells this sentinel exactly this way in a receive request, and
      * it is not an enumerated attribute name. It is declared here rather than written inline so the
      * one place it is used can be read against the reasoning on
-     * {@link #authorizationListenerContainerOptions(long, long)}.</p>
+     * {@link #authorizationListenerContainerOptions(long, long, java.time.Duration)}.</p>
      */
     private static final String ALL_MESSAGE_ATTRIBUTES = "All";
+
+    /**
+     * How many account-context round trips one authorization request can cost.
+     *
+     * <p>Assumptions: three, and they are the reads {@code COPAUA0C.cbl} performs at its paragraphs 5100,
+     * 5200 and 5300 -- the card cross-reference, the account master and the customer existence check.
+     * Three is the WORST case rather than the usual one: a card that does not resolve costs one, because
+     * the reference program guards the remaining reads on the cross-reference having been found. The
+     * worst case is the figure that matters when the sum is being compared against a deadline.</p>
+     */
+    private static final int ACCOUNT_CONTEXT_CALLS_PER_REQUEST = 3;
 
     /**
      * The logger for queue-transport configuration, named for this class.
@@ -328,14 +370,97 @@ public class SqsConfig {
      * could disagree about which account and region they address, and a publisher pointed at a
      * different endpoint from the consumer fails only at run time, only on the reply path.</p>
      *
+     * <p>Refactoring Rationale: the client is given a whole-call bound and a per-attempt bound, and it
+     * had neither -- the software development kit's default for both is no bound at all, so a stalled
+     * send retried indefinitely. For the drain that is a stuck scheduled pass holding row locks. For the
+     * request consumer the same absence is worse, because a handler that outlives its message's
+     * visibility period does not merely run late: the queue makes the request visible again, a second
+     * consumer takes it, and two handlers decide one authorization at once. The durable
+     * transaction-identifier check makes the second decision idempotent rather than harmless, and
+     * relying on it to absorb a race the configuration could have prevented is not a bound.</p>
+     *
+     * <p>Assumptions: this method is where the WHOLE per-message budget is compared against visibility,
+     * because it is the only place in this context that can see every bound at once. The three
+     * account-context bounds and the datasource socket bound are read here for comparison only -- they
+     * are applied by {@code RestAccountContextClient} and {@code DataSourceConfig} respectively, each
+     * from the same property, so no value is set twice and none can drift between the two readers.</p>
+     *
+     * <p>Assumptions: the visibility period is a PROPERTY rather than a value read from the queue. It is
+     * set by {@code infra/modules/sqs}, whose {@code visibility_timeout_seconds} defaults to 60, and the
+     * default here is that same 60 so an unconfigured context validates against what the infrastructure
+     * provisions. Reading it from the queue was the alternative and is rejected: context refresh would
+     * then depend on a reachable queue, and the check would silently pass in every test and local run.</p>
+     *
+     * <p>Trade-offs: the bounds are applied through the CONSUMER form of
+     * {@code overrideConfiguration}, which mutates the configuration the starter's configurer already
+     * built. The value form would replace it, discarding the retry policy, the user agent and any
+     * execution interceptor the starter installed -- a loss visible only as absent telemetry and absent
+     * retries, neither of which fails a test.</p>
+     *
      * @param configurer the starter's client-builder configurer, which applies the resolved region,
      *     credentials provider and any endpoint override; must not be {@code null}
+     * @param apiCallTimeoutMillis the whole-call bound in milliseconds, from
+     *     {@link QueueClientBudget#PROPERTY_API_CALL_TIMEOUT}; must be positive and shorter than the
+     *     visibility period
+     * @param apiCallAttemptTimeoutMillis the per-attempt bound in milliseconds, from
+     *     {@link QueueClientBudget#PROPERTY_API_CALL_ATTEMPT_TIMEOUT}; must be positive and must not
+     *     exceed the whole-call bound
+     * @param visibilityTimeoutSeconds how long a received message stays invisible to other consumers,
+     *     from {@link QueueClientBudget#PROPERTY_VISIBILITY_TIMEOUT}; must be positive
+     * @param accountConnectMillis the account-context connect bound in milliseconds, from
+     *     {@code carddemo.account-context.connect-timeout-ms}, read here only to be summed
+     * @param accountReadMillis the account-context read bound in milliseconds, from
+     *     {@code carddemo.account-context.read-timeout-ms}, read here only to be summed
+     * @param datasourceReadMillis the datasource socket bound in milliseconds, from
+     *     {@code carddemo.datasource.read-timeout-ms}, read here only to be summed
      * @return the synchronous queue client, never {@code null}
+     * @throws IllegalStateException if the three queue bounds do not satisfy {@link QueueClientBudget},
+     *     or if the summed per-message budget reaches the visibility period, so the failure arrives at
+     *     startup naming the relationship that does not hold rather than as duplicated processing later
      */
     @Bean
     @ConditionalOnMissingBean
-    public SqsClient sqsClient(AwsClientBuilderConfigurer configurer) {
-        return configurer.configure(SqsClient.builder()).build();
+    public SqsClient sqsClient(AwsClientBuilderConfigurer configurer,
+            @Value("${" + QueueClientBudget.PROPERTY_API_CALL_TIMEOUT + ":10000}")
+            long apiCallTimeoutMillis,
+            @Value("${" + QueueClientBudget.PROPERTY_API_CALL_ATTEMPT_TIMEOUT + ":5000}")
+            long apiCallAttemptTimeoutMillis,
+            @Value("${" + QueueClientBudget.PROPERTY_VISIBILITY_TIMEOUT + ":60}")
+            long visibilityTimeoutSeconds,
+            @Value("${carddemo.account-context.connect-timeout-ms:2000}") long accountConnectMillis,
+            @Value("${carddemo.account-context.read-timeout-ms:3000}") long accountReadMillis,
+            @Value("${carddemo.datasource.read-timeout-ms:30000}") long datasourceReadMillis) {
+
+        QueueClientBudget budget = new QueueClientBudget(
+                Duration.ofMillis(apiCallTimeoutMillis),
+                Duration.ofMillis(apiCallAttemptTimeoutMillis),
+                Duration.ofSeconds(visibilityTimeoutSeconds));
+
+        // WHY : Assumptions: the handler budget is the THREE account-context round trips the consumer
+        //       makes -- the cross-reference, the account master and the customer existence check, at
+        //       COPAUA0C.cbl paragraphs 5100, 5200 and 5300 -- plus the datasource socket bound that
+        //       backstops the database work. Each round trip can spend a connect and a read, so the
+        //       worst case is three times their sum. Adding them here rather than trusting each bound
+        //       separately is the point: the individual bounds are all reasonable and their SUM is what
+        //       has to fit inside the visibility period, and nothing else in this context compares them.
+        Duration handlerWork = Duration.ofMillis(accountConnectMillis + accountReadMillis)
+                .multipliedBy(ACCOUNT_CONTEXT_CALLS_PER_REQUEST)
+                .plus(Duration.ofMillis(datasourceReadMillis));
+        budget.requireFitsVisibility(handlerWork,
+                ACCOUNT_CONTEXT_CALLS_PER_REQUEST + " account-context round trips of"
+                        + " carddemo.account-context.connect-timeout-ms plus"
+                        + " carddemo.account-context.read-timeout-ms, plus"
+                        + " carddemo.datasource.read-timeout-ms");
+        LOG.info("event=auth.queue.client.bounded apiCallTimeout={} apiCallAttemptTimeout={}"
+                        + " handlerWork={} visibilityTimeout={}",
+                budget.apiCallTimeout(), budget.apiCallAttemptTimeout(), handlerWork,
+                budget.visibilityTimeout());
+
+        return configurer.configure(SqsClient.builder())
+                .overrideConfiguration(override -> override
+                        .apiCallTimeout(budget.apiCallTimeout())
+                        .apiCallAttemptTimeout(budget.apiCallAttemptTimeout()))
+                .build();
     }
 
     /**
@@ -349,7 +474,7 @@ public class SqsConfig {
      * still cannot start without one.</p>
      *
      * <p>Alternatives Considered: leaving the queue TYPE unverified and relying on the ordering
-     * option applied by {@link #authorizationListenerContainerOptions(long, long)} to refuse an
+     * option applied by {@link #authorizationListenerContainerOptions(long, long, java.time.Duration)} to refuse an
      * unordered queue. That refusal covers the request side only, because the container never opens
      * the reply queue -- a reply goes to the address its request nominated. An unordered reply
      * destination would therefore pass startup and fail later, when the transport rejected the group
@@ -392,22 +517,41 @@ public class SqsConfig {
      * ordinary singletons it must observe, without forcing early instantiation of the enclosing
      * configuration class.</p>
      *
+     * <p>Refactoring Rationale: the two budgets are now VALIDATED rather than merely converted. They
+     * were accepted as raw second counts with no check of any kind, so a deployment could set either to
+     * zero or to a negative number -- a container that waits zero seconds for its in-flight messages
+     * abandons every one of them, and the acknowledgement it never sent means the queue redelivers work
+     * that had already completed. They were also unchecked against the shutdown phase they are spent
+     * inside: a stopping container consumes the two in sequence, and if their sum exceeds
+     * {@code spring.lifecycle.timeout-per-shutdown-phase} the platform terminates the process
+     * mid-drain, which is the same loss reached by a different route. Both conditions now fail startup.</p>
+     *
+     * <p>Assumptions: the phase timeout is READ from configuration rather than restated here, with the
+     * framework's own thirty-second default as its default, so lowering it in {@code application.yml}
+     * fails this check instead of silently leaving a drain that cannot finish.</p>
+     *
      * @param listenerShutdownSeconds how long a stopping container waits for in-flight messages to
      *     finish, from {@code carddemo.messaging.listener-shutdown-timeout-seconds}; must be positive
      * @param acknowledgementShutdownSeconds how long a stopping container waits for outstanding
      *     acknowledgements to be sent, from
      *     {@code carddemo.messaging.acknowledgement-shutdown-timeout-seconds}; must be positive
+     * @param shutdownPhaseTimeout the phase both budgets are spent inside, from
+     *     {@code spring.lifecycle.timeout-per-shutdown-phase}; must be positive
      * @return the post-processor that applies these settings to the listener-container factory,
      *     never {@code null}
+     * @throws IllegalStateException if either budget is not positive, or if their sum exceeds the
+     *     shutdown phase they are spent inside, so the failure names the property rather than presenting
+     *     as work abandoned during a deployment
      */
     @Bean
     public static BeanPostProcessor authorizationListenerContainerOptions(
             @Value("${carddemo.messaging.listener-shutdown-timeout-seconds:10}")
             long listenerShutdownSeconds,
             @Value("${carddemo.messaging.acknowledgement-shutdown-timeout-seconds:5}")
-            long acknowledgementShutdownSeconds) {
+            long acknowledgementShutdownSeconds,
+            @Value("${spring.lifecycle.timeout-per-shutdown-phase:30s}") Duration shutdownPhaseTimeout) {
         return new ListenerContainerOptionsCustomizer(Duration.ofSeconds(listenerShutdownSeconds),
-                Duration.ofSeconds(acknowledgementShutdownSeconds));
+                Duration.ofSeconds(acknowledgementShutdownSeconds), shutdownPhaseTimeout);
     }
 
     /**
@@ -438,20 +582,30 @@ public class SqsConfig {
          * comma-separated value, and refusing it would fail every context that configures no queue.
          * A NON-blank entry is always checked, so nothing that is actually configured escapes.</p>
          *
+         * <p>Refactoring Rationale: the two references are checked by DIFFERENT rules, and one rule
+         * checked both. They are consumed by different code in different shapes: the request queue is
+         * handed to the listener starter, which resolves either a bare queue name or a queue address,
+         * while every allowlisted reply destination is passed straight to {@code queueUrl(...)} on a send
+         * by {@code OutboxPublisher}, which accepts an address and nothing else. One rule that accepted
+         * both shapes for both references blessed a bare name in the allowlist that made every reply to
+         * that requester fail, and a resource name in either position that neither consumer can
+         * resolve.</p>
+         *
          * @param requestQueue the reference to the ordered request queue, possibly blank; must not
          *     be {@code null}
          * @param replyQueueAllowlist the addresses a reply may be sent to, possibly empty or
          *     containing blank entries; must not be {@code null}
-         * @throws IllegalStateException if a non-blank reference does not end with
-         *     {@link SqsConfig#FIFO_QUEUE_SUFFIX}, because an unordered queue cannot carry the
-         *     per-card ordering the reference consumer's serial loop provides
+         * @throws IllegalStateException if a non-blank request-queue reference is not a bare name or an
+         *     address ending in {@link SqsConfig#FIFO_QUEUE_SUFFIX}, or if a non-blank allowlist entry is
+         *     not an address ending in that suffix, because an unordered queue cannot carry the per-card
+         *     ordering the reference consumer's serial loop provides and a non-address cannot be sent to
          */
         FifoQueueNamingContract(String requestQueue, List<String> replyQueueAllowlist) {
             Objects.requireNonNull(requestQueue, "requestQueue");
             Objects.requireNonNull(replyQueueAllowlist, "replyQueueAllowlist");
-            requireOrderedQueue(requestQueue, "carddemo.messaging.pauth-request-queue");
+            requireOrderedListenerReference(requestQueue, "carddemo.messaging.pauth-request-queue");
             for (String address : replyQueueAllowlist) {
-                requireOrderedQueue(address, "carddemo.messaging.reply-queue-allowlist");
+                requireOrderedReplyQueueUrl(address, "carddemo.messaging.reply-queue-allowlist");
             }
             this.requestQueue = requestQueue;
             this.replyQueueAllowlist = List.copyOf(replyQueueAllowlist);
@@ -478,35 +632,88 @@ public class SqsConfig {
         }
 
         /**
-         * Refuses a non-blank reference that does not name an ordered queue.
+         * Refuses a non-blank listener reference that the starter cannot resolve to an ordered queue.
          *
-         * <p>Assumptions: the comparison is on a lower-cased copy taken in an explicitly named
-         * locale, and naming it is the point. Lower-casing in the ambient locale changes which
-         * characters map to which in a small number of locales, so a startup check written without
-         * one can pass in one deployment region and refuse identical configuration in another.</p>
+         * <p>Assumptions: a bare queue name and a queue address are both accepted, because the listener
+         * starter resolves either. A RESOURCE NAME is refused: it resolves to neither, so a deployment
+         * configuring one would start and then receive nothing at all, which is the failure a startup
+         * check exists to convert into a message naming the property.</p>
          *
-         * <p>Assumptions: a suffix test is correct for all three shapes this value legitimately
-         * takes -- a bare queue name, a queue address and a resource name -- because in each of them
-         * the queue name is the final segment, and the transport requires an ordered queue's name to
-         * end with the suffix. No parsing of the value is therefore needed, and none is done, which
-         * also keeps this check from having an opinion about a shape it was not given.</p>
+         * <p>Refactoring Rationale: the suffix is compared CASE-SENSITIVELY, and it was compared against
+         * a lower-cased copy of the reference. The lower-casing was defended as locale hygiene, and it
+         * inverted the check's meaning: the transport's own suffix is lower case, the listener starter
+         * selects its ordered message source and ordered acknowledgement path by testing for exactly
+         * that lower-case suffix, so a reference ending {@code .FIFO} passed this check and then selected
+         * the UNORDERED components -- losing the per-card ordering silently, which is the one outcome
+         * this class exists to prevent. Case-sensitivity also disposes of the locale question entirely:
+         * nothing is transformed, so no locale can transform it differently.</p>
          *
          * @param reference the configured reference to check, possibly blank; must not be
          *     {@code null}
          * @param propertyName the property the reference came from, named in the failure so an
          *     operator repairs the right value; must not be {@code null}
-         * @throws IllegalStateException if the reference is non-blank and does not end with
-         *     {@link SqsConfig#FIFO_QUEUE_SUFFIX}
+         * @throws IllegalStateException if the reference is non-blank and is either a resource name or
+         *     does not end with {@link SqsConfig#FIFO_QUEUE_SUFFIX} exactly
          */
-        private static void requireOrderedQueue(String reference, String propertyName) {
+        private static void requireOrderedListenerReference(String reference, String propertyName) {
             if (reference.isBlank()) {
                 return;
             }
-            if (!reference.trim().toLowerCase(Locale.ROOT).endsWith(FIFO_QUEUE_SUFFIX)) {
+            String trimmed = reference.trim();
+            if (trimmed.startsWith(RESOURCE_NAME_PREFIX)) {
                 throw new IllegalStateException(propertyName
-                        + " must name a first-in-first-out queue, whose name ends with "
-                        + FIFO_QUEUE_SUFFIX + ": an unordered queue gives no per-card ordering and"
-                        + " rejects the group and deduplication identifiers every send sets");
+                        + " must be a queue name or a queue address, not a resource name: the listener"
+                        + " starter resolves a name or an address and would receive nothing at all");
+            }
+            requireFifoSuffix(trimmed, propertyName);
+        }
+
+        /**
+         * Refuses a non-blank reply destination that is not an address of an ordered queue.
+         *
+         * <p>Assumptions: only an ADDRESS is accepted here, where the listener reference also accepts a
+         * bare name, and the asymmetry is the consuming code rather than a preference. Every entry of
+         * this list is compared against a requester's reply-to attribute and then passed unchanged to
+         * {@code queueUrl(...)} on a send, so a bare name or a resource name in this list is a value that
+         * passes startup and then fails every reply to the requester that nominated it -- on the reply
+         * path only, for one requester, which is the least observable place for it to fail.</p>
+         *
+         * @param address the configured destination to check, possibly blank; must not be {@code null}
+         * @param propertyName the property the destination came from, named in the failure; must not be
+         *     {@code null}
+         * @throws IllegalStateException if the destination is non-blank and is not an
+         *     {@code https} address, or does not end with {@link SqsConfig#FIFO_QUEUE_SUFFIX} exactly
+         */
+        private static void requireOrderedReplyQueueUrl(String address, String propertyName) {
+            if (address.isBlank()) {
+                return;
+            }
+            String trimmed = address.trim();
+            if (!trimmed.startsWith(QUEUE_URL_SCHEME)) {
+                throw new IllegalStateException(propertyName
+                        + " must be a queue address beginning " + QUEUE_URL_SCHEME
+                        + ": every entry is passed unchanged as the destination of a send, which accepts"
+                        + " an address and neither a bare name nor a resource name");
+            }
+            requireFifoSuffix(trimmed, propertyName);
+        }
+
+        /**
+         * Refuses a reference whose final segment does not end with the ordered-queue suffix.
+         *
+         * @param trimmed the non-blank, trimmed reference to check; must not be {@code null}
+         * @param propertyName the property the reference came from, named in the failure; must not be
+         *     {@code null}
+         * @throws IllegalStateException if the reference does not end with
+         *     {@link SqsConfig#FIFO_QUEUE_SUFFIX} exactly
+         */
+        private static void requireFifoSuffix(String trimmed, String propertyName) {
+            if (!trimmed.endsWith(FIFO_QUEUE_SUFFIX)) {
+                throw new IllegalStateException(propertyName
+                        + " must name a first-in-first-out queue, whose name ends with the exact"
+                        + " lower-case suffix " + FIFO_QUEUE_SUFFIX + ": an unordered queue gives no"
+                        + " per-card ordering and rejects the group and deduplication identifiers every"
+                        + " send sets, and the starter tests for this suffix case-sensitively");
             }
         }
     }
@@ -532,19 +739,67 @@ public class SqsConfig {
         private final Duration acknowledgementShutdownTimeout;
 
         /**
-         * Retains the two shutdown budgets this customizer applies.
+         * Validates the two shutdown budgets against the phase they are spent in, and retains them.
          *
          * @param listenerShutdownTimeout how long a stopping container waits for in-flight messages
-         *     to finish; must not be {@code null}
+         *     to finish; must not be {@code null} and must be positive
          * @param acknowledgementShutdownTimeout how long a stopping container waits for outstanding
-         *     acknowledgements to be sent; must not be {@code null}
+         *     acknowledgements to be sent; must not be {@code null} and must be positive
+         * @param shutdownPhaseTimeout the phase both budgets are spent inside, which their sum must fit;
+         *     must not be {@code null} and must be positive
+         * @throws NullPointerException if any budget is {@code null}
+         * @throws IllegalStateException if any budget is not positive, or if the two container budgets
+         *     together exceed the shutdown phase
          */
         ListenerContainerOptionsCustomizer(Duration listenerShutdownTimeout,
-                Duration acknowledgementShutdownTimeout) {
+                Duration acknowledgementShutdownTimeout, Duration shutdownPhaseTimeout) {
             this.listenerShutdownTimeout =
                     Objects.requireNonNull(listenerShutdownTimeout, "listenerShutdownTimeout");
             this.acknowledgementShutdownTimeout = Objects.requireNonNull(
                     acknowledgementShutdownTimeout, "acknowledgementShutdownTimeout");
+            Objects.requireNonNull(shutdownPhaseTimeout, "shutdownPhaseTimeout");
+            requirePositiveBudget(listenerShutdownTimeout,
+                    "carddemo.messaging.listener-shutdown-timeout-seconds",
+                    "a container that waits no time for its in-flight messages abandons every one of"
+                            + " them, and the acknowledgement it never sends makes the queue redeliver"
+                            + " work that had already completed");
+            requirePositiveBudget(acknowledgementShutdownTimeout,
+                    "carddemo.messaging.acknowledgement-shutdown-timeout-seconds",
+                    "an acknowledgement budget of no time discards the acknowledgements of messages"
+                            + " that succeeded, so the queue redelivers completed work");
+            requirePositiveBudget(shutdownPhaseTimeout, "spring.lifecycle.timeout-per-shutdown-phase",
+                    "a phase of no duration terminates the process before any drain begins");
+            // WHY : Assumptions: the two budgets are compared as a SUM because a stopping container
+            //       spends them in sequence -- it waits for in-flight messages first and for outstanding
+            //       acknowledgements afterwards -- so neither alone is what has to fit. Comparing them
+            //       individually would bless a pair that each fit and together do not.
+            Duration drain = listenerShutdownTimeout.plus(acknowledgementShutdownTimeout);
+            if (drain.compareTo(shutdownPhaseTimeout) > 0) {
+                throw new IllegalStateException("the container drain budget " + drain
+                        + " (carddemo.messaging.listener-shutdown-timeout-seconds plus"
+                        + " carddemo.messaging.acknowledgement-shutdown-timeout-seconds) exceeds"
+                        + " spring.lifecycle.timeout-per-shutdown-phase " + shutdownPhaseTimeout
+                        + ": the platform would terminate the process mid-drain, abandoning in-flight"
+                        + " messages and the acknowledgements of completed ones");
+            }
+        }
+
+        /**
+         * Refuses a shutdown budget that is not positive, naming the property and the consequence.
+         *
+         * @param budget the configured budget; must not be {@code null}
+         * @param propertyName the property the budget came from, named in the failure; must not be
+         *     {@code null}
+         * @param consequence what a non-positive value costs, quoted so the failure explains itself;
+         *     must not be {@code null}
+         * @throws IllegalStateException if the budget is zero or negative
+         */
+        private static void requirePositiveBudget(Duration budget, String propertyName,
+                String consequence) {
+            if (budget.isZero() || budget.isNegative()) {
+                throw new IllegalStateException(propertyName + " must be positive but was " + budget
+                        + ": " + consequence);
+            }
         }
 
         /**

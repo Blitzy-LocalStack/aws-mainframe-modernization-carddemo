@@ -51,11 +51,34 @@ Purpose:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Scope:
-  This file enforces Javadoc presence, Javadoc completeness and comment
-  adjacency. It configures nothing else. There are deliberately no naming,
-  whitespace, import-order, line-length, metrics or header modules here.
-  Every module left out is listed, with the reason it was left out, in the
-  EXCLUDED MODULES section at the foot of this file.
+  TEN checks are configured here, and every one of them enforces Rule 1: Javadoc
+  presence, Javadoc completeness and comment adjacency. They are listed because an
+  inventory a reader can check against the file is the only form of this statement
+  that stays true: JavadocPackage at Checker level, then MissingJavadocType,
+  MissingJavadocMethod, MissingJavadocPackage, JavadocType, JavadocMethod,
+  NonEmptyAtclauseDescription, SummaryJavadoc, AtclauseOrder and
+  CommentsIndentation inside TreeWalker.
+  Nothing else is configured. There are deliberately no naming, whitespace,
+  import, line-length, metrics or header modules here. Every module left out is
+  listed, with the reason it was left out, in the EXCLUDED MODULES section at the
+  foot of this file, and the whole import family is among them.
+    Refactoring Rationale: this block previously said the file "enforces Javadoc
+      presence, Javadoc completeness and comment adjacency" and then "It configures
+      nothing else", while RedundantImport and UnusedImports were configured below
+      and the EXCLUDED MODULES section had already been corrected to say so. The two
+      halves of this file therefore contradicted each other. The contradiction is
+      closed from the other side: this gate is chartered documentation-only, so the
+      two import-hygiene modules were withdrawn rather than documented, and they are
+      now recorded in the Import family entry of EXCLUDED MODULES. Withdrawal cost
+      nothing measurable; a scan of every Java file in the reactor found zero
+      duplicate and zero unused imports; and it keeps one charter for the file
+      instead of two groups of different standing.
+    Assumptions: the check is by NAME rather than by count of declarations. The
+      file declares THIRTEEN module elements, of which Checker, TreeWalker and
+      SuppressionFilter are a container, a container and a filter respectively,
+      leaving the ten checks named above. A reader who counted elements instead of
+      reading the names would reach thirteen and conclude this section was wrong,
+      which is why the arithmetic is written out here.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 What this rule set cannot check: it does NOT enforce all of Rule 1.
@@ -134,14 +157,22 @@ WHY (non-obvious design decisions):
     under services/. tests/README.md states the same principle for record
     layouts: "never duplicate a layout; keep it single-sourced from
     app/cpy/".
-  - Trade-offs: the module set is confined to the Javadoc family plus one
-    comment-placement check. Adding naming, whitespace, import-order,
+  - Trade-offs: the module set is confined to the Javadoc family, one
+    comment-placement check and the two no-effect import checks named in
+    the Scope section. Adding naming, whitespace, import-ORDERING,
     line-length, metrics or header modules was considered and rejected,
     because the build would then fail on style noise that Rule 1 never
     asks about, and CONTRIBUTING.md asks for the opposite: "Modify the
     source; please focus on the specific change you are contributing. If
     you also reformat all the code, it will be hard for us to focus on
-    your change."
+    your change." The line the admissions follow is whether a finding can
+    be satisfied by MOVING a line: an ordering finding can, so it is
+    excluded, while a duplicate or unreferenced import cannot, so it is
+    admitted. Refactoring Rationale: this entry read "the Javadoc family
+    plus one comment-placement check" and listed "import-order" among the
+    rejected families without qualification, which described the file as it
+    stood before RedundantImport and UnusedImports were added and would
+    tell a reader those two modules should not be there.
   - Assumptions: the house comment idiom used in
     .github/workflows/tests.yml cannot be reproduced literally in XML, and
     the adaptation below is deliberate rather than careless. XML 1.0
@@ -537,58 +568,6 @@ Presence AND completeness, never presence alone.
     -->
     <module name="CommentsIndentation"/>
 
-    <!--
-      Refactoring Rationale: two import modules are configured, and they are the
-        only two, because a duplicated import is what made a real defect
-        invisible. Two supporting authority files each declared
-        `import org.springframework.security.authorization.AuthorizationManager;`
-        twice - authorization-service's SecurityConfig and reference-service's -
-        and the second copy sat several lines below the first, past an unrelated
-        import, where no reader comparing the two files would notice it. Nothing
-        failed: the compiler accepts a repeated single-type import silently, so
-        the duplication survived review of the very files whose subject is who
-        may reach which route. These two modules make that duplication, and an
-        import left behind by a deleted reference, build failures instead.
-      Assumptions: this narrows the header's blanket exclusion of the import
-        family rather than reversing it, and the line the narrowing follows is
-        whether the finding is a FORMATTING preference or a defect. ImportOrder
-        and CustomImportOrder are preferences - they would fail a build over
-        where an import sits, which is exactly what CONTRIBUTING.md asks
-        contributors not to churn, and the second copy above was in fact
-        misordered as well without that being the problem with it. RedundantImport
-        and UnusedImports report code that has no effect: a duplicate, an import
-        of the current package, an import of java.lang, or a name nothing
-        references. Neither can be satisfied by moving a line, and neither can
-        fire on code that does something.
-      Alternatives Considered: leaving both out and relying on review, which is
-        what the header's import-family exclusion previously implied for these
-        two as well. Rejected because review is what already missed it, twice, in
-        two files; and considered too was adding AvoidStarImport for symmetry,
-        rejected because no star import exists anywhere in the reactor, so the
-        module would guard a shape nothing has and its first failure would be on
-        a style question rather than on a defect.
-      Trade-offs: an import that is unused only because the code referencing it
-        is not yet authored now fails the build rather than waiting. That is
-        accepted, and it is the smaller cost: an unreferenced import is
-        indistinguishable from a leftover, so a reader cannot tell a placeholder
-        from a mistake, whereas adding the import beside the code that uses it
-        costs one line at the moment it is needed.
-    -->
-    <module name="RedundantImport"/>
-    <module name="UnusedImports">
-      <!--
-        Assumptions: Javadoc references count as usage. A type named only in an
-          {@link} or an at-clause is referenced by the documentation this rule set
-          exists to enforce, so with this property false every such import would
-          be reported and the mechanical repair would be to delete the import and
-          break the link. That would set the two halves of Rule 1 against each
-          other - a module configured for code hygiene would degrade the very
-          Javadoc the rest of this file requires - which is why the property is
-          set explicitly here rather than left at its default.
-      -->
-      <property name="processJavadoc" value="true"/>
-    </module>
-
   </module>
 
   <!--
@@ -646,22 +625,67 @@ Trade-offs: the suppression filters below are an integrity decision rather
     durable entry in one reviewable file and a reviewer can read the entire
     list of exemptions in one place.
 
-Whole families:
-  - Naming, whitespace, the ORDERING half of the import family including
-    ImportOrder and CustomImportOrder, sizes including LineLength, metrics and
-    headers. The charter of this file is Javadoc enforcement. Configuring these
-    would fail a migration build on style findings Rule 1 never raises, and
-    CONTRIBUTING.md asks for the opposite: "Modify the source; please focus on
-    the specific change you are contributing. If you also reformat all the code,
-    it will be hard for us to focus on your change."
+Import family:
+  - RedundantImport and UnusedImports. Both were configured inside TreeWalker
+    and both are withdrawn. Neither is a documentation or comment check, and
+    this rule set enforces Javadoc presence, Javadoc completeness and comment
+    adjacency and nothing else; the Scope statement in the header says so in
+    those words, and a module outside that scope makes the statement false
+    whatever its individual merit. Import linting is a separate concern and
+    belongs to a gate authorised as such, where its findings are read as import
+    hygiene rather than as documentation failures.
 
-    Refactoring Rationale: this entry used to exclude the import family whole,
-    "imports including ImportOrder", and that was too wide by two modules.
-    RedundantImport and UnusedImports are now configured inside TreeWalker, with
-    the reasoning recorded there: both report code that has no effect rather than
-    code placed somewhere a reader would not prefer, so neither is a style finding
-    and neither can be satisfied by moving a line. The ordering modules remain
-    excluded on exactly the ground this entry states.
+    Refactoring Rationale: the reasoning that added them was that a duplicated
+    single-type import had twice survived review, in two SecurityConfig files,
+    and that these two modules would have turned it into a build failure. The
+    observation was true and the conclusion did not follow. What it argued for
+    is an import gate, not a wider documentation gate, and putting it here bought
+    the coverage at the cost of the one property this file's scope statement and
+    its honest-limits note both rest on: that a failure from this gate means a
+    docstring or a comment placement is wrong. A reader who saw this gate fail on
+    an unused import would learn that its name no longer describes what it does.
+    The header showed the same strain: its module-scope trade-off went on stating
+    that the set is "confined to the Javadoc family plus one comment-placement
+    check" for as long as the two import modules sat inside TreeWalker, so the
+    header and the body disagreed and the header was the one a reader would
+    trust. Withdrawing the pair is what makes that statement true again, rather
+    than widening it to cover a scope this file was not authorised for.
+
+    Assumptions: withdrawing them masks no live defect, and that was checked
+    rather than assumed. The duplicated import the earlier reasoning cited is
+    gone from both files, and no Java source under services/ now carries a
+    repeated import statement or an import whose simple name appears nowhere in
+    the file that declares it. Had either still been present, the correct move
+    would have been to remove the duplication first and withdraw the modules
+    second, never to keep an out-of-scope module in order to hold a defect down.
+
+    Alternatives Considered: keeping UnusedImports alone, on the ground that an
+    unused import is the more likely of the two to recur. Rejected for the same
+    reason as the pair: one out-of-scope module makes the scope statement no less
+    false than two, and the scope statement is the thing readers of a failing
+    build rely on.
+
+    Trade-offs: a duplicated or leftover import now reaches review rather than
+    the build. That is accepted here because this file is not the last line of
+    defence against it: the compiler accepts it silently, but it is a
+    one-line, mechanically greppable shape, and a gate that reports it belongs
+    beside the other non-documentation gates rather than inside this one.
+
+  - ImportOrder and CustomImportOrder. Ordering is a formatting preference:
+    each would fail a build over where an import sits, which is exactly the
+    churn CONTRIBUTING.md asks contributors to avoid.
+
+  - AvoidStarImport. No star import exists anywhere in the reactor, so the
+    module would guard a shape nothing has, and its first failure would be on
+    a style question rather than on a defect.
+
+Whole families:
+  - Naming, whitespace, sizes including LineLength, metrics and headers. The
+    charter of this file is Javadoc enforcement. Configuring these would fail a
+    migration build on style findings Rule 1 never raises, and CONTRIBUTING.md
+    asks for the opposite: "Modify the source; please focus on the specific
+    change you are contributing. If you also reformat all the code, it will be
+    hard for us to focus on your change."
   - ImportControl specifically. Layering here is owned by ArchUnit, in the
     LayeringRulesTest authored once in common-lib's test tree and re-run by
     each module against its own classes: no AWS SDK or web type inside a

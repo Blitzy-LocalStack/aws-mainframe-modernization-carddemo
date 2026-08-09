@@ -36,9 +36,11 @@
  *       {@code OpaqueIdentifier}, {@code SealedSelector},
  *       {@code HtmlTextEncoder}, {@code InternalServiceToken}.</li>
  *   <li><b>{@code messaging}</b> -- the message-expiry attribute every queue
- *       consumer honours, and the canonical encoding a correlation identity must
- *       satisfy to travel as queue metadata. Two production classes:
- *       {@code MessageExpiry}, {@code MessagingCorrelationId}.</li>
+ *       consumer honours, the canonical encoding a correlation identity must
+ *       satisfy to travel as queue metadata, and the rule that every bound on a
+ *       consumer's per-message work fits inside that message's visibility period.
+ *       Three production classes: {@code MessageExpiry},
+ *       {@code MessagingCorrelationId}, {@code QueueClientBudget}.</li>
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
  *       {@code service}, {@code environment} and {@code version}, the decision
  *       about what a rendered value may contain before it reaches a log line, and
@@ -51,9 +53,16 @@
  *   <li><b>{@code validation}</b> -- the date edit rules and the
  *       {@code FLG-*-NOT-OK} and {@code FLG-*-BLANK} flag triad. Two production
  *       classes: {@code DateEditValidator}, {@code FieldValidationFlag}.</li>
+ *   <li><b>{@code control}</b> -- the online-write window: the fail-closed
+ *       decision every mutating path consults while the nightly batch chain owns
+ *       the data, the refusal it raises, the request-side application of it, and
+ *       the marker by which a read shaped as a write declares itself. Four
+ *       production classes: {@code OnlineWriteGate},
+ *       {@code OnlineWritesDisabledException},
+ *       {@code OnlineWriteGateInterceptor}, {@code OnlineWriteGateExempt}.</li>
  * </ul>
  *
- * <p>Trade-offs: those nine subpackages are the whole of it. This package has
+ * <p>Trade-offs: those ten subpackages are the whole of it. This package has
  * no application-layer subpackage at all -- no controller, service, repository,
  * domain, transfer-object or mapper package, and no configuration package
  * either. {@code MetricsConfig} consequently sits under {@code observability},
@@ -70,9 +79,21 @@
  * the whole roster from the directory on every build, so the next such gap fails
  * a test rather than misleading a reader.
  *
+ * <p>Refactoring Rationale: this roster named nine subpackages and omitted
+ * {@code control} because that subpackage did not exist: the online-write flag was
+ * created by the infrastructure, toggled by two functions and injected into every
+ * online task definition, and READ BY NOTHING. Every service accepted writes
+ * straight through the batch window, so "quiesce" named a control that had no
+ * application half at all. It is a subpackage of its own rather than four classes
+ * inside {@code web} because what it owns is a DECISION about the environment -- read
+ * a flag, fail closed, cache briefly -- and only the application of that decision is a
+ * request concern. Filing the whole of it under the request package would make the
+ * fail-closed semantics an implementation detail of a replaceable interceptor, which
+ * is the wrong way round.
+ *
  * <p>Refactoring Rationale: this root holds exactly ONE production class,
  * {@code CardDemoCommonAutoConfiguration}, and an earlier revision held none. It
- * is here rather than in any of the nine because it registers components from
+ * is here rather than in any of the ten because it registers components from
  * FOUR of them -- the correlation filter and the cursor-token signer from
  * {@code web}, the meter filter from {@code observability}, the codec module from
  * {@code money} and the error advice from {@code error} -- so placing it in one of
@@ -88,18 +109,18 @@
  * service dimension, failed requests rendered in the framework's own shape -- and
  * an alternative that required each of the eight services to import them
  * explicitly would have left the same omission possible eight times over. The cost is that a reader hunting for configuration by name has to
- * know the concern first. The gain is that all nine subpackage names are
- * contracts rather than eight contracts and one bucket, so the question "which
+ * know the concern first. The gain is that all ten subpackage names are
+ * contracts rather than nine contracts and one bucket, so the question "which
  * subpackage does this belong in" keeps a definite answer as the tree grows.
- * The closed inventory immediately below enumerates those nine and nothing else,
+ * The closed inventory immediately below enumerates those ten and nothing else,
  * which is what makes the closed list checkable rather than merely intended.
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>35 production classes</b> in a root and nine
- * subpackages, each carrying one charter file, for <b>45</b> compilation units. The
+ * <p>The module holds <b>40 production classes</b> in a root and ten
+ * subpackages, each carrying one charter file, for <b>51</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
- * of these ten rows, and a proposed addition that fits none of them does not belong
+ * of these eleven rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all.
  *
  * <pre>
@@ -108,29 +129,30 @@
  * common.money                           2         1                   3
  * common.codec                           6         1                   7
  * common.error                           7         1                   8
- * common.messaging                       2         1                   3
+ * common.messaging                       3         1                   4
  * common.web                             3         1                   4
  * common.security                        8         1                   9
  * common.observability                   3         1                   4
  * common.time                            1         1                   2
  * common.validation                      2         1                   3
+ * common.control                         4         1                   5
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 6 + 7 + 2 + 3 + 8 + 3 + 1 + 2 = 35, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 7 + 8 + 3 + 4 + 9 + 4 + 2 + 3 = 45. Both totals agree,
- * and this file is one of the ten charters. Each sum is kept whole on one line
+ * 1 + 2 + 6 + 7 + 3 + 3 + 8 + 3 + 1 + 2 + 4 = 40, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 7 + 8 + 4 + 4 + 9 + 4 + 2 + 3 + 5 = 51. Both totals agree,
+ * and this file is one of the eleven charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>35 production classes
- * across 9 subpackages and the root, in 45 compilation units, of which 10 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>40 production classes
+ * across 10 subpackages and the root, in 51 compilation units, of which 11 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 35 fails both sums and is wrong.
+ * other than 40 fails both sums and is wrong.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -153,8 +175,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>35</b>. The
- * difference is 18 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>40</b>. The
+ * difference is 23 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -219,6 +241,11 @@
  *       correlation identity must satisfy to travel as queue metadata, kept separate
  *       from the servlet rule because the two transports admit different characters
  *       and one rule for both would have to be the intersection.</li>
+ *   <li>{@code messaging.QueueClientBudget} -- the rule that every bound deciding how
+ *       long a consumer can be busy with one message has to fit inside that message's
+ *       visibility period. Three services and one infrastructure module share the
+ *       period, so three private copies of the rule would be three chances for one to
+ *       be relaxed while the others still claimed the guarantee.</li>
  *   <li>{@code security.MaskedCardNumber} -- states what a masked primary account
  *       number IS, where {@code CardNumberMasker} only produces one. Without it each
  *       response contract judged the shape for itself, so a contract could accept a
@@ -235,11 +262,27 @@
  *       one bounded context presents to another. Two contexts calling each other
  *       must agree on the token's shape and lifetime exactly, which is the defining
  *       property of a shared-kernel contract.</li>
+ *   <li>{@code control.OnlineWriteGate} -- decides whether the environment is
+ *       currently accepting mutating work, and refuses when it cannot establish that
+ *       it is. Seven services must agree on that decision and on its fail-closed
+ *       behaviour exactly; seven copies of a safety control is seven chances for one
+ *       of them to be quietly fail-open.</li>
+ *   <li>{@code control.OnlineWritesDisabledException} -- the refusal the gate raises,
+ *       carried here rather than per service so that one status and one message answer
+ *       a closed window everywhere instead of each context choosing its own.</li>
+ *   <li>{@code control.OnlineWriteGateInterceptor} -- applies the gate to every
+ *       mutating request without any handler having to call it, which is what makes
+ *       the coverage a property of the code rather than of who remembered.</li>
+ *   <li>{@code control.OnlineWriteGateExempt} -- the marker by which a read shaped as
+ *       a write declares itself, with its justification stated at the handler. It is
+ *       shared because the operations needing it are the cross-context internal
+ *       lookups, so the vocabulary for exempting one has to be common to the caller's
+ *       context and the callee's.</li>
  * </ul>
  *
- * <p>Trade-offs: the alternative to naming these 18 here was to leave the plan's 17
- * and this charter's 35 to be reconciled by whoever next noticed the gap. Rejected,
- * because the reconciliation is not mechanical -- seventeen of the eighteen are
+ * <p>Trade-offs: the alternative to naming these 19 here was to leave the plan's 17
+ * and this charter's 36 to be reconciled by whoever next noticed the gap. Rejected,
+ * because the reconciliation is not mechanical -- eighteen of the nineteen are
  * cross-cutting contracts and one is a registration mechanism, and no arithmetic
  * recovers that from two totals. The cost accepted is that this list has to be
  * maintained alongside the table above whenever an addition is argued in; the
@@ -253,6 +296,13 @@
  * the number of entries in this list equals the measured production-class count minus
  * the plan's 17, so an addition argued into the module without an argument written
  * here fails the build.
+ *
+ * <p>Refactoring Rationale: the four {@code control} entries were added with the
+ * subpackage itself, and the table's third revision -- from 35 and 45 to 39 and 50 --
+ * is therefore a recorded addition rather than the drift the two earlier revisions
+ * were. The distinction is worth stating because the two look identical in a diff: what
+ * separates them is whether the classes arrived with an argument for their presence,
+ * and these four arrived with one each.
  *
  * <h2>The dependency arrow points inward only</h2>
  *
@@ -369,7 +419,7 @@
  * content would be a sentence pointing at this one, because a charter that
  * defers is worse than no charter: it has to be kept in step with the file it
  * defers to, and it invites the next author to add a third. The count canon
- * above is the arithmetic guard on that: ten charters, not twelve, so a later
+ * above is the arithmetic guard on that: eleven charters, not thirteen, so a later
  * addition at either directory shows up as a broken total rather than as a
  * judgement call.
  *
@@ -615,7 +665,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 35 production classes this charter enumerates.
+ * the architecture rules for the 39 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

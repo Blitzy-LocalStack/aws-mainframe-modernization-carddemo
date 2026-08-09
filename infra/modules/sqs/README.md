@@ -162,27 +162,28 @@ module's central claim: message order is observable behaviour for authorization
 and is required *per card*, whereas the inquiry exchange has no ordering
 requirement at all.
 
-**Per-card ordering.** Producers derive `MessageGroupId` through
-`CsvAuthCodec.AuthRequest.orderGroup` — and, on the reply leg,
-`CsvAuthCodec.AuthReply.orderGroup`, which returns the same token for the same
-card — using the purpose-scoped HMAC held by `OpaqueIdentifier` with the key
-supplied via `CARDDEMO_MESSAGING_HMAC_KEY`. Equal cards therefore produce one
-stable group, while the primary account number itself never appears in SQS
-metadata, queue telemetry or send traces.
+**Per-card ordering.** Producers set `MessageGroupId` to the **card number
+itself** and `MessageDeduplicationId` to the **transaction identifier itself**,
+which §0.4.1.8 of the technical specification states literally and §0.7.6 repeats
+for the grouping rule. Equal cards therefore produce one group by construction,
+with no derivation for two producers to disagree about.
 
-Refactoring Rationale: this paragraph named `CARDDEMO_MASK_HMAC_KEY`, and the
-name was wrong in a way that mattered rather than cosmetically. That variable is
-the extract-transform-load redaction key, and `infra/modules/ecs-service` admits
-it for the `data-migration` workload only — so the derivation described here
-could not happen on any producer, and the reply path fell back to publishing the
-card number itself as its group identity. The two keys are deliberately separate:
-this one is generated per environment by each root, injected to
-`authorization-service` alone, and shared with every producer on this queue
-because the group identity has to be equal for equal cards *across* producers —
-that equality is the ordering guarantee. Sharing a single value with the
-migration workload would let a job that reads cardholder extracts compute
-production queue group identities, and would make rotating either purpose require
-stopping both.
+Refactoring Rationale: this paragraph described both identities as
+purpose-scoped HMACs derived through `OpaqueIdentifier` from a key supplied via
+`CARDDEMO_MESSAGING_HMAC_KEY`, so that the account number never entered queue
+metadata. That derivation is withdrawn, because it removed the guarantees it was
+layered on: a group identity orders one card's messages only while **every**
+producer computes the same value for that card, and a deduplication identity
+suppresses a resend only while the **requester** can predict it, so a value keyed
+from one consumer's secret split a card across groups and let an honest resend
+through as new. The consequence — a primary account number in queue metadata,
+which server-side encryption of the body does not cover — is registered as
+divergence `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in
+`docs/architecture/cobol-to-service-traceability.md`, and this module supplies two
+of the three controls that bound it: `sse_kms` encryption under the
+customer-managed key this module is handed, and receive/send capability scoped by
+the task-role policies built from its outputs. The third, private-network-only
+reachability, comes from the interface endpoint in `infra/modules/network`.
 Assumptions: a per-card group is implementable at all because the card number is
 an explicit field of the baseline's comma-separated request — the field order is
 listed from `app/app-authorization-ims-db2-mq/README.md:285` onward, with

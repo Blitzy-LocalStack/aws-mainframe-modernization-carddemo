@@ -57,6 +57,11 @@ import java.util.Objects;
  *     {@code null}
  * @param approvedAuthAmt the total amount approved against the account, never {@code null}
  * @param declinedAuthAmt the total amount declined against the account, never {@code null}
+ * @param customerName the customer's name as the reference screen displays it, composed by the account
+ *     context; {@code null} when no customer could be resolved for the identifier the segment names
+ * @param addressLine1 the first composed address line; {@code null} on the same terms
+ * @param addressLine2 the second composed address line; {@code null} on the same terms
+ * @param phoneNumber1 the customer's first telephone number; {@code null} on the same terms
  */
 public record PendingAuthSummaryView(
         String accountId,
@@ -74,7 +79,11 @@ public record PendingAuthSummaryView(
         Short approvedAuthCnt,
         Short declinedAuthCnt,
         Money approvedAuthAmt,
-        Money declinedAuthAmt) {
+        Money declinedAuthAmt,
+        String customerName,
+        String addressLine1,
+        String addressLine2,
+        String phoneNumber1) {
 
     /**
      * The declared width of the account identifier, eleven digits.
@@ -121,6 +130,15 @@ public record PendingAuthSummaryView(
         Objects.requireNonNull(declinedAuthCnt, "declinedAuthCnt is required");
         Objects.requireNonNull(approvedAuthAmt, "approvedAuthAmt is required");
         Objects.requireNonNull(declinedAuthAmt, "declinedAuthAmt is required");
+        // WHY : Assumptions: the four customer display fields are DELIBERATELY not required, unlike every
+        //       component above them. They are read across a service boundary from the account context,
+        //       and that context may legitimately have no customer for the identifier the segment names --
+        //       a state the reference itself has a not-found arm for. Requiring them would turn an absent
+        //       display name into a refusal of a screen whose authorization totals are perfectly readable,
+        //       which withdraws information the operator can act on over information they cannot.
+        //       Trade-offs: an absent field is published as null and rendered blank, so the screen cannot
+        //       distinguish "no customer" from "customer with no address"; the reference cannot either,
+        //       because it moves spaces in both cases.
     }
 
     /**

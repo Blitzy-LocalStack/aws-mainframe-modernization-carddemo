@@ -259,7 +259,7 @@ import codecs
 import os
 import pathlib
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from decimal import Decimal
 from types import ModuleType
 from typing import Final
@@ -322,6 +322,7 @@ __all__ = [
     "decode_field",
     "decode_field_characters",
     "decode_record",
+    "decode_record_fields",
     "decode_timestamp",
     "iter_ebcdic_records",
     "trim_trailing_blanks",
@@ -2480,10 +2481,125 @@ def decode_record(
     return decoded
 
 
+def decode_record_fields(
+    record: bytes | bytearray | memoryview,
+    layout: RecordSpec,
+    field_names: Collection[str],
+    *,
+    code_page: str = EBCDIC_CODE_PAGE,
+) -> dict[str, str | Decimal | bytes]:
+    """Decode ONLY the named fields of a record, leaving every other span undecoded.
+
+    Purpose
+    -------
+    Serve the caller whose requirement is not merely that a span be absent from the result, but
+    that it never be decoded at all. :func:`decode_record` decodes every declared field and a
+    caller then projects; that is correct for a record whose every field is loadable, and it is
+    the wrong shape for a record carrying a span the target must never hold in any form, because
+    the value exists -- in the returned mapping and in every intermediate reachable from it --
+    before the projection removes it.
+
+    Assumptions: this function is ADDITIVE and changes nothing about :func:`decode_record`, which
+    remains the entry point for the ordinary whole-record case and the one a verification pass
+    uses, since a pass comparing two corpora must see a complete description of the bytes.
+
+    Alternatives Considered: an EXCLUSION parameter -- name the spans to skip rather than the
+    spans to decode -- was weighed and rejected. Exclusion fails safe in the wrong direction: a
+    field added to a layout is decoded by default, so a new sensitive span would be materialised
+    by every existing caller until somebody remembered to add its name. Naming what to decode
+    means a new span is decoded only when a caller asks for it by name.
+
+    Trade-offs: the requested names are validated against the layout and an unknown name RAISES
+    rather than being ignored. Ignoring would be more forgiving of a typo and is exactly the wrong
+    kindness here: the caller's whole purpose is to enumerate what may be decoded, so a
+    misspelled name would silently narrow the result and produce a row missing a column, which
+    reads downstream as absent data rather than as a mistake.
+
+    Parameters
+    ----------
+    record : bytes | bytearray | memoryview
+        One whole fixed-width record image of exactly ``layout.reclen`` bytes, read in binary
+        mode. A ``str`` is refused. The WHOLE image is required even though only part of it is
+        decoded, because a field's offset is meaningful only within a complete record.
+    layout : RecordSpec
+        The record descriptor supplying the declared length and the ordered field descriptors.
+    field_names : Collection[str]
+        The names of the fields to decode, spelled exactly as the copybook spells them. Order is
+        irrelevant: the result is always in the layout's declaration order, so two callers asking
+        for the same set get the same mapping. An empty collection is accepted and yields an empty
+        mapping, which is the honest answer to "decode nothing".
+    code_page : str
+        The character set to decode the display-text and zoned fields through. Defaults to
+        :data:`EBCDIC_CODE_PAGE`, and must name one of the vetted pages in
+        :data:`SUPPORTED_CODE_PAGES`.
+
+    Returns
+    -------
+    dict[str, str | Decimal | bytes]
+        One entry per REQUESTED field, keyed by the field name exactly as the copybook spells it,
+        in the layout's declaration order. Each value has the same form :func:`decode_record`
+        gives it. No entry appears for a field that was not requested, and no such field's bytes
+        are read by any codec.
+
+    Raises
+    ------
+    TypeError
+        If ``record`` is a ``str``, is not a byte image, or is a ``memoryview`` that is not a
+        one-dimensional image of single bytes.
+    EbcdicRecordLengthError
+        If the record is not exactly ``layout.reclen`` bytes, or if the layout declares two
+        fields of the same name, which would make one of them unrepresentable in the result.
+    EbcdicFieldDecodeError
+        If ``field_names`` holds a name the layout does not declare -- the message names every
+        unknown name and quotes no record content -- if ``code_page`` is not usable, if a requested
+        span does not decode to exactly one character per byte and re-encode to the span byte for
+        byte, or if a requested field declares a storage regime this module has no rule for.
+    zoned.ZonedDecimalError
+        If a requested zoned or unsigned display span violates its contract.
+    packed.PackedDecimalError
+        If a requested packed or binary span violates its contract.
+    """
+    image = _require_record_image(record, layout)
+    declared = {field.name for field in layout.fields}
+    unknown = sorted(name for name in field_names if name not in declared)
+    if unknown:
+        # WHY : Trade-offs: the refusal is this module's own field-level error type rather than
+        #   the layouts module's declaration error, because the LAYOUT is not wrong here -- the
+        #   REQUEST is, and it is a request about fields, made through this module. Raising the
+        #   layouts type would place this module in the position of reporting a fault in a
+        #   declaration it merely read, which is a distinction every other error site here keeps.
+        raise EbcdicFieldDecodeError(
+            f"record {layout.name} does not declare field(s) {', '.join(unknown)}, so they cannot"
+            " be decoded from it; the requested names must be the copybook's own spellings,"
+            " because a name that resolves to nothing would narrow the result silently and the"
+            " caller asking for a restricted decode is the one that can least afford that"
+        )
+
+    requested = frozenset(field_names)
+    decoded: dict[str, str | Decimal | bytes] = {}
+    # WHY : Assumptions: the walk is over the LAYOUT's fields filtered by the request, not over the
+    #   request itself, which is what fixes the result's order to the record's byte order for every
+    #   caller regardless of the order it asked in. The duplicate-name refusal is the same one
+    #   `decode_record` makes and for the same reason, and it is repeated rather than shared
+    #   because a shared helper would have to be handed the partially built mapping.
+    for field in layout.fields:
+        if field.name not in requested:
+            continue
+        if field.name in decoded:
+            raise EbcdicRecordLengthError(
+                f"record {layout.name} declares more than one field named {field.name!r}, so a"
+                " name-keyed result cannot represent them both; the layout must give each"
+                " field a distinct name"
+            )
+        decoded[field.name] = _decode_one_field(image, field, code_page)
+    return decoded
+
+
 def decode_export_record(
     record: bytes | bytearray | memoryview,
     *,
     code_page: str = EBCDIC_CODE_PAGE,
+    payload_fields: Collection[str] | None = None,
 ) -> tuple[dict[str, str | Decimal | bytes], dict[str, str | Decimal | bytes]]:
     """Decode one export record in the two steps its layout genuinely has.
 
@@ -2493,6 +2609,12 @@ def decode_export_record(
     those fields carry, ask the layouts module which of the five overlays that type selects,
     and decode the 460-byte payload against THAT layout. It returns both halves so a caller
     holds the envelope it was routed by and the branch it was routed to.
+
+    Assumptions: the ENVELOPE half is always decoded in full and needs no projection, because
+    its only sensitive content is the 460-byte payload area and that area is declared
+    :attr:`Kind.OPAQUE` -- it comes back as undecoded bytes, so decoding the envelope reveals
+    nothing about the interior. Every span a caller might need to withhold lives in the PAYLOAD
+    half, which is why ``payload_fields`` restricts that half alone.
 
     Refactoring Rationale: this function is new, and it exists because the alternative was a
     silent corruption. ``app/cpy/CVEXPORT.cpy`` declares the payload area ``PIC X(460)`` at
@@ -2531,13 +2653,22 @@ def decode_export_record(
     code_page : str
         The character set to decode the display-text and zoned fields of both halves through.
         Defaults to :data:`EBCDIC_CODE_PAGE`.
+    payload_fields : Collection[str] | None, keyword-only
+        When ``None``, every field the selected branch declares is decoded, which is the
+        whole-record behaviour a verification pass needs. When a collection of names is given,
+        ONLY those payload fields are decoded and no other payload span is read by any codec --
+        the mechanism by which a caller can guarantee a span such as the card verification value
+        is never materialised, rather than merely omitted after the fact. The names are resolved
+        against the SELECTED branch, so a caller passing names for a branch this record is not
+        gets a refusal naming them.
 
     Returns
     -------
     tuple[dict[str, str | Decimal | bytes], dict[str, str | Decimal | bytes]]
         The envelope's decoded fields first -- in which ``EXPORT-RECORD-DATA`` is still the
         undecoded 460 bytes -- and the payload's decoded fields second, keyed and typed
-        exactly as :func:`decode_record` describes.
+        exactly as :func:`decode_record` describes. The payload half holds every branch field
+        when ``payload_fields`` is ``None`` and exactly the requested fields otherwise.
 
     Raises
     ------
@@ -2550,7 +2681,8 @@ def decode_export_record(
         layouts disagree.
     EbcdicFieldDecodeError
         If ``code_page`` is not supported or not registered, if a span holds a byte value that
-        page leaves undefined, or if the page does not decode one character per byte.
+        page leaves undefined, if the page does not decode one character per byte, or if
+        ``payload_fields`` names a field the selected branch does not declare.
     layouts.LayoutError
         If the record-type discriminator is not one of the five the export program writes.
         Raised by ``layouts.export_branch`` and left to propagate, because its message already
@@ -2598,4 +2730,12 @@ def decode_export_record(
             " slicing with the constants would otherwise decode the wrong bytes"
         )
 
-    return envelope, decode_record(payload, branch, code_page=code_page)
+    # WHY : Trade-offs: the two decode calls are kept as separate branches of one condition rather
+    #   than collapsed by defaulting `payload_fields` to every branch field name. Collapsing reads
+    #   better and would make the whole-record case go through the projection path, which validates
+    #   a name set it constructed itself -- work that cannot fail and hides which of the two
+    #   contracts a caller actually asked for. Keeping them apart means the unrestricted case is
+    #   provably the same call it always was.
+    if payload_fields is None:
+        return envelope, decode_record(payload, branch, code_page=code_page)
+    return envelope, decode_record_fields(payload, branch, payload_fields, code_page=code_page)

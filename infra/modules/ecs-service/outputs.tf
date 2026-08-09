@@ -2,18 +2,29 @@
 # infra/modules/ecs-service/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The entire public surface of the reusable ecs-service module. Sixteen
+#   The entire public surface of the reusable ecs-service module. Seventeen
 #   outputs and nothing else -- no resource, no data source, no local and no
 #   variable is declared here, because a module's outputs are its return values
 #   and this file is the only place they are stated. Each of the two
 #   environment roots, infra/envs/dev and infra/envs/prod, instantiates the
-#   module eight times, once per bounded context: auth, account, card,
-#   transaction, reference, batch, authorization and reporting. Every name
-#   below therefore resolves sixteen times across the two roots, and each name
-#   is a ONE-WAY CONTRACT -- Terraform resolves module.<instance>.<output> at
+#   module NINE times, once per key of its `workloads` local: the seven online
+#   contexts auth, account, card, transaction, reference, authorization and
+#   reporting, plus the two non-online workloads batch and data-migration. Every
+#   name below therefore resolves EIGHTEEN times across the two roots, and each
+#   name is a ONE-WAY CONTRACT -- Terraform resolves module.<instance>.<output> at
 #   the caller's own call site, so renaming an output here breaks the caller
 #   rather than this file, and the resulting error names the caller's
 #   expression instead of this line.
+#
+#   Refactoring Rationale: this paragraph said "Sixteen outputs", "eight times"
+#   and "resolves sixteen times", and omitted data-migration from the list of
+#   instantiations -- while the Return values and Exceptions sections below had
+#   already been corrected to seventeen and nine. A file whose own sections
+#   disagree is worse than one that is uniformly stale, because a reader has no
+#   way to tell which section was measured. All three counts are now derived the
+#   same way and are checkable: `grep -c '^output "' outputs.tf` gives seventeen,
+#   the roots' `local.workloads` has nine keys, and the product with two roots is
+#   eighteen.
 #
 # Parameters:
 #   None. An output block accepts no parameters. Every value below is read
@@ -32,16 +43,44 @@
 #   order main.tf creates the resources behind them: the log group, the two IAM
 #   roles, the task definition and its container, the target group, the
 #   service, the autoscaling target. HCL declares no type on an output, so
-#   every description below states its value's type in words. Five of the
-#   seventeen are genuine cross-module contracts and say so where they are
-#   declared:
+#   every description below states its value's type in words. SIX of the
+#   seventeen are wired into a sibling module by name at a root call site, and
+#   say so where they are declared. Each entry below was verified by reading the
+#   expression that consumes it rather than by recollection:
 #     - target_group_arn        attached to a listener rule by
-#                               infra/modules/alb
-#     - task_definition_arn     started by infra/modules/step-functions-batch
+#                               infra/modules/alb, through the roots'
+#                               `service_routes` map
+#     - task_definition_arn     started by infra/modules/step-functions-batch,
+#                               for the batch, data-migration and reporting
+#                               instances
 #     - container_name          addressed by name in that module's run-task
-#                               container overrides
-#     - log_group_name          read by infra/modules/observability
-#     - target_group_arn_suffix the CloudWatch dimension observability needs
+#                               container overrides, same three instances
+#     - target_group_arn_suffix the CloudWatch dimension
+#                               infra/modules/observability needs, passed for
+#                               the seven online services
+#     - task_role_arn           and
+#     - execution_role_arn      enumerated into step-functions-batch's
+#                               `pass_role_arns`, six entries for three images,
+#                               which become the Resource of one iam:PassRole
+#                               statement
+#
+#   Refactoring Rationale: this list said FIVE and credited log_group_name as
+#   "read by infra/modules/observability". It is not: that module receives
+#   `log_group_names` from the roots' Lambda log-group local and
+#   `vpc_flow_log_group_name` from the network module, and no root expression
+#   reads this module's log_group_name at all. The two role ARNs, which the list
+#   omitted, ARE genuinely wired. A cross-module inventory that over-credits one
+#   output and under-credits two makes a safe rename look dangerous and a
+#   dangerous one look safe, which is the specific harm of leaving it uncorrected.
+#
+#   Assumptions: the eleven names not listed above are NOT dead. Each root
+#   re-exports this module's complete output object per workload as its
+#   `ecs_workloads` output, so every name here is readable with
+#   `terraform output ecs_workloads` -- that grouped re-export is their consumer,
+#   and it is an operator and script contract rather than a module one. They are
+#   distinguished from the six above because renaming one of those six breaks a
+#   sibling module's wiring at plan time, whereas renaming one of the eleven
+#   changes only what an operator reads.
 #
 # Exceptions or errors:
 #   - Six outputs are null for two of the nine instantiations rather than
@@ -111,8 +150,8 @@ output "log_group_name" {
     Consumed by infra/modules/observability, which attaches metric filters and
     builds this service's dashboard and alarm set from it, and by an operator
     tailing one service during the batch window. Never null: the log group is
-    created for all eight instantiations, including the batch one, which has a
-    task definition and no service.
+    created for all nine instantiations, including the two -- batch and
+    data-migration -- that have a task definition and no service.
   EOT
   value       = aws_cloudwatch_log_group.this.name
 }
@@ -155,8 +194,8 @@ output "log_group_arn" {
 #       what makes the grant one-directional: a sibling module names this ARN
 #       in its own resource policy, so a service's reach is enumerated where
 #       the resource is defined rather than assembled inside a module shared by
-#       all eight services -- where any grant would necessarily reach all
-#       eight.
+#       all nine workloads -- where any grant would necessarily reach all
+#       nine.
 output "task_role_arn" {
   description = <<-EOT
     ARN string of the IAM role the APPLICATION assumes at run time, as
@@ -168,7 +207,7 @@ output "task_role_arn" {
     therefore the identity least privilege is expressed against -- main.tf
     writes no policy onto this role, so what the service may reach is exactly
     what a caller grants to this ARN and nothing besides. Never null: both
-    roles are created for all eight instantiations.
+    roles are created for all nine instantiations.
   EOT
   value       = aws_iam_role.task.arn
 }
@@ -254,9 +293,9 @@ output "task_definition_arn" {
     task-definition wiring: its state machine starts a task through the
     synchronous run-task integration, and its execution role scopes
     ecs:RunTask to this ARN alongside ecs:StopTask, ecs:DescribeTasks and
-    iam:PassRole. Never null -- the task definition is created for all eight
-    instantiations, including the batch one, which has a task definition and no
-    service.
+    iam:PassRole. Never null -- the task definition is created for all nine
+    instantiations, including the two -- batch and data-migration -- that have a
+    task definition and no service.
   EOT
   value       = aws_ecs_task_definition.this.arn
 }
@@ -343,7 +382,7 @@ output "container_port" {
 #       Trade-offs: publishing a NULLABLE output was chosen over both
 #       alternatives to it. Omitting the output for the batch shape is not
 #       expressible at all -- an output block is unconditional, so the real
-#       choice is a null value or no output for any of the eight
+#       choice is a null value or no output for any of the nine
 #       instantiations. Splitting the module in two was the other option: a
 #       separate ecs-task module carrying only the task definition, the two
 #       roles and the log group. That is rejected because it would duplicate

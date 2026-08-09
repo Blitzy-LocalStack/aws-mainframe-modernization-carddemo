@@ -216,6 +216,30 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "transaction_types", schema = "reference")
 public class TransactionType {
 
+    /** The exact width the stored type code occupies, from {@code type_cd CHAR(2)}. */
+    public static final int TYPE_CD_WIDTH = 2;
+
+    /**
+     * The closed character domain of a stored type code, as a regular expression.
+     *
+     * <p>Refactoring Rationale: this expression is published HERE, on the type that owns the code, because
+     * three request-handling classes have to refuse a malformed code at their boundary and each of them
+     * previously either declared its own copy or declared nothing at all. The two controllers that carry a
+     * {@code typeCd} path segment reference it, and so does the disclosure-group read, whose middle key
+     * component is this same code. One expression in one place is what stops a copy from drifting into
+     * admitting a value another copy refuses -- a drift that fails nothing, because each copy is applied at
+     * a different address, so the two boundaries simply disagree and neither reports it.</p>
+     *
+     * <p>Assumptions: it is the {@code TransactionTypeCode} schema's own expression from
+     * {@code openapi/reference-api.yaml}, transcribed rather than tightened, and it excludes {@code '00'}.
+     * The exclusion is the baseline's: the numeric edit at line 826 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} composes 'Tran Type code must not be zero.'
+     * with the literal at line 961. It is deliberately NOT the same expression as the FILTER domain the
+     * browse request records publish, which is a bare two-digit run because {@code '00'} means "no filter"
+     * there and is therefore admissible input.</p>
+     */
+    public static final String TYPE_CD_PATTERN = "^(?:0[1-9]|[1-9][0-9])$";
+
     // WHY : Assumptions: the column name, its declared width and its nullability are taken verbatim
     //       from the transaction_types block of V1__reference.sql, which declares
     //       type_cd CHAR(2) NOT NULL and constrains it as the primary key. The name is bound
@@ -248,7 +272,7 @@ public class TransactionType {
     //       database boundary rather than a corrupted relationship.
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "type_cd", length = 2, nullable = false, updatable = false)
+    @Column(name = "type_cd", length = TYPE_CD_WIDTH, nullable = false, updatable = false)
     private String typeCd;
 
     // WHY : Assumptions: taken verbatim from V1__reference.sql, which declares

@@ -18,7 +18,10 @@
  *
  * <p>Assumptions: nothing here touches a queue client, a payload or a database. The types are pure rules
  * over values, so they are unit-testable without a broker, a container or a message, and the layering
- * gate that forbids infrastructure types inside shared-kernel packages holds here by construction.</p>
+ * gate that forbids infrastructure types inside shared-kernel packages holds here by construction. That
+ * applies to {@code QueueClientBudget} as much as to the other two: it states the relationship between a
+ * client's time bounds and a queue's visibility period as three durations, and leaves APPLYING those
+ * values to whichever client library each service configures.</p>
  *
  * <p>Alternatives Considered: adding the messaging rule as a second predicate on the servlet filter that
  * already owns the correlation contract. Rejected because it would leave a class named for one transport

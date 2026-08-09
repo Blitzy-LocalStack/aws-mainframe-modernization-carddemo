@@ -82,11 +82,11 @@ class UserControllerTest {
      * not that a token verifies, which is asserted where tokens are minted and redeemed.</p>
      */
     private static final String SEALED_FIRST_KEY =
-            CursorToken.VERSION + ".Zmlyc3Qta2V5LXBheWxvYWQ." + "A".repeat(43);
+            CursorToken.VERSION + ".Zmlyc3Qtbm9uY2U5." + "A".repeat(43);
 
     /** A second value of the same sealed shape, standing in for the last-key component. */
     private static final String SEALED_LAST_KEY =
-            CursorToken.VERSION + ".bGFzdC1rZXktcGF5bG9hZA." + "B".repeat(43);
+            CursorToken.VERSION + ".bGFzdC1ub25jZTk5." + "B".repeat(43);
 
     private UserService users;
 
@@ -116,7 +116,7 @@ class UserControllerTest {
     void theListRouteAnswersWithThePageEnvelope() throws Exception {
         when(users.list(isNull(), isNull(), eq("operator-1"))).thenReturn(PageResponse.ofRows(
                 List.of(new UserSummary("USER0001", "Ada", "Lovelace", "U")),
-                SEALED_FIRST_KEY, SEALED_LAST_KEY, true));
+                SEALED_FIRST_KEY, SEALED_LAST_KEY, true, false));
 
         mockMvc.perform(get(UserController.COLLECTION_PATH).principal(CALLER))
                 .andExpect(status().isOk())

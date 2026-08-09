@@ -58,35 +58,53 @@ import java.util.regex.Pattern;
  * its last cent flips an inclusive boundary comparison, and both posting boundaries in the reference
  * baseline are inclusive.</p>
  *
- * <h2>Contract two: one rounding contract, and divergence C-ROUNDING</h2>
+ * <h2>Contract two: two rounding modes, one per operation, neither selectable</h2>
  *
- * <p>Every monetary result this type produces is reduced to cents with {@code GENERAL_ROUNDING},
- * which is {@link RoundingMode#HALF_UP}. That single mode governs {@link #of(BigDecimal)},
- * {@link #multipliedBy(BigDecimal)}, {@link #dividedBy(BigDecimal)} and
- * {@link #monthlyInterest(BigDecimal)} alike. No entry point takes a rounding mode, so no call site
- * can select a different one.</p>
+ * <p>Every monetary result this type produces is reduced to cents, and which mode performs that
+ * reduction depends on the operation rather than on the caller. {@link #of(BigDecimal)},
+ * {@link #multipliedBy(BigDecimal)} and {@link #dividedBy(BigDecimal)} use
+ * {@code GENERAL_ROUNDING}, which is {@link RoundingMode#HALF_UP}. {@link #monthlyInterest(BigDecimal)}
+ * uses {@code BASELINE_INTEREST_ROUNDING}, which is {@link RoundingMode#DOWN}. No entry point takes a rounding
+ * mode, so no call site can select either one, and the mode a given operation uses is a property of
+ * this type rather than of any of its callers.</p>
  *
- * <p>Assumptions: half up is the mode transformation rule T3 of the migration plan states for the
- * money path, without exception, and the plan is the frozen contract this type implements. The
- * reference accrual program instead truncates toward zero: the statement at lines 464 and 465 of
- * {@code app/cbl/CBACT04C.cbl} stores into the two-place field declared at line 168 and carries no
- * {@code ROUNDED} phrase, and no statement anywhere in that program carries one. That difference is
- * therefore a deliberate behavioural divergence rather than an oversight, registered as
- * <b>C-ROUNDING</b> in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ * <p>Assumptions: the split follows the reference source, and the asymmetry is the point. The
+ * baseline performs exactly one monetary computation and the accrual quotient is it: the statement at
+ * lines 464 and 465 of {@code app/cbl/CBACT04C.cbl} stores into the two-place field declared at line
+ * 168 and carries no {@code ROUNDED} phrase, and no statement anywhere in that program carries one, so
+ * that statement discards the excess digits of its result -- truncation toward zero. The three
+ * general operations have no reference statement at all; they are target arithmetic with no baseline
+ * counterpart, so nothing constrains their mode and transformation rule T3's half up applies to them
+ * unopposed.</p>
  *
- * <p>Trade-offs: the divergence is one cent, and only on a quotient landing exactly on a half cent.
- * On the vectors the reference fixtures carry the two modes agree exactly -- a balance of
- * {@code 1000.00} at a rate of {@code 2.50} yields {@code 2.08333...} and both give {@code 2.08}.
- * They part company only on an exact half cent, as with {@code 1000.80} at {@code 2.50}, where the
- * quotient is {@code 2.0850} exactly, truncation gives {@code 2.08} and half up gives {@code 2.09}.
- * Accepting that cent is the cost of one arithmetic surface across the whole migration.</p>
+ * <p>Refactoring Rationale: this type used half up for the accrual quotient too, and registered the
+ * resulting cent as an accepted divergence called C-ROUNDING. That disposition is withdrawn and the
+ * divergence is closed. Reading rule T3's "one mode for the money path" as covering the accrual put
+ * the letter of a transformation rule above the parity requirement it exists to serve -- the plan
+ * requires observable behaviour to be unchanged, names the exact interest formula among the rules that
+ * must be preserved, and admits a behavioural change only as an explicitly authorised divergence. The
+ * accrual formula is also one of the rules the reference test suite asserts verbatim, so the cent was
+ * a functional-parity failure in the most heavily asserted computation in the system. It did not stay
+ * confined to one accrual either: the accrual paragraph reduces every term before accumulating it and
+ * adds the accumulated total to the account balance once per account, so a cent gained per
+ * transaction category reaches the balance that the next over-limit comparison is made against, and
+ * that comparison is inclusive.</p>
  *
- * <p>Alternatives Considered: keeping a mode parameter on the accrual entry point so a parity caller
- * could ask for truncation. Rejected because a mode parameter is a second money contract in
- * disguise: two call sites computing the same accrual could then disagree by a cent with nothing in
- * either one signalling that they had chosen differently, and the plan states one mode. The
- * reference truncation is preserved where it belongs, as a documented divergence with its measured
- * vectors, rather than as an API a caller can reach.</p>
+ * <p>Trade-offs: two modes cost a reader having to know which operation is governed by which, where
+ * one mode cost nothing to explain and a cent of drift in the one computation that matters most. The
+ * cost is paid down by there being exactly one operation on the truncating side, by each constant
+ * being named for the operation it governs rather than for a general policy, and by the vector that
+ * discriminates the two modes being asserted in the tests: {@code 1000.80} at {@code 2.50} gives a
+ * quotient of {@code 2.0850} exactly, which truncates to {@code 2.08} and would round half up to
+ * {@code 2.09}. Note that most vectors do not discriminate at all -- {@code 1000.00} at {@code 2.50}
+ * gives {@code 2.08333...} and both modes give {@code 2.08} -- which is precisely why a test that
+ * lands on an exact half cent has to exist for this contract to be checked rather than assumed.</p>
+ *
+ * <p>Alternatives Considered: a rounding-mode parameter on the accrual entry point, so a parity
+ * caller could ask for truncation while other callers kept half up. Rejected because a mode parameter
+ * is a second money contract in disguise: two call sites computing the same accrual could then
+ * disagree by a cent with nothing in either one signalling that they had chosen differently. Fixing
+ * the mode per operation gives the same arithmetic with none of that exposure.</p>
  *
  * <h2>Immutability and construction</h2>
  *
@@ -153,12 +171,74 @@ public final class Money implements Comparable<Money> {
      * The rounding mode applied whenever a general monetary result must be reduced to cents.
      *
      * <p>Assumptions: this is the mode transformation rule T3 of the migration plan states for the
-     * money path, and it governs every reduction this type performs -- {@link #of(BigDecimal)},
-     * {@link #multipliedBy(BigDecimal)}, {@link #dividedBy(BigDecimal)} and
-     * {@link #monthlyInterest(BigDecimal)}. It is a constant rather than a parameter anywhere,
-     * because a selectable mode would be a second money contract in disguise.</p>
+     * money path, and it governs every reduction this type performs EXCEPT the interest quotient --
+     * {@link #of(BigDecimal)}, {@link #multipliedBy(BigDecimal)} and {@link #dividedBy(BigDecimal)}.
+     * It is a constant rather than a parameter anywhere, because a selectable mode would be a second
+     * money contract in disguise.</p>
+     *
+     * <p>Assumptions: none of the three operations this mode governs has a reference statement to be
+     * faithful to. The baseline performs exactly one monetary computation, the accrual quotient, and
+     * that one is governed by {@link #BASELINE_INTEREST_ROUNDING} below. General multiplication, general
+     * division and the reduction of a caller-supplied amount are target operations with no baseline
+     * counterpart, so no parity obligation constrains their mode and the plan's stated mode applies
+     * unopposed.</p>
      */
     public static final RoundingMode GENERAL_ROUNDING = RoundingMode.HALF_UP;
+
+    /**
+     * The rounding mode applied to the monthly interest quotient, which truncates toward zero.
+     *
+     * <p>Assumptions: this is the mode the reference accrual statement performs, read off the source
+     * rather than chosen. Lines 464 and 465 of {@code app/cbl/CBACT04C.cbl} compute
+     * {@code ( TRAN-CAT-BAL * DIS-INT-RATE ) / 1200} into the two-place field declared at line 168,
+     * and the statement carries no {@code ROUNDED} phrase -- nor does any statement anywhere in that
+     * program. A COBOL arithmetic statement without {@code ROUNDED} discards the excess digits of its
+     * result rather than rounding them, which is truncation toward zero, and
+     * {@link RoundingMode#DOWN} is that mode.</p>
+     *
+     * <p>Refactoring Rationale: {@link #GENERAL_ROUNDING} governed the accrual quotient as well until
+     * this constant existed, and the difference was registered as an accepted divergence rather than
+     * closed. That was the wrong disposition for this particular operation. The accrual formula is one
+     * of the business rules the reference test suite asserts verbatim, so a cent of drift in it is a
+     * functional-parity failure in the most heavily asserted computation in the system, not a
+     * rounding preference -- and the drift is not confined to a single accrual: the accrual paragraph
+     * reduces every term before accumulating it and the accumulated total is added to the account
+     * balance once per account, so a cent gained per category compounds into the balance the next
+     * over-limit comparison is made against, and both posting boundaries are inclusive.</p>
+     *
+     * <p>Alternatives Considered: keeping one mode for the whole type and retaining the divergence,
+     * which is what the earlier revision did, on the reading that transformation rule T3 names half up
+     * for the money path without exception. Rejected because rule T3 is subordinate to the parity
+     * requirement it exists to serve: the plan states that observable behaviour is unchanged and that
+     * the exact interest formula is preserved, and it also states that no behavioural change ships
+     * unless it is an explicitly authorised divergence. A one-cent difference in the accrual is an
+     * observable behavioural change, so retaining it would satisfy the letter of T3's mode while
+     * breaking the requirement T3 is written to protect. What T3 actually forbids is binary floating
+     * point and a caller-selectable mode, and both remain forbidden here: the mode is still fixed at
+     * the type, still unreachable from any signature, and still applied to an exact decimal.</p>
+     *
+     * <p>Alternatives Considered: a rounding-mode parameter on {@link #monthlyInterest(BigDecimal)}
+     * so a caller could ask for either. Rejected for the reason the earlier revision gave and which
+     * still holds: two call sites computing the same accrual could then disagree by a cent with
+     * nothing in either signalling that they had chosen differently.</p>
+     *
+     * <p>Trade-offs: this type now carries two rounding contracts instead of one, so a reader has to
+     * know which operation is governed by which. That cost is paid down by there being exactly one
+     * operation on this side of the split, by its mode being named for what it is rather than for a
+     * general policy, and by the discriminating vector being asserted in the tests: a balance of
+     * {@code 1000.80} at a rate of {@code 2.50} gives a quotient of {@code 2.0850} exactly, which
+     * truncates to {@code 2.08} and would round half up to {@code 2.09}.</p>
+     *
+     * <p>Assumptions: the name carries {@code BASELINE} because the mode's authority is the reference
+     * source rather than a target policy decision -- a reader who wonders why one operation on this
+     * type rounds differently from the others should be able to see the answer in the identifier.
+     * The name is also the one a sibling module already cites: the balance member of
+     * {@code com.carddemo.batch.domain.TransactionCategoryBalance} records that the accrual division
+     * truncates and names {@code BASELINE_INTEREST_ROUNDING} as the constant expressing it. That
+     * citation described a constant this type did not yet declare, so adopting the name it used makes
+     * the existing note accurate rather than requiring it to be rewritten around a second spelling.</p>
+     */
+    public static final RoundingMode BASELINE_INTEREST_ROUNDING = RoundingMode.DOWN;
 
     /**
      * The divisor that turns an annual percentage rate into a monthly fractional rate, which is 1200.
@@ -702,11 +782,20 @@ public final class Money implements Comparable<Money> {
      * parenthesised in the reference source itself at line 465, so this order is a preserved
      * instruction and not an inference.</p>
      *
-     * <p>Assumptions: the quotient is rounded half up rather than truncated toward zero as the
-     * reference program does, because transformation rule T3 states one mode for the whole money path.
-     * The difference is at most one cent and only on an exact half cent, and it is registered as
-     * divergence C-ROUNDING in
-     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     * <p>Assumptions: the quotient is truncated toward zero, with {@link #BASELINE_INTEREST_ROUNDING}, which is
+     * what the reference statement does -- it carries no {@code ROUNDED} phrase, and a COBOL
+     * arithmetic statement without one discards the excess digits of its result. This is the one
+     * operation on this type governed by that mode; every other reduction uses
+     * {@link #GENERAL_ROUNDING}. Neither mode is reachable from this signature, so no call site can
+     * select between them.</p>
+     *
+     * <p>Refactoring Rationale: this method reduced the quotient with {@link #GENERAL_ROUNDING} until
+     * {@link #BASELINE_INTEREST_ROUNDING} existed, and the resulting cent was registered as an accepted
+     * divergence. The reasoning behind that constant records why the divergence was closed rather
+     * than kept; the short form is that the accrual formula is one of the rules the reference suite
+     * asserts verbatim, so a cent here is a parity failure rather than a rounding preference, and it
+     * compounds -- each term is reduced before being accumulated and the accumulated total reaches the
+     * account balance, which the next inclusive over-limit comparison is made against.</p>
      *
      * @param annualRatePercentage the annual rate as a percentage, so {@code 15.00} means fifteen per
      *     cent; must not be {@code null}. It is a percentage and not a fraction because
@@ -730,7 +819,11 @@ public final class Money implements Comparable<Money> {
         //   2.08333... -- so the alternative would fail on ordinary inputs. Supplying the scale and the
         //   mode to the division itself also makes a second rounding structurally impossible later in
         //   this method, which is the property the preserved arithmetic order depends on.
-        BigDecimal monthlyInterest = product.divide(MONTHLY_RATE_DIVISOR, SCALE, GENERAL_ROUNDING);
+        // Assumptions: the mode is BASELINE_INTEREST_ROUNDING and not GENERAL_ROUNDING, and this is the only
+        //   line in the type where the two differ. The reference statement at app/cbl/CBACT04C.cbl
+        //   lines 464 and 465 carries no ROUNDED phrase, so it discards the excess digits of its
+        //   result; truncating here is what makes this quotient equal to the one the baseline stores.
+        BigDecimal monthlyInterest = product.divide(MONTHLY_RATE_DIVISOR, SCALE, BASELINE_INTEREST_ROUNDING);
 
         return new Money(monthlyInterest);
     }

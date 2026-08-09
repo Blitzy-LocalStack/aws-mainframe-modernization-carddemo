@@ -4,9 +4,9 @@
 # Purpose:
 #   Performs credential-free Terraform format, initialization, validation,
 #   lint, documentation-drift, secret, and explicit material-security policy
-#   gates. A manual same-repository run may additionally produce a real
-#   remote-state plan through short-lived OIDC credentials. This workflow never
-#   mutates infrastructure.
+#   gates, plus a Rule 1 gate over the Python this file itself embeds. A manual
+#   same-repository run may additionally produce a real remote-state plan through
+#   short-lived OIDC credentials. This workflow never mutates infrastructure.
 #
 # Parameters:
 #   workflow_dispatch.run_plan selects the optional credentialed plan job;
@@ -26,6 +26,11 @@
 #     transfer in exchange for no cache-poisoning surface in a security job.
 #   - Assumptions: backend-free init validates providers and modules without AWS
 #     credentials; backend correctness is exercised by the optional real plan.
+#   - Assumptions: the Python embedded in this file is gated by this file. Ruff
+#     walks files on disk and a heredoc body is a string inside a YAML value, so
+#     no packaged Python gate can reach it; one step extracts every block and
+#     applies Ruff plus a Rule 1 element check, including to itself. The full
+#     argument, and why a governed .py module was rejected, is at that step.
 # =============================================================================
 
 name: CardDemo Infrastructure CI
@@ -150,6 +155,13 @@ jobs:
           echo "$install_dir" >> "$GITHUB_PATH"
           python -m pip install "checkov==3.3.8"
 
+          # Assumptions: ruff is pinned to the same 0.16.0 the data-migration package
+          #   pins, so the embedded-Python gate below and the packaged Python gate cannot
+          #   disagree about what a docstring rule means. A floating version would let a
+          #   new release change this workflow's verdict without any change to this
+          #   workflow.
+          python -m pip install "ruff==0.16.0"
+
       - name: Verify infrastructure tool versions
         shell: bash
         run: |
@@ -159,6 +171,203 @@ jobs:
           terraform-docs --version
           gitleaks version
           checkov --version
+          ruff --version
+
+      # Assumptions: the Python inside this workflow is source code and Rule 1 binds it,
+      #   but it reaches no Python gate on its own. Ruff walks files on disk; a heredoc
+      #   body is a string inside a YAML value, so `ruff check .` never sees it, and the
+      #   data-migration AST gate walks that package only. Two of the blocks below had
+      #   shipped with no module docstring at all and five of their functions documented
+      #   neither their parameters nor their return value, which is the exact shape the
+      #   packaged gates exist to prevent and were never asked about here. This step
+      #   extracts every block and applies both halves to it: ruff for the rules a linter
+      #   can decide, and an explicit check that each docstring names the elements Rule 1
+      #   enumerates.
+      #   Alternatives Considered: moving the code into governed .py files under a package
+      #   and calling them from the workflow. Rejected for a reason specific to what these
+      #   blocks are -- three of the five assert facts about THIS workflow file and about
+      #   the roots it drives, so they are configuration checks rather than reusable code,
+      #   and a package would put a step's own precondition a directory away from the step
+      #   that depends on it. The blocks are also each run exactly once, by one step, so
+      #   there is no second caller for a module to serve.
+      #   Assumptions: the extraction is exact rather than best-effort. The expected block
+      #   count is asserted, so a newly added block that does not match the opener pattern
+      #   fails this gate instead of being skipped in silence -- a silent skip being the
+      #   failure mode that let the two undocumented blocks through in the first place.
+      #   Trade-offs: the Rule 1 element check is a section-NAME check, not a semantic one.
+      #   It decides that a docstring states its parameters and its return value, and
+      #   cannot decide whether the prose is accurate; that half stays with review, exactly
+      #   as `docs/CODE_DOCUMENTATION_STANDARD.md` records for every language. The cheaper
+      #   alternative of selecting ruff's own D417 was measured and does not substitute:
+      #   the pep257 convention this repository uses disables it, and enabling it would
+      #   additionally require the Google or NumPy section syntax, which is not the form
+      #   these docstrings or the packaged ones are written in.
+      - name: Verify the workflow's embedded Python against the Rule 1 gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'GATE'
+          """Extract every heredoc Python block in this workflow and gate each one.
+
+          Parameters:
+              None. The workflow path and the expected block count are module constants,
+              because this module checks exactly one file -- the one it is embedded in.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If the number of extracted blocks differs from the expected
+                  count, which is what stops a newly added block from escaping the gate.
+              SystemExit: With a non-zero status if any block breaks a ruff rule or omits a
+                  Rule 1 docstring element. Raised deliberately so the step fails.
+              OSError: If the workflow file cannot be read.
+          """
+
+          import ast
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          WORKFLOW = Path(".github/workflows/infra-ci.yml")
+
+          # Assumptions: the count includes THIS block, so the gate covers itself. A gate
+          #   exempt from its own rule is the first place a convention decays.
+          EXPECTED_BLOCKS = 5
+
+          OPENER = re.compile(r"^(?P<indent> *)python3? - <<'(?P<delimiter>[A-Z]+)'$")
+
+
+          def blocks(text):
+              """Return one dedented Python source per heredoc block, in file order.
+
+              Parameters:
+                  text (str): The whole workflow file as a single string.
+              Returns:
+                  list[tuple[str, str]]: A (delimiter, source) pair for each block found.
+              Raises:
+                  AssertionError: If a heredoc is opened and never closed by its delimiter,
+                      which would otherwise silently swallow the rest of the file into one
+                      block and lint it as Python.
+              """
+              found = []
+              lines = text.splitlines()
+              index = 0
+              while index < len(lines):
+                  opened = OPENER.match(lines[index])
+                  if opened is None:
+                      index += 1
+                      continue
+                  # Assumptions: the opener's own indentation is the block's left margin.
+                  #   A YAML literal scalar has already had its base indentation removed
+                  #   by the time the shell runs, so subtracting that margin reproduces
+                  #   the source the interpreter actually receives rather than an
+                  #   approximation of it.
+                  margin = len(opened.group("indent"))
+                  delimiter = opened.group("delimiter")
+                  index += 1
+                  body = []
+                  while index < len(lines) and lines[index].strip() != delimiter:
+                      body.append(lines[index][margin:])
+                      index += 1
+                  assert index < len(lines), f"heredoc <<'{delimiter}' is never closed"
+                  found.append((delimiter, "\n".join(body) + "\n"))
+                  index += 1
+              return found
+
+
+          def raises_something(node):
+              """Report whether a body can raise, counting assert as a raise.
+
+              Parameters:
+                  node (ast.AST): The module or function node whose body is examined.
+              Returns:
+                  bool: True if the body contains a raise or an assert statement.
+              Raises:
+                  None.
+              """
+              # Assumptions: a nested function's own statements are not counted for its
+              #   parent, so each definition is judged on what it does itself.
+              for child in ast.walk(node):
+                  if isinstance(child, (ast.Raise, ast.Assert)):
+                      return True
+              return False
+
+
+          def missing_elements(source, label):
+              """List the Rule 1 docstring elements the module and its functions omit.
+
+              Parameters:
+                  source (str): One extracted block's Python source.
+                  label (str): Name used to identify the block in a report line.
+              Returns:
+                  list[str]: One human-readable line per omission, empty when the block
+                      documents every element Rule 1 enumerates.
+              Raises:
+                  SyntaxError: If the extracted block is not valid Python, which means the
+                      extraction margin was wrong rather than the source being bad.
+              """
+              tree = ast.parse(source)
+              problems = []
+              subjects = [(label + " module", tree)]
+              for node in ast.walk(tree):
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      subjects.append((f"{label} function {node.name}", node))
+
+              for name, node in subjects:
+                  text = ast.get_docstring(node)
+                  if not text:
+                      problems.append(f"{name}: no docstring")
+                      continue
+                  required = ["Parameters:", "Returns:"]
+                  if raises_something(node):
+                      required.append("Raises:")
+                  for section in required:
+                      if section not in text:
+                          problems.append(f"{name}: docstring omits {section}")
+              return problems
+
+
+          extracted = blocks(WORKFLOW.read_text(encoding="utf-8"))
+          assert len(extracted) == EXPECTED_BLOCKS, (
+              f"expected {EXPECTED_BLOCKS} embedded Python blocks, found {len(extracted)}"
+          )
+
+          omissions = []
+          for ordinal, (delimiter, source) in enumerate(extracted, start=1):
+              omissions.extend(missing_elements(source, f"block {ordinal} <<{delimiter}>>"))
+
+          with tempfile.TemporaryDirectory() as staging:
+              paths = []
+              for ordinal, (delimiter, source) in enumerate(extracted, start=1):
+                  staged = Path(staging) / f"block_{ordinal:02d}_{delimiter.lower()}.py"
+                  staged.write_text(source, encoding="utf-8")
+                  paths.append(str(staged))
+              # Assumptions: --isolated with an explicit selection rather than the
+              #   data-migration pyproject. That file also configures first-party import
+              #   resolution and a relative-import ban for a package these blocks are not
+              #   members of, so pointing at it would apply rules about a package layout
+              #   that does not exist here. The rule families and the convention are the
+              #   same ones it selects, which is the part that has to match.
+              linted = subprocess.run(
+                  [
+                      "ruff", "check", "--isolated", "--no-cache",
+                      "--select", "D,E,W,F,I", "--line-length", "100",
+                      "--config", 'lint.pydocstyle.convention = "pep257"',
+                      *paths,
+                  ],
+                  check=False,
+              )
+
+          for problem in omissions:
+              print(f"Rule 1 element missing: {problem}")
+
+          if omissions or linted.returncode != 0:
+              sys.exit(1)
+
+          print(f"Embedded Python gate: PASS ({len(extracted)} blocks)")
+          GATE
+
 
       # Alternatives Considered: bare terraform fmt, which rewrites the checkout
       # and lets drift pass. Check mode preserves the review boundary.
@@ -219,6 +428,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PROSE'
+          """Verify every spelled-out count in a Terraform header against the declarations.
+
+          Parameters:
+              None. The paths and prose patterns are literals below, one per claim,
+              because each claim is a different sentence in a different file.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If a header states a count no declaration supports, if a
+                  claimed sentence is absent from the file that should carry it, or if a
+                  header spells a number this module does not recognise.
+          """
+
           import re
           from pathlib import Path
 
@@ -231,13 +453,41 @@ jobs:
 
 
           def declared(path, kind):
-              """Count top-level blocks of one kind in one Terraform file."""
+              """Count top-level blocks of one kind in one Terraform file.
+
+              Parameters:
+                  path (str): Repository-relative path of the Terraform file to read.
+                  kind (str): Block keyword to count, such as "output" or "variable".
+              Returns:
+                  int: How many blocks of that kind the file declares at top level.
+              Raises:
+                  OSError: If the path does not exist or cannot be read, which is a
+                      moved or renamed file rather than a prose defect and is left to
+                      surface as itself instead of being reported as a count mismatch.
+              """
               body = Path(path).read_text()
+              # Assumptions: the match is anchored at column zero, so a nested block or a
+              #   block name quoted inside a comment cannot inflate the count.
               return len(re.findall(r'(?m)^%s "' % kind, body))
 
 
           def spelled(path, pattern):
-              """Read one spelled number out of a file's header comment."""
+              """Read one spelled number out of a file's header comment.
+
+              Parameters:
+                  path (str): Repository-relative path of the file whose header is read.
+                  pattern (str): Regular expression whose first group captures the number
+                      word, written to match the surrounding sentence so that the claim
+                      being checked is identified by its own wording.
+              Returns:
+                  int: The numeric value of the captured word.
+              Raises:
+                  AssertionError: If the pattern matches nothing, which means the sentence
+                      was reworded or removed, or if the captured word is not one this
+                      module maps -- both of which leave the claim unchecked and so are
+                      failures rather than skips.
+                  OSError: If the path cannot be read.
+              """
               found = re.search(pattern, Path(path).read_text())
               assert found, f"{path}: no prose count matching {pattern}"
               # WHY: a sentence-initial number is capitalised ("Ten outputs"), so the word is
@@ -281,6 +531,89 @@ jobs:
           assert spelled(boot, r"The ([A-Za-z-]+) nullable overrides") == len(
               re.findall(r"(?m)^  default     = null$", Path(boot).read_text()))
 
+          # WHY : Refactoring Rationale: the network module was NOT covered here, and it
+          #       drifted furthest of any module -- twenty-one published outputs against a
+          #       contract specified at sixteen, with its own header still claiming
+          #       twenty-one in one place and the input count stale in three files. Prose
+          #       and declarations agreeing by review is exactly what did not happen, so
+          #       the module is now counted like the other five.
+          # WHY : Assumptions: the output count is asserted from THREE files, not one.
+          #       outputs.tf states it in its return-value inventory, main.tf restates it
+          #       because a reader of the resources wants to know what leaves, and both
+          #       must equal what is declared. A single-file check would let the other
+          #       copy drift, which is how the stale twenty-one survived.
+          net_out = "infra/modules/network/outputs.tf"
+          net_main = "infra/modules/network/main.tf"
+          net_vars = "infra/modules/network/variables.tf"
+          assert spelled(net_out, r"([A-Za-z-]+) outputs in [a-z-]+ groups") == declared(
+              net_out, "output")
+          assert spelled(net_main, r"outputs\.tf publishes ([A-Za-z-]+) values read") == declared(
+              net_out, "output")
+          assert spelled(net_out, r"All ([A-Za-z-]+) module inputs are declared") == declared(
+              net_vars, "variable")
+          assert spelled(net_main, r"All ([A-Za-z-]+) inputs are declared") == declared(
+              net_vars, "variable")
+          assert spelled(net_vars, r"consumes all ([A-Za-z-]+) variables") == declared(
+              net_vars, "variable")
+          assert spelled(net_vars, r"Parameters -- ([A-Za-z-]+), of which one is required") == declared(
+              net_vars, "variable")
+
+          # WHY : Assumptions: this is a CONNECTIVITY assertion rather than a count, and it
+          #       is here because the two rules it names were missing and their absence did
+          #       not fail anything -- validate, tflint, terraform-docs and the policy scan
+          #       all passed while every object-storage call was dropped at the ENI and no
+          #       service could fetch the Cognito JWK set it needs to start. A rule whose
+          #       absence is invisible to every other gate needs one of its own.
+          # WHY : Trade-offs: it asserts the rules EXIST, not that they are reachable at
+          #       run time, which no static gate can know. Naming the two resources is
+          #       still enough to stop a future tidy-up removing them as unused, which is
+          #       the regression that actually happened once.
+          network_body = Path(net_main).read_text()
+          for required_rule in (
+              "app_to_s3_gateway",
+              "data_to_s3_gateway",
+              "app_to_identity_provider",
+          ):
+              assert re.search(
+                  r'(?m)^resource "aws_vpc_security_group_egress_rule" "%s"' % required_rule,
+                  network_body,
+              ), (
+                  f"infra/modules/network/main.tf: egress rule {required_rule} is absent. "
+                  "The S3 gateway endpoint carries no security group, so S3 needs a "
+                  "prefix-list rule, and Cognito has no interface endpoint in the "
+                  "specified eight-service set, so its JWK set leaves through NAT. "
+                  "Without these rules the tiers are provisioned and unreachable."
+              )
+
+          # WHY : Assumptions: a confused-deputy condition pair is the kind of thing a
+          #       refactor drops silently, because removing it changes no plan output that
+          #       a reviewer reads.
+          # WHY : Trade-offs: the match is against the `variable = "<key>"` ARGUMENT and is
+          #       scoped to the assume-role document, not against the key name anywhere in
+          #       the file. A bare substring test was tried first and was WRONG -- it passed
+          #       with the condition deleted, because the surrounding why-comment names both
+          #       keys, so prose alone satisfied it. A gate a comment can satisfy is not a
+          #       gate. Slicing the document out first also stops a condition on some other
+          #       policy in this file from standing in for this one.
+          assume_doc = re.search(
+              r'(?ms)^data "aws_iam_policy_document" "flow_logs_assume_role" \{.*?^\}',
+              network_body,
+          )
+          assert assume_doc, (
+              "infra/modules/network/main.tf: the flow-log assume-role policy document is "
+              "absent or no longer a top-level block, so its trust conditions cannot be "
+              "verified."
+          )
+          for condition_key in ("aws:SourceAccount", "aws:SourceArn"):
+              assert re.search(
+                  r'variable\s*=\s*"%s"' % re.escape(condition_key), assume_doc.group(0)
+              ), (
+                  f"infra/modules/network/main.tf: the flow-log role trust policy must "
+                  f"carry a {condition_key} condition argument. Without both, the VPC Flow "
+                  "Logs service can assume this role on behalf of a flow log in another "
+                  "account."
+              )
+
           print("Terraform prose counts: PASS")
           PROSE
 
@@ -321,7 +654,19 @@ jobs:
 
 
           def declarations(root):
-              """Return (all variable names, names with no default) for one environment root."""
+              """Return (all variable names, names with no default) for one environment root.
+
+              Parameters:
+                  root (str): Environment directory name under infra/envs, "dev" or "prod".
+              Returns:
+                  tuple[set[str], set[str]]: Every declared variable name, and the subset
+                      that declares no default and therefore must have a producer.
+              Raises:
+                  OSError: If that root declares no variables.tf, which is a missing root
+                      rather than a closure defect.
+                  IndexError: If a variable block is opened and never closed, which is
+                      unbalanced HCL that terraform validate reports in its own words.
+              """
               text = Path(f"infra/envs/{root}/variables.tf").read_text()
               names, required = set(), set()
               for match in re.finditer(r'^variable "([^"]+)" \{', text, re.M):
@@ -346,13 +691,32 @@ jobs:
 
 
           def outputs(root):
-              """Return the set of output names one environment root publishes."""
+              """Return the set of output names one environment root publishes.
+
+              Parameters:
+                  root (str): Environment directory name under infra/envs, "dev" or "prod".
+              Returns:
+                  set[str]: Every output name the root publishes, which is the whole of
+                      what a workflow step is allowed to read back from it.
+              Raises:
+                  OSError: If that root declares no outputs.tf.
+              """
               text = Path(f"infra/envs/{root}/outputs.tf").read_text()
               return set(re.findall(r'^output "([^"]+)" \{', text, re.M))
 
 
           def configuration(path):
-              """Return workflow text with whole-line comments removed."""
+              """Return workflow text with whole-line comments removed.
+
+              Parameters:
+                  path (str): Repository-relative path of the workflow file to read.
+              Returns:
+                  str: The same text with entirely-commented lines dropped, so that a
+                      variable name discussed in a comment cannot be mistaken for one the
+                      workflow actually supplies.
+              Raises:
+                  OSError: If the workflow file cannot be read.
+              """
               # Assumptions: only lines that are ENTIRELY a comment are dropped. A "#" inside an
               #     expression or a quoted value is left alone, so nothing that actually
               #     configures the run is discarded by this filter.
@@ -673,6 +1037,22 @@ jobs:
             2>&1 | tee infra-reports/checkov.json
 
           python - <<'PY'
+          """Assert the policy scan actually scanned something and found nothing material.
+
+          Parameters:
+              None. The report path is the file the scanner was just told to write.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If the scan evaluated no resources, passed no checks, failed
+                  any check, or hit a parsing error. The first two are the reason this
+                  module exists: a scanner invocation that matched nothing exits zero, so
+                  without them a mistyped path would read as a clean infrastructure.
+              KeyError: If the report carries no summary, which means the scanner changed
+                  its output shape rather than that the infrastructure is clean.
+              json.JSONDecodeError: If the scanner wrote something that is not JSON.
+          """
+
           import json
           from pathlib import Path
 
@@ -761,6 +1141,11 @@ jobs:
           # cloudfront_aliases additionally validates length > 0, so an unset environment
           # variable fails the plan rather than planning a distribution with no alias.
           TF_VAR_cloudfront_aliases: ${{ vars.CARDDEMO_CLOUDFRONT_ALIASES_JSON }}
+          # Assumptions: both roots declare alarm_email_endpoints with NO default and refuse
+          # an empty list, so a plan cannot be produced without a recipient. It is supplied
+          # from a protected repository variable rather than from terraform.tfvars because an
+          # on-call address is personal data this tree does not carry.
+          TF_VAR_alarm_email_endpoints: ${{ vars.CARDDEMO_ALARM_EMAIL_ENDPOINTS_JSON }}
           TF_VAR_github_oidc_provider_arn: ${{ vars.CARDDEMO_GITHUB_OIDC_PROVIDER_ARN }}
           # Trade-offs: taken from the run context rather than from a protected environment
           # variable, for the same reason deploy.yml does so -- the contract is the

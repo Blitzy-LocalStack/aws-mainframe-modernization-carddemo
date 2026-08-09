@@ -50,7 +50,7 @@ bounded-context services, an internal Application Load Balancer behind an API
 Gateway HTTP API, a Cognito user pool, six primary SQS queues with six dead-letter
 queues, a Step Functions state machine replacing the nightly JCL chain, a
 versioned S3 bucket for dataset generations, a CloudFront-fronted bucket for the
-single-page application, ten ECR repositories, four KMS customer-managed keys,
+single-page application, eleven ECR repositories, four KMS customer-managed keys,
 Secrets Manager entries, and the log groups, dashboards and alarms replacing the
 job log.
 
@@ -142,7 +142,7 @@ tempted to relax.
 |---|---|---|---|
 | `required_version` | `>= 1.15.0` | the sixteen modules | Trade-offs: an open-ended floor rather than an exact pin. A module is consumed by a caller whose own CLI version it cannot control, so a floor lets Terraform intersect every constraint in the graph and select one satisfying CLI, where an exact pin in sixteen places would have to be edited in sixteen places. |
 | `required_version` | `~> 1.15.0` | the three roots | Assumptions: a root is the directory an operator actually runs, so it is the right place to bound the minor line as well as the floor. Validated on **1.15.8**. |
-| `hashicorp/aws` | `~> 6.56` | all nineteen directories | Assumptions: the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.81.0** onward, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. Alternatives Considered: a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
+| `hashicorp/aws` | `~> 6.56` | all nineteen directories | Assumptions: the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.80.0** onward, and the auto-pause-seconds argument a zero minimum makes mandatory only from **5.81.0**, so the effective floor for the pair is **5.81.0**, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. Alternatives Considered: a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
 | `hashicorp/random` | `~> 3.9` | all seventeen directories that declare a provider set | Assumptions: the constraint is declared uniformly so Terraform resolves **one** release for the whole module graph, rather than only in the directories that currently use it. Four directories use it today, and each uses it as an **`ephemeral`** resource or for a non-secret handle: `modules/secrets` generates each service database credential with `ephemeral "random_password"`, `envs/dev` and `envs/prod` generate the messaging-HMAC, internal-identity and pagination-cursor keys the same way, and `modules/cognito` uses `random_id` only for the opaque 128-bit handle in a secret's NAME. An ephemeral value is never written to state, which is what keeps a generated credential out of both the repository and the state file structurally rather than by reviewer vigilance. Assumptions: this provider does NOT generate the Cognito seed-user credentials — `terraform_data.seed_user_credential` in `modules/cognito` runs `seed_user_bootstrap.py`, which mints each one and writes it straight to Secrets Manager — and it does not generate the Aurora master password either, which `manage_master_user_password = true` delegates to the database service. Refactoring Rationale: this row previously named four directories and asserted the provider was declared "deliberately nowhere else", singling out `infra/bootstrap` as an intentional omission. It is in fact declared in seventeen directories including `infra/bootstrap`, and it generated neither of the two credential kinds the row credited it with. |
 
 ### 3.2 Which files in this tree are tracked in git
@@ -195,7 +195,7 @@ resources yet.
 
 | Module | Target responsibility | REFERENCE source in the untouched baseline |
 |---|---|---|
-| `network` | Three-AZ VPC; public, private-app and **isolated-data** subnets; NAT; interface endpoints for `ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states` and `ssm`; an S3 gateway endpoint; three security groups | *(net-new — the baseline expresses no network topology)* |
+| `network` | Three-AZ VPC; public, private-app and **isolated-data** subnets; NAT; interface endpoints for `ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states`, `ssm`, `xray` and `cognito-idp`; an S3 gateway endpoint reached by a **prefix-list** egress rule from both the app and data tiers; a NAT-bound egress rule for the Cognito JWK set, which has no interface endpoint in that set; **four** security groups (edge load balancer, application, data, interface endpoints — the VPC Link's fifth group is owned by `api-gateway-http`) | *(net-new — the baseline expresses no network topology)* |
 | `kms` | Four customer-managed keys **with rotation** — for Aurora, S3, Secrets Manager and SQS | `app/csd/CARDDEMO.CSD` — all eight file resources are defined `RECOVERY(NONE)` and `JOURNAL(NO)` (8 occurrences each, L1–L89), so this is encryption at rest where the baseline had none |
 | `secrets` | Secrets Manager entries, and the random initial passwords generated at apply time | `app/cpy/CSUSR01Y.cpy:L21` — `05 SEC-USR-PWD PIC X(08).`, the plaintext password field this designs out |
 | `ecr` | **Ten** repositories, with scan-on-push and a lifecycle policy | `app/csd/CARDDEMO.CSD:L489-L496` — two `DEFINE LIBRARY` stanzas, both naming the single `AWS.M2.CARDDEMO.LOADLIB` load library |
@@ -212,16 +212,30 @@ resources yet.
 | `cloudfront-spa` | S3 origin with an origin access control, the distribution, and single-page-application error routing | `app/bms/*.bms` — the delivery path that replaces the 3270 terminal |
 | `observability` | Log groups, dashboards, alarms and an SNS topic | the `SYSOUT` and `SYSPRINT` DD statements across the 38 jobs — 116 occurrences of `SYSOUT=*` and 80 `SYSPRINT DD`, which is what the job log actually was |
 
-### 4.1 Why `ecr` provisions exactly ten repositories
+### 4.1 Why `ecr` provisions exactly eleven repositories
 
 Assumptions: an ECR repository is needed per **container image**, not per Maven
 module, and those two counts differ by one. There are **nine** Maven modules under
 `services/` but only **eight** service images: `services/common-lib` is the shared
 kernel library that the eight services compile against, so it has no Dockerfile
 and produces no image. Adding the SPA image and the ETL image to the eight service
-images gives **ten**: the eight bounded-context services plus `ui` plus
-`data-migration`. Counting Maven modules instead would invent an eleventh
-repository that nothing ever pushes to.
+images gives **ten** deployables built from this repository: the eight
+bounded-context services plus `ui` plus `data-migration`. Counting Maven modules
+instead would invent a repository that nothing ever pushes to.
+
+The eleventh repository is a different kind of thing and is not one of this
+repository's builds: `aws-otel-collector` **mirrors** a pinned third-party image.
+Refactoring Rationale: this section read "exactly ten" while the module declared
+eleven, because the mirror was added with the telemetry sidecar and the count was
+not re-derived. The mirror is not optional — `ecs-service` gives every workload the
+sidecar by default, and `network` enumerates the application tier's egress instead
+of allowing every destination on 443, so the public registry the collector was
+pulled from is unreachable from a task: without the mirror no task can pull its
+sidecar and therefore no task starts at all, and that failure plans cleanly.
+Alternatives Considered: pushing the collector into one of the ten deployable
+repositories under its own tag, which would have kept this count at ten. Rejected
+because a repository expires images by count, so ordinary service releases would
+expire the third-party image out from under the sidecar.
 
 ---
 
@@ -780,12 +794,30 @@ contract.
   application subnets carry the ECS tasks. **Isolated data subnets carry Aurora
   and have no internet route at all** — isolating the data tier with no route out
   is the strongest blast-radius control available here.
-- **AWS API traffic never leaves the VPC.** Interface endpoints cover the ECR API
-  and Docker registry, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions
-  and SSM; a gateway endpoint covers S3.
-- **Security groups permit three flows and nothing else:** load balancer to
-  application on **8080**, application to Aurora on **5432**, and application to
-  the interface endpoints on **443**.
+- **AWS API traffic stays inside the VPC for every service an endpoint covers.**
+  Ten interface endpoints cover the ECR API and Docker registry, CloudWatch
+  Logs, Secrets Manager, KMS, SQS, Step Functions, SSM, X-Ray and the Cognito
+  identity provider; a gateway endpoint
+  covers S3 — nine endpointed services in total. **Two dependencies are
+  deliberately reached over NAT instead:** Cognito, for the token operations
+  `auth-service` performs, and X-Ray, for trace delivery, have no endpoint in the
+  frozen eight-service set that AAP §0.4.1.6 fixes. The bounded claim is the true
+  one; see [ADR-008](../docs/adr/ADR-008-security-and-identity.md) for why adding
+  endpoints for the two, or narrowing their egress rule to published address
+  ranges, were both rejected.
+- **Security groups permit six flows and nothing else** — four security groups
+  (`alb`, `app`, `data`, `vpc_endpoints`) carry them, and every flow is declared
+  as a paired egress and ingress rule except the two that have no security group
+  on the far side: load balancer to application on the container port,
+  application to Aurora on **5432**, application to the interface endpoints on
+  **443**, application back to the load balancer on **443** (this is how one
+  service resolves an account context from another), application to the S3
+  gateway endpoint on **443** by prefix list, and the single wide **443** egress
+  rule that reaches Cognito and X-Ray. WHY (Refactoring Rationale): the three
+  flows this list named before omitted the last three, which the network module
+  did not declare either — so service-to-service calls, object-store access and
+  every Cognito and X-Ray call would have been dropped by the application group
+  at run time, with no build failure and a hung request as the first symptom.
 - **At the edge:** an API Gateway HTTP API with a Cognito JWT authorizer fronts the
   internal ALB through a VPC Link; CloudFront with an origin access control fronts
   the single-page-application bucket.

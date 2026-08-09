@@ -5,7 +5,7 @@
 #   The complete public contract of the `observability` module. main.tf
 #   declares one encrypted notification topic, one shared terminal access-log
 #   bucket, a caller-sized set of CloudWatch log groups, one operations
-#   dashboard and eleven metric alarms. Nothing about them is reachable outside
+#   dashboard and THIRTEEN metric alarms. Nothing about them is reachable outside
 #   this directory except through the nine outputs below, so this file -- not
 #   main.tf -- is what a caller programs against.
 #
@@ -32,7 +32,7 @@
 #   not.
 #
 # Parameters:
-#   None. An `output` block accepts no input. The module's twenty-nine inputs
+#   None. An `output` block accepts no input. The module's thirty-one inputs
 #   are declared in variables.tf, which carries the type, the description and
 #   the domain validation of each; every value published below is read from a
 #   resource attribute in main.tf rather than from one of those inputs.
@@ -328,14 +328,16 @@ output "dashboard_arn" {
 #       name suffix from disjoint subsets of var.queue_names -- so one grammar
 #       is applied to all eight iterated families rather than only where a
 #       collision exists today.
-# WHY : Trade-offs: one map over all eleven families rather than one output per
-#       family. Eleven outputs would let each carry its own description into
+# WHY : Trade-offs: one map over all THIRTEEN families rather than one output per
+#       family. Thirteen outputs would let each carry its own description into
 #       the generated README, which is what the deliberate-absence section
-#       argues for elsewhere; it is declined here because eight of the eleven
+#       argues for elsewhere; it is declined here because eight of the thirteen
 #       are caller-sized, so their instance count is unknown to this file and
-#       only a map can express them at all. The accepted cost is that the
-#       eleven families share one description, and the key grammar above is
-#       what keeps the map self-describing in its place.
+#       only a map can express them at all. Two more are count-gated, so an
+#       output per family would additionally have to publish a null for each
+#       closed gate. The accepted cost is that the thirteen families share one
+#       description, and the key grammar above is what keeps the map
+#       self-describing in its place.
 # WHY : Assumptions: this map must list every alarm family main.tf declares. An
 #       alarm added there and omitted here is invisible to both gates --
 #       `terraform validate` passes because the map is still well-formed, and
@@ -345,7 +347,7 @@ output "dashboard_arn" {
 # -----------------------------------------------------------------------------
 
 output "alarm_arns" {
-  description = "Map of alarm ARNs covering all eleven alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the three single-instance alarms. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name."
+  description = "Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api_5xx, aurora_cpu, aurora_capacity); the remaining two are present only when their gate is open -- aurora_connections when database_connection_threshold is set, and cloudfront_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name."
   value = merge(
     {
       for service, alarm in aws_cloudwatch_metric_alarm.service_unhealthy :
@@ -384,5 +386,27 @@ output "alarm_arns" {
       aurora_cpu      = aws_cloudwatch_metric_alarm.aurora_cpu.arn
       aurora_capacity = aws_cloudwatch_metric_alarm.aurora_capacity.arn
     },
+
+    # WHY : Refactoring Rationale: these two families were MISSING from this map while
+    #       main.tf created them, so the module built thirteen alarms and published
+    #       eleven. The omission is worse than a documentation gap, because the stated
+    #       purpose of this output is to let a caller compose a composite alarm or scope
+    #       an IAM Resource element over "all" alarms: a caller doing either got a set
+    #       that silently excluded database connection exhaustion and CloudFront error
+    #       rate, and no expression anywhere would have failed to reveal it.
+    # WHY : Assumptions: both are merged CONDITIONALLY rather than read directly,
+    #       because both are count-gated resources and a bare `.arn` on a count-indexed
+    #       resource is an error. aurora_connections exists only when
+    #       database_connection_threshold is set; cloudfront_5xx only when a
+    #       distribution id is supplied AND the region is us-east-1, which is where
+    #       CloudFront publishes its metrics. When a gate is closed the key is ABSENT
+    #       from the map rather than present with a null, so a caller iterating the map
+    #       never has to filter nulls and `lookup` reports the truth.
+    length(aws_cloudwatch_metric_alarm.aurora_connections) > 0 ? {
+      aurora_connections = aws_cloudwatch_metric_alarm.aurora_connections[0].arn
+    } : {},
+    length(aws_cloudwatch_metric_alarm.cloudfront_5xx) > 0 ? {
+      cloudfront_5xx = aws_cloudwatch_metric_alarm.cloudfront_5xx[0].arn
+    } : {},
   )
 }

@@ -1,11 +1,27 @@
 /**
  * Web-layer slice tests for the REST adapters of the account bounded context.
  *
- * <p>Every class in this package is built with {@code @WebMvcTest}, so the web layer of
- * account-service stands up alone and each collaborator beneath it arrives as a mock. The subject
- * under test is the production package {@code com.carddemo.account.api} and nothing deeper: what a
- * request must look like to be accepted, what status and body a response carries, which authority a
- * route demands, and that no handler depends on a previous call having happened.
+ * <p>Every class in this package holds the web layer of account-service alone, with each collaborator
+ * beneath it arriving as a mock. The subject under test is the production package
+ * {@code com.carddemo.account.api} and nothing deeper: what a request must look like to be accepted,
+ * what status and body a response carries, which authority a route demands, and that no handler depends
+ * on a previous call having happened.
+ *
+ * <p>Assumptions: two shapes are used, and the choice per class is the level the assertion needs rather
+ * than a preference. A class asserting the MACHINE contract -- the route constants, the published
+ * property names, the security expression, the status a handler returns -- reaches the handler by DIRECT
+ * INVOCATION and by reading its metadata, because none of that needs a request to travel. A class
+ * asserting the WIRE contract -- a serialised body, a rejected query parameter answered as a per-field
+ * array -- drives a standalone {@code MockMvc} over the real controller with the shared advice
+ * registered, which is what every other controller test in this build does, so a reader moving between
+ * modules meets one shape.
+ *
+ * <p>Alternatives Considered: {@code @WebMvcTest} for the wire-level classes, which is the shape this
+ * charter originally named for all of them. Rejected on what it would add: a Spring context, this
+ * module's own auto-configuration and its security filter chain, none of which decides any outcome
+ * asserted here -- while route membership and the security expression are already asserted from the
+ * metadata by the contract class. No test in this build uses it, so adopting it here would also make
+ * this the one module a reader had to learn twice.
  *
  * <p>Parameters, return values, exceptions or errors. A package declaration accepts no parameter,
  * yields no value and raises nothing, so this charter carries no such at-clause; the inapplicability

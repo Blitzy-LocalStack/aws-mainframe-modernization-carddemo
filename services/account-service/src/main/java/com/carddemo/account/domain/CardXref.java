@@ -4,7 +4,9 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import java.sql.Types;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
 
 /**
  * The card-to-account-and-customer cross-reference row owned by the account bounded context.
@@ -198,6 +200,13 @@ public class CardXref {
     //       written as a literal rather than assembled from CARD_NUMBER_LENGTH precisely so that it
     //       greps against V1__account.sql L657 as the same string a reader finds there.
     @Id
+    // WHY : Assumptions: CHAR(16) in V1__account.sql, and this member is both the primary key and
+    //       the keyset browse ordering key. The two positioned browse queries compare it with a
+    //       strict inequality, and a bpchar column bound as VARCHAR resolves that comparison under
+    //       text rules instead of fixed-character rules -- so the binding is stated rather than
+    //       inferred, because an ordering that disagreed with the stored form would misposition a
+    //       page rather than fail.
+    @JdbcTypeCode(Types.CHAR)
     @Column(name = "card_num", length = CARD_NUMBER_LENGTH, nullable = false,
             columnDefinition = "char(16)")
     private String cardNum;

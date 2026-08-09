@@ -558,8 +558,8 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>35 production classes</b> and <b>10</b> package
- * charter files, for <b>45</b> compilation units in total:
+ * <p>The shared kernel holds <b>40 production classes</b> and <b>11</b> package
+ * charter files, for <b>51</b> compilation units in total:
  *
  * <pre>
  * package             production classes   charter   compilation units
@@ -572,27 +572,28 @@
  * common.observability                 3         1                   4
  * common.time                          1         1                   2
  * common.validation                    2         1                   3
- * common.messaging                     2         1                   3
+ * common.messaging                     3         1                   4
+ * common.control                       4         1                   5
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 2 = 35
+ * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
  * </pre>
  *
  * <p>Cross-check by compilation unit:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 3 = 45
+ * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
  * </pre>
  *
- * <p>Both sums agree, and this file is one of the ten charters. Each sum is kept
+ * <p>Both sums agree, and this file is one of the eleven charters. Each sum is kept
  * whole on one line, and each addend is labelled with the package it counts, so
  * that a single wrong figure is locatable rather than merely detectable.
  *
- * <p>Assumptions: the authoritative figures are <strong>35 production classes
- * across 9 subpackages and the root, in 45 compilation units, of which 10 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>40 production classes
+ * across 10 subpackages and the root, in 51 compilation units, of which 11 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *

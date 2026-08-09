@@ -410,47 +410,60 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
 }
 
 # -----------------------------------------------------------------------------
-# Dedicated VPC Link security path -- exact SG-to-SG TCP 443 only.
+# VPC Link security path -- exact self-referencing TCP 443 on the ALB group.
 # -----------------------------------------------------------------------------
 
-resource "aws_security_group" "vpc_link" {
-  name_prefix = "${local.name_stem}-vpc-link-"
-  description = "Dedicated source security group for the CardDemo API Gateway VPC Link."
-  vpc_id      = var.vpc_id
-
-  # WHY : Refactoring Rationale: no inline ingress or egress blocks are used.
-  #       Separate rule resources below make the only permitted flow explicit
-  #       and avoid the provider-created allow-all egress rule a generic VPC
-  #       Link group would otherwise retain.
-  tags = local.tags
-}
+# WHY : Refactoring Rationale: this module used to create a FOURTH security group
+#       of its own for the VPC Link, which - with the network module's own three
+#       plus its interface-endpoint group - put the delivered topology at five
+#       functional security groups against a design that freezes the count at
+#       three (technical specification section 0.5.1.12). The link now attaches
+#       to the ALB group the network module publishes, so the flow it needs is a
+#       SELF reference on that group and the group count comes back to three.
+#       The old comment argued a dedicated group was needed to "prove that any
+#       member had the matching destination rule". That property is kept: both
+#       halves of the flow are still declared here, in this module's graph, and
+#       the link still cannot be pointed at a group whose destination rule is
+#       absent - it is now pointed at the very group carrying that rule.
+#       Trade-offs: sharing the group means the link's ENIs also inherit the ALB
+#       group's egress to the application tier on the container port. Those ENIs
+#       forward only to the configured private integration - the ALB listener
+#       below - so the inherited permission reaches nothing they initiate. The
+#       accepted cost is that a reader of the ALB group sees permissions serving
+#       two roles; the compensating control is that both are named in the network
+#       module's README flow table rather than left to be inferred.
+#       Alternatives Considered: keeping the dedicated group and arguing the AAP
+#       count. Rejected because the count is frozen and this module's group was
+#       one of the two that broke it; narrowing here is the change with the
+#       smaller blast radius, since nothing outside this module referenced it.
 
 resource "aws_vpc_security_group_egress_rule" "vpc_link_to_alb_https" {
-  security_group_id            = aws_security_group.vpc_link.id
+  security_group_id            = var.alb_security_group_id
   referenced_security_group_id = var.alb_security_group_id
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
 
   # WHY : Assumptions: the VPC Link targets the ALB's sole HTTPS listener, so
-  #       TCP 443 is the complete destination contract. Referencing the ALB
-  #       security group instead of a CIDR admits only interfaces carrying that
-  #       group and survives subnet-address changes.
-  description = "Allow the API Gateway VPC Link to reach the internal ALB HTTPS listener."
+  #       TCP 443 is the complete destination contract. Referencing the group
+  #       instead of a CIDR admits only interfaces carrying that group and
+  #       survives subnet-address changes.
+  description = "Allow the API Gateway VPC Link to reach the internal ALB HTTPS listener within the shared group."
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_from_vpc_link_https" {
   security_group_id            = var.alb_security_group_id
-  referenced_security_group_id = aws_security_group.vpc_link.id
+  referenced_security_group_id = var.alb_security_group_id
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
 
   # WHY : Refactoring Rationale: this is the destination half absent from the
-  #       previous network contract. Owning both halves here is the only place
-  #       the VPC Link source group and the ALB destination group are visible
-  #       together without introducing a module cycle.
-  description = "Allow only the dedicated API Gateway VPC Link group into the ALB HTTPS listener."
+  #       original network contract. It remains declared here rather than in the
+  #       network module, because that module already publishes
+  #       alb_security_group_id to this one and referencing this module's
+  #       resources in return would close a cycle between the two.
+  description = "Allow the API Gateway VPC Link into the ALB HTTPS listener within the shared group."
 }
 
 # -----------------------------------------------------------------------------
@@ -478,11 +491,13 @@ resource "aws_apigatewayv2_vpc_link" "this" {
   #       zone.
   subnet_ids = var.private_app_subnet_ids
 
-  # WHY : Refactoring Rationale: using a caller-supplied list left this module
-  #       unable to prove that any member had the matching destination rule.
-  #       Creating one group and both SG-reference rules above makes the private
-  #       integration's connectivity part of this module's graph.
-  security_group_ids = [aws_security_group.vpc_link.id]
+  # WHY : Refactoring Rationale: using a caller-supplied list of arbitrary groups
+  #       left this module unable to prove that any member had the matching
+  #       destination rule. The link now carries the ONE group whose destination
+  #       rule this module declares above, which keeps that property while
+  #       removing the extra group - see the Refactoring Rationale over those
+  #       rules for why the dedicated group was withdrawn.
+  security_group_ids = [var.alb_security_group_id]
 
   tags = local.tags
 }

@@ -542,6 +542,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /api/v1/transactions/{transactionId}:
     description: >-
@@ -839,6 +841,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
 components:
 
@@ -1007,12 +1011,46 @@ components:
           schema:
             $ref: "#/components/schemas/ApiError"
 
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
   # WHY : Assumptions: there is deliberately NO shared InternalServerError entry
-  #       here, and its absence is a decision rather than an omission. The three
+  #       here, and its absence is a decision rather than an omission. The four
   #       entries above are shared precisely because their meaning does not vary
   #       by operation: a field-validation refusal, a missing or unvalidatable
-  #       token, and a group claim without the required authority read the same
-  #       whichever operation returned them. A 500 in this context does not. Each
+  #       token, a group claim without the required authority, and a write refused
+  #       because the batch window is closed all read the same whichever operation
+  #       returned them -- the last of them says nothing about the operation at all,
+  #       only about the environment, which is the clearest case for sharing there
+  #       is. A 500 in this context does not. Each
   #       of the four operations declares its own, because each carries the
   #       VERBATIM aggregate message of the baseline paragraph that detected the
   #       failure, together with the program and line it came from -- and those
@@ -1285,12 +1323,13 @@ components:
       type: string
       description: >-
         An opaque sealed keyset cursor issued by this service. It carries a
-        version prefix, a base64url payload and a base64url authentication code,
-        separated by full stops, and it is meaningful only to the service that
-        sealed it. A caller stores it and replays it unaltered; it is never
-        parsed, composed or compared by a client.
+        version prefix, a base64url nonce and a base64url ENCIPHERED payload with
+        its own authentication tag, separated by full stops, and it is meaningful
+        only to the service that sealed it. A caller stores it and replays it
+        unaltered; it is never parsed, decoded, composed or compared by a client,
+        and decoding it yields ciphertext rather than the key it stands for.
       maxLength: 256
-      pattern: "^v1\\.[A-Za-z0-9_-]{1,200}\\.[A-Za-z0-9_-]{43}$"
+      pattern: "^v2\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]{1,200}$"
 
     # WHY : Refactoring Rationale: ONE bound and ONE character set for the
     #       correlation identity, published once and referenced by the request
@@ -1516,7 +1555,7 @@ components:
       #       a further request is issued from, and hasPrev is derivable from
       #       firstKey being non-null -- so the wider shape would publish three
       #       members a caller must be told how to reconcile with three others.
-      required: [items, firstKey, lastKey, hasNext]
+      required: [items, firstKey, lastKey, hasNext, hasPrevious]
       additionalProperties: false
       properties:
         # WHY : Assumptions: the bound of ten is a BASELINE FACT, not a tuning
@@ -1589,6 +1628,19 @@ components:
             beyond the page. When it is false, a forward request would return no
             rows and the baseline answers the attempt with "You are already at the
             bottom of the page..." from app/cbl/COTRN00C.cbl L270.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
+
         # WHY : Trade-offs: no member states whether a page PRECEDES this one, and the
         #       answer is the presence of firstKey instead. The envelope has four
         #       members and a backward indicator is not one of them, and the question

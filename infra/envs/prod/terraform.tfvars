@@ -45,4 +45,8 @@ batch_schedule_expression = "cron(0 2 * * ? *)"
 deletion_protection            = true
 skip_final_snapshot            = false
 secret_recovery_window_in_days = 30
-alarm_email_endpoints          = []
+# WHY : alarm_email_endpoints is deliberately ABSENT from this file. It is a required
+#       input with no default, supplied out of band (TF_VAR_alarm_email_endpoints or
+#       the deploy workflow's own variable), because an on-call address is personal
+#       data this repository does not carry. See infra/envs/prod/variables.tf for the
+#       full reasoning and docs/runbooks/deploy.md for the operator step.

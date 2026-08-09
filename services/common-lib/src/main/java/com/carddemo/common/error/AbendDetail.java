@@ -1,6 +1,7 @@
 package com.carddemo.common.error;
 
 import com.carddemo.common.observability.LogSafeText;
+import java.io.Serializable;
 
 /**
  * Carries the four components of the reference baseline's abend data block as one structured value.
@@ -160,7 +161,41 @@ public record AbendDetail(
         String abendCode,
         String abendCulprit,
         String abendReason,
-        String abendMsg) {
+        String abendMsg) implements Serializable {
+
+    /**
+     * The serialization identity of this record, declared rather than generated.
+     *
+     * <p>Refactoring Rationale: this record is declared serializable because an exception carries it as a
+     * field, and that exception declares a serialization identity of its own -- so it PROMISED a stable
+     * serialized form while holding a member that could not be written. The condition is
+     * {@code com.carddemo.reference.service.DisclosureGroupService.DisclosureGroupNotFoundException},
+     * which retains the abend record that stands in for the reference program's termination at
+     * {@code app/cbl/CBACT04C.cbl} line 458 so an operator can read it. Java records are not serializable
+     * unless declared so, so any attempt to write that exception -- a container replicating an error
+     * across a session store, a test harness round-tripping one, a framework capturing one for later
+     * inspection -- would have failed at the field with an unhelpful report about this type rather than
+     * about the exception.</p>
+     *
+     * <p>Alternatives Considered: marking the exception's field transient instead, which the condition's
+     * own report offered as one option. Rejected because the field is the whole reason the exception
+     * exists in a distinguishable form: it carries the abend code, culprit, reason and message an
+     * operator reads, and a transient field returns null after a round trip, so the accessor would answer
+     * null to a caller that had no way to know why. Declaring the four components writable keeps the
+     * promise the exception already makes.</p>
+     *
+     * <p>Alternatives Considered: storing a serializable snapshot on the exception -- the four strings as
+     * separate fields -- and rebuilding the record on access. Rejected as four members and a factory in
+     * place of one interface declaration, with the same observable behaviour and one more place for the
+     * component order to be got wrong.</p>
+     *
+     * <p>Assumptions: a fixed value is declared rather than left to be generated, because a generated
+     * identity is derived from the shape of the class and would change the moment a component or a
+     * constant is added, breaking a peer holding a serialized copy for no functional reason. Every
+     * component is a {@code String}, which is itself serializable, so no component needs its own
+     * treatment.</p>
+     */
+    private static final long serialVersionUID = 1L;
 
     /**
      * The declared width of the abend code component, four characters.

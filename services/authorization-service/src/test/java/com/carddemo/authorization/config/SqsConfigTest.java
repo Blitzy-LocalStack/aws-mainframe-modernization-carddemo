@@ -2,13 +2,18 @@ package com.carddemo.authorization.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.config.SqsConfig.FifoQueueNamingContract;
 import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.service.AuthorizationRequestListener;
 import com.carddemo.authorization.service.OutboxPublisher;
 import com.carddemo.common.messaging.MessageExpiry;
+import com.carddemo.common.messaging.QueueClientBudget;
+import io.awspring.cloud.autoconfigure.core.AwsClientBuilderConfigurer;
 import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.awspring.cloud.sqs.listener.BackPressureMode;
 import io.awspring.cloud.sqs.listener.FifoSqsComponentFactory;
@@ -30,7 +35,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.convert.DurationStyle;
 import org.yaml.snakeyaml.Yaml;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.SqsClientBuilder;
 
 /**
  * Verifies the queue-transport decisions {@link SqsConfig} makes on behalf of this context.
@@ -92,7 +102,8 @@ class SqsConfigTest {
                 .maxConcurrentMessages(10));
 
         BeanPostProcessor customizer = SqsConfig.authorizationListenerContainerOptions(
-                LISTENER_SHUTDOWN_SECONDS, ACKNOWLEDGEMENT_SHUTDOWN_SECONDS);
+                LISTENER_SHUTDOWN_SECONDS, ACKNOWLEDGEMENT_SHUTDOWN_SECONDS,
+                declaredShutdownPhaseTimeout());
         Object returned = customizer.postProcessAfterInitialization(factory, "factory");
         assertThat(returned).as("the customizer returns the same factory instance")
                 .isSameAs(factory);
@@ -138,25 +149,116 @@ class SqsConfigTest {
     }
 
     /**
-     * Confirms both authorization queue references are accepted when both name ordered queues.
+     * Confirms the two accepted shapes of a listener reference are accepted and retained unchanged.
      *
-     * <p>Assumptions: an address form and a bare-name form are both exercised, and the suffix is also
-     * exercised in upper case, because a deployment legitimately supplies any of the three and a check
-     * that accepted only one shape would refuse correct configuration.</p>
+     * <p>Refactoring Rationale: this case asserted that an UPPER-CASE suffix was accepted, on the stated
+     * ground that a deployment legitimately supplies any of three shapes. That was the defect written down
+     * as a requirement. The transport's suffix is lower case and the listener starter tests for it
+     * case-sensitively when it chooses between its ordered and unordered message sources, so a reference
+     * ending {@code .FIFO} passed the check and then selected the UNORDERED components -- losing per-card
+     * ordering with nothing to observe. The upper-case form is now asserted to be REFUSED, in the sibling
+     * case below.</p>
+     *
+     * <p>Assumptions: a bare name and an address are both exercised here because the listener starter
+     * genuinely resolves either, and a check that accepted only one would refuse correct configuration.
+     * The reply allowlist is deliberately not given the same latitude: its entries are sent to, and a send
+     * accepts an address only.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("ordered references in name, address and mixed-case form are all accepted")
+    @DisplayName("a listener reference is accepted as a bare name or as an address, and retained")
     void orderedReferencesAreAcceptedAndRetained() {
         FifoQueueNamingContract contract = new SqsConfig().authorizationQueueNamingContract(
-                "carddemo-pauth-request-dev.FIFO", List.of(ORDERED_REPLY_ADDRESS));
+                ORDERED_REQUEST_QUEUE, List.of(ORDERED_REPLY_ADDRESS));
 
-        assertThat(contract.requestQueue()).isEqualTo("carddemo-pauth-request-dev.FIFO");
+        assertThat(contract.requestQueue()).isEqualTo(ORDERED_REQUEST_QUEUE);
         assertThat(contract.replyQueueAllowlist()).containsExactly(ORDERED_REPLY_ADDRESS);
+
+        FifoQueueNamingContract addressed = new SqsConfig().authorizationQueueNamingContract(
+                ORDERED_REPLY_ADDRESS, List.of(ORDERED_REPLY_ADDRESS));
+
+        assertThat(addressed.requestQueue())
+                .as("an address is a shape the listener starter resolves too")
+                .isEqualTo(ORDERED_REPLY_ADDRESS);
         assertThatThrownBy(() -> contract.replyQueueAllowlist().add("another"))
                 .as("the retained allowlist is not modifiable through the accessor")
                 .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    /**
+     * Confirms an upper-case ordered-queue suffix is refused in either position.
+     *
+     * <p>Assumptions: both references are exercised, because the two are validated by different rules and
+     * a suffix relaxed in one of them is as harmful as in both. The listener reference selects the
+     * starter's ordered components by this suffix; the reply address is what a send is issued against, and
+     * the transport's own name for the queue is lower case.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an upper-case .FIFO suffix is refused in both the listener and the reply position")
+    void anUpperCaseOrderedSuffixIsRefused() {
+        assertThatThrownBy(() -> new SqsConfig().authorizationQueueNamingContract(
+                "carddemo-pauth-request-dev.FIFO", List.of(ORDERED_REPLY_ADDRESS)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.messaging.pauth-request-queue")
+                .hasMessageContaining("lower-case");
+
+        assertThatThrownBy(() -> new SqsConfig().authorizationQueueNamingContract(
+                ORDERED_REQUEST_QUEUE,
+                List.of("https://sqs.us-east-1.amazonaws.com/000000000000/reply-dev.FIFO")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.messaging.reply-queue-allowlist");
+    }
+
+    /**
+     * Confirms a reply destination that is not an address is refused even when it is ordered.
+     *
+     * <p>Assumptions: a bare name and a resource name are both exercised, and both are ordered-looking, so
+     * the case isolates the SHAPE from the suffix. Every allowlist entry is passed unchanged as the
+     * destination of a send by the outbox drain, and a send resolves an address only -- so either shape
+     * would pass startup and then fail every reply to the requester that nominated it, on the reply path,
+     * for one requester, which is the least observable place to fail.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a bare name and a resource name are refused as reply destinations")
+    void aReplyDestinationThatIsNotAnAddressIsRefused() {
+        assertThatThrownBy(() -> new SqsConfig().authorizationQueueNamingContract(
+                ORDERED_REQUEST_QUEUE, List.of("carddemo-pauth-reply-dev.fifo")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.messaging.reply-queue-allowlist")
+                .hasMessageContaining(SqsConfig.QUEUE_URL_SCHEME);
+
+        assertThatThrownBy(() -> new SqsConfig().authorizationQueueNamingContract(
+                ORDERED_REQUEST_QUEUE,
+                List.of("arn:aws:sqs:us-east-1:000000000000:carddemo-pauth-reply-dev.fifo")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.messaging.reply-queue-allowlist");
+    }
+
+    /**
+     * Confirms a resource name is refused as the listener reference.
+     *
+     * <p>Assumptions: the reference is ordered-looking, so this case isolates the shape. The listener
+     * starter resolves a bare name or an address and neither resolves a resource name, so a deployment
+     * configuring one would start and then receive nothing at all -- which is a silent halt of the whole
+     * flow rather than an error, and exactly what a startup check exists to convert into a message naming
+     * the property.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a resource name is refused as the listener queue reference")
+    void aResourceNameIsRefusedAsTheListenerReference() {
+        assertThatThrownBy(() -> new SqsConfig().authorizationQueueNamingContract(
+                "arn:aws:sqs:us-east-1:000000000000:carddemo-pauth-request-dev.fifo",
+                List.of(ORDERED_REPLY_ADDRESS)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("carddemo.messaging.pauth-request-queue")
+                .hasMessageContaining("resource name");
     }
 
     /**
@@ -295,6 +397,147 @@ class SqsConfigTest {
     }
 
     /**
+     * Confirms a non-positive listener drain budget stops startup, naming the property.
+     *
+     * <p>Purpose: a container that waits no time for its in-flight messages abandons every one of them,
+     * and the acknowledgements it never sends make the queue redeliver work that had already completed.
+     * That is indistinguishable in a log from ordinary redelivery, which is why the value is refused at
+     * startup rather than left to be inferred from duplicated processing.</p>
+     *
+     * <p>Assumptions: zero and a negative are both exercised, because zero is what a property set to an
+     * empty or mistyped value converts to while a negative is what a hand-edited document produces, and a
+     * check written as {@code &lt; 0} would admit the first of them.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a non-positive listener drain budget is refused, naming the property")
+    void aNonPositiveListenerDrainBudgetIsRefused() {
+        for (long invalid : new long[] {0L, -1L}) {
+            assertThatThrownBy(() -> SqsConfig.authorizationListenerContainerOptions(
+                    invalid, ACKNOWLEDGEMENT_SHUTDOWN_SECONDS, declaredShutdownPhaseTimeout()))
+                    .as("listener drain budget of %d seconds", invalid)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("carddemo.messaging.listener-shutdown-timeout-seconds");
+        }
+    }
+
+    /**
+     * Confirms a non-positive acknowledgement drain budget stops startup, naming the property.
+     *
+     * <p>Assumptions: this is asserted separately from the listener budget rather than parameterised with
+     * it, because the two are distinct properties with distinct consequences -- this one discards the
+     * acknowledgements of messages that already SUCCEEDED -- and a single case covering both would pass
+     * against an implementation that validated only one of them.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a non-positive acknowledgement drain budget is refused, naming the property")
+    void aNonPositiveAcknowledgementDrainBudgetIsRefused() {
+        for (long invalid : new long[] {0L, -1L}) {
+            assertThatThrownBy(() -> SqsConfig.authorizationListenerContainerOptions(
+                    LISTENER_SHUTDOWN_SECONDS, invalid, declaredShutdownPhaseTimeout()))
+                    .as("acknowledgement drain budget of %d seconds", invalid)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "carddemo.messaging.acknowledgement-shutdown-timeout-seconds");
+        }
+    }
+
+    /**
+     * Confirms two individually valid drain budgets whose SUM exceeds the shutdown phase are refused.
+     *
+     * <p>Purpose: a stopping container spends the two budgets in sequence -- in-flight messages first,
+     * outstanding acknowledgements afterwards -- so neither alone is what has to fit inside the phase the
+     * platform allows. This is the case that distinguishes a summed comparison from two individual ones:
+     * both budgets here are shorter than the phase and their sum is not.</p>
+     *
+     * <p>Assumptions: the phase timeout is taken from the packaged configuration and the two budgets are
+     * derived from it, so the case states the RELATIONSHIP rather than three numbers -- changing the
+     * declared phase in that document cannot make this case vacuous.</p>
+     *
+     * <p>Assumptions: the equal case is asserted to be accepted alongside the excess, because a drain
+     * that exactly fills the phase completes within it. A check written with the wrong comparison would
+     * fail exactly one of the two halves below.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("two drain budgets that individually fit but together do not are refused")
+    void anOverBudgetDrainSumIsRefused() {
+        long phaseSeconds = declaredShutdownPhaseTimeout().toSeconds();
+        long each = phaseSeconds - 1L;
+
+        assertThatThrownBy(() -> SqsConfig.authorizationListenerContainerOptions(
+                each, each, declaredShutdownPhaseTimeout()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("spring.lifecycle.timeout-per-shutdown-phase");
+
+        assertThat(SqsConfig.authorizationListenerContainerOptions(
+                phaseSeconds - 1L, 1L, declaredShutdownPhaseTimeout()))
+                .as("a drain that exactly fills the phase completes inside it")
+                .isNotNull();
+    }
+
+    /**
+     * Confirms the whole per-message budget is compared against the visibility period at startup.
+     *
+     * <p>Purpose: this consumer's handler makes three account-context round trips and then does database
+     * work, and every one of those has its own bound. Each bound can be individually reasonable while
+     * their SUM outlives the period the queue keeps the message invisible -- at which point the queue
+     * redelivers, a second consumer takes the request, and two handlers decide one authorization at once.
+     * Nothing else in this context can see every bound together, so the comparison lives here and this is
+     * the case that proves it happens.</p>
+     *
+     * <p>Assumptions: the client-builder configurer is asserted to be UNTOUCHED. That is what places the
+     * refusal ahead of client construction, so the context fails to refresh naming the relationship that
+     * does not hold rather than starting with a client that cannot meet its deadline.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a summed handler budget reaching the visibility period is refused at startup")
+    void aSummedHandlerBudgetReachingVisibilityIsRefused() {
+        AwsClientBuilderConfigurer configurer = mock(AwsClientBuilderConfigurer.class);
+        SqsConfig config = new SqsConfig();
+
+        assertThatThrownBy(() -> config.sqsClient(configurer, 10_000L, 5_000L, 60L,
+                2_000L, 3_000L, 60_000L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(QueueClientBudget.PROPERTY_VISIBILITY_TIMEOUT)
+                .hasMessageContaining("carddemo.datasource.read-timeout-ms");
+        verifyNoInteractions(configurer);
+    }
+
+    /**
+     * Confirms the configured bounds reach the built client rather than only being validated.
+     *
+     * <p>Assumptions: the bounds are read back off the CLIENT, not off the budget, because the class
+     * under test could satisfy every other case here by validating the values and then never applying
+     * them -- which is exactly the state the client was in before, validated nowhere and bounded
+     * nowhere.</p>
+     *
+     * <p>Assumptions: the stubbed configurer stands in for the starter's own, supplying only the region
+     * and credentials a builder needs in order to build. It returns the SAME builder it was handed, so
+     * the assertion below observes the override the class under test applied on top of it -- which is
+     * what makes the consumer form of the override, rather than the replacing value form, observable.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the whole-call and per-attempt bounds are applied to the built client")
+    void theConfiguredBoundsReachTheBuiltClient() {
+        SqsClient client = new SqsConfig().sqsClient(buildableConfigurer(), 10_000L, 5_000L, 60L,
+                2_000L, 3_000L, 30_000L);
+
+        assertThat(client.serviceClientConfiguration().overrideConfiguration().apiCallTimeout())
+                .contains(Duration.ofSeconds(10));
+        assertThat(client.serviceClientConfiguration().overrideConfiguration()
+                .apiCallAttemptTimeout()).contains(Duration.ofSeconds(5));
+    }
+
+    /**
      * Confirms the customizer leaves the poll and concurrency settings it does not own alone.
      *
      * <p>Assumptions: this is the assertion that the request window and the receive wait are decided by
@@ -360,13 +603,35 @@ class SqsConfigTest {
     @DisplayName("a bean that is not a listener-container factory passes through untouched")
     void anUnrelatedBeanPassesThroughUntouched() {
         BeanPostProcessor customizer = SqsConfig.authorizationListenerContainerOptions(
-                LISTENER_SHUTDOWN_SECONDS, ACKNOWLEDGEMENT_SHUTDOWN_SECONDS);
+                LISTENER_SHUTDOWN_SECONDS, ACKNOWLEDGEMENT_SHUTDOWN_SECONDS,
+                declaredShutdownPhaseTimeout());
         Object unrelated = new Object();
 
         assertThat(customizer.postProcessAfterInitialization(unrelated,
                 "defaultSqsListenerContainerFactory")).isSameAs(unrelated);
         assertThat(customizer.postProcessBeforeInitialization(unrelated, "any"))
                 .isSameAs(unrelated);
+    }
+
+    /**
+     * Builds a stub client-builder configurer that supplies just enough for a builder to build.
+     *
+     * <p>Assumptions: the region and credentials are literals with no reachable endpoint behind them.
+     * Nothing in these cases issues a call, so a client that would fail on its first request is
+     * sufficient -- and preferable to a real configurer, which would resolve a region and a credentials
+     * chain from the environment and make the case pass or fail on how the runner is configured.</p>
+     *
+     * @return a configurer that returns the builder it was handed, after making it buildable
+     */
+    private static AwsClientBuilderConfigurer buildableConfigurer() {
+        AwsClientBuilderConfigurer configurer = mock(AwsClientBuilderConfigurer.class);
+        when(configurer.configure(any(SqsClientBuilder.class))).thenAnswer(invocation -> {
+            SqsClientBuilder builder = invocation.getArgument(0);
+            return builder.region(Region.US_EAST_1)
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create("test-access-key", "test-secret-key")));
+        });
+        return configurer;
     }
 
     /**

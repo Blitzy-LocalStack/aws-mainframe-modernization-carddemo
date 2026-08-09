@@ -1,13 +1,14 @@
 /**
- * Spring wiring for the account, customer and card-cross-reference context, closed at five configuration
+ * Spring wiring for the account, customer and card-cross-reference context, closed at seven configuration
  * classes that hold no business rule, no error mapping and no shared-kernel registration of their own.
  *
  * <h2>What this package is for</h2>
  *
- * <p>This package answers four assembly questions for the bounded context whose charter, records, tables
+ * <p>This package answers five assembly questions for the bounded context whose charter, records, tables
  * and transcribed behaviour are described once at {@code com.carddemo.account}: which tokens are accepted
  * and what each route demands of them, what metadata the published contract carries, how the context
- * reaches its own schema and no other, and how the queue-driven inquiry listener is fed. Nothing here
+ * reaches its own schema and no other, how the queue-driven inquiry listener is fed, and how the two
+ * protected customer identifiers become ciphertext. Nothing here
  * transcribes a baseline paragraph, so nothing here carries a functional-parity obligation of its own.
  * The wiring exists so that the classes which do transcribe baseline paragraphs may assume a correctly
  * assembled context rather than establishing one apiece.</p>
@@ -19,13 +20,33 @@
  * with exactly three tables, {@code accounts}, {@code customers} and {@code card_xref}. The line counts
  * are {@code wc -l} values, which is the measure this repository uses, and they are quoted because they
  * are the honest indication of how much transcribed logic each program contributes to the context these
- * five classes assemble.</p>
+ * seven classes assemble.</p>
  *
- * <h2>The closed set of five configuration classes</h2>
+ * <h2>The closed set of seven configuration classes</h2>
  *
- * <p>The set is <strong>closed at five</strong>, and all five exist beside this charter. That is a
+ * <p>The set is <strong>closed at seven</strong>, and all seven exist beside this charter. That is a
  * constraint on what may be added here as well as a listing of the directory, and each member owns
- * exactly one concern.</p>
+ * exactly one concern. The count and the enumeration below are measured against the directory on every
+ * build:</p>
+ *
+ * <pre>
+ * this directory: 8 java files = 7 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that marker line is what makes the closure checkable, and it is added because
+ * this section has now been wrong twice in the same direction. It closed the set at four while
+ * {@code InternalApiSecurityConfig} stood beside it, and then at five while
+ * {@code CustomerIdentifierProtectionConfig} and {@code KmsConfig} both did. The second omission is the
+ * more damaging of the two, because those two classes are the ENTIRE production implementation of this
+ * context's encryption boundary: {@code CustomerMapper} requires the
+ * {@code CustomerIdentifierProtection} port through its constructor and is component-scanned, so a reader
+ * who acted on "anything else here does not belong" and removed them would not get a compile failure --
+ * they would get a context that refuses to refresh, and, if they instead satisfied the port with
+ * something inert, two columns named {@code ssn_encrypted} and {@code govt_issued_id_encrypted} holding
+ * cleartext. The marker and the entries under it are measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so an eighth class arriving without an entry here now fails the build instead of quietly falsifying
+ * this paragraph.</p>
  *
  * <p>Refactoring Rationale: this section was headed "the closed set of four" and enumerated four,
  * omitting {@code InternalApiSecurityConfig} after it landed. The omission is worse here than an
@@ -35,7 +56,7 @@
  * removing it does not fail a build: it makes three internal reads from the authorization context
  * refuse authentication, which that caller reports as the dependency being unavailable, so the
  * authorization would be redelivered until the queue dead-lettered it. The closure argument below,
- * which grounds each member on a capability the POM declares, is extended to the fifth rather than
+ * which grounds each member on a capability the POM declares, is extended to each new member rather than
  * loosened.</p>
  *
  * <ul>
@@ -69,7 +90,30 @@
  *       chain under a permissive rule, which would also have made the calls succeed. Rejected because the
  *       paths would then be reachable by any authenticated cardholder and one of them resolves a primary
  *       account number, so the permissive rule buys availability with a disclosure. Assumptions: this
- *       class is why the set here is five where a context with no inbound service caller has four.</li>
+ *       class is why this context has an internal chain at all, where a context with no inbound service
+ *       caller has none.</li>
+ *   <li>{@code KmsConfig} -- the key-management client, and nothing else. It contributes the one client
+ *       that {@code com.carddemo.account.service.CustomerIdentifierCipher} and
+ *       {@code CustomerIdentifierProtectionConfig} reach, so that neither has to build its own.
+ *       Assumptions: region and credentials resolve through the SDK's own default provider chains rather
+ *       than being named here, because in a deployed task the region arrives as an environment variable
+ *       and the credentials as the task role -- and a task role only means anything if no credential is
+ *       configurable. Alternatives Considered: constructing the client inside the cipher instead.
+ *       Rejected because a class that builds its own infrastructure client cannot be handed a substitute,
+ *       so every case asserting what an envelope discloses would then need a real key.</li>
+ *   <li>{@code CustomerIdentifierProtectionConfig} -- the implementation of the
+ *       {@code CustomerMapper.CustomerIdentifierProtection} port, which is the only production route by
+ *       which the national identifier {@code CUST-SSN} at {@code app/cpy/CVCUS01Y.cpy} L17 and the
+ *       government-issued identifier {@code CUST-GOVT-ISSUED-ID} at L18 become the {@code BYTEA}
+ *       ciphertext that {@code src/main/resources/db/migration/V1__account.sql} declares. Assumptions: it
+ *       is a separate class from {@code KmsConfig} above even though both concern one key, because the
+ *       two answer different questions -- that one supplies a client, this one decides the framing
+ *       (envelope encryption under a fresh data key per identifier, Galois/Counter Mode, and an
+ *       encryption context naming the purpose and the column but never the customer) -- and folding them
+ *       together would put a cryptographic decision and a client builder behind one name. Assumptions: it
+ *       lives in this package and not in {@code mapper} because the port is declared there precisely so
+ *       the mapping layer can state what it needs of a key provider without naming one; an infrastructure
+ *       type is admissible here and is not admissible there.</li>
  * </ul>
  *
  * <p>Assumptions: each member of that set rests on a capability this module actually declares, so the
@@ -78,13 +122,17 @@
  * {@code SecurityConfig} configures, the contract-documentation starter at L422 that gives
  * {@code OpenApiConfig} something to
  * describe, the database driver at L376 with the migration artifacts at L397 and L401 that
- * {@code DataSourceConfig} wires, and the queue starter at L330 that {@code SqsConfig} tunes. The fifth
- * member is grounded differently and deliberately so: {@code InternalApiSecurityConfig} rests on no
- * additional dependency at all -- it uses the same security starter as the first member plus the shared
- * kernel's service-token minter -- and what it rests on instead is the existence of an inbound
- * service-to-service caller, which the sibling authorization context's client establishes. A SIXTH class
- * would therefore have to arrive either with a sixth declared capability or with a second class of caller,
- * and a reader can check both claims without reading a single Java file.</p>
+ * {@code DataSourceConfig} wires, and the queue starter at L330 that {@code SqsConfig} tunes. It also
+ * declares the key-management client that {@code KmsConfig} contributes and
+ * {@code CustomerIdentifierProtectionConfig} consumes, and that dependency is what grounds the last two
+ * members: without it neither class would compile, and with it the two protected columns have an
+ * implementation rather than a name. {@code InternalApiSecurityConfig} is the one member grounded
+ * differently, and deliberately so: it rests on no additional dependency at all -- it uses the same
+ * security starter as the first member plus the shared kernel's service-token minter -- and what it rests
+ * on instead is the existence of an inbound service-to-service caller, which the sibling authorization
+ * and transaction contexts' clients establish. An EIGHTH class would therefore have to arrive either with
+ * a newly declared capability or with a further class of caller, and a reader can check both claims
+ * without reading a single Java file.</p>
  *
  * <h2>What this package must never own</h2>
  *

@@ -40,22 +40,34 @@
 --   substitution, and it contains no backslash meta-command, so the identical
 --   text runs under `psql -v ON_ERROR_STOP=1 -f` and through a driver cursor.
 --   It assumes, and does not verify:
---     - data-migration/sql/V0__schemas_and_roles.sql has created the schemas,
---       and the five owning Flyway migrations have created all eleven tables.
---     - The session role holds USAGE on auth, account, card, ledger and
---       reference, plus SELECT on each of the eleven tables. NO least-privilege
---       runtime role holds that union, and that is by design rather than an
---       oversight: measured against a bootstrapped cluster, carddemo_reporting
---       reads NONE of the eleven, because it is granted SELECT on reporting
---       views rather than on base tables; carddemo_reporting_owner and
---       carddemo_batch each read ten and are stopped by auth.users, the auth
---       schema being held outside both of their grant graphs. Run this as the
---       operator principal that applied V0, or as a verification role granted
---       SELECT on exactly these eleven tables. Choosing carddemo_reporting
---       because its name suggests reporting produces the 42501 below on the
---       first branch evaluated.
+--     - data-migration/sql/V0__schemas_and_roles.sql has created the schemas, the
+--       five owning Flyway migrations have created all eleven tables, and
+--       data-migration/sql/V3__verification_surfaces.sql has created the two
+--       aggregate views this file reads.
+--     - The session role holds USAGE on the `reporting` schema and SELECT on
+--       reporting.v_verification_row_counts, and NOTHING ELSE is required. That
+--       is satisfied by carddemo_reporting, the least-privilege read-only role,
+--       which is the role this file is meant to be run as:
+--
+--         psql "$CARDDEMO_DB_URL" -v ON_ERROR_STOP=1 \
+--              -f data-migration/sql/verify/row_counts.sql
+--
+--       Refactoring Rationale: this note used to say the opposite -- that NO
+--       least-privilege runtime role could run this file, that carddemo_reporting
+--       read none of the eleven tables, and that an operator should therefore run
+--       it "as the operator principal that applied V0". Every one of those
+--       statements was true of the cluster as it then stood, and the arrangement
+--       they described was the defect: a verification pass that can only be run
+--       by a principal holding row-level read access to every account balance,
+--       card number and national identifier in the system is a pass whose
+--       execution is itself a disclosure. V3 fixes the cause rather than the
+--       documentation, by publishing the COUNTS as an owner-backed aggregate view
+--       and granting SELECT on that view alone. What this file needs is "how many
+--       rows"; what it now requires is exactly that and nothing more.
 --     - Nothing is written: no row, no object, no session setting. A principal
---       holding SELECT and nothing else is sufficient to run this file.
+--       holding SELECT on one view and nothing else is sufficient to run this
+--       file -- and, being unable to write anything anywhere, is incapable of
+--       altering the data it is verifying.
 --
 -- Returns exactly one result set of exactly eleven rows, one per (dataset,
 -- target table) pair:
@@ -72,26 +84,32 @@
 --   the result rather than parse it.
 --
 -- Fails when:
---   - SQLSTATE 42P01 undefined_table -- a table is missing because its owning
---     migration has not been applied. The failure is correct and preferable to a
---     silently short report that omits the table it could not read.
---   - SQLSTATE 42501 insufficient_privilege -- the session role lacks USAGE on a
---     schema or SELECT on a table, as described under session context.
+--   - SQLSTATE 42P01 undefined_table -- the aggregate view is missing because
+--     V3__verification_surfaces.sql has not been applied, or a base table beneath
+--     it is missing because its owning migration has not been applied. Either
+--     failure is correct and preferable to a silently short report that omits the
+--     table it could not read.
+--   - SQLSTATE 42501 insufficient_privilege -- the session role lacks USAGE on the
+--     `reporting` schema or SELECT on reporting.v_verification_row_counts, as
+--     described under session context. A privilege error can no longer be caused
+--     by a base table, because this file names none.
 --
 -- Misleads when: it is read as evidence of anything beyond arrival and
 --   quantity. Every case is enumerated under "What this pass CANNOT prove".
 --
 -- WHY (non-obvious design decisions):
---       (1) Alternatives Considered: every branch counts with COUNT(*) and
---       never COUNT(<column>). COUNT over a column skips NULLs, and
---       ledger.daily_transactions.proc_ts is nullable BY DESIGN -- the
+--       (1) Assumptions: the counts are read from an aggregate VIEW and are no
+--       longer computed here. Detail at the `actual` branch below and, for the
+--       privilege reasoning, in V3__verification_surfaces.sql. The COUNT(*)
+--       rather than COUNT(<column>) decision that used to live here now lives
+--       with the counting, in that file: a column-qualified count would skip
+--       NULLs, and ledger.daily_transactions.proc_ts is nullable BY DESIGN -- the
 --       pre-posting feed leaves those 26 bytes blank on 300 of 300 records, so
---       COUNT(proc_ts) returns 0 where COUNT(*) returns 300. A column-qualified
---       count would report a perfectly loaded table as entirely empty.
+--       COUNT(proc_ts) returns 0 where COUNT(*) returns 300.
 --       (2) Assumptions: no timestamp column appears in any predicate, grouping,
---       ordering or filter here. proc_ts is a runtime wall-clock stamp, and
---       orig_ts is deterministic only for posted rows, so any timestamp
---       predicate would make this report irreproducible between runs.
+--       ordering or filter here or in the view. proc_ts is a runtime wall-clock
+--       stamp, and orig_ts is deterministic only for posted rows, so any
+--       timestamp predicate would make this report irreproducible between runs.
 --       (3) Assumptions: ledger.transactions carries a NULL baseline rather than
 --       0, because it has no seed dataset at all. Detail at the row itself.
 --       (4) Assumptions: reference.disclosure_groups expects 51 where every
@@ -102,21 +120,20 @@
 --       Detail at the statement itself.
 --       (7) Assumptions: the three reference tables are seeded by Flyway rather
 --       than by the ETL loaders, and idempotently. Detail at those rows.
---       (8) Assumptions: every table is named schema-qualified rather than
---       resolved through search_path. Detail at the counting branches.
+--       (8) Assumptions: the aggregate view is named schema-qualified rather than
+--       resolved through search_path. Detail at the `actual` branch.
 --       (9) Trade-offs: status and delta are derived here in SQL rather than
 --       left to the Python consumer. Detail at the CASE expression.
---       (10) Refactoring Rationale: this file replaces an earlier draft that
---       reported bare counts under a (schema_name, table_name, row_count)
---       shape, preceded by a psql ON_ERROR_STOP meta-command. Three things were
---       wrong with it. It carried no baselines, so its output could not be
---       judged without knowing eleven numbers from elsewhere. The meta-command
---       made the file unusable through a driver cursor for no gain: the runbook
---       already passes -v ON_ERROR_STOP=1 on the command line, and with a
---       single statement there is no second statement for the switch to skip.
---       And it counted ledger.transaction_rejects, a table no seed dataset can
---       ever justify a baseline for. Pure SQL is the settled convention for this
---       directory, recorded at V0__schemas_and_roles.sql L130-L135.
+--       (10) Assumptions: the file is pure SQL, carrying no psql meta-command,
+--       because it is run both by psql and through a driver cursor and a
+--       meta-command is unusable through the latter. The runbook passes
+--       -v ON_ERROR_STOP=1 on the command line instead, and with a single
+--       statement there is no second statement for that switch to skip. Pure
+--       SQL is the settled convention for this directory, recorded at
+--       V0__schemas_and_roles.sql L130-L135.
+--       (11) Alternatives Considered: counts are exact rather than estimated,
+--       and the full scan that costs is accepted. Detail at the counting
+--       branches.
 -- =============================================================================
 
 -- WHY : Alternatives Considered: ONE statement, one terminating semicolon, and
@@ -161,14 +178,34 @@ WITH expected (sort_key, dataset, target_table, expected_rows) AS (
         (6,           'discgrp',        'reference.disclosure_groups',                51),
         (7,           'tcatbal',        'ledger.transaction_category_balances',       50),
 
-        -- WHY : Assumptions: these three reference tables are populated by
-        --       Flyway, in V2__seed_reference.sql, and NOT by the ETL loaders,
-        --       so the counts hold whether the seed migration ran, the ETL ran,
-        --       or both did. Each of that file's inserts carries a key-targeted
-        --       ON CONFLICT ... DO NOTHING, so a second application adds
-        --       nothing. The baselines are unchanged by this -- they still come
-        --       from app/data/ASCII -- but attributing them to the ETL would
-        --       send anyone diagnosing a mismatch to the wrong component.
+        -- WHY : Refactoring Rationale: this note used to say these three
+        --       reference tables are populated by Flyway "and NOT by the ETL
+        --       loaders", and concluded that the counts therefore "hold whether
+        --       the seed migration ran, the ETL ran, or both did". The first
+        --       clause was false and the second did not follow from it.
+        --       loaders/aurora.py has always declared TRANTYPE, TRANCAT and
+        --       DISGROUP as load targets, so BOTH components write all three --
+        --       and the loader wrote them through a plain COPY, which aborts on
+        --       the first primary-key collision. Running the seed migration and
+        --       then the ETL, which is the documented order, therefore failed
+        --       the load outright rather than composing with it. Two writers
+        --       also disagreed on content: V2__seed_reference.sql writes
+        --       'Purchase', while the copybook field is PIC X(50) and the loader
+        --       carried its blank padding into a VARCHAR(50) column, so the row
+        --       a screen rendered depended on which writer ran first while these
+        --       counts agreed either way.
+        -- WHY : Assumptions: the counts DO hold in all three orders now, and the
+        --       two mechanisms that make them hold are stated here because
+        --       neither is visible from this file. The loader declares a conflict
+        --       key on exactly these three targets and loads them by staging into
+        --       a session-temporary table and merging with
+        --       ON CONFLICT ... DO NOTHING -- the same conflict target
+        --       V2__seed_reference.sql uses, asserted against that file's own
+        --       clause by data-migration/tests/test_aurora_loader.py -- so a row
+        --       already present is skipped rather than colliding. And the loader
+        --       TRIMS the description fields, so the row either writer produces
+        --       is byte-identical to the other's. The baselines below are
+        --       unchanged by any of this: they still come from app/data/ASCII.
         (8,           'trancatg',       'reference.transaction_categories',           18),
         (9,           'trantype',       'reference.transaction_types',                 7),
 
@@ -203,28 +240,20 @@ WITH expected (sort_key, dataset, target_table, expected_rows) AS (
 --       the two and the report would state a count for a table it did not read.
 --       The qualified name costs one prefix per branch and removes that class of
 --       error entirely.
+-- WHY : Alternatives Considered: every branch below counts rows with COUNT(*)
+--       rather than reading the planner's reltuples estimate out of pg_class.
+--       reltuples is an ESTIMATE maintained by vacuum and analyze, and
+--       immediately after a bulk load it is routinely stale or zero. A
+--       verification that accepted it could report a load as complete on the
+--       strength of a number the database itself does not claim is accurate,
+--       which is the opposite of what this pass is for.
+-- WHY : Trade-offs: COUNT(*) reads every row of every table below, so the cost
+--       of this statement grows with the data. That is accepted because it runs
+--       once per migration rather than per request, and because the cheaper
+--       alternative is not a cheaper truth but a weaker claim.
 actual (target_table, actual_rows) AS (
-    SELECT 'account.accounts',                     COUNT(*) FROM account.accounts
-    UNION ALL
-    SELECT 'card.cards',                           COUNT(*) FROM card.cards
-    UNION ALL
-    SELECT 'account.card_xref',                    COUNT(*) FROM account.card_xref
-    UNION ALL
-    SELECT 'account.customers',                    COUNT(*) FROM account.customers
-    UNION ALL
-    SELECT 'ledger.daily_transactions',            COUNT(*) FROM ledger.daily_transactions
-    UNION ALL
-    SELECT 'reference.disclosure_groups',          COUNT(*) FROM reference.disclosure_groups
-    UNION ALL
-    SELECT 'ledger.transaction_category_balances', COUNT(*) FROM ledger.transaction_category_balances
-    UNION ALL
-    SELECT 'reference.transaction_categories',     COUNT(*) FROM reference.transaction_categories
-    UNION ALL
-    SELECT 'reference.transaction_types',          COUNT(*) FROM reference.transaction_types
-    UNION ALL
-    SELECT 'auth.users',                           COUNT(*) FROM auth.users
-    UNION ALL
-    SELECT 'ledger.transactions',                  COUNT(*) FROM ledger.transactions
+    SELECT v.target_table, v.actual_rows
+    FROM   reporting.v_verification_row_counts v
 )
 
 -- WHY : Trade-offs: four groups of tables that exist in these schemas are

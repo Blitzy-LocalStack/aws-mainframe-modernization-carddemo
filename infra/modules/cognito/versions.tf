@@ -95,7 +95,8 @@ terraform {
 
   required_providers {
     # WHY : 6.56.0 is the release this package is verified against, and any 6.x
-    #       also clears the 5.81.0 minimum that zero-capacity Aurora needs
+    #       also clears the 5.81.0 minimum that zero-capacity Aurora and its
+    #       mandatory auto-pause argument together need (5.80.0 and 5.81.0)
     #       elsewhere in this package, so every module can share one
     #       constraint. Trade-offs: the range admits later 6.x releases, which
     #       lets a provider fix reach this module with no edit here but means

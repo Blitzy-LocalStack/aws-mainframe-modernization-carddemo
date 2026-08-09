@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -25,7 +26,9 @@ import com.carddemo.common.web.PageResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -270,6 +273,68 @@ class CardXrefByAccountReadTest {
     }
 
     /**
+     * Verifies a cursor issued while walking one account cannot reposition a walk of another.
+     *
+     * <p>Assumptions: this is the account-scope half of the seal, and without it the cursor was portable
+     * between accounts. The value a cursor names is a CARD NUMBER, the predicate is keyed on it, and the
+     * same card number under a different account is a valid position -- so the misposition was silent: a
+     * page could begin part way through the other account's rows, or come back empty, with nothing in the
+     * response saying anything had gone wrong. No row of the wrong account was ever returned, because the
+     * account in the path is the row filter; what was wrong was WHERE the page started.</p>
+     */
+    @Test
+    @DisplayName("a cursor issued for one account is refused while walking another")
+    void aCursorIssuedForOneAccountIsRefusedForAnother() {
+        String cursor = this.sealer.seal(binding(false), cardNumber(9));
+
+        assertThatThrownBy(() ->
+                this.reads.listCardCrossReferences(ACCOUNT_ID + 1, cursor, "next", SUBJECT))
+                .isInstanceOf(CursorToken.InvalidCursorException.class);
+    }
+
+    /**
+     * Verifies no part of a card number survives in a cursor this walk issues.
+     *
+     * <p>Assumptions: the cursor's VALUE is a primary account number, so what the token does with it is a
+     * confidentiality question and not merely an integrity one. The token was previously signed but only
+     * base64url-encoded, which is a reversible transport encoding rather than a cipher, so the whole card
+     * number was recoverable by anyone holding a page of this listing -- a browser history entry, a proxy
+     * log or a bookmarked URL. The shared sealer now enciphers under authenticated encryption, and this case
+     * asserts the property from the OUTSIDE: it decodes every segment of the token as the transport encoding
+     * it is and requires that neither the card number, nor its last four digits, nor its leading digits
+     * appear anywhere in the resulting bytes.</p>
+     */
+    @Test
+    @DisplayName("a decoded cursor reveals no part of the card number it positions on")
+    void aDecodedCursorRevealsNoPartOfTheCardNumber() {
+        when(this.crossReferences.findForwardFromCursor(isNull(), eq(ACCOUNT_ID), any(Limit.class)))
+                .thenReturn(rows(1, PAGE_SIZE));
+
+        PageResponse<CardXrefResponse> page =
+                this.reads.listCardCrossReferences(ACCOUNT_ID, null, null, SUBJECT);
+
+        String positioned = cardNumber(PAGE_SIZE);
+        for (String token : List.of(page.firstKey(), page.lastKey())) {
+            assertThat(token).isNotNull();
+            StringBuilder decoded = new StringBuilder(token);
+            for (String segment : token.split("\\.")) {
+                decoded.append(' ').append(new String(
+                        Base64.getUrlDecoder().decode(segment.getBytes(StandardCharsets.US_ASCII)),
+                        StandardCharsets.ISO_8859_1));
+            }
+            String material = decoded.toString();
+
+            assertThat(material)
+                    .as("the whole card number must not be recoverable from the token")
+                    .doesNotContain(positioned)
+                    .as("nor its last four digits, which are the part a mask would have left")
+                    .doesNotContain(positioned.substring(positioned.length() - 4))
+                    .as("nor its leading digits, which identify the issuer")
+                    .doesNotContain(positioned.substring(0, 6));
+        }
+    }
+
+    /**
      * Verifies the single account-keyed read takes the lowest-ordering row and reads only that row.
      *
      * <p>Assumptions: the reference issues one {@code EXEC CICS READ} at L727 of
@@ -288,7 +353,14 @@ class CardXrefByAccountReadTest {
         when(this.contextMapper.toCardXrefView(row)).thenReturn(view);
 
         assertThat(this.reads.resolveCardCrossReferenceByAccount(ACCOUNT_ID)).isSameAs(view);
-        verify(this.crossReferences, never()).findByAccountIdOrderByCardNumAsc(any());
+
+        // Refactoring Rationale: this used to assert that the UNBOUNDED by-account query was not called,
+        //   and that query no longer exists on the repository at all -- it was withdrawn because a public
+        //   route materialised every cross-reference row an account holds, and every such row carries a
+        //   primary account number. The guarantee is now structural rather than asserted: there is no
+        //   unbounded read for this service to reach for. What is still worth asserting is that resolving
+        //   one row costs exactly one bounded call, which is what the count below pins.
+        verify(this.crossReferences, times(1)).findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID);
     }
 
     /**
@@ -305,7 +377,41 @@ class CardXrefByAccountReadTest {
                 .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> this.reads.resolveCardCrossReferenceByAccount(ACCOUNT_ID))
-                .isInstanceOf(NoSuchElementException.class);
+                .isInstanceOf(NoSuchElementException.class)
+                // WHY : Assumptions: the message is read as well as the type, because this message is not
+                //       consumed only by the caller -- the shared advice writes it to the operational
+                //       record and returns it in a response body, so it lands in a durable place. The
+                //       sensitive-data contract in docs/architecture/observability.md names account and
+                //       customer identifiers alongside the primary account number and requires a
+                //       prohibited value to be OMITTED rather than abbreviated, so this asserts ABSENCE
+                //       rather than a masked rendering. It used to name the account.
+                .hasMessageNotContaining(String.valueOf(ACCOUNT_ID))
+                .hasMessage("the account has no cross-referenced card");
+    }
+
+    /**
+     * Verifies the card-keyed cross-reference refusal names neither the card nor any part of it.
+     *
+     * <p>Assumptions: the card number is asserted absent in whole rather than checked for masking, because
+     * a primary account number is the one value the migration's logging contract withholds from a durable
+     * diagnostic outright. The caller supplied the card, so the message has nothing to add by repeating it
+     * into the operational record and the response body.</p>
+     *
+     * <p>Assumptions: this exercises the third read on this service rather than one of the two the class
+     * charter names, and it is here because it is the SAME refusal decision as the case above, taken by
+     * the sibling method over the same substituted store. Asserting the pair together is what shows the
+     * two agree; separating them by class would leave a reader to discover that they must.</p>
+     */
+    @Test
+    @DisplayName("the card-keyed cross-reference refusal carries no card number")
+    void theCardKeyedRefusalNamesNoCardNumber() {
+        String card = cardNumber(3);
+        when(this.crossReferences.findByCardNum(card)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> this.reads.resolveCardCrossReference(card))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageNotContaining(card)
+                .hasMessage("no cross-reference row exists for the requested card");
     }
 
     /**
@@ -315,8 +421,18 @@ class CardXrefByAccountReadTest {
      * @return the binding string, never {@code null}
      */
     private static String binding(boolean backward) {
+        // Refactoring Rationale: the ACCOUNT is part of the scope, and its absence was a real defect rather
+        //   than a gap in this helper. A cursor bound to the caller and the direction alone opened cleanly
+        //   while walking a DIFFERENT account: the cursor names a card number, the predicate is keyed on
+        //   it, and the same card number under another account is a valid position the caller never saw --
+        //   so a page could begin part way through that account's rows, or be empty, with nothing in the
+        //   response saying so.
+        // Assumptions: the account is rendered zero-padded to its declared eleven digits and the two
+        //   predicates are composed with the shared length-prefixing composer, not concatenated, so no pair
+        //   of predicate values can compose the scope of another pair.
         return CursorToken.binding(CURSOR_QUERY, SUBJECT,
-                backward ? "direction:previous" : "direction:next");
+                CursorToken.scope(backward ? "direction:previous" : "direction:next",
+                        "account:" + String.format(Locale.ROOT, "%011d", ACCOUNT_ID)));
     }
 
     /**

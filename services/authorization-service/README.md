@@ -87,34 +87,44 @@ java -jar services/authorization-service/target/authorization-service-1.0.0-SNAP
 ### `CARDDEMO_MESSAGING_HMAC_KEY` is key material, not a name
 
 This variable carries a **secret value**, and it is the only one in the list above
-that does besides the datasource password. It is the purpose-scoped key that
-`CsvAuthCodec.AuthRequest.orderGroup` and `CsvAuthCodec.AuthReply.orderGroup`
-derive the queue's FIFO **group identity** under, and that the codec's
-`correlationKey` accessors derive the internal correlation identity under.
+that does besides the datasource password. It keys the one tokeniser this service
+holds, `config/MessagingIdentityConfig.java`, which the derived-identity surfaces of
+`.mapper` take as a parameter —
+`AuthorizationMessageMapper.businessCorrelationToken` and the redacted diagnostic
+digest `MappingDiagnostic.structuredFields(OpaqueIdentifier)`.
+
+Refactoring Rationale: it keyed the queue's FIFO **group** and **deduplication**
+identities, and no longer does. Specification §0.4.1.8 and §0.7.6 freeze those as
+literal values — `MessageGroupId = card_num`, `MessageDeduplicationId =
+transaction_id` — and the derivation could not stand once read against them: a group
+identity orders one card's messages only while every producer on the queue computes
+it identically, and a deduplication identity suppresses a resend only while the
+requester can predict it, and a value keyed from this service's own secret is
+neither. The card number consequently appears in queue metadata, which is registered
+as divergence `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in
+`docs/architecture/cobol-to-service-traceability.md` and bounded by the queue's
+customer-managed-key encryption, its private-network-only reachability and
+task-role-scoped read access.
 
 Assumptions: it carries **no default**, and a missing value stops startup in
 `config/MessagingIdentityConfig.java` with a message naming the property. That is
-deliberate rather than strict: a group identifier is message *metadata* — it sits
-outside the encrypted body, it is reported in queue telemetry, and it is carried
-into every log and metric that observes the queue — and the only other per-card
-stable value the service holds is the card number itself. A default would
-therefore produce a running service that published a primary account number on
-every reply, which is worse than one that refuses to start.
+deliberate rather than strict: a default would make every value derived through the
+tokeniser an unkeyed digest of a short, structured input, which anyone holding one
+could confirm by enumeration — a value that *looks* opaque and reverses in seconds
+is worse than a service that refuses to start.
 
 Alternatives Considered: an unkeyed digest, or a keyed digest with a published
-salt. Both rejected for the same reason: the protected value is a sixteen-digit
-number with a check digit, so the candidate space is small enough to enumerate and
-anyone holding a token could confirm which card produced it. Only a secret key
-makes the token unconfirmable, which is what makes publishing it acceptable.
+salt. Both rejected for the same reason: the protected inputs are short and
+structured, so the candidate space is small enough to enumerate and anyone holding a
+token could confirm which input produced it. Only a secret key makes the token
+unconfirmable, which is what makes publishing it acceptable.
 
-Assumptions: the **same** key must reach every producer on the pending-authorization
-queue, and it must not be per instance or per restart. The group identity has to be
-equal for equal cards across producers — that equality *is* the per-card ordering
-guarantee — so a per-instance key would scatter one card's messages across as many
-groups as there are running tasks and remove the ordering silently. Each Terraform
-environment root generates one key per environment into Secrets Manager and injects
-it to this service alone; `infra/modules/ecs-service` asserts both directions of
-that, so a deployment that forgets it or that hands it to another service fails at
+Assumptions: the key must not be per instance or per restart, because every identity
+derived from it has to be stable to be worth anything — a correlation token that
+changed per instance would not join two log lines about one authorization. Each
+Terraform environment root generates one key per environment into Secrets Manager and
+injects it to this service alone; `infra/modules/ecs-service` asserts both directions
+of that, so a deployment that forgets it or that hands it to another service fails at
 `plan`.
 
 Assumptions: this is a **different** secret from `CARDDEMO_MASK_HMAC_KEY`, the

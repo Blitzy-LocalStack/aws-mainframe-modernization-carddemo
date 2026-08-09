@@ -1,5 +1,5 @@
 /**
- * Pins the server-anchored clock that supplies the screen header band its paint instant.
+ * @file Pins the server-anchored clock that supplies the screen header band its paint instant.
  *
  * WHY these cases exist — the divergence being closed is a WRONG DATE, not a crash: before this
  * clock existed, every production call site omitted `ScreenHeader`'s `now` prop and the band read the

@@ -59,7 +59,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any, Final
@@ -70,7 +70,10 @@ from carddemo_migration.config import (
     DatasetStagingSettings,
     quote_identifier,
     resolve_aurora_settings,
+    resolve_card_verification_value_key_id,
+    resolve_customer_identifier_key_id,
     resolve_dataset_staging_settings,
+    resolve_seed_user_subjects,
 )
 from carddemo_migration.copybook import layouts
 from carddemo_migration.copybook.ebcdic_codec import (
@@ -78,6 +81,7 @@ from carddemo_migration.copybook.ebcdic_codec import (
     EbcdicFieldDecodeError,
     EbcdicRecordLengthError,
     decode_record,
+    decode_record_fields,
     iter_ebcdic_records,
 )
 from carddemo_migration.copybook.layouts import RecordSpec
@@ -87,13 +91,29 @@ from carddemo_migration.credentials import (
     EXIT_OK,
     EXIT_USAGE,
 )
-from carddemo_migration.loaders.aurora import AuroraLoadError, connect, load_records, target_for
+from carddemo_migration.loaders.aurora import (
+    AuroraLoadError,
+    LoadContext,
+    Projection,
+    TableTarget,
+    connect,
+    load_records,
+    prepare_record,
+    target_for,
+)
+from carddemo_migration.loaders.protected_columns import (
+    CardVerificationValueCipher,
+    CustomerIdentifierCipher,
+    KmsDataKeySource,
+    ProtectedColumnError,
+)
 from carddemo_migration.loaders.s3_stage import (
     DatasetSourceError,
     StagedObject,
     reserve_generation,
     stage_dataset_file,
 )
+from carddemo_migration.readers import reader_module
 from carddemo_migration.readers.factory import RecordReader
 from carddemo_migration.seed_datasets import SeedDatasetError
 from carddemo_migration.verify.checksum import digest_records
@@ -176,7 +196,7 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #   Naming only :class:`~carddemo_migration.copybook.layouts.LayoutError` would leave
 #   :class:`~carddemo_migration.copybook.layouts.RecordLengthError` uncaught, which is the
 #   commoner of the two in practice: a truncated transfer produces it on the first record.
-# WHY (Trade-offs): they are caught rather than propagated because README.md section 5.2
+# Trade-offs: they are caught rather than propagated because README.md section 5.2
 #   contracts a non-zero EXIT for each of them, and an orchestrated batch state branching on
 #   a numeric return code cannot branch on a traceback. The cost is that the stack is not
 #   printed; the message carries the record number and the field, which is what an operator
@@ -194,8 +214,77 @@ _DECODE_ERRORS: Final[tuple[type[Exception], ...]] = (
 _STEP_ERRORS: Final[tuple[type[Exception], ...]] = (
     AuroraLoadError,
     ConfigurationError,
+    ProtectedColumnError,
     *_DECODE_ERRORS,
 )
+
+
+# Assumptions: the three sealing and subject-resolving projections are named here so that
+#   `_load_context_for` can decide what a target needs from the target's OWN declaration rather
+#   than from a list of record names. A record acquiring a protected column later then acquires
+#   its collaborator automatically, where a name list would have left it silently uncollected --
+#   and an uncollected identifier cipher is a refused load rather than a plaintext one, but it is
+#   still a load that fails for a reason nobody wrote down.
+_IDENTIFIER_PROJECTIONS: Final[frozenset[Projection]] = frozenset({Projection.SEALED_IDENTIFIER})
+_VERIFICATION_VALUE_PROJECTIONS: Final[frozenset[Projection]] = frozenset(
+    {Projection.SEALED_VERIFICATION_VALUE}
+)
+_SUBJECT_PROJECTIONS: Final[frozenset[Projection]] = frozenset({Projection.SUBJECT_FOR_USER_ID})
+
+
+def _load_context_for(target: TableTarget) -> LoadContext:
+    """Resolve only the collaborators a target's own declaration asks for.
+
+    Purpose
+    -------
+    Build the load context lazily and narrowly, so that loading a record with no protected
+    column reaches neither the key-management service nor the parameter store, and loading one
+    with a protected column resolves exactly the key its owning service reads.
+
+    Parameters
+    ----------
+    target : TableTarget
+        The target about to be loaded. Its declared projections decide what is resolved.
+
+    Returns
+    -------
+    LoadContext
+        A context carrying the ciphers and the subject document the target needs, and nothing
+        else.
+
+    Raises
+    ------
+    ConfigurationError
+        If a needed parameter or document cannot be resolved, which is an incomplete environment
+        rather than a database that refused.
+    """
+    # WHY : Trade-offs: each collaborator is resolved ONLY when a projection asks for it, rather
+    #   than all three up front. Resolving eagerly would make `load-dataset TRANTYPE` -- a
+    #   seven-row reference load needing no cipher at all -- require a key-management grant and a
+    #   published subject document, so an environment that had provisioned neither could not load
+    #   the reference data it needs first. It would also mean a single missing parameter blocked
+    #   every load rather than the ones that actually depend on it.
+    declared = set(target.projections.values())
+    identifier_cipher = None
+    verification_cipher = None
+    subjects: Mapping[str, str] = {}
+    if declared & _IDENTIFIER_PROJECTIONS:
+        identifier_cipher = CustomerIdentifierCipher(
+            key_id=resolve_customer_identifier_key_id(),
+            keys=KmsDataKeySource.from_environment(),
+        )
+    if declared & _VERIFICATION_VALUE_PROJECTIONS:
+        verification_cipher = CardVerificationValueCipher(
+            key_id=resolve_card_verification_value_key_id(),
+            keys=KmsDataKeySource.from_environment(),
+        )
+    if declared & _SUBJECT_PROJECTIONS:
+        subjects = resolve_seed_user_subjects()
+    return LoadContext(
+        identifier_cipher=identifier_cipher,
+        verification_value_cipher=verification_cipher,
+        subjects=subjects,
+    )
 
 
 def _dataset_rows() -> list[dict[str, Any]]:
@@ -359,6 +448,12 @@ def _decode_record(arguments: argparse.Namespace) -> int:
         print("--record is a one-based ordinal, so it must be 1 or greater", file=sys.stderr)
         return EXIT_USAGE
 
+    # Assumptions: the suppressed set is resolved BEFORE the extract is opened, so the decision
+    #   about what may be decoded is made without reference to the bytes and cannot be influenced
+    #   by them. It also costs no I/O when it turns out to be empty, which it is for every layout
+    #   but one.
+    suppressed = _suppressed_field_names(layout)
+
     # Assumptions: the record is reached by ITERATING the dataset rather than by seeking to
     #   ordinal times record length. The two agree on a well-formed extract, and they
     #   disagree exactly where it matters: an extract whose length is not a whole multiple
@@ -380,7 +475,24 @@ def _decode_record(arguments: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_USAGE
-        fields = decode_record(image, layout, code_page=arguments.code_page)
+        # WHY : a layout carrying a suppressed field is decoded through the codec's PROJECTION
+        #   entry point, so the suppressed span is never converted to characters in this process
+        #   -- the same rule `readers/export_record.py` applies to the card verification value.
+        #   Redacting after a whole-layout decode would put the cleartext in a local, in this
+        #   frame, and in the traceback of any exception raised while it is live, which is a
+        #   materialization the disclosure policy forbids however briefly it lasts.
+        # Trade-offs: two call sites rather than one. `decode_record` is kept for the common case
+        #   so the unrestricted decode remains provably the same call it always was, and the
+        #   projection is taken only where something must be withheld.
+        if suppressed:
+            fields = decode_record_fields(
+                image,
+                layout,
+                tuple(field.name for field in layout.fields if field.name not in suppressed),
+                code_page=arguments.code_page,
+            )
+        else:
+            fields = decode_record(image, layout, code_page=arguments.code_page)
     except EbcdicRecordLengthError as failure:
         print(str(failure), file=sys.stderr)
         return EXIT_FAILED
@@ -396,11 +508,57 @@ def _decode_record(arguments: argparse.Namespace) -> int:
     #   as an IEEE-754 double -- which is the one thing the whole codec stack exists to
     #   avoid. A string keeps the exact digits the picture clause declares.
     rendered = {name: str(value) for name, value in fields.items()}
-    print(json.dumps(_redacted(rendered, layout), indent=2))
+    print(json.dumps(_redacted(rendered, layout, suppressed), indent=2))
     return EXIT_OK
 
 
-def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
+def _suppressed_field_names(layout: RecordSpec) -> frozenset[str]:
+    """Return the fields of one layout that must never be decoded or represented.
+
+    Purpose
+    -------
+    Ask the reader that OWNS a record which of its fields are suppressed rather than merely
+    sensitive, so this command applies the same distinction the owning reader publishes. A
+    sensitive field is one whose value must not be printed; a suppressed field is one whose
+    value must not exist in this process at all -- the stored password in ``SECUSER`` and the
+    card verification value in the export record -- and the two therefore need different
+    treatment rather than the same redaction.
+
+    Parameters
+    ----------
+    layout : RecordSpec
+        The layout being decoded, whose registry name selects the owning reader.
+
+    Returns
+    -------
+    frozenset of str
+        The owning reader's ``SUPPRESSED_FIELD_NAMES``, or an empty set when the layout has no
+        reader or its reader suppresses nothing.
+
+    Raises
+    ------
+    None
+        A layout with no reader is a normal state -- the derived layouts are readerless on
+        purpose -- and is answered with an empty set rather than an error.
+    """
+    # Alternatives Considered: a mapping from record name to suppressed field names, declared
+    #   here or in `layouts`, was rejected because it would be a SECOND authority for a question
+    #   the owning reader already answers. The two would then have to be kept in step by review,
+    #   and the failure mode of them drifting is that this command prints a derived form of a
+    #   value the reader has declared unrepresentable -- the exact defect this function closes.
+    # Assumptions: the attribute is read with a default rather than required, because most
+    #   readers suppress nothing and declaring an empty constant in each of them to satisfy this
+    #   lookup would add a name to twelve modules to serve one caller.
+    try:
+        module = reader_module(layout.name)
+    except KeyError:
+        return frozenset()
+    return frozenset(getattr(module, "SUPPRESSED_FIELD_NAMES", frozenset()))
+
+
+def _redacted(
+    rendered: dict[str, str], layout: RecordSpec, suppressed: frozenset[str] = frozenset()
+) -> dict[str, str]:
     """Redact every sensitive field of an already-rendered record.
 
     Purpose
@@ -415,12 +573,17 @@ def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
         Field name to rendered value, as produced from a decoded record.
     layout : RecordSpec
         The layout the record was decoded against, carrying each field's sensitivity.
+    suppressed : frozenset of str, optional
+        Fields whose value must not be represented in any form. They are rendered as a fixed
+        withheld marker and are never passed to the redaction helper. Defaults to none, which
+        keeps the behaviour of every layout that suppresses nothing unchanged.
 
     Returns
     -------
     dict of str to str
         The same mapping with each sensitive field replaced by
-        :func:`carddemo_migration.copybook.layouts.mask_field`'s redaction.
+        :func:`carddemo_migration.copybook.layouts.mask_field`'s redaction, and each suppressed
+        field replaced by the fixed withheld marker.
 
     Raises
     ------
@@ -435,6 +598,25 @@ def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
     #   needed them, and a flag defaulting to safe is still a flag an operator can pass.
     safe: dict[str, str] = {}
     for field in layout.fields:
+        # WHY : the suppression test comes FIRST, before the missing-value test and before the
+        #   sensitivity branch, and the order is load-bearing rather than stylistic. A suppressed
+        #   field is not decoded at all by the caller, so it arrives here with no value; reaching
+        #   the missing-value test first would drop it from the output and lose the proof that the
+        #   record carries a field at that offset, and reaching the sensitivity branch first would
+        #   hand its characters to `mask_field`, which returns a keyed tag DERIVED from them.
+        #   A keyed tag of a stored password is a representation of that password, and the
+        #   contract the owning reader publishes for a suppressed field is that no representation
+        #   exists -- not its characters, not a digest of them, not a keyed tag of them.
+        # Refactoring Rationale: this branch closes the second door onto the first door's problem.
+        #   `readers/usrsec.py` stopped putting the password through the masking helper when its
+        #   whole-record rendering was rewritten, but THIS command reaches the same field by a
+        #   different route -- a whole-layout decode followed by a per-field redaction -- and so
+        #   kept printing `"SEC-USR-PWD": "<tag>"`, a keyed HMAC tag of the plaintext. Fixing one
+        #   route and not the other would have left the property true of the reader and false of
+        #   the system.
+        if field.name in suppressed:
+            safe[field.name] = _WITHHELD_RENDERING
+            continue
         value = rendered.get(field.name)
         if value is None:
             continue
@@ -961,9 +1143,15 @@ def _read_back(connection: Any, target: Any) -> list[dict[str, Any]]:
     ------
     None
     """
-    fields = tuple(target.columns)
-    names = ", ".join(quote_identifier(column) for column in target.columns.values())
-    order = ", ".join(quote_identifier(column) for column in target.columns.values())
+    # WHY : Assumptions: the read-back is restricted to the target's COMPARABLE fields, which
+    #   excludes any column holding an envelope. An envelope's initialisation vector is drawn per
+    #   value, so the same identifier enciphered twice differs -- selecting such a column would
+    #   make the digest comparison report a difference on every run, against a load that was
+    #   correct. The exclusion is the target's own decision, so this function states none of it.
+    fields = target.comparable_fields()
+    columns = tuple(target.columns[name] for name in fields)
+    names = ", ".join(quote_identifier(column) for column in columns)
+    order = ", ".join(quote_identifier(column) for column in columns)
     statement = f"SELECT {names} FROM {target.qualified_name} ORDER BY {order}"  # noqa: S608
     candidate = connection.cursor()
     cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
@@ -993,7 +1181,7 @@ def _money_field_names(reader: RecordReader) -> tuple[str, ...]:
     ------
     None
     """
-    # WHY (Assumptions): a money field is exactly a SIGNED display field. An unsigned display
+    # Assumptions: a money field is exactly a SIGNED display field. An unsigned display
     #   field is an identifier or a count -- a card number, a credit score -- and totalling one
     #   would produce a number with no meaning that a source-versus-target comparison would then
     #   solemnly confirm.
@@ -1020,25 +1208,37 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     try:
         _, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
+        # WHY : Assumptions: the context is resolved BEFORE the connection is opened, so an
+        #   environment missing a key parameter or a subject document fails without having taken a
+        #   connection it would then have to close on the error path. It is also the cheaper
+        #   failure: a missing parameter is an operator action, and learning it before the database
+        #   is touched keeps the two diagnoses apart.
+        context = _load_context_for(target)
         connection = connect(resolve_aurora_settings(target.schema))
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
     try:
-        written = load_records(connection, target, records)
-    except AuroraLoadError as exc:
+        outcome = load_records(connection, target, records, context)
+    except (AuroraLoadError, ProtectedColumnError) as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
     finally:
         connection.close()
+    # WHY : Assumptions: BOTH counts are reported rather than one. On the stage-and-merge path a
+    #   load that staged every row and inserted none is a success -- the seed migration had already
+    #   written them -- and an operator reading a line that said only "loaded 7 row(s)" would
+    #   believe seven rows had been added. The outcome renders the skipped count only when it is
+    #   non-zero, so the direct path's line does not carry a number that is always zero.
     _LOGGER.info(
-        "loaded record=%s rows=%d into %s.%s",
+        "loaded record=%s staged=%d inserted=%d into %s.%s",
         arguments.dataset,
-        written,
+        outcome.staged,
+        outcome.inserted,
         target.schema,
         target.table,
     )
-    print(f"loaded {written} row(s) of {arguments.dataset} into {target.schema}.{target.table}")
+    print(f"loaded {arguments.dataset} into {target.schema}.{target.table}: {outcome.describe()}")
     return EXIT_OK
 
 
@@ -1106,17 +1306,31 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     try:
         _, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
+        # WHY : Assumptions: the context is resolved here as well as in the load handler, because
+        #   the source side is now projected through the target's own declarations and a
+        #   SUBJECT_FOR_USER_ID projection needs the published document to produce the value the
+        #   column holds. The sealing projections are excluded from the digest, so their
+        #   collaborators are not needed -- and `_load_context_for` resolves only what a target's
+        #   declarations ask for, so this call reaches the key-management service for no dataset
+        #   this command can compare.
+        context = _load_context_for(target)
         connection = connect(resolve_aurora_settings(target.schema))
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
-    fields = tuple(target.columns)
-    # WHY : the source digest is taken INSIDE the block that closes the connection, even though
-    #   it touches no database. Digesting drives the lazy reader, so it is where a width or
-    #   decode failure surfaces -- and outside this block that failure would return without ever
-    #   closing the connection it had already opened.
+    fields = target.comparable_fields()
+    # WHY : Refactoring Rationale: the source side is digested through `prepare_record`, over the
+    #   target's comparable fields, where it used to digest the RAW decoded record over every
+    #   mapped field. Both halves of that were wrong once the loader began projecting values. The
+    #   raw record carries a description at its fixed width and the stored column holds it
+    #   trimmed, so a digest of the raw form differs from the stored form for a load that was
+    #   correct; and the full field set includes the envelope columns, whose bytes differ on every
+    #   write by design. Digesting what was STORED, over the fields that can be stored
+    #   deterministically, is the only construction that compares the two sides of the same load.
     try:
-        source_digest = digest_records(records, fields)
+        source_digest = digest_records(
+            (prepare_record(target, record, context) for record in records), fields
+        )
         # WHY : the loaded rows are read back and digested through the SAME field order and the
         #   same canonical rendering, so the comparison is between two digests of the same
         #   construction. Comparing a source digest against a value recorded in a file would

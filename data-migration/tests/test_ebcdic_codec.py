@@ -63,6 +63,7 @@ from carddemo_migration.copybook.ebcdic_codec import (
     decode_field,
     decode_field_characters,
     decode_record,
+    decode_record_fields,
     decode_timestamp,
     iter_ebcdic_records,
     trim_trailing_blanks,
@@ -954,3 +955,126 @@ def test_every_shipped_base_master_record_still_decodes() -> None:
             decoded_records += 1
 
     assert decoded_records == _BASE_MASTER_RECORD_TOTAL
+
+
+def test_a_restricted_decode_reads_only_the_named_fields() -> None:
+    """Require the projection entry point to decode exactly the requested fields and no others.
+
+    Purpose
+    -------
+    Assert the contract the export reader depends on: naming fields up front must produce a
+    mapping holding those fields alone, in the layout's declaration order rather than the order
+    they were asked for, so a caller withholding a span gets a result no other span can be read
+    out of.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Refactoring Rationale): this entry point exists because the export reader used to decode
+    #   every branch field and then omit the card verification value from the mapping it built. That
+    #   is suppression AFTER materialisation: the value existed as a decoded string reachable from
+    #   the payload mapping and from any traceback raised below the decode. Naming what may be
+    #   decoded is the only shape that makes the omission a real one.
+    # WHY (Assumptions): the requested names are given in REVERSE declaration order, so the
+    #   assertion on key order proves the result follows the LAYOUT rather than the request. Two
+    #   callers asking for the same set must get identical mappings, or a comparison between two
+    #   corpora would depend on how each side happened to enumerate its fields.
+    spec = EXPORT_CUSTOMER_LAYOUT
+    image = bytes(_zeroed_branch_image(spec))
+    declared = [field.name for field in spec.fields]
+    wanted = [name for name in declared if not name.startswith("FILLER")][:4]
+
+    projected = decode_record_fields(image, spec, list(reversed(wanted)))
+
+    assert list(projected) == [name for name in declared if name in set(wanted)]
+    whole = decode_record(image, spec)
+    for name in wanted:
+        assert projected[name] == whole[name]
+
+
+def test_a_restricted_decode_of_no_field_reads_nothing() -> None:
+    """Require an empty request to yield an empty mapping rather than a whole record.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Assumptions): the empty request is asserted explicitly because the tempting
+    #   implementation -- treating an empty collection as "unrestricted", the way a falsy argument
+    #   often defaults -- would silently decode everything for the caller that asked for nothing,
+    #   which is the exact opposite of what a projection is for. `None` means unrestricted here and
+    #   an empty collection means empty.
+    spec = EXPORT_CUSTOMER_LAYOUT
+    image = bytes(_zeroed_branch_image(spec))
+
+    assert decode_record_fields(image, spec, ()) == {}
+
+
+def test_a_restricted_decode_refuses_a_field_the_layout_does_not_declare() -> None:
+    """Require an unknown requested name to be refused rather than quietly ignored.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Trade-offs): ignoring an unknown name would be the forgiving choice and is the wrong one.
+    #   A caller of this entry point is enumerating what may be decoded, so a misspelling would
+    #   narrow the result and produce a row missing a column -- which reads downstream as absent
+    #   data rather than as a mistake. The refusal names the offending field and nothing else.
+    spec = EXPORT_CUSTOMER_LAYOUT
+    image = bytes(_zeroed_branch_image(spec))
+
+    with pytest.raises(EbcdicFieldDecodeError) as refusal:
+        decode_record_fields(image, spec, ("NOT-A-FIELD",))
+    message = str(refusal.value)
+    assert "NOT-A-FIELD" in message
+    assert spec.name in message
+
+
+def test_an_export_payload_projection_decodes_only_the_named_payload_fields() -> None:
+    """Require the export entry point's projection to restrict the payload half alone.
+
+    Purpose
+    -------
+    Assert that the envelope is unaffected by a payload projection and that the payload holds
+    exactly the requested fields, which together are the property the export reader relies on to
+    keep the card verification value out of every decode.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Assumptions): the envelope is asserted UNCHANGED because it needs no projection: its only
+    #   sensitive content is the 460-byte payload area, which is declared opaque and comes back as
+    #   undecoded bytes. Restricting the envelope as well would have been symmetrical and pointless.
+    record = _first_export_record()
+    envelope_all, payload_all = decode_export_record(record)
+    wanted = [name for name in payload_all if not name.startswith("FILLER")][:2]
+
+    envelope_some, payload_some = decode_export_record(record, payload_fields=wanted)
+
+    assert envelope_some == envelope_all
+    assert list(payload_some) == wanted
+    for name in wanted:
+        assert payload_some[name] == payload_all[name]

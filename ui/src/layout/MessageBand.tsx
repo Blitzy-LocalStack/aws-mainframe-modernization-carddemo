@@ -1,5 +1,5 @@
 /**
- * The single message line of the CardDemo SPA.
+ * @file The single message line of the CardDemo SPA.
  *
  * Purpose
  * -------

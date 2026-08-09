@@ -1,5 +1,5 @@
 /**
- * Session state for the signed-on operator.
+ * @file Session state for the signed-on operator.
  *
  * WHY this replaces a COMMAREA field — Assumptions: the baseline carried the operator's identity and
  * type in `CDEMO-USER-ID` and `CDEMO-USER-TYPE` inside the structure the terminal echoed back

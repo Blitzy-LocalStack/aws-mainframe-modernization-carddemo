@@ -1,5 +1,6 @@
 package com.carddemo.reference.dto;
 
+import com.carddemo.common.web.CursorToken;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
@@ -164,8 +165,8 @@ public record TransactionCategoryListRequest(
         //   being bound instead of surviving as far as the point where the position is opened. The
         //   token is sealed to this collection, so one minted by the transaction-type browse is
         //   refused here rather than answered with a page from the wrong set.
-        @Size(max = 256)
-        @Pattern(regexp = "v1\\.[A-Za-z0-9_-]{1,200}\\.[A-Za-z0-9_-]{43}")
+        @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+        @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN)
         String cursor,
 
         // Alternatives Considered: an enumeration rather than a constrained string. A string would
@@ -179,8 +180,9 @@ public record TransactionCategoryListRequest(
         //   admitting two digits and nothing else, while the length bounds restate the minimum and
         //   maximum the contract declares so that this shape reads the way the document does. Neither
         //   asserts presence, so an omitted filter stays legal and browses across every type.
-        @Size(min = 2, max = 2)
-        @Pattern(regexp = "[0-9]{2}")
+        @Size(min = TransactionCategoryListRequest.TYPE_CODE_LENGTH,
+                max = TransactionCategoryListRequest.TYPE_CODE_LENGTH)
+        @Pattern(regexp = TransactionCategoryListRequest.TYPE_CODE_PATTERN)
         String typeCode,
 
         // Assumptions: a length bound and nothing further. No blankness test and no character rule is
@@ -189,6 +191,34 @@ public record TransactionCategoryListRequest(
         //   bound is the declared width of the description this filter is matched against,
         //   TRAN-CAT-TYPE-DESC PIC X(50) at app/cpy/CVTRA04Y.cpy line 8, so a longer value could not
         //   be contained by any stored description.
-        @Size(min = 1, max = 50)
+        @Size(min = TransactionCategoryListRequest.DESCRIPTION_MIN_LENGTH,
+                max = TransactionCategoryListRequest.DESCRIPTION_MAX_LENGTH)
         String description) {
+
+    /**
+     * The exact width of a type-code filter, two digits.
+     *
+     * <p>Refactoring Rationale: this constant and the three below are published so the browse route can
+     * hold its own parameters to the identical bounds. It has to: a record's constraints are evaluated
+     * when something VALIDATES the record, and the browse route constructs this shape by hand rather than
+     * binding it -- so nothing validated it and a malformed filter reached a repository predicate, which
+     * answered it with an empty page a caller could not distinguish from a legitimately empty result.
+     * Restating the bounds as a second set of literals on the handler was the alternative, and those
+     * could drift from these while still compiling.</p>
+     */
+    public static final int TYPE_CODE_LENGTH = 2;
+
+    /** The closed domain of a type-code filter, as a regular expression: two digits and nothing else. */
+    public static final String TYPE_CODE_PATTERN = "[0-9]{2}";
+
+    /** The shortest description filter that can match anything. */
+    public static final int DESCRIPTION_MIN_LENGTH = 1;
+
+    /**
+     * The declared width of the stored description this filter is matched against.
+     *
+     * <p>Assumptions: fifty is {@code TRAN-CAT-TYPE-DESC PIC X(50)} at {@code app/cpy/CVTRA04Y.cpy}
+     * line 8, so a longer value could not be contained by any stored description.</p>
+     */
+    public static final int DESCRIPTION_MAX_LENGTH = 50;
 }

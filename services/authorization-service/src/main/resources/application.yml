@@ -7,8 +7,21 @@
 #   shares: the HTTPS listener, the Aurora PostgreSQL datasource and its
 #   connection pool, Flyway schema migration and the identity that applies it,
 #   JPA behaviour, resource-server identity, the published API contract, the
-#   Actuator surface, log levels, and the queue, outbox, account-context and
-#   internal-identity settings this context alone carries.
+#   Actuator surface, log levels, and the queue, outbox, account-context,
+#   datasource-bound and internal-identity settings this context alone carries.
+#
+#   Refactoring Rationale: the operational BOUNDS -- the four carddemo.datasource
+#   timeouts, the two container drain budgets and the three queue-client bounds --
+#   are declared here even though every one of them carries a fallback in Java. A
+#   bound that exists only as an annotation default is a bound an operator cannot
+#   find: the deployed value is whatever the class says while this file, the one
+#   place a deployment is read from, says nothing, so the first person to look
+#   concludes the bounds are unset. Declaring them changes no behaviour, because
+#   the values here are those same fallbacks; what it changes is that they are now
+#   visible, overridable and documented beside their units.
+#   InjectedPropertyClosureTest derives the set from the two namespaces this
+#   service owns for its bounds rather than from a list, so a tenth bound added
+#   under either prefix fails until it is declared here too.
 #
 #   This file is the property-key contract for the module: the classes under
 #   com.carddemo.authorization.config and com.carddemo.authorization.service
@@ -196,30 +209,42 @@ spring:
     #       both populate. Restating the pattern per service is what let the two
     #       drift apart before this import existed.
     #       (2) Assumptions: this is the ONLY import in the base document, and the
-    #       Parameter Store overlay is declared per profile instead --
-    #       `optional:aws-parameterstore:/carddemo/<env>/authorization/` in
-    #       application-dev.yml and application-prod.yml -- because the parameter
-    #       path has to name the environment it reads, which a shared base document
-    #       cannot know. Terraform module outputs reach the running service through
-    #       that overlay and through environment variables the ECS task definition
-    #       sets from Parameter Store and from Secrets Manager container secrets;
-    #       nothing here holds a resolved endpoint.
-    #       Alternatives Considered: declaring the parameter-store import here
-    #       without the `optional:` prefix so a missing overlay failed loudly.
-    #       Rejected because the subtree is legitimately EMPTY in a deployment
-    #       that delivers every value as an environment variable, and a
-    #       non-optional import raises ConfigDataNotFoundException on a claimed
-    #       location that holds no resource -- so a correct deployment would fail
-    #       to start over the absence of values it was never relying on.
-    #       Refactoring Rationale: this note previously gave a different reason --
-    #       that the sibling POM declares no parameter-store starter, so no
-    #       resolver claims the prefix. That is no longer true and was the reason
-    #       the two profile overlays disagreed with each other: pom.xml declares
-    #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store, so a
-    #       resolver DOES claim the prefix and DOES have the SSM client it needs.
-    #       Both overlays now take that one path, and `optional:` is retained for
-    #       the reason stated above rather than for a classpath absence that no
-    #       longer exists.
+    #       shared defaults are the only location imported ANYWHERE in this module:
+    #       application-dev.yml and application-prod.yml each declare this same
+    #       document and nothing besides it. No document here claims an
+    #       `aws-parameterstore:` location. Every deployment value reaches the
+    #       running service as an environment variable the ECS task definition sets
+    #       from Parameter Store and from Secrets Manager container secrets, which is
+    #       what the datasource, issuer and queue placeholders below bind to; nothing
+    #       in this file holds a resolved endpoint. The measured reason the overlay is
+    #       declined is stated once, in the file header above, and is not restated
+    #       here.
+    #       Assumptions: that closure is asserted rather than merely intended --
+    #       config/ProfileConfigurationTopologyTest.noDocumentClaimsAParameterStoreLocation
+    #       reads all THREE documents and requires none of them to claim that prefix,
+    #       and eachOverlayImportsTheSharedDefaultsAlone requires each overlay's list to
+    #       be exactly the shared defaults, so a location added anywhere fails the build
+    #       instead of being discovered on the next deployment.
+    #       Refactoring Rationale: this note said the OPPOSITE until now. It claimed
+    #       the overlay "is declared per profile instead", named
+    #       `optional:aws-parameterstore:/carddemo/<env>/authorization/` as the value
+    #       in both overlays, and concluded that "both overlays now take that one
+    #       path". Neither profile has taken it since the withdrawal the header
+    #       records, so that sentence contradicted the header of this same file, and a
+    #       reader who reached this key first was told the module reads a subtree it
+    #       does not read. It is withdrawn here rather than deleted so that a reader
+    #       who saw it knows which of the two statements to trust.
+    #       Refactoring Rationale: the same note also carried a superseded third
+    #       reason -- that the sibling POM declares no parameter-store starter, so no
+    #       resolver claims the prefix. That premise was false when written and is
+    #       false now: pom.xml declares
+    #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store deliberately,
+    #       and its own comment there gives the reason -- the queue starter already
+    #       registers the resolver for that prefix module-wide, so the client is
+    #       declared to keep resolver and client PAIRED, which turns a future claim
+    #       into a legible region error instead of a NoClassDefFoundError raised
+    #       before logging is configured. The starter is therefore present BECAUSE
+    #       nothing imports the subtree, not as evidence that something does.
     import: "classpath:/carddemo-common-defaults.yml"
 
   lifecycle:
@@ -730,16 +755,17 @@ carddemo:
 
     # WHY : Refactoring Rationale: a `mask-hmac-key` setting stood here, delivered as
     #       CARDDEMO_MASK_HMAC_KEY and shared with the extract-transform-load image, and it
-    #       keyed a SECOND tokeniser bean for the queue identities that
-    #       carddemo.messaging.hmac-key below already keys. It is withdrawn, and the
-    #       withdrawal is the security-preserving direction rather than the tidy one: the
-    #       shared key is held by a one-off migration workload that reads cardholder
-    #       extracts, so keying production queue metadata with it would let that workload
-    #       compute the group identity of any card's messages, and would couple the
-    #       rotation of a migration secret to the ordering guarantee of a running queue.
-    #       The property the shared key was chosen for -- one value across every producer,
-    #       so equal cards land in equal groups -- is a property of carddemo.messaging.
-    #       hmac-key too, which both roots deliver as one secret to every task.
+    #       keyed a SECOND tokeniser bean of the same type as the one
+    #       carddemo.messaging.hmac-key below already keys. It is withdrawn for two
+    #       independent reasons, and the first alone is disqualifying: no deployment of THIS
+    #       context supplies the property, which both roots provision for the migration
+    #       workload alone, so the context could not start under its own declared
+    #       deployment. The second is that two unqualified beans of one type are the
+    #       condition under which a consumer silently binds the wrong key. Keying anything
+    #       here with the migration secret would also be the wrong direction on its own
+    #       merits: that key is held by a one-off workload that reads cardholder extracts,
+    #       so it would let that workload compute values a production consumer derives and
+    #       would couple the rotation of a migration secret to a running service.
 
     cognito:
       # WHY : Assumptions: these exist to be COMPARED, not to be chosen.
@@ -791,6 +817,47 @@ carddemo:
   #   of this file would otherwise see an undeclared property and add the placeholder that breaks it.
 
 
+  datasource:
+    # WHY : (1) Assumptions: these four bounds are DECLARED here rather than left to the
+    #       fallbacks in config/DataSourceConfig.java, and the difference matters
+    #       operationally rather than functionally. A bound that exists only as an
+    #       annotation default is a bound an operator cannot find: the deployed value is
+    #       whatever the code says, this document -- the one place a deployment is read
+    #       from -- says nothing, and the first person to look concludes the timeouts are
+    #       unset. The values below are the same fallbacks, so declaring them changes no
+    #       behaviour; what it changes is that they are now visible and overridable.
+    #       (2) Assumptions: the three server-side and socket bounds must ASCEND strictly
+    #       from lock through statement to read, and DataSourceConfig refuses to start
+    #       otherwise. The ordering is not a preference. With the lock bound the larger,
+    #       a merely contended row is cancelled by the statement bound instead, so an
+    #       operator reads "a statement took too long" for what is really two workers
+    #       wanting one authorization -- different problems with different remedies. With
+    #       the statement bound the larger, the client abandons the socket while the
+    #       server is still executing, so the query runs on holding its locks with nobody
+    #       waiting for the result.
+    #       (3) Trade-offs: the socket bound is thirty seconds, which is long for a keyed
+    #       read and is chosen for the outbox drain rather than for the online path. That
+    #       pass claims rows with a locking read and then sends, so it can legitimately
+    #       wait behind a decision in progress; a bound tight enough for a single-row read
+    #       would abandon the drain's connection during ordinary contention and leave
+    #       replies unpublished until the next pass.
+    #       (4) Assumptions: the connect bound is separate from the read bound and equal
+    #       to it here, because they fail differently. An exhausted connect bound means
+    #       the database is unreachable and the pool has nothing to reclaim; an exhausted
+    #       read bound means it answered and then stopped, which leaves a session to
+    #       cancel. Collapsing them into one value was the alternative and would have
+    #       removed that distinction from the failure an operator sees.
+    #       (5) Assumptions: config/SqsConfig.java READS read-timeout-ms as part of the
+    #       per-message budget it compares against the queue's visibility period, so
+    #       raising it here can fail startup with that comparison rather than here. That
+    #       coupling is deliberate: the sum of what one message's handling can spend is
+    #       what has to fit inside visibility, and no single property can be checked
+    #       against it alone.
+    connect-timeout-ms: 30000
+    read-timeout-ms: 30000
+    statement-timeout-ms: 15000
+    lock-timeout-ms: 5000
+
   messaging:
     # WHY : (1) Assumptions: the queue is named by an injected value rather than a
     #       literal, because one image runs against every environment's queues.
@@ -802,14 +869,23 @@ carddemo:
     #       constrained here by reply-queue-allowlist below rather than by one
     #       static destination key.
     #       (2) Assumptions: the queue is FIFO, and its message group is one group
-    #       PER CARD, carried as the keyed opaque derivation described under
-    #       hmac-key below and never as the card number itself. Requests for one
-    #       card therefore arrive in order while requests for different cards
-    #       arrive in parallel, which is what lets the consumer take a row lock on
-    #       one account's summary without serialising the whole service.
+    #       PER CARD, carried as the card number ITSELF -- specification section
+    #       0.4.1.8 freezes MessageGroupId = card_num and MessageDeduplicationId =
+    #       transaction_id, and both values have to be computed identically by every
+    #       producer on this queue and predictably by a requester that may resend,
+    #       which a value derived from this service's own secret is not. Requests
+    #       for one card therefore arrive in order while requests for different
+    #       cards arrive in parallel, which is what lets the consumer take a row
+    #       lock on one account's summary without serialising the whole service.
     #       Deduplication is by transaction identifier, so a redelivered put of the
     #       same transaction is accepted once within the queue's deduplication
     #       window regardless of whether its bytes are identical.
+    #       Trade-offs: those two identities are queue METADATA, so a card number
+    #       and a transaction identifier are visible to anything that can read the
+    #       queue's attributes. That exposure is registered as divergence
+    #       D-AUTHORIZATION-FIFO-IDENTITY-METADATA in docs/architecture/
+    #       cobol-to-service-traceability.md rather than removed, because removing
+    #       it removed the two guarantees the identities exist to provide.
     #       Alternatives Considered: a standard queue, which costs less per message
     #       and has no throughput ceiling per group. Rejected on two concrete
     #       consequences rather than on preference: it offers no ordering guarantee
@@ -854,10 +930,12 @@ carddemo:
     #       batch window without a rebuild.
     max-concurrent-messages: 10
 
-    # WHY : (1) Assumptions: this is the count of requests one processing window
-    #       handles before intake closes and reopens, and the value is the
-    #       baseline's DECLARED bound: 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP
-    #       VALUE 500 at COPAUA0C.cbl L40.
+    # WHY : (1) Assumptions: this is the baseline's DECLARED bound, verbatim: 05
+    #       WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500 at COPAUA0C.cbl L40.
+    #       It is the DECLARED limit and not the admission count -- the listener
+    #       admits this many plus one, for the reason in (2) -- so the value here
+    #       stays the number the reference program declares and the offset lives in
+    #       code beside the citation that explains it.
     #       (2) Assumptions: the baseline's own control flow admits 501, and the
     #       arithmetic is spelled out because 500 is the number a reader expects
     #       and the off-by-one is invisible without it. The counter is
@@ -866,20 +944,76 @@ carddemo:
     #       at L339, IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT. Counts 1
     #       through 500 all fail that test and read another request, so the loop
     #       ends only once the 501st has been handled.
-    #       (3) Trade-offs: the declared 500 is enforced here and the observed 501
-    #       is not reproduced, because the extra message is an artifact of the
-    #       order of increment and comparison rather than a rule any part of the
-    #       baseline states. That is a behavioural divergence and it is registered
-    #       as D-AUTH-REQUEST-WINDOW in
-    #       docs/architecture/cobol-to-service-traceability.md, with the same
-    #       entry in docs/adr/ADR-004-messaging.md and
-    #       docs/architecture/messaging-contracts.md, rather than being taken
-    #       silently. Alternatives Considered: configuring 501 here to match the
-    #       observed loop exactly. Rejected because it would contradict a
-    #       divergence already registered in three documents and asserted by
-    #       AuthorizationRequestListenerTest, so the register and the running
-    #       system would disagree about which number is enforced.
+    #       (3) Refactoring Rationale: an earlier revision enforced the declared 500
+    #       and registered the missing message as divergence D-AUTH-REQUEST-WINDOW.
+    #       That entry is WITHDRAWN and the observed 501 is now reproduced, by
+    #       service/AuthorizationRequestListener.java adding its published
+    #       BASELINE_COMPARISON_OFFSET to this value. The reasoning is that
+    #       functional parity with observable behaviour is a stated constraint of
+    #       this migration, the observable behaviour is 501 requests per run, and a
+    #       divergence registered against a difference that can simply be removed is
+    #       a difference that should have been removed. Alternatives Considered:
+    #       writing 501 here instead. Rejected because it would put a derived number
+    #       in the place a reader looks for the reference program's declared one, and
+    #       the derivation -- post-increment then strict comparison -- would then have
+    #       no home.
     request-process-limit: 500
+
+    # WHY : (1) Assumptions: these two bound how long a STOPPING container waits, and
+    #       they are declared here rather than left to the fallbacks in
+    #       config/SqsConfig.java for the reason the datasource block above gives: a
+    #       bound that exists only as an annotation default cannot be found by an
+    #       operator reading a deployment. The values are those same fallbacks, so
+    #       nothing changes but their visibility.
+    #       (2) Assumptions: a stopping container spends the two IN SEQUENCE -- it
+    #       waits for in-flight messages first and for outstanding acknowledgements
+    #       afterwards -- so their SUM is what must fit inside
+    #       spring.lifecycle.timeout-per-shutdown-phase above, and SqsConfig refuses
+    #       to start when it does not. Fifteen seconds against that phase's twenty
+    #       leaves five seconds of margin. Neither may be zero: a container that
+    #       waits no time abandons its in-flight messages, and the acknowledgements
+    #       it never sends make the queue redeliver work that had already completed.
+    #       (3) Trade-offs: ten seconds for the drain rather than longer. One message
+    #       costs at most the account-context and datasource bounds declared in this
+    #       file, so a longer drain would mostly delay every deployment; a shorter one
+    #       would abandon a decision already committed but not yet acknowledged, which
+    #       the queue would then redeliver and the transaction-identifier check would
+    #       answer from the recorded row -- correct, but a redelivery an operator has
+    #       to explain.
+    listener-shutdown-timeout-seconds: 10
+    acknowledgement-shutdown-timeout-seconds: 5
+
+    # WHY : (1) Assumptions: these three are read TOGETHER by config/SqsConfig.java and
+    #       are meaningless apart. The first two bound the queue client's own calls --
+    #       the whole call including retries, and one network attempt within it -- and
+    #       the third is the period the queue keeps a received message invisible to
+    #       other consumers. common-lib's QueueClientBudget requires the whole-call
+    #       bound to be STRICTLY shorter than that period, and requires the summed
+    #       worst case of one message's handling to be shorter still.
+    #       (2) Assumptions: the software development kit's default for both client
+    #       bounds is NO bound, which is why they are set at all. A stalled publish
+    #       inside a handler is not merely slow: the handler outlives visibility, the
+    #       queue makes the request visible again, a second consumer takes it, and two
+    #       handlers decide one authorization. Nothing in a log distinguishes that from
+    #       ordinary redelivery.
+    #       (3) Assumptions: visibility-timeout-seconds is a PROPERTY here rather than
+    #       a value read from the queue, and sixty is what infra/modules/sqs provisions
+    #       through its own visibility_timeout_seconds default. Reading it from the
+    #       queue at startup was the alternative and is rejected twice over: context
+    #       refresh would then require a reachable queue, and the check would silently
+    #       pass in every test and local run where no queue exists. The consequence is
+    #       that lowering the queue's period in Terraform without lowering it here
+    #       leaves the check comparing against a number the queue no longer uses --
+    #       which is why both defaults are the same value and why this comment names
+    #       the module.
+    #       (4) Assumptions: this property does NOT set the queue's visibility period.
+    #       Nothing in this service can: the period is a queue attribute owned by the
+    #       infrastructure module. The value here is the figure the startup comparison
+    #       is made against, and stating that plainly is the point -- a reader who took
+    #       it for the setting would tune it expecting the queue to follow.
+    api-call-timeout-ms: 10000
+    api-call-attempt-timeout-ms: 5000
+    visibility-timeout-seconds: 60
 
     # WHY : (1) Assumptions: no per-message expiry setting appears here, and its
     #       absence is a transport fact rather than an omission. The baseline sets
@@ -933,13 +1067,49 @@ carddemo:
     #       NOTHING after a crash between commit and trigger -- which is the exact
     #       window the outbox exists to close -- so the poll covers both cases with
     #       one mechanism and bounds the added latency at this interval.
-    #       (2) Trade-offs: twenty-five rows per pass. The whole pass runs in one
-    #       transaction holding row locks, so a larger batch holds more locks for
-    #       longer while a smaller one wastes a round trip per row; twenty-five
-    #       drains a normal backlog in one pass without holding locks across a
-    #       noticeable interval.
+    #       (2) Trade-offs: twenty-five ORDERING GROUPS per pass, which is what this
+    #       number bounds -- one head row is claimed per group. Refactoring
+    #       Rationale: this comment previously described it as rows per pass and
+    #       said the whole pass ran in one transaction holding row locks. Neither
+    #       is true now and neither should have been relied on: the batch size
+    #       never bounded rows, because each group's follow-on loop drained that
+    #       group until it ran dry, so one card with a backlog gave the pass no
+    #       upper bound at all -- which is what outbox-max-rows-per-drain below
+    #       now supplies. The pass is also no longer one transaction: the claim,
+    #       each outcome and each retention chunk are separate short transactions,
+    #       so no database connection or row lock is held across a queue send.
     outbox-poll-interval-ms: 1000
     outbox-batch-size: 25
+
+    # WHY : (1) Assumptions: five hundred rows is the CEILING ON A WHOLE PASS,
+    #       across every group it opens, and the figure comes from the reference
+    #       consumer rather than from preference -- app/app-authorization-ims-db2-mq
+    #       /cbl/COPAUA0C.cbl bounds one invocation at five hundred messages, so the
+    #       migrated publisher inherits the limit instead of inventing one.
+    #       (2) Assumptions: the per-GROUP share is derived from this number divided
+    #       by the batch size above -- twenty rows per group at these values -- and
+    #       is deliberately not a separate property. A separate one could be set
+    #       larger than this ceiling, at which point one hot group consumes the pass
+    #       and the fairness the division exists to provide silently disappears.
+    #       (3) Trade-offs: a group that reaches its share yields with rows still
+    #       pending and the next pass resumes it from the same head, so a hot card
+    #       pays some latency and every other claimed group stops waiting behind it.
+    outbox-max-rows-per-drain: 500
+
+    # WHY : (1) Assumptions: this is the TERMINAL policy. A reply that has been
+    #       attempted this many times is abandoned -- recorded as given up on, with
+    #       its diagnostic, and never attempted again. Refactoring Rationale: there
+    #       was no such ceiling, so a reply whose queue was permanently unreachable
+    #       (deleted, or its permission revoked) was retried forever and held its
+    #       ordering group's head position forever, blocking every later reply for
+    #       that card with no bound and no operator signal.
+    #       (2) Trade-offs: abandoning gives up on an answer the committed decision
+    #       says was owed, so the row is RETAINED with its payload and reason rather
+    #       than deleted, is excluded from the retention sweep, and is logged at
+    #       error -- an operator removes it once they have read it. Ten attempts
+    #       against the publisher's doubling backoff spans well over an hour, so a
+    #       transient outage is never abandoned.
+    outbox-max-attempts: 10
 
     # WHY : (1) Assumptions: a PUBLISHED reply is kept for a bounded window and then
     #       deleted by OutboxPublisher.purgePublished, and a PENDING one is never
@@ -954,6 +1124,14 @@ carddemo:
     #       (3) Trade-offs: the sweep runs hourly rather than on the drain interval,
     #       because retention is measured in days and a per-second pass would issue a
     #       delete that matched nothing.
+    #       (4) Refactoring Rationale: the sweep now deletes ORDERED, BOUNDED CHUNKS
+    #       in separate short transactions and stops when a chunk comes back short,
+    #       and a partial index over the published side was added to serve it. It
+    #       previously deleted every row matching the cut-off in one statement, which
+    #       is unbounded by construction -- the published side is the part of this
+    #       table that grows without limit -- and did so by sequentially scanning the
+    #       whole table, because the two existing partial indexes carry WHERE
+    #       published_at IS NULL and so exclude exactly the rows the sweep wants.
     outbox-retention-days: 7
     outbox-retention-sweep-interval-ms: 3600000
 
@@ -976,40 +1154,75 @@ carddemo:
     #       unanswered.
     reply-queue-allowlist: ${CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST}
 
-    # WHY : (1) Assumptions: this is the key the queue GROUP identity and the
-    #       queue CORRELATION identity are derived under, and it carries no
-    #       default at all. A group identifier is message metadata: it sits
-    #       outside the encrypted body, it is reported in queue telemetry, and it
-    #       reaches every log and metric that observes the queue. The only
-    #       per-card stable value otherwise available is the card number, so
-    #       without this key the derivation collapses back to publishing a primary
-    #       account number on every message -- which is why an unset value stops
-    #       startup instead of falling back.
+    # WHY : (1) Assumptions: this keys the ONE tokeniser this context holds, and it
+    #       carries no default at all. Refactoring Rationale: it keyed the queue
+    #       GROUP and DEDUPLICATION identities, and no longer does. Specification
+    #       sections 0.4.1.8 and 0.7.6 freeze those as literal values --
+    #       MessageGroupId = card_num and MessageDeduplicationId = transaction_id --
+    #       because both have to be computed identically by every producer on the
+    #       queue and predictably by the requester that may resend, and a value
+    #       keyed from this service's own secret is neither. What the key still
+    #       covers is the identities this context derives for itself rather than
+    #       ones a producer contract fixes: the business correlation token the
+    #       mapper can compute and the redacted diagnostic digest it renders.
     #       (2) Alternatives Considered: an unkeyed digest, or a keyed digest with
-    #       a published salt. Both rejected for one reason: the protected value is
-    #       a sixteen-digit number with a check digit, so the candidate space is
+    #       a published salt. Both rejected for one reason: the protected values are
+    #       short and structured -- a sixteen-digit number with a check digit, an
+    #       acquirer identifier of fifteen characters -- so the candidate space is
     #       small enough to enumerate, and anyone holding a token could confirm
-    #       which card produced it. Only a secret key makes the token
+    #       which input produced it. Only a secret key makes the token
     #       unconfirmable, which is what makes it worth publishing at all.
-    #       (3) Assumptions: the SAME key is shared with every other producer on
-    #       this queue and is NOT per instance. That sharing is the ordering
-    #       guarantee: the group identity has to be equal for equal cards across
-    #       producers and across restarts, and a per-instance key would scatter one
-    #       card's messages across as many groups as there are running tasks,
-    #       removing the per-card ordering silently.
+    #       (3) Assumptions: the key is NOT per instance. Every identity worth
+    #       deriving from it has to be stable across restarts and across instances
+    #       to be worth anything -- a correlation token that changed per instance
+    #       would not join two log lines about one authorization -- so a per-instance
+    #       key would silently produce values that look right and correlate nothing.
     #       (4) Assumptions: this is a DIFFERENT secret from the extract-transform-
     #       load masking key CARDDEMO_MASK_HMAC_KEY. The two have different
     #       holders and different trust purposes -- that one is held by a one-off
     #       migration workload reading cardholder extracts, this one by a
     #       long-running consumer -- so sharing a single value would let the
-    #       migration workload compute production queue group identities and would
-    #       make rotating either one require stopping both.
+    #       migration workload compute values a production consumer derives and
+    #       would make rotating either one require stopping both.
     #       (5) Assumptions: the value arrives as a container secret from the
     #       deployment's secret store, in base64 or as raw text, and it is never a
     #       literal in this file or in any tfvars file. config/
     #       MessagingIdentityConfig.java detects the form and refuses anything
     #       shorter than the tokeniser's minimum key length.
     hmac-key: ${CARDDEMO_MESSAGING_HMAC_KEY}
+
+  extract:
+    # WHY : (1) Purpose: the maintenance loader reads an unload of the hierarchical
+    #       database as two fixed-width files -- the root file at a stride of 100
+    #       bytes and the prefixed child file at 206 -- and this is the largest
+    #       number of records it will accept from either one. Unit: records, per
+    #       file, not bytes and not the two files together.
+    #       (2) Refactoring Rationale: the read previously had NO ceiling of any
+    #       kind and drained the whole stream into one array, with a rationale
+    #       claiming the cost was bounded by the transaction that holds the loaded
+    #       entities. That was false in two ways: the bytes are read before any
+    #       entity exists, and the two costs are additive rather than alternative.
+    #       A stream that is not an extract at all -- an object-storage key pointing
+    #       at the wrong file -- was therefore read until the heap ended, reporting
+    #       an allocation failure naming a byte count rather than a refusal naming
+    #       the file.
+    #       (3) Assumptions: two hundred thousand is a deliberate over-estimate of a
+    #       real unload rather than a capacity plan. The extract is one file pair per
+    #       unload of one database, so a genuine file is far below this; the ceiling
+    #       exists to bound a MISTAKE. At the child stride of 206 bytes it bounds the
+    #       read at roughly forty megabytes, which the container holds while leaving
+    #       the load's own transaction its room.
+    #       (4) Trade-offs: raising this raises the memory one load may hold, because
+    #       every record of a file is resolved before any record is decoded -- which
+    #       is itself deliberate, so that a stride mismatch between the two files is
+    #       reported as a mismatch instead of as a malformed money field in the
+    #       middle of the first record read against the wrong layout. Lowering it
+    #       below a real extract's size refuses that extract outright; the refusal
+    #       names this property so an operator knows what to raise.
+    #       (5) Assumptions: the loader refuses a non-positive value when it is
+    #       BUILT, so a container configured with zero fails at startup rather than
+    #       on its first load.
+    max-records: 200000
 
   account-context:
     # WHY : (1) Assumptions: this context decides an authorization against records
@@ -1020,14 +1233,6 @@ carddemo:
     #       The address arrives from a Terraform output, so it carries no default: a
     #       default would let this service start against a plausible-looking wrong
     #       address and decline every authorization with the not-found reason.
-    #       (2) Trade-offs: the two timeouts are short and deliberately so. Both
-    #       calls run inside the deciding transaction, which is holding a row lock
-    #       on the account's summary by the time the second is made, so an unbounded
-    #       read would hold a lock and a pooled connection for as long as the
-    #       dependency stayed silent. Three seconds is well beyond the in-network
-    #       latency of a keyed read and well inside the queue's own visibility
-    #       timeout, so a stalled dependency surfaces as a redelivered message
-    #       rather than as an exhausted connection pool.
     base-url: ${CARDDEMO_ACCOUNT_CONTEXT_BASE_URL}
 
     # WHY : (1) Assumptions: this is the EXACT origin the base address above is
@@ -1090,17 +1295,25 @@ carddemo:
     #       (3) Assumptions: it is a DIFFERENT secret from
     #       carddemo.messaging.hmac-key above, and the separation is deliberate
     #       rather than incidental. That key derives opaque queue-metadata tokens
-    #       and is held by this service alone; this one is a signing key shared with
-    #       exactly one other service. Sharing a single value would mean rotating
-    #       the account context's trust anchor and this service's queue grouping
-    #       together, and would let a holder of either capability exercise the
-    #       other.
+    #       and is held by this service alone; this one is a signing key held by this
+    #       service and by the account context that verifies it. Sharing a single
+    #       value would mean rotating the account context's trust anchor and this
+    #       service's queue grouping together, and would let a holder of either
+    #       capability exercise the other.
+    #       (3a) Refactoring Rationale: this key is now THIS SERVICE'S OWN and is not
+    #       shared with the transaction context, which holds a second key of its own.
+    #       While one key was shared, either signer could mint a token carrying the
+    #       other's subject, and the account context could not tell -- so its audit
+    #       record named a caller it had no way to verify. The account context now
+    #       selects the verification key by the subject the token names, so a token
+    #       minted with this key under another service's name fails its signature
+    #       check.
     #       (4) Assumptions: the value arrives as a container secret from the
     #       deployment's secret store, in base64 or as raw text.
     #       common-lib InternalServiceToken refuses anything shorter than the digest
     #       width at construction, so a short value fails startup rather than
     #       weakening the credential silently.
-    signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+    authorization-signing-key: ${CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY}
 
     # WHY : (1) Assumptions: the lifetime is expressed in seconds and defaults to
     #       sixty. A token is minted fresh for every request and is used within

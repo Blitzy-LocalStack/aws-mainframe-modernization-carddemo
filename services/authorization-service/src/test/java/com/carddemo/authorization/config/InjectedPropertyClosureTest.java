@@ -78,6 +78,34 @@ class InjectedPropertyClosureTest {
     private static final String WITHDRAWN_KEY = "carddemo.security.mask-hmac-key";
 
     /**
+     * The namespaces holding this service's own operational bounds, which must be declared even when
+     * they carry a default.
+     *
+     * <p>Assumptions: these three prefixes and no others. {@code carddemo.security.} and
+     * {@code carddemo.internal-identity.} hold key material and identity settings whose values are not an
+     * operator's to tune, and {@code carddemo.account-context.} is already declared in full -- so widening
+     * this to every {@code carddemo.} key would police settings that are correctly code-owned and would
+     * turn the assertion into a rule about the prefix rather than about tunability.</p>
+     *
+     * <p>Refactoring Rationale: {@code carddemo.extract.} joined the list with the loader's record ceiling.
+     * That bound is exactly the kind this guard exists for -- a memory bound with a default, which an
+     * operator has to be able to see before they can raise it for a genuinely larger unload -- and adding
+     * the prefix here is what makes the guard notice the next bound added beside it.</p>
+     */
+    private static final List<String> OPERATIONAL_BOUND_PREFIXES =
+            List.of("carddemo.datasource.", "carddemo.extract.", "carddemo.messaging.");
+
+    /**
+     * How many distinct operational bounds the filter is expected to find at minimum.
+     *
+     * <p>Assumptions: this is a FLOOR rather than an exact count, so adding a bound does not fail the guard
+     * while removing the filter's reach does. Nine were the set the review found undeclared -- four
+     * datasource bounds, two drain budgets and three queue-client bounds -- and the tenth is the loader's
+     * record ceiling, declared with the read that it bounds.</p>
+     */
+    private static final int EXPECTED_OPERATIONAL_BOUNDS = 10;
+
+    /**
      * Matches one placeholder and captures its property name, stopping before any default part.
      *
      * <p>Assumptions: the name group excludes both the closing brace and the colon that introduces a
@@ -251,21 +279,90 @@ class InjectedPropertyClosureTest {
     }
 
     /**
+     * Verifies every operational bound this service injects is declared, defaulted or not.
+     *
+     * <p>Purpose: the closure above deliberately excludes a defaulted placeholder, because a default IS the
+     * statement that the property need not exist. That reasoning holds for a property whose value is a
+     * decision of the code, and it fails for a property whose value an operator has to be able to see and
+     * change -- a timeout, a drain budget, a visibility period. Such a bound existing only as an annotation
+     * default is a bound nobody can find: the deployed value is whatever the class says, the document a
+     * deployment is read from says nothing, and the first person to look concludes the bounds are unset.</p>
+     *
+     * <p>Assumptions: the set policed here is DERIVED from the three namespaces this service owns for its
+     * own operational bounds -- {@code carddemo.datasource.}, {@code carddemo.extract.} and
+     * {@code carddemo.messaging.} -- rather than written out as a list. A hand-written list would pass
+     * unchanged the day a further bound was added under any of them, which is the exact way the nine that
+     * prompted this arrived undeclared.</p>
+     *
+     * <p>Assumptions: an intermediate node counts as declared, because {@code declaredProperties} records
+     * nodes as well as leaves and a bound could legitimately be bound as structured content. The condition
+     * being tested is visibility in the document, not scalar-ness.</p>
+     *
+     * @throws IOException if the packaged configuration cannot be read
+     */
+    @Test
+    @DisplayName("every operational bound is declared in the packaged configuration, default or not")
+    void everyOperationalBoundIsDeclared() throws IOException {
+        Set<String> declared = declaredProperties();
+
+        Map<String, String> undeclared = new TreeMap<>();
+        for (InjectedProperty injected : injectedProperties()) {
+            boolean operational = OPERATIONAL_BOUND_PREFIXES.stream()
+                    .anyMatch(prefix -> injected.key().startsWith(prefix));
+            if (operational && !declared.contains(injected.key())) {
+                undeclared.put(injected.key(), injected.site());
+            }
+        }
+
+        assertThat(undeclared)
+                .as("an operational bound that exists only as an annotation default is invisible to the "
+                        + "operator who has to tune it, so each of these must appear in %s with its unit "
+                        + "and its reason; each entry maps the property to the injection site that names it",
+                        BASE_CONFIGURATION)
+                .isEmpty();
+    }
+
+    /**
+     * Verifies the derived set is non-empty, so the assertion above cannot pass on nothing.
+     *
+     * <p>Assumptions: this guard is separate from {@link #theScanFindsTheInjectedProperties()} because that
+     * one proves the scan works at all while this one proves the PREFIX filter still selects something. A
+     * namespace rename would leave the scan healthy and the filter matching nothing, and the assertion
+     * above would then be green while policing an empty set.</p>
+     */
+    @Test
+    @DisplayName("the operational-bound filter selects the bounds it is meant to police")
+    void theOperationalBoundFilterSelectsSomething() {
+        List<String> selected = injectedProperties().stream()
+                .map(InjectedProperty::key)
+                .filter(key -> OPERATIONAL_BOUND_PREFIXES.stream().anyMatch(key::startsWith))
+                .distinct()
+                .toList();
+
+        assertThat(selected)
+                .as("the two operational namespaces this service owns must both be represented")
+                .contains("carddemo.datasource.read-timeout-ms",
+                        "carddemo.extract.max-records",
+                        "carddemo.messaging.visibility-timeout-seconds")
+                .hasSizeGreaterThanOrEqualTo(EXPECTED_OPERATIONAL_BOUNDS);
+    }
+
+    /**
      * Verifies the withdrawn masking key is injected nowhere, by name.
      *
      * <p>Assumptions: this is asserted in addition to the closure above rather than instead of it. The
      * closure would catch the key's return only while it stayed absent from the YAML; naming it here also
      * refuses the other repair someone might reach for, which is to re-declare the property. That repair
      * would restart the service and reintroduce the reason it was withdrawn -- the key belongs to a
-     * migration workload that reads cardholder extracts, so keying production queue metadata with it would
-     * let that workload compute any card's group identity.</p>
+     * migration workload that reads cardholder extracts, so keying anything this service derives with it
+     * would let that workload compute values a production consumer derives.</p>
      */
     @Test
     @DisplayName("the withdrawn masking key is injected nowhere in this service")
     void theWithdrawnMaskingKeyIsInjectedNowhere() {
         assertThat(injectedProperties()).extracting(InjectedProperty::key)
-                .as("%s is withdrawn; queue identities are keyed from carddemo.messaging.hmac-key",
-                        WITHDRAWN_KEY)
+                .as("%s is withdrawn; this context's derived identities are keyed from"
+                        + " carddemo.messaging.hmac-key", WITHDRAWN_KEY)
                 .doesNotContain(WITHDRAWN_KEY);
     }
 
@@ -324,8 +421,8 @@ class InjectedPropertyClosureTest {
      * Verifies the tokeniser configuration refuses to start with no key rather than defaulting one.
      *
      * <p>Assumptions: failing start-up is the required behaviour and not merely the observed one. A default
-     * would key every environment's queue identities from a value computable out of the source tree, which
-     * is the same disclosure the tokeniser exists to prevent, and it would do so silently.</p>
+     * would key every environment's derived identities from a value computable out of the source tree, so a
+     * value that looks opaque would reverse by enumeration, and it would do so silently.</p>
      */
     @Test
     @DisplayName("the tokeniser configuration refuses to start with no key rather than defaulting one")

@@ -1,5 +1,5 @@
 /**
- * The measured BMS-to-Ant-Design token bridge: the single place a CardDemo design
+ * @file The measured BMS-to-Ant-Design token bridge: the single place a CardDemo design
  * value is written down.
  *
  * Purpose

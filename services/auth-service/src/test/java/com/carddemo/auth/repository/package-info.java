@@ -1,5 +1,6 @@
 /**
- * JPA keyed operations plus exactly two keyset browse queries. No offset paging.
+ * JPA keyed operations, two POSITIONED keyset browse queries plus the unpositioned opening read, and
+ * the identity-synchronisation ledger's own constraints. No offset paging.
  *
  * <h2>The data contract this package is built on</h2>
  *
@@ -44,6 +45,14 @@
  * queries. The browse open and the browse close have no target counterpart because a query carries
  * its cursor position in its own predicate instead of in a server-side handle, so there is no handle
  * to open or to release.</p>
+ *
+ * <p>Refactoring Rationale: a THIRD query joined the contract after this section was written, and it is
+ * recorded here rather than left to contradict the two the paragraph above counts. Both positioned queries
+ * take a key and the first page has none, so opening the browse was expressible only by passing a value
+ * chosen to sort below every stored key -- which leans on a collation detail to mean "before every key" and
+ * would silently omit a row whose identifier were blank. The opening read has no reference VERB counterpart,
+ * because the baseline establishes its browse position before its first read rather than passing a key it
+ * was given, so the count of POSITIONED queries is still two and the count of queries is three.</p>
  *
  * <p>An ordinal offset is deliberately not part of the contract. An offset recomputed against a
  * table that another transaction has inserted into or deleted from skips and repeats rows, whereas a
@@ -112,6 +121,23 @@
  * direction, loading flat fixtures into real indexed files before a program runs instead of
  * asserting against an in-process stand-in, so this choice follows the house precedent rather than
  * departing from it.</p>
+ *
+ * <h2>The second table this package asserts</h2>
+ *
+ * <p>{@code auth.identity_sync_task}, created by {@code V2__auth_identity_sync.sql}, derives from NO
+ * baseline record at all, and the reason it exists is the reason it is asserted here. The baseline keeps its
+ * users in one file, so a user change there is a single write that cannot be half done; the migrated context
+ * writes to {@code auth.users} AND to a managed identity provider that is not a transaction participant, so
+ * a change that must reach both cannot be made atomic. This table is the durable record of what the provider
+ * still owes, committed in the same transaction as the row it describes.</p>
+ *
+ * <p>Assumptions: two properties of it are only assertable against a real engine, which is why they belong
+ * in this package rather than in a substituted unit test. Its {@code CHECK} constraints must refuse an
+ * operation or a status outside the sets the applier implements, because a row carrying a fourth value would
+ * make the applier's programming-error branch reachable from DATA. And it must carry NO foreign key to
+ * {@code auth.users}: a withdrawal intention is recorded in the same transaction that deletes the row it
+ * names, so a reference would make that insert impossible, and under a cascade would delete the intention
+ * along with the row -- the exact loss the table exists to prevent.</p>
  *
  * <h2>What this package may hold</h2>
  *

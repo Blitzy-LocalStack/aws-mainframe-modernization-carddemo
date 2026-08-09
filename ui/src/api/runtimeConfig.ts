@@ -1,5 +1,5 @@
 /**
- * Runtime configuration for the single-page application.
+ * @file Runtime configuration for the single-page application.
  *
  * WHY this module exists at all — Refactoring Rationale: the API base URL used to be read only
  * from `import.meta.env.VITE_API_BASE_URL`, which Vite inlines at **build** time. The deployment

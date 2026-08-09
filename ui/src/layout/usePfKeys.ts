@@ -1,5 +1,5 @@
 /**
- * Centralizes CICS attention-identifier (AID) keyboard semantics for the React
+ * @file Centralizes CICS attention-identifier (AID) keyboard semantics for the React
  * layout layer.
  *
  * The mappings port `YYYY-STORE-PFKEY` from `app/cpy/CSSTRPFY.cpy:L21-L78`,

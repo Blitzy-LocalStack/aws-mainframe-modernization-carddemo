@@ -457,6 +457,19 @@ class AuthorizationMessageMapperTest {
      * fifty tenths of a second the reference descriptor sets at {@code cbl/COPAUA0C.cbl} L750 read
      * through the mapper's own conversion rather than restated here as a literal five.</p>
      *
+     * <p>Assumptions: the two first-in-first-out identities are asserted as the LITERAL card number and
+     * the LITERAL transaction identifier, which is what the specification freezes at &sect;0.4.1.8 --
+     * {@code MessageGroupId = card_num} and {@code MessageDeduplicationId = transaction_id}. They are
+     * compared against the reply's own accessors rather than against restated string literals, so a
+     * fixture edit cannot make the assertion pass against a different card.</p>
+     *
+     * <p>Refactoring Rationale: this case previously asserted the identities equalled a keyed token of
+     * the card and of the card-plus-transaction pair. That made the identity a value only this producer
+     * could compute, and the identity is not a local concern: grouping orders one card's messages ACROSS
+     * every producer on the queue, and duplicate suppression compares a value the requester may resend.
+     * A keyed derivation silently stopped both working for any other producer, so the assertion has been
+     * moved onto the frozen values.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -469,14 +482,14 @@ class AuthorizationMessageMapperTest {
                 new AuthorizationMessageMapper.ReplyRouting(REPLY_QUEUE_URL, "corr-1",
                         AuthorizationMessageMapper.replyExpiresAt(sentAt));
 
-        OutboxMessage publication = mapper.toOutboxMessage(reply, routing, TOKENISER);
+        OutboxMessage publication = mapper.toOutboxMessage(reply, routing);
 
         assertEquals(REPLY_QUEUE_URL, publication.replyQueueUrl());
         assertEquals("corr-1", publication.correlationId());
         assertEquals(CsvAuthCodec.encodeReply(reply), publication.payload());
         assertEquals(sentAt.plusSeconds(5), publication.expiresAt());
-        assertEquals(reply.orderGroup(TOKENISER), publication.orderGroupToken());
-        assertEquals(reply.deduplicationKey(TOKENISER), publication.deduplicationToken());
+        assertEquals(reply.cardNum(), publication.orderGroupId());
+        assertEquals(reply.transactionId(), publication.deduplicationId());
     }
 
     /**

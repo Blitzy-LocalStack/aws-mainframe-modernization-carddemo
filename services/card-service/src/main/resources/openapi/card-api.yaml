@@ -510,8 +510,13 @@ paths:
   #       rule rather than an accident: an HTTP API route with a literal segment is
   #       selected ahead of one with a path variable, Spring MVC likewise prefers an
   #       exact pattern to a templated one, and a selector cannot spell the literal
-  #       in any case because a sealed selector begins with the version marker "v1."
-  #       and is at least fifty characters. The alternative was a second top-level
+  #       in any case because a sealed selector is base64url of a nonce, a
+  #       ciphertext and a tag and is therefore at least fifty characters, where the
+  #       literal is six. An earlier revision of this comment justified the same
+  #       conclusion by claiming a selector "begins with the version marker v1.",
+  #       which was false -- SealedSelector emits no version marker and no full stop
+  #       at all, its shape being [A-Za-z0-9_-]+ -- so the reason is restated from
+  #       the property that actually holds, its minimum length. The alternative was a second top-level
   #       segment such as /api/v1/card-lookup, which needs a new route key at the
   #       gateway and a new rule at the load balancer; the overlap costs neither.
   /api/v1/cards/lookup:
@@ -704,6 +709,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   # WHY : Alternatives Considered: the unmasked reading is a separate path
   #       rather than the masked path plus a query flag or a request header
@@ -1048,8 +1055,9 @@ components:
         handler runs and before the value reaches a log - for a card-number or
         account filter of the wrong width or carrying a non-digit, an all-zero
         account filter, a cursor that is unreadable, was not issued for this
-        query or was sealed for the other direction, a direction whose cursor is
-        missing, a correlation identity longer than the published bound or
+        query, was issued to a different caller, was issued under a different
+        account filter or was sealed for the other direction, a direction whose
+        cursor is missing, a correlation identity longer than the published bound or
         carrying a character outside the published set, a request body that is
         absent, a body that would change nothing, or a body failing field
         validation. The fieldErrors array names each offending field; the message
@@ -1129,6 +1137,37 @@ components:
         independently of this outcome, and this response deliberately does not
         say which, so that an unauthorised caller cannot use the choice
         between 403 and 404 to discover whether a selector stands for a row.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    ServiceUnavailable:
+      description: >-
+        The operation was refused because the environment is not currently
+        accepting mutating work. The nightly batch chain owns the data for the
+        duration of its window, and NOTHING WAS APPLIED -- the refusal is issued
+        before the handler runs, so no part of the request took effect. A caller
+        that repeats the same request unchanged once the window reopens succeeds.
+
+
+        This is the target equivalent of the reference quiesce. app/jcl/CLOSEFIL.jcl
+        lines 26 to 30 closed five VSAM files to the CICS region for the duration of
+        the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
+        in between received a file-status error and abended. The migrated bracket
+        deliberately closes WRITES only, so every read this service publishes keeps
+        answering while the window is closed.
+
+
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one a
+        client acts on. The request is well formed and its caller is entitled to make
+        it; only the window in which it may be applied is absent. No Retry-After is
+        sent, because the window is reopened by a state machine whose remaining work
+        this service cannot see, so any value would be a guess a client would then
+        schedule against.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -1369,6 +1408,20 @@ components:
         #       refused with 400. This is what makes a single cursor parameter as safe
         #       as two named ones while removing the both-supplied and
         #       mismatched-pair cases the two-parameter form had to define errors for.
+        # WHY : Refactoring Rationale: the AUTHENTICATED CALLER is named in that seal
+        #       as well, and it is documented here because a caller can observe it --
+        #       handing a cursor to a colleague earns a 400 rather than a page. It is
+        #       recorded as a correction rather than as news: the sentence above
+        #       promised the direction binding while the service composed its binding
+        #       from the query name alone, so a cursor was in fact redeemable by any
+        #       authorized caller and in either direction. Both bindings now exist, so
+        #       both sentences are true of the running service.
+        # WHY : Assumptions: the caller's name reaches the service from the validated
+        #       token through the security context and appears in NO part of this
+        #       operation's request -- no body member, no query parameter, no path
+        #       segment, no header. That is why binding to it adds nothing to this
+        #       document's schemas: there is nothing for a caller to send, and nothing
+        #       a caller could send instead of what it holds.
         # WHY : Alternatives Considered: positioning a page by a row ordinal -
         #       counting rows from the start of the ordered set and asking for the
         #       rows after the nth - was evaluated and rejected on a specific defect
@@ -1431,8 +1484,12 @@ components:
             response to advance past it, or the firstKey member to retreat from
             it, and state the matching direction. Omit it, and the direction, to
             obtain the opening page. The value is opaque and must be echoed exactly
-            as received; it is not a card number and cannot be constructed by a
-            client. The two members it is copied from carry across
+            as received; it is not a card number, it reveals no part of one, and it
+            cannot be constructed by a client. It is also not transferable: a cursor
+            is sealed against the caller it was issued to, the account filter it was
+            issued under and the direction it was issued for, so presenting one from
+            another caller, another filter or the other direction is a 400 rather
+            than a page. The two members it is copied from carry across
             WS-CA-LAST-CARDKEY at app/cbl/COCRDLIC.cbl:230-232 and
             WS-CA-FIRST-CARDKEY at :233-235, the latter being what the baseline
             moves into its browse positioning field at :1268.
@@ -1557,12 +1614,21 @@ components:
     #       shared token look like three different types.
     # WHY : Assumptions: the three constants below are read from
     #       services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java
-    #       and not chosen here - the version prefix at :81, the maximum length
-    #       of 256 at :92 and the accepted shape as a compiled pattern at
-    #       :121-122. The pattern admits a version prefix, a base64url payload of
-    #       up to two hundred characters and a base64url authentication code of
-    #       exactly forty-three, separated by full stops; the fixed forty-three
-    #       is the unpadded base64url rendering of a thirty-two-byte code.
+    #       and not chosen here - the version prefix, the maximum length of 256 and
+    #       the accepted shape as a compiled pattern, all declared as constants of
+    #       that class. The pattern admits a version prefix, a base64url nonce of
+    #       exactly sixteen characters and a base64url enciphered payload of up to
+    #       two hundred, separated by full stops; the fixed sixteen is the unpadded
+    #       base64url rendering of the twelve-byte nonce that Galois/Counter Mode is
+    #       specified for.
+    # WHY : Refactoring Rationale: the second segment used to be the payload in
+    #       CLEARTEXT and the third a forty-three-character authentication code. A
+    #       signature answers whether a token was altered and never whether it can
+    #       be read, so one base64url decode recovered the composite key - and one
+    #       of its columns is a primary account number. The payload is now
+    #       enciphered under an authenticated cipher, which answers both questions
+    #       with one primitive and is why the third segment is no longer of fixed
+    #       width.
     # WHY : Refactoring Rationale: a cursor is sealed rather than being the raw
     #       key it stands for. The raw keyset cursor is the composite of card
     #       number and account identifier that app/cbl/COCRDLIC.cbl:230-232
@@ -1577,7 +1643,7 @@ components:
     CursorToken:
       type: string
       maxLength: 256
-      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
       description: >-
         An opaque paging position minted by this service. It stands for a key
         in the ordered set without disclosing it, and it is bound to the query
@@ -1585,9 +1651,10 @@ components:
         different filter or by a different caller. It is bound to the DIRECTION
         it was minted for as well, so replaying the previous-page position with
         direction next cannot silently answer with the wrong page. Treat it as a
-        value to be echoed back unchanged and never parsed, constructed or
-        compared: no part of it is a card number, an account identifier or a row
-        ordinal. A cursor that cannot be opened is reported as 400.
+        value to be echoed back unchanged and never parsed, decoded, constructed or
+        compared: its payload is enciphered, so base64url-decoding it yields
+        ciphertext and no part of it is a card number, an account identifier or a
+        row ordinal. A cursor that cannot be opened is reported as 400.
 
     # WHY : Assumptions: the two member values are lower case and are next and
     #       previous, and they are not chosen here. They are the two the
@@ -2285,6 +2352,7 @@ components:
         - firstKey
         - lastKey
         - hasNext
+        - hasPrevious
       additionalProperties: false
       properties:
         # WHY : Assumptions: the upper bound of seven is declared on the array
@@ -2371,6 +2439,18 @@ components:
             filtered after being read, this and not the row count is the only
             statement about whether more rows exist. When it is true, lastKey is
             present.
+        hasPrevious:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False on the OPENING page even though
+            that page carries a firstKey, because firstKey answers where a backward
+            request would be issued from while this member answers whether anything
+            waits there. Establishing it from the read rather than from firstKey is
+            what stops the first page advertising an earlier page and answering a
+            client that follows the advertisement with an empty page; the reference
+            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
+            and 1302. A caller binds the backward paging control to this value, and
+            it is never true without a firstKey to step back from.
 
     # WHY : Refactoring Rationale: a CardSelectorLookupRequest and a
     #       CardSelectorLookupResponse pair once stood here, for an operation that
@@ -2412,44 +2492,48 @@ components:
         - version
       additionalProperties: false
       properties:
-        # WHY : Refactoring Rationale: the same pattern the read schema carries
-        #       is repeated here rather than referenced, because the two schemas
-        #       are independent objects and a request must be rejectable on its
-        #       own terms. A caller validating against this schema before sending
-        #       therefore sees the same constraint the service applies, so the
-        #       'Card name can only contain alphabets and spaces' refusal at
-        #       app/cbl/COCRDUPC.cbl:183-184 becomes a condition the caller can
-        #       anticipate rather than only discover.
-        # WHY : Refactoring Rationale: this pattern REQUIRES A LETTER and an
-        #       earlier revision of it did not. It read '^[A-Za-z ]+$', which
-        #       admits a value of fifty spaces, while CardUpdateRequest carries
-        #       @NotBlank ALONGSIDE the same character-set pattern and refuses
-        #       one. A blank-padded screen field is the ordinary shape of an
-        #       unfilled 3270 input, so the value this schema admitted and the
-        #       service refused was not an exotic case but the commonest one: it
-        #       is exactly what app/cbl/COCRDUPC.cbl:811-813 tests for when it
-        #       refuses low values, spaces or zeros alike.
-        # WHY : Assumptions: the two Java constraints are expressed here as ONE
-        #       pattern because a property carries one. '^ *[A-Za-z][A-Za-z ]*$'
-        #       is the conjunction of them: the leading run admits the blank
-        #       padding the reference field carries, the single letter is the
-        #       not-blank rule, and the trailing run keeps the character set. It
-        #       therefore accepts and refuses exactly what the record does, which
-        #       is asserted by acceptance over a value corpus rather than by
-        #       comparing the two expressions as text.
-        # WHY : Alternatives Considered: an allOf of two patterns, one per Java
-        #       constraint, which would let each expression stay identical to the
-        #       annotation it mirrors. Rejected because allOf on a scalar is
-        #       handled inconsistently by code generators, and a constraint a
-        #       generated client silently drops is worse than one expressed
-        #       differently. Also considered a lookahead, '^(?=.*[A-Za-z])[A-Za-z ]+$';
-        #       rejected for the same reason, a plain expression being the more
-        #       portable of two equivalents.
+        # WHY : Refactoring Rationale: this schema declared minLength and a
+        #       character-set pattern on the four attributes, and both are
+        #       WITHDRAWN. The declarative layer they belonged to ran BEFORE the
+        #       service, so it decided the outcome for exactly the inputs the
+        #       service transcribes most carefully: a blank field and an
+        #       all-zeros field. The reference distinguishes those two states
+        #       from a merely unacceptable value -- app/cbl/COCRDUPC.cbl:811-813
+        #       classifies low values, spaces and zeros as BLANK, which earns the
+        #       literal asterisk written into the field at :1263-1272, while a
+        #       bad character set is NOT-OK and earns the highlight without the
+        #       asterisk -- and it reports all four attributes together rather
+        #       than stopping at the first. A schema-level refusal collapses all
+        #       of that into one generic violation with no per-field array, no
+        #       screen marker and no reference sentence, so the transcription was
+        #       unreachable for any caller arriving over HTTP.
+        # WHY : Assumptions: what remains on each property is its declared WIDTH
+        #       and nothing else, because a width is a transport fact rather than
+        #       a business rule: the 3270 field could not hold more than its
+        #       declared characters, so the reference has no sentence for an
+        #       over-long value and the service has none either. The domains are
+        #       instead described in prose on each property and enforced by
+        #       CardUpdateService, which answers 400 carrying the per-field error
+        #       array with the reference sentence for each faulted attribute. The
+        #       400 response of this operation documents that shape.
+        # WHY : Alternatives Considered: keeping the declarative constraints and
+        #       withdrawing the service gates, which would have left one
+        #       authoritative layer just as surely. Rejected because that layer
+        #       cannot express what the reference does: JSON Schema has no way to
+        #       report four independent field states in one response, no way to
+        #       distinguish blank from unacceptable, and no way to attach the
+        #       asterisk marker the reference writes into a blank field. Choosing
+        #       the schema would have meant choosing to lose the parity.
+        # WHY : Trade-offs: a caller can no longer discover the attribute domains
+        #       by validating locally against this schema before sending, which is
+        #       a real loss and is the price of the parity above. It is mitigated
+        #       rather than ignored: each property's description states its domain
+        #       verbatim, so the information is still published here, and a caller
+        #       that sends an out-of-domain value receives the reference sentence
+        #       naming the field rather than a generic rejection.
         embossedName:
           type: string
-          minLength: 1
           maxLength: 50
-          pattern: '^ *[A-Za-z][A-Za-z ]*$'
           description: >-
             The replacement name to emboss, alphabetic characters and spaces
             only and carrying at least one letter, up to fifty characters.
@@ -2463,9 +2547,7 @@ components:
           example: JOHN Q PUBLIC
         activeStatus:
           type: string
-          enum:
-            - 'Y'
-            - 'N'
+          maxLength: 1
           description: >-
             The replacement active status, restricted to the two values the
             database also enforces. Carried across the CRDSTCDI PIC X(1) input
@@ -2495,9 +2577,7 @@ components:
         #       docs/architecture/cobol-to-service-traceability.md.
         expirationMonth:
           type: string
-          minLength: 2
           maxLength: 2
-          pattern: '^(0[1-9]|1[0-2])$'
           description: >-
             The replacement expiry month, two digits with its leading zero
             present. Carried across the EXPMONI PIC X(2) input field at
@@ -2508,9 +2588,7 @@ components:
           example: '12'
         expirationYear:
           type: string
-          minLength: 4
           maxLength: 4
-          pattern: '^(19[5-9][0-9]|20[0-9]{2})$'
           description: >-
             The replacement expiry year, four digits between 1950 and 2099.
             Carried across the EXPYEARI PIC X(4) input field at

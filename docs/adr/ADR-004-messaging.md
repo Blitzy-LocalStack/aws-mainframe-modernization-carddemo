@@ -482,19 +482,16 @@ actually exercises.
 
 ### 2. Ordering is grouped by card, because that is the granularity the domain has
 
-The FIFO group **identity** is the card, and the deduplication **identity** is the
-card-and-transaction pair. Both are drawn from fields present in the request layout:
+The FIFO group **identity** is the card and the deduplication **identity** is the
+transaction. Both are drawn from fields present in the request layout:
 `PA-RQ-CARD-NUM` at
 [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) **L21**
 and `PA-RQ-TRANSACTION-ID` at **L36**.
 
-Neither identity is carried as its raw value. `MessageGroupId` and
-`MessageDeduplicationId` each carry a **purpose-separated opaque derivation** of the
-identity above, produced by `CsvAuthCodec` through `OpaqueIdentifier` under two
-distinct purpose strings so that a token from one attribute cannot be correlated with
-a token from the other. The derivations are deterministic, so equal identities still
-map to equal tokens and both queue guarantees are unchanged; see the Trade-offs
-paragraph below for why the raw values are kept out of queue metadata.
+Both are carried as their **raw values**: `MessageGroupId` is the sixteen-character
+card number and `MessageDeduplicationId` is the fifteen-character transaction
+identifier, which is what §0.4.1.8 of the technical specification states literally
+and §0.7.6 repeats for the grouping rule.
 
 Alternatives Considered: **a single global group**, which is the simpler
 configuration and would guarantee total order across the whole stream. Rejected
@@ -512,26 +509,42 @@ proceed. An unqualified claim that two authorizations can never be observed out 
 sequence would be too broad, and the narrower enforceable commitment is stated in
 [`docs/architecture/messaging-contracts.md`](../architecture/messaging-contracts.md).
 
-Trade-offs: the grouping **value** is a purpose-scoped opaque derivation of the
-card number rather than the card number itself, so equal card numbers still map to
-one stable group while the primary account number never enters queue metadata. The
-deduplication **value** is derived the same way, under its own separate purpose
-string, over the card-and-transaction pair — so neither the account number nor the
-transaction identifier appears in queue metadata, and the two attributes cannot be
-cross-referenced with each other. Both **semantics** are unchanged — one group per
-card, one deduplication identity per transaction on that card — and the cost is that
-an operator reading a queue attribute sees a token instead of a number and needs the
-codec to relate the two. That cost is accepted because queue metadata is carried
-into logs and metrics, where [ADR-008](ADR-008-security-and-identity.md) requires
-the account number to be masked; the derivation and its purpose string are
-specified in
-[`docs/architecture/messaging-contracts.md`](../architecture/messaging-contracts.md).
+Refactoring Rationale: an earlier revision of this decision carried both identities
+as **purpose-separated keyed derivations** produced by `CsvAuthCodec` through
+`OpaqueIdentifier`, so that neither the card number nor the transaction identifier
+entered queue metadata. That is withdrawn, and the reason is not tidiness. A group
+identity orders one card's messages only while **every** producer on the queue
+computes the same value for that card, and a deduplication identity suppresses a
+resend only while the **requester** that may resend can predict it. A value keyed
+from the consumer's own secret satisfies neither: a second producer written to this
+ADR would have placed one card's messages in a different group and lost the ordering
+guarantee, and a requester's honest resend would have been accepted as new. The
+specification states both identities literally for exactly that reason, and a
+confidentiality measure that removes an ordering guarantee is not a trade this ADR
+can make on the specification's behalf.
+
+Trade-offs: the primary account number therefore **does** appear in queue metadata,
+which is where [ADR-008](ADR-008-security-and-identity.md) requires it to be masked
+for logs and metrics, and the conflict is resolved in the specification's favour and
+registered rather than hidden — divergence
+`D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in the
+[divergence register](../architecture/cobol-to-service-traceability.md). Three
+provisioned controls bound the exposure, and each is asserted in infrastructure code
+rather than assumed: the queues are encrypted with a customer-managed KMS key, they
+are reachable only through an interface endpoint inside the private network, and
+receive/send capability is scoped to the task roles of the consumer and the
+requesting producer. What the controls do not cover is queue telemetry and any log
+line that records a group identity, so the containment rule is asserted in code
+instead: `OutboxMetadataConfidentialityTest` pins the number to that **one**
+metadata field and fails if it reaches the deduplication identity, the queue address
+or any message attribute. The cost of the withdrawn derivation — an operator seeing
+a token and needing the codec to relate it to a card — also disappears.
 
 ### 3. Duplicate suppression is real but bounded, and the durable backstop is the database
 
-The deduplication attribute gives exactly-once **acceptance** of a given
-card-and-transaction identity — a second send of the same identity inside the
-deduplication window is accepted and discarded rather than delivered twice.
+The deduplication attribute gives exactly-once **acceptance** of a given transaction
+identity — a second send of the same identifier inside the deduplication window is
+accepted and discarded rather than delivered twice.
 
 Assumptions: **that window is five minutes, not unbounded.** This matters more here
 than it would in a system inheriting redelivery from its source, because the
@@ -570,7 +583,7 @@ carried across deliberately.
 
 | Baseline behaviour | Cited at | Target mechanism |
 |---|---|---|
-| A **declared** bound of 500 requests per invocation, which the loop **observably admits 501** of | `WS-REQSTS-PROCESS-LIMIT ... VALUE 500` **L40**; `ADD 1 TO WS-MSG-PROCESSED` **L332** then `IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT` **L339** | A **bounded long-poll loop** that admits the **declared** 500, registered as a divergence |
+| A **declared** bound of 500 requests per invocation, which the loop **observably admits 501** of | `WS-REQSTS-PROCESS-LIMIT ... VALUE 500` **L40**; `ADD 1 TO WS-MSG-PROCESSED` **L332** then `IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT` **L339** | A **bounded intake window** that admits the same **501** — the declared 500 is configured and the offset is added, so no divergence is registered |
 | A five-second wait on the get | `MOVE 5000 TO WS-WAIT-INTERVAL` **L242**, applied to `MQGMO-WAITINTERVAL` **L393** | **`WaitTimeSeconds=5`** on receive |
 
 **500 is declared; 501 is what the loop admits, and the two are different numbers.**
@@ -582,19 +595,23 @@ not an inference about intent — the declared literal and the admitted count si
 not the same figure, and a record that quotes only the literal leaves a reader unable
 to reconcile a 501st processed request with the number they were given.
 
-Refactoring Rationale: the target enforces the **declared** 500, because that is the
-number the source states as its policy and the number every other document quotes.
-That makes the target's window one request narrower than the baseline's, which is an
-intentional behavioural divergence and is registered as **D-AUTH-REQUEST-WINDOW** in
-[the divergence register](../architecture/cobol-to-service-traceability.md#d-auth-request-window--the-declared-five-hundred-request-bound-is-enforced-not-the-observed-501).
-Alternatives Considered: reproducing 501 exactly, which is the strictest reading of
-parity. Rejected because it would require the migrated code to carry an
-off-by-one it cannot justify on its own terms — every reader of
-`requestProcessLimit = 500` would have to be told that it means 501 — and because the
-bound governs pacing rather than any reject reason, message, boundary or calculation,
-so no parity comparison of business output depends on which of the two it is. The
-divergence is recorded rather than silently absorbed precisely because the alternative
-was defensible.
+Refactoring Rationale: the target admits the **observed 501**, and this decision has been
+reversed. An earlier revision enforced the declared 500 — on the argument that 500 is the
+number the source states as its policy and the number every other document quotes — and
+registered the one-request difference as **D-AUTH-REQUEST-WINDOW**. That entry has been
+withdrawn and the withdrawal is recorded in the section preamble of
+[the divergence register](../architecture/cobol-to-service-traceability.md). Two things
+decided the reversal. Functional parity with observable behaviour is a stated constraint
+of this migration rather than a preference, so a difference that can be removed outright
+is not a difference to register. And the objection the earlier choice rested on —
+that a constant reading 500 would have to be explained as meaning 501 — is answered
+without any divergence at all, by keeping the configured value at the declared 500 and
+holding the `+1` as `BASELINE_COMPARISON_OFFSET`, a separately named constant carrying the
+increment-then-compare citation that derives it. Two named numbers that add up beat one
+number that has to be re-explained. Assumptions: the bound governs pacing rather than any
+reject reason, message, boundary or calculation, so this reversal changes no parity
+comparison of business output; what it changes is that a full run of the migrated consumer
+now handles as many requests as a full run of the reference program.
 
 The unit is worth stating because the literal is ambiguous on its face: the
 interval is in **milliseconds**, so `5000` is five seconds. The baseline says so
@@ -1255,14 +1272,16 @@ The guarantee this record makes is **direction-specific**, and stating it as
 "byte-for-byte parity with two divergences" would be wrong on both counts. What is
 preserved exactly is the **field order, the field widths, the delimiter, the
 correlation identity and the reply routing**. What differs is enumerated here in full
-— six entries, not two — so that a reader auditing the transport does not have to
-discover any of them by measurement.
+— five entries, not two — so that a reader auditing the transport does not have to
+discover any of them by measurement. Refactoring Rationale: this read six until
+`D-AUTH-REQUEST-WINDOW` was withdrawn, its request-window difference having been removed
+rather than re-argued; the figure is re-counted from the rows below rather than decremented,
+because a tally adjusted by hand is how such a figure goes stale in the first place.
 
 | ID | Divergence | Registered at |
 |---|---|---|
 | **D-5** | The reply is published from an outbox committed with the decision, inverting the baseline's publish-at-**L461**-then-write-at-**L464**-then-commit-at-**L335** order in [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) | [divergence register](../architecture/cobol-to-service-traceability.md#d-5--the-reply-published-before-the-decision-is-committed) |
 | **D-6** | The distributed commit across IMS and Db2 becomes a single local transaction — **eliminated, not emulated** | [divergence register](../architecture/cobol-to-service-traceability.md#d-6--the-distributed-commit-is-eliminated-not-emulated) |
-| **D-AUTH-REQUEST-WINDOW** | The **declared** 500-request bound is enforced, where the baseline loop admits **501** (increment **L332**, strict `>` test **L339**) | [divergence register](../architecture/cobol-to-service-traceability.md#d-auth-request-window--the-declared-five-hundred-request-bound-is-enforced-not-the-observed-501) |
 | **D-REPLY-PUT-LENGTH** | The reply is sent at the **63** bytes built, where the baseline passes **64** to `MQPUT1` (one trailing pad byte from the reply pointer) | [divergence register](../architecture/cobol-to-service-traceability.md#d-reply-put-length--the-reply-is-sent-at-the-sixty-three-built-not-the-sixty-four-transmitted) |
 | **D-AUTH-AMOUNT-TOLERANT-READ** | A **170**-byte request whose amount is at the copybook's declared 14 characters is read whole, where the baseline receiver truncates it into `PIC X(13)`; the codec still emits the canonical **169** | [divergence register](../architecture/cobol-to-service-traceability.md#d-auth-amount-tolerant-read--the-declared-width-amount-token-is-emitted-and-read-whole) |
 | **D-NEGATIVE-AUTH-AMOUNT** | An amount outside the emittable domain is **refused by name** rather than silently narrowed | [divergence register](../architecture/cobol-to-service-traceability.md#d-negative-auth-amount--an-out-of-domain-authorization-amount-is-refused) |

@@ -97,12 +97,28 @@ spring:
   #       location is claimed in this module and its Systems Manager client is then
   #       built, and this module declines to pin a static region -- so preparing
   #       either profile failed on a region the default provider chain could not
-  #       resolve, which the `optional:` marker does not suppress. Both overlays
-  #       and the parameter-store starter were withdrawn together, and
-  #       ProfileConfigImportTest asserts that all three profiles now resolve with
-  #       no AWS setting present. The correction is recorded rather than the note
-  #       simply deleted, because this profile's own guarantee was previously
-  #       stated by contrast with two overlays that no longer differ from it.
+  #       resolve, which the `optional:` marker does not suppress. Both OVERLAYS
+  #       were withdrawn, and ProfileConfigImportTest asserts that all three
+  #       profiles now resolve with no AWS setting present. The correction is
+  #       recorded rather than the note simply deleted, because this profile's own
+  #       guarantee was previously stated by contrast with two overlays that no
+  #       longer differ from it.
+  # WHY : Refactoring Rationale: the clause above read "both overlays and the
+  #       parameter-store starter were withdrawn together". The starter was NOT
+  #       withdrawn. pom.xml declares
+  #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store at L297-300,
+  #       deliberately, so that the resolver the queue starter registers module-wide
+  #       is never left without the Systems Manager client it constructs: with the
+  #       client absent a claimed location fails as NoClassDefFoundError inside
+  #       environment preparation, before logging exists to report it, instead of as
+  #       a legible region error. ProfileConfigurationTopologyTest asserts each half
+  #       of that pairing -- noDocumentClaimsAParameterStoreLocation and
+  #       theParameterStoreClientIsOnTheClasspath -- so the classpath claim was
+  #       already contradicted by a passing test when it was written here. The same
+  #       false clause stood in application.yml, application-dev.yml and
+  #       ProfileConfigImportTest, and all four are corrected in one change; a fact
+  #       about one dependency held in four places is a fact that will next be
+  #       corrected in three.
   # WHY : Alternatives Considered: (a) an empty import list, which would also
   #       add nothing but would drop the shared defaults that supply the
   #       structured-logging fields and the `carddemo.environment` and
@@ -374,19 +390,22 @@ carddemo:
     #       through 500 all fail that test and read again, and the loop closes only
     #       once a 501st has been handled.
     # WHY : Alternatives Considered: configuring 501 here so the number in the file
-    #       matched the baseline's observed loop exactly. Rejected because the
-    #       extra message is an artifact of the ORDER of increment and comparison
-    #       rather than a rule any part of the baseline states, and because the
-    #       divergence is already registered -- as D-AUTH-REQUEST-WINDOW in
-    #       docs/architecture/cobol-to-service-traceability.md, with matching
-    #       entries in docs/adr/ADR-004-messaging.md and
-    #       docs/architecture/messaging-contracts.md -- so a 501 here would make
-    #       the running system contradict its own register. Trade-offs: the
-    #       declared bound is what this profile enforces, which is why a test whose
-    #       subject is the boundary arithmetic itself must lower this key to a
-    #       small value in its own context rather than read 501 out of this file:
-    #       the key is exposed here so that behaviour follows from configuration,
-    #       and 501 is deliberately not written anywhere as a value.
+    #       matched the baseline's observed loop exactly. Rejected, and the reason
+    #       is now that it would be the SAME number written twice rather than that
+    #       the extra message is unwanted: service/AuthorizationRequestListener.java
+    #       adds its published BASELINE_COMPARISON_OFFSET to whatever this key holds,
+    #       so the consumer already admits 501 and writing 501 here would admit 502.
+    #       Refactoring Rationale: an earlier revision enforced the declared 500 and
+    #       registered the missing message as divergence D-AUTH-REQUEST-WINDOW. That
+    #       entry is withdrawn -- functional parity with observable behaviour is a
+    #       stated constraint of this migration, and a divergence registered against
+    #       a difference that can simply be removed is one that should have been
+    #       removed -- so this key now holds the reference program's DECLARED literal
+    #       and nothing else. Trade-offs: a test whose subject is the boundary
+    #       arithmetic itself must still lower this key in its own context rather
+    #       than read a figure out of this file, because the key is exposed so that
+    #       behaviour follows from configuration; neither 501 nor 502 is written
+    #       anywhere as a value.
     request-process-limit: 500
 
     # WHY : Assumptions: this is a determinism control, not a tuning value, and it
@@ -448,7 +467,7 @@ carddemo:
 #         - carddemo.messaging.reply-queue-allowlist
 #         - carddemo.messaging.hmac-key
 #         - carddemo.account-context.base-url
-#         - carddemo.internal-identity.signing-key
+#         - carddemo.internal-identity.authorization-signing-key
 # WHY : Assumptions: `spring.flyway.clean-disabled` is also left unset, and it is
 #       the one omission with the opposite motive. The base disables clean
 #       unconditionally, and inheriting that is the intent: a test container is

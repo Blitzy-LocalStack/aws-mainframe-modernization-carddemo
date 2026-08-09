@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -621,4 +622,47 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
         pattern.append('%');
         return pattern.toString();
     }
+
+    /**
+     * Inserts one transaction type, refusing rather than replacing a code that already exists.
+     *
+     * <p>Purpose: this exists because {@code save} and {@code saveAndFlush} CANNOT insert this entity.
+     * {@code TransactionType} carries an ASSIGNED {@code String} identifier and a {@code long}
+     * {@code @Version}, and neither of those can express newness: the version is a primitive so it is
+     * never {@code null}, which sends the framework's newness test to the identifier, and the identifier
+     * is always present because a caller supplies the business code. Every {@code save} of a new type
+     * therefore reaches {@code EntityManager.merge}, which loads the row named by that identifier and
+     * writes an UPDATE against it.</p>
+     *
+     * <p>Assumptions: the consequence was measured, not inferred. A create for a code that already exists
+     * raised {@code ObjectOptimisticLockingFailureException} when the stored version did not match the
+     * zero on the new instance -- and where a stored version DOES match, the merge would have UPDATED the
+     * existing row's description and answered the caller success, silently replacing a type it was asked
+     * to create. Either way the service's {@code DataIntegrityViolationException} catch could not run, so
+     * the duplicate classification the published contract depends on was unreachable.</p>
+     *
+     * <p>Refactoring Rationale: the statement is written as a native INSERT rather than reached through
+     * the persistence context, because an INSERT is exactly what is wanted and there is no context-level
+     * way to demand one for an entity whose newness cannot be detected. Two alternatives were weighed.
+     * Implementing {@code Persistable} with a transient "new" flag on the entity was rejected: it makes
+     * every read have to clear the flag and every caller have to set it, so a forgotten flag reintroduces
+     * the silent overwrite with nothing to catch it. Injecting an {@code EntityManager} into the service
+     * to call {@code persist} was rejected because it puts a persistence-context concern in the service
+     * layer, which the layering rules keep out of it.</p>
+     *
+     * <p>Assumptions: {@code version} is not named in the column list, so the column default of zero
+     * applies. Writing it explicitly would be a second declaration of the schema's default in a second
+     * place.</p>
+     *
+     * @param typeCd the two-character code to key the row by; must not be {@code null}
+     * @param description the description to store, already normalised for storage; must not be
+     *     {@code null}
+     * @return the number of rows inserted, which is one on success
+     */
+    @Modifying
+    @Query(value = """
+            insert into transaction_types (type_cd, description)
+            values (:typeCd, :description)
+            """, nativeQuery = true)
+    int insertType(@Param("typeCd") String typeCd, @Param("description") String description);
 }

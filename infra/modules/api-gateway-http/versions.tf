@@ -88,8 +88,10 @@ terraform {
     #       reproducible pin.
     #       (3) Assumptions: the 6.x-era floor is inherited infra-wide, not
     #       required by anything in this module. It exists because a provider
-    #       at 5.81.0 or later is needed to accept a zero minimum Aurora
-    #       capacity, recorded in docs/adr/ADR-003-datastore-targets.md, and
+    #       at 5.80.0 or later is needed to accept a zero minimum Aurora
+    #       capacity, and one at 5.81.0 or later for the auto-pause argument it
+    #       makes mandatory, so the pair floors at 5.81.0; both are recorded in
+    #       docs/adr/ADR-003-datastore-targets.md, and
     #       `~> 6.56` clears that. Every module and root repeats the identical
     #       constraint so a provider upgrade is one decision rather than
     #       one per directory -- the pinning discipline recorded in

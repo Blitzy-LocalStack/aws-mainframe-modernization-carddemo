@@ -970,7 +970,7 @@ statement grouping token and is granted to the schema owner alone.
 
 | Schema | Owning context | Target tables or views | Authored migration status |
 |---|---|---|---|
-| `auth` | `auth-service` | `users` | `V1__auth.sql` authored |
+| `auth` | `auth-service` | `users`, `identity_sync_task` | `V1__auth.sql` and `V2__auth_identity_sync.sql` authored |
 | `account` | `account-service` | `accounts`, `customers`, `card_xref` | `V1__account.sql` authored |
 | `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
@@ -1618,7 +1618,7 @@ Two target indexes, both partial and both on unpublished rows only:
 | Index | Definition | Why |
 |---|---|---|
 | `idx_auth_reply_outbox_unpublished` | `(outbox_id) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. Keyed on `outbox_id` rather than `created_at` because insertion order is what the drain resumes from, and a monotonic identity orders rows written inside the same clock tick unambiguously. |
-| `idx_auth_reply_outbox_group` | `(order_group_token, outbox_id) WHERE published_at IS NULL` | Per-card publication order through the purpose-scoped opaque group token. The drain sends one token's pending replies in write order without putting the primary account number in SQS metadata; this index makes that ordering an index scan rather than a sort. |
+| `idx_auth_reply_outbox_group` | `(order_group_id, outbox_id) WHERE published_at IS NULL` | Per-card publication order. The column holds the card number itself, because §0.4.1.8 freezes the reply queue's `MessageGroupId` as `card_num`; the drain sends one card's pending replies in write order, and this index makes that ordering an index scan rather than a sort. The column was named `order_group_token` by `V1__authorization.sql` and renamed by `V3__authorization_outbox_fifo_identities.sql` when the identity stopped being a derived token. |
 
 > Assumptions: **publication state is a nullable timestamp rather than a status
 > column.** A `CHAR(1)` status with a check constraint was the alternative, matching
@@ -1648,13 +1648,24 @@ Two target indexes, both partial and both on unpublished rows only:
 > it; it is created by `authorization-service`'s own Flyway migration,
 > [`V1__authorization.sql`](../../services/authorization-service/src/main/resources/db/migration/V1__authorization.sql),
 > alongside the three derived tables, and no other context reads or writes it. Its
-> queue-attribute columns are `message_group_id`, `deduplication_id`,
-> `correlation_id` and `reply_queue_url`, and the first three carry
-> purpose-separated KEYED TOKENS rather than the values they stand for -- so neither
-> the primary account number nor the raw transaction tuple becomes SQS metadata or a
-> queue-telemetry dimension. The tokens are derived by `CsvAuthCodec` through
-> `OpaqueIdentifier`, and the attribute mapping they feed is specified in
-> [`messaging-contracts.md`](messaging-contracts.md).
+> queue-attribute columns are `order_group_id`, `deduplication_id`,
+> `correlation_id` and `reply_to_queue_url` — the four names the DDL declares, two of
+> them renamed from `order_group_token` and `deduplication_token` by
+> [`V3__authorization_outbox_fifo_identities.sql`](../../services/authorization-service/src/main/resources/db/migration/V3__authorization_outbox_fifo_identities.sql).
+> The first two carry the LITERAL values §0.4.1.8 freezes, `card_num` and
+> `transaction_id`, and the third carries the requester's own correlation value
+> echoed unchanged. An earlier revision stored purpose-separated keyed tokens in all
+> three so that no account number reached SQS metadata; that is withdrawn, because a
+> group identity has to be equal for equal cards across every producer on the queue
+> and a deduplication identity has to be predictable by the requester that may
+> resend it, and a value keyed from one service's secret is neither. The exposure
+> that follows — a primary account number in queue metadata, which server-side
+> encryption of the body does not cover — is registered as divergence
+> `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) and bounded
+> by the queue's customer-managed-key encryption, its private-network-only
+> reachability and task-role-scoped read access. The attribute mapping these columns
+> feed is specified in [`messaging-contracts.md`](messaging-contracts.md).
 
 
 ### `reporting` — `reporting-service`, a schema it can only read
@@ -1954,28 +1965,39 @@ model:
 > A store into a fixed-scale field without `ROUNDED` **discards** the surplus digits
 > rather than rounding them, so the baseline behaviour is truncation toward zero.
 >
-> The target applies `HALF_UP` regardless, because transformation rule T3 states the
-> money contract as one mode at every hop and that plan is the frozen contract this
-> migration is measured against. The resulting one-cent difference is therefore a
-> documented behavioural divergence, not a defect and not an exception to the table
-> above: it is registered as **C-ROUNDING** in
-> `docs/architecture/cobol-to-service-traceability.md`, the register of every
-> intentional divergence, alongside the three baseline defects that are likewise not
-> reproduced.
+> The target applies the same truncation, through `Money.BASELINE_INTEREST_ROUNDING`
+> — `RoundingMode.DOWN` — which governs the accrual quotient and nothing else. Every
+> other reduction in the money path uses `Money.GENERAL_ROUNDING`, half up, which is
+> the mode transformation rule T3 states. Neither is reachable from any signature, so
+> no call site selects between them. **There is no divergence here**, and none is
+> registered.
 >
-> Trade-offs: **the cost is exactly one cent, and only where a quotient lands on an
-> exact half cent.** On the vectors the reference fixtures actually carry the two modes
-> agree, which is why the divergence has to be written down rather than left for a
-> fixture to catch: a balance of `1000.00` at a rate of `15.00` yields `12.5000`
-> exactly and both modes return `12.50`; at a rate of `2.50` against the same balance
-> the quotient is `2.08333…` and both return `2.08`. They part company only at
-> `1000.80` and `2.50`, where the quotient is `2.0850` exactly — truncation returns
-> `2.08` and half-up returns `2.09`. Alternatives Considered: **implementing
-> `RoundingMode.DOWN` here to match the baseline cent for cent** was evaluated and
-> rejected: it would leave the plan, every sibling package descriptor and the
-> documentation standard stating one mode while the shared kernel implemented another,
-> with nothing to indicate which a reader should believe, and it would remove the one
-> money-rounding contract an architecture rule can assert mechanically. The
+> Refactoring Rationale: the accrual applied `HALF_UP` and the resulting cent was
+> recorded here as documented divergence **C-ROUNDING**. That is withdrawn; the
+> identifier survives only as a withdrawal record in §7.5 of
+> `docs/architecture/cobol-to-service-traceability.md`. This paragraph previously
+> evaluated **implementing `RoundingMode.DOWN` to match the baseline cent for cent**
+> and rejected it, on the grounds that it would leave the plan and every sibling
+> descriptor stating one mode while the kernel implemented another, and would remove
+> the one money-rounding contract an architecture rule can assert mechanically. Both
+> objections were answerable rather than decisive, and both have been answered: the
+> siblings and the standard now state the split, and what an architecture rule
+> actually asserts is that no binary floating-point type appears in the money path,
+> which is untouched by there being two decimal modes. What the rejection cost was
+> not answerable — the accrual is one of the business rules the reference test suite
+> asserts verbatim, and the cent compounds, because line 467 adds each reduced term
+> into the account total and line 352 adds that total to the account balance, which
+> the next **inclusive** over-limit comparison is made against.
+>
+> Trade-offs: **two modes rather than one, and a reader has to know which operation
+> takes which.** On the vectors the reference fixtures actually carry the two modes
+> agree, which is why the split has to be written down and asserted rather than left
+> for a fixture to catch: a balance of `1000.00` at a rate of `15.00` yields
+> `12.5000` exactly and both modes return `12.50`; at a rate of `2.50` against the
+> same balance the quotient is `2.08333…` and both return `2.08`. They part company
+> at `1000.80` and `2.50`, where the quotient is `2.0850` exactly — truncation
+> returns `2.08` and half up would return `2.09` — and on any negative vector, where
+> truncation toward zero and rounding on magnitude differ in direction. The
 > authoritative statement of the contract lives beside the implementation, in
 > [`../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`](../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java),
 > which carries the same two baseline observations and the same vectors.

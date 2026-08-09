@@ -2,7 +2,7 @@
 # infra/modules/kms/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Declares the five customer-managed KMS keys the migrated stack encrypts
+#   Declares the four customer-managed KMS keys the migrated stack encrypts
 #   itself with -- one per data class -- each with automatic rotation, its own
 #   alias and its own key policy:
 #
@@ -33,19 +33,15 @@
 #     aws_kms_key.sqs      The request, reply and error queues and their
 #                          dead-letter queues, whose payloads carry card
 #                          numbers.
-#     aws_kms_key.application
-#                          The values the migrated code enciphers ITSELF, rather
-#                          than values an integrated AWS service enciphers on its
-#                          behalf: today the card verification value, which the
-#                          baseline holds as three display digits in the clear
-#                          [app/cpy/CVACT02Y.cpy:L7] and which
-#                          com.carddemo.card.service.CardVerificationValueCipher
-#                          stores as an envelope instead. It is the one key in
-#                          this module a workload role calls DIRECTLY, so its
-#                          policy carries an encryption-context condition where
-#                          the other four carry `kms:ViaService`.
+#   There is deliberately no fifth key for the values the migrated code
+#   enciphers ITSELF - the card verification value [app/cpy/CVACT02Y.cpy:L7] and
+#   the two customer identifiers [app/cpy/CVCUS01Y.cpy:L17-L18]. Those are
+#   columns in the Aurora cluster, so their envelope data keys come from
+#   aws_kms_key.aurora, whose policy carries a SECOND statement with an
+#   encryption-context condition instead of `kms:ViaService` because a workload
+#   role calls it DIRECTLY rather than through RDS.
 #
-#   Five keys, five aliases and five policy documents, and nothing else. No key
+#   Four keys, four aliases and four policy documents, and nothing else. No key
 #   material, no credential, no AWS account identifier and no ARN literal
 #   appears in this file: account identity is read at plan time from the
 #   caller's own session, trusted principals arrive as module inputs, and the
@@ -65,7 +61,7 @@
 #   Two failure modes are worth naming, because both are moved earlier by the
 #   way this file is written rather than being absent:
 #     - A malformed trusted-principal ARN, or a reference that cannot be
-#       resolved, fails while the five policy documents are evaluated during
+#       resolved, fails while the four policy documents are evaluated during
 #       `terraform plan`, not part-way through a run that has already created
 #       keys. That is a consequence of composing each policy with
 #       `aws_iam_policy_document` rather than with a JSON string.
@@ -82,8 +78,8 @@
 #   than approximate, and both are now stated as measurements (`grep -c
 #   '^variable "'` and `grep -c '  validation {'` over variables.tf) so a reader
 #   can re-derive them. The pair was corrected together with the arrival of
-#   `application_key_user_role_arns` and
-#   `application_encryption_context_purposes`, which would otherwise have widened
+#   `envelope_encryption_role_arns` and
+#   `envelope_encryption_context_purposes`, which would otherwise have widened
 #   an already-wrong count.
 #
 # WHY (non-obvious design decisions):
@@ -117,7 +113,7 @@
 #   `source = "../../modules/kms"`. What is still outside that boundary is a
 #   `plan` or an `apply` against a live account, which needs credentials no part
 #   of this repository holds. The sibling outputs.tf is now authored and
-#   publishes the five key/alias contracts, so this directory no longer carries
+#   publishes the four key/alias contracts, so this directory no longer carries
 #   a module-structure finding. No `tflint-ignore` is needed: the earlier
 #   missing-file condition was fixed at its source rather than suppressed.
 # =============================================================================
@@ -161,26 +157,26 @@ data "aws_partition" "current" {}
 # -----------------------------------------------------------------------------
 
 locals {
-  # Assumptions: the five alias names differ only in the data class they name,
-  # so the part they share is composed once here and interpolated five times
-  # below. Composing it at each alias instead would let the five spellings drift
+  # Assumptions: the four alias names differ only in the data class they name,
+  # so the part they share is composed once here and interpolated four times
+  # below. Composing it at each alias instead would let the four spellings drift
   # apart -- a prefix corrected in three places and missed in the fourth
   # produces one alias that no longer sorts or greps with its siblings, and
   # nothing in the plan output marks it as the odd one.
   #
   # Assumptions: each finished alias is `alias/<name_prefix>-<class>-<environment>`,
   # and the environment segment is load-bearing rather than decorative. Both
-  # environment roots call this same module source, so two sets of five keys can
+  # environment roots call this same module source, so two sets of four keys can
   # exist in one account; without the segment an operator listing aliases there
   # would see two identically-named aliases and have no way to tell which
   # environment's ciphertext each key opens.
   alias_prefix = "${var.name_prefix}-"
 
   # Assumptions: the account-root principal is the administrative principal in
-  # all five key policies, so its ARN is assembled once here from the resolved
+  # all four key policies, so its ARN is assembled once here from the resolved
   # partition and the resolved account identifier. Two properties follow from
   # composing it rather than writing it: no account identifier is committed to
-  # the repository, and the five policies cannot end up naming two different
+  # the repository, and the four policies cannot end up naming two different
   # principals because there is only one expression to get wrong.
   account_root_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
 
@@ -195,10 +191,10 @@ locals {
     "kms:DescribeKey",
   ]
 
-  # Refactoring Rationale: the application key's grant is TWO actions and not the
+  # Refactoring Rationale: the envelope grant is TWO actions and not the
   # three above, and the difference is the point rather than an oversight. The
   # three above are for integrated services, which describe a key to discover its
-  # properties before using it; the application key is used by our own code, which
+  # properties before using it; the envelope grant is exercised by our own code, which
   # already holds the key identifier from its configuration and never asks the
   # service what the key is. Granting DescribeKey as well would let a workload
   # enumerate a key's metadata for no capability it needs.
@@ -303,35 +299,45 @@ locals {
 }
 
 # =============================================================================
-# The five keys
+# The four keys
 # -----------------------------------------------------------------------------
-# The notes in this banner are SHARED: they govern all five key declarations
+# The notes in this banner are SHARED: they govern all four key declarations
 # that follow, because the reasoning behind these arguments is identical across
-# the five and stating it five times would let the copies drift apart. What is
+# the four and stating it four times would let the copies drift apart. What is
 # genuinely per-key -- the data class, the trust list and whether a service
 # principal needs a grant -- is documented at each key instead.
 #
+# The arithmetic here is FOUR KEYS SERVING FIVE PURPOSES, and the mismatch is
+# deliberate rather than untidy. The frozen design fixes four customer-managed
+# keys -- Aurora, S3, Secrets Manager and SQS. The fifth purpose, the values the
+# application enciphers itself, has no key of its own: its grant is a second
+# statement on the Aurora key, because the columns it protects are Aurora column
+# data. That is why this file declares four keys, four aliases and four policies
+# while variables.tf declares FIVE trust lists -- one per purpose, not one per
+# key. A reader who expects those two counts to agree should read this paragraph
+# rather than assume one of them is stale.
+#
 # Alternatives Considered: A KEY PER DATA CLASS RATHER THAN ONE SHARED KEY. This
 # is the defining decision of the module and the alternative is real: a single
-# customer-managed key encrypting the database, the dataset bucket, the secrets,
-# the queues and the values the application enciphers itself would work, and it
+# customer-managed key encrypting the database, the dataset bucket, the secrets
+# and the queues would work, and it
 # would cost less, because KMS is billed per key per month on top of per-request
-# charges -- one monthly key charge instead of five. It is rejected on blast
+# charges -- one monthly key charge instead of four. It is rejected on blast
 # radius, and the mechanism is concrete. One
 # key means exactly one key policy and one rotation schedule, so a principal
 # mistakenly added to that single policy, or a compromise of that single key,
-# reaches all five data classes at once: the relational records, the staged
-# dataset generations, the stored credentials, the queue payloads and the
-# application-enciphered values. With five
-# keys each carries its own policy and rotates independently, so the same
+# reaches all four data classes at once: the relational records - including the
+# values the application enciphers itself, which are columns among them - the
+# staged dataset generations, the stored credentials and the queue payloads. With
+# four keys each carries its own policy and rotates independently, so the same
 # mistake or the same compromise reaches one data class and leaves the other
-# four unreadable to it. A queue consumer trusted to open message payloads
+# three unreadable to it. A queue consumer trusted to open message payloads
 # cannot decrypt a database backup, because the grant that would let it do so
 # is on a key its policy does not appear in.
-#   Trade-offs: the cost is named rather than hidden -- five monthly key charges
-#   instead of one, and five key policies to keep correct instead of one, which
-#   is five times the surface on which a wrong trust entry can be written. That
-#   is accepted because a wrong entry on one of five policies is recoverable by
+#   Trade-offs: the cost is named rather than hidden -- four monthly key charges
+#   instead of one, and four key policies to keep correct instead of one, which
+#   is four times the surface on which a wrong trust entry can be written. That
+#   is accepted because a wrong entry on one of four policies is recoverable by
 #   narrowing that policy, whereas the same entry on a single shared policy has
 #   already exposed everything the stack stores. The same reasoning is recorded,
 #   once, in docs/adr/ADR-008-security-and-identity.md; it is cross-referenced
@@ -366,9 +372,9 @@ locals {
 # Assumptions: ROTATION IS NOT A CALLER PREFERENCE. `enable_key_rotation` is
 # wired to the module input on every key, and that input defaults to `true`
 # because rotation is the posture the target architecture specifies for all
-# five keys. The infrastructure pipeline's explicit material-security baseline
+# four keys. The infrastructure pipeline's explicit material-security baseline
 # includes the CMK-rotation check, and the variable validation additionally
-# accepts only `true`; wiring the argument on all five keys therefore satisfies
+# accepts only `true`; wiring the argument on all four keys therefore satisfies
 # that gate by construction. No inline suppression is needed anywhere in this
 # module, which is the difference between a gate that is passed and a gate that
 # is silenced.
@@ -400,7 +406,7 @@ locals {
 # The two ends of the range buy different things, and which one is wanted
 # belongs to the environment rather than to the module. A short window lets
 # `terraform destroy` release the keys sooner and stops a torn-down environment
-# from leaving five keys behind in a pending-deletion state; a longer window
+# from leaving four keys behind in a pending-deletion state; a longer window
 # preserves more time in which a key destroyed by mistake can be recovered,
 # because once the window elapses the key is gone and every ciphertext under it
 # is permanently unreadable. Both environment roots may legitimately set it
@@ -412,7 +418,7 @@ locals {
 # authorization for that key to IAM across the whole account. Any principal
 # whose IAM permissions allow a KMS action could then use the key, so the
 # per-domain boundary these keys exist to draw would be erased at creation --
-# five keys each carrying an account-wide default policy are, in effect, one
+# four keys each carrying an account-wide default policy are, in effect, one
 # key. Setting the policy on every key is therefore the mechanism that makes the
 # rest of this module mean anything.
 #
@@ -454,12 +460,12 @@ locals {
 # three. A single shared list is the obvious simplification and it would undo the
 # key-per-data-class decision above -- every trusted principal would hold use of
 # every key, so a role trusted only to read queue payloads could also decrypt a
-# database backup and a stored credential. The five separate lists are what make
-# the five keys a boundary rather than five copies of one permission. The same
+# database backup and a stored credential. The four separate lists are what make
+# the four keys a boundary rather than four copies of one permission. The same
 # reasoning is recorded at the declarations in infra/modules/kms/variables.tf.
 #
 # Assumptions: A USE STATEMENT IS EMITTED ONLY WHEN ITS LIST IS NON-EMPTY. All
-# five lists default to empty, deliberately: the principals they name are task
+# four lists default to empty, deliberately: the principals they name are task
 # roles created by a module that itself consumes these keys' ARNs, so requiring
 # a non-empty list would make the grant a precondition of the key the grant
 # depends on. An emitted statement with an empty `principals` block is not an
@@ -472,7 +478,7 @@ locals {
 # the stack's baseline tag set through `default_tags` on its own `provider "aws"`
 # block, and the provider merges that set into every taggable resource it
 # creates. What is merged at each key below is the layer above that set: the tag
-# naming the data class, so the five keys are distinguishable from one another
+# naming the data class, so the four keys are distinguishable from one another
 # and from the root's other resources in a cost report or an inventory. Read
 # without this note, a small tag map on a key looks like missing tagging.
 #
@@ -492,7 +498,7 @@ locals {
 # [app/cpy/CVACT02Y.cpy:L5,L7], and customer national and government identifiers
 # [app/cpy/CVCUS01Y.cpy:L17-L18] -- together with the cluster's automated
 # backups, which are encrypted with the same key as the cluster. It is therefore
-# the key whose trust list is the narrowest of the five in intent.
+# the key whose trust list is the narrowest of the four in intent.
 #
 # Assumptions: NO service-principal statement appears in this policy, and the
 # absence is reasoned rather than overlooked. The database service reaches a
@@ -550,6 +556,81 @@ data "aws_iam_policy_document" "aurora" {
       }
     }
   }
+
+  # WHY : Refactoring Rationale: this statement was the whole of a FIFTH key's
+  #       policy - a separate customer-managed key the application drew envelope
+  #       data keys from, for the card verification value and the two customer
+  #       identifiers the baseline held in the clear. The specified key model is
+  #       four keys, one per data-at-rest domain: Aurora, S3, Secrets Manager and
+  #       SQS. A fifth was outside it, so the key was withdrawn and its grant
+  #       moved here.
+  #
+  #       Assumptions: Aurora is the correct domain for it rather than an
+  #       arbitrary choice among the four. Every value these envelopes protect is
+  #       a column in the Aurora cluster - card.cards.cvv_encrypted,
+  #       account.customers.ssn_encrypted and
+  #       account.customers.govt_issued_id_encrypted - so the key that protects
+  #       the Aurora domain is the key protecting that data, whether the
+  #       enciphering happens in the storage layer or one layer above it.
+  #       Alternatives Considered: (a) folding it into the secrets key, on the
+  #       grounds that both hold confidential material - rejected, that key's
+  #       domain is credentials held in Secrets Manager, and the blast radius a
+  #       reader infers from its name would then be wrong; (b) keeping the fifth
+  #       key and recording a divergence - rejected, the four-key model is
+  #       specified rather than advisory, and a divergence is for behaviour that
+  #       cannot be delivered as specified, which is not the case here.
+  #       Trade-offs: what is given up is separation of key MATERIAL between
+  #       storage-level and application-level encryption of the same rows, so a
+  #       compromise of this key reaches both. That is a smaller loss than it
+  #       first appears, because the two already protected the same records: a
+  #       caller able to read the cluster's storage key could read the rows the
+  #       envelopes sit in. What is NOT given up is the separation between the two
+  #       application purposes - each still carries its own encryption context,
+  #       asserted below, so the card role cannot open a customer identifier and
+  #       the account role cannot open a card verification value.
+  #
+  #       Assumptions: this must be a SECOND statement rather than actions added
+  #       to the one above. The Aurora statement carries a kms:ViaService
+  #       condition pinning it to the RDS service principal, which is correct for
+  #       storage-level use and would deny these calls outright - a task calls
+  #       KMS directly, not through RDS. Two statements keep each condition set
+  #       attached to the calls it belongs to.
+  dynamic "statement" {
+    for_each = length(var.application_envelope_user_role_arns) > 0 ? [1] : []
+
+    content {
+      sid       = "AllowEnvelopeEncryptionByApplicationRoles"
+      effect    = "Allow"
+      actions   = local.workload_envelope_actions
+      resources = ["*"]
+
+      principals {
+        type        = "AWS"
+        identifiers = var.application_envelope_user_role_arns
+      }
+
+      # Assumptions: this condition is what a direct grant has instead of
+      # kms:ViaService. It admits only requests whose encryption context names one
+      # of the declared purposes, so a role holding this grant cannot use the key
+      # for anything but the values it was granted for -- and a ciphertext produced
+      # under one purpose cannot be deciphered by a caller asking under another.
+      condition {
+        test     = "StringEquals"
+        variable = "kms:EncryptionContext:carddemo:purpose"
+        values   = var.application_envelope_context_purposes
+      }
+
+      # Assumptions: the caller-account condition is kept for the same reason it is
+      # kept on every other statement in this module -- it confines the grant to
+      # requests made on behalf of this account, so the key cannot be used against
+      # another account's resource even by a principal this policy names.
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+    }
+  }
 }
 
 resource "aws_kms_key" "aurora" {
@@ -580,10 +661,24 @@ resource "aws_kms_key_policy" "aurora" {
       condition     = length(var.aurora_key_user_role_arns) == 0 || length(var.aurora_encryption_context_ids) > 0
       error_message = "aurora_encryption_context_ids must name at least one exact Aurora cluster resource identifier when Aurora key users are configured."
     }
+
+    # WHY : Refactoring Rationale: this precondition moved here with the envelope
+    #       statement it guards, from the withdrawn fifth key's policy resource.
+    #       It is kept rather than merged into the one above because the two
+    #       trust lists are independent: storage-level Aurora principals and
+    #       application envelope principals are configured separately, and a
+    #       malformed ARN in either should name which list it was found in.
+    precondition {
+      condition = alltrue([
+        for arn in var.application_envelope_user_role_arns :
+        can(regex(local.current_account_role_arn_pattern, arn))
+      ])
+      error_message = "Every application_envelope_user_role_arns value must be an exact IAM role ARN in the account applying this module."
+    }
   }
 }
 
-# Assumptions: this note governs all five aliases in this module -- this one and
+# Assumptions: this note governs all four aliases in this module -- this one and
 # the four declared further down. An alias exists because a key identifier is an
 # opaque generated value that says nothing about what it opens, so it is the
 # alias that consuming modules and operators are expected to reference. The
@@ -619,8 +714,8 @@ resource "aws_kms_alias" "aurora" {
 # grant below is therefore unconditional: whether the front end can be served
 # must not depend on an operator populating an optional list.
 #
-# Trade-offs: the grant is one action rather than the five in
-# `local.key_user_actions`. Retrieving an encrypted object needs a decrypt and
+# Trade-offs: the grant is one action rather than the three in
+# `local.service_data_key_actions`. Retrieving an encrypted object needs a decrypt and
 # nothing else; `kms:Encrypt` and `kms:GenerateDataKey*` would only be needed if
 # objects were uploaded THROUGH the distribution, which this architecture never
 # does -- the deployment pipeline publishes the bundle under its own identity.
@@ -1166,7 +1261,7 @@ resource "aws_kms_alias" "s3" {
 # field the user record declares [app/cpy/CSUSR01Y.cpy:L21], which is
 # deliberately not carried into any target schema. This key is consequently the
 # one whose compromise would be worth the most to an attacker, and the strongest
-# reason in the module for not sharing one key across all five data classes.
+# reason in the module for not sharing one key across all four data classes.
 #
 # Assumptions: NO service-principal statement appears in this policy. The secret
 # store encrypts and decrypts a secret's value on behalf of whichever principal
@@ -1289,7 +1384,7 @@ resource "aws_kms_alias" "secrets" {
 # message the dead-letter target exists to preserve is the message that is lost,
 # which is the failure mode hardest to notice because it appears only when
 # something else has already gone wrong. The grant is deliberately two actions
-# rather than the five in `local.key_user_actions`: writing a message needs a
+# rather than the three in `local.service_data_key_actions`: writing a message needs a
 # data key, and reading one back needs a decrypt, and nothing about a
 # dead-letter delivery needs re-encryption.
 # -----------------------------------------------------------------------------
@@ -1409,164 +1504,31 @@ resource "aws_kms_alias" "sqs" {
 
 
 # -----------------------------------------------------------------------------
-# Application data -- the values this system enciphers itself
+# Application-enciphered values -- deliberately NOT a fifth key
 #
-# Assumptions: the four keys above protect data at rest through an INTEGRATED
-# service -- the database, object storage, the secret store and the queues each
-# hold the ciphertext and each asks KMS for the data key on the workload's behalf.
-# This key is the one used by the application's own code, and that difference
-# decides every choice in its policy.
+# Refactoring Rationale: a fifth customer-managed key stood here, the one the
+# application drew envelope data keys from for the card verification value and
+# the two customer identifiers the baseline held in the clear. It has been
+# withdrawn. The specified key model is FOUR customer-managed keys with
+# rotation, one per data-at-rest domain -- Aurora, S3, Secrets Manager and SQS --
+# and that enumeration is exhaustive rather than a starting point. The note that
+# stood here argued a fifth key was the smaller deviation; that reasoning is
+# withdrawn with the key, because the choice was not between a fifth key and a
+# weaker posture. Those envelope operations now draw their data keys from the
+# AURORA key, whose policy carries the grant and both encryption-context
+# conditions -- see the second dynamic statement in
+# data.aws_iam_policy_document.aurora above, where the full rationale for the
+# placement, the alternatives weighed and the trade-off accepted are recorded.
 #
-# Refactoring Rationale: WHY THERE IS A FIFTH KEY AT ALL, against a target
-# architecture that enumerates four. The architecture names four customer-managed
-# keys -- Aurora, S3, Secrets Manager and SQS -- and it ALSO requires that the
-# card verification value, the national identifier and the government-issued
-# identifier be held enciphered in their own columns rather than merely inside an
-# encrypted volume. Those two requirements cannot both be met by the four:
-# an integrated-service key is reachable only THROUGH its service, so the Aurora
-# key can encrypt the whole cluster but cannot produce a data key for one column,
-# and every one of the four carries a `kms:ViaService` condition that denies a
-# direct call by design. The enumeration is therefore read as naming the keys the
-# four managed-service data domains need, not as a prohibition on the key the
-# application layer needs -- and a fifth key is the smaller deviation than either
-# alternative: widening one of the four by removing its ViaService condition
-# would let a workload use the database's own key directly, and leaving the
-# columns unenciphered would contradict the requirement that put them there.
-# Alternatives Considered: a seventeenth module owning this key alone, which
-# would have left this module's own four-key documentation untouched. REJECTED --
-# the module catalogue is enumerated by the same architecture, so adding a module
-# is a larger departure than adding a key to the module whose entire subject is
-# keys, and it would split key administration across two directories.
-#
-# Assumptions: this key protects THREE values across TWO bounded contexts, and
-# each is a value the baseline held in the clear on a file declared JOURNAL(NO)
-# and RECOVERY(NONE). The card verification value CARD-CVV-CD is three display
-# digits at app/cpy/CVACT02Y.cpy line 7 and becomes cvv_encrypted BYTEA; the
-# national identifier CUST-SSN is nine display digits at app/cpy/CVCUS01Y.cpy
-# line 17 and the government-issued identifier CUST-GOVT-ISSUED-ID is twenty
-# characters at line 18, and the two become ssn_encrypted BYTEA and
-# govt_issued_id_encrypted BYTEA. A column name does not encrypt anything;
+# Assumptions: nothing about the application-side contract changed except which
+# key alias is configured. The values are still enciphered by
 # com.carddemo.card.service.CardVerificationValueCipher and
-# com.carddemo.account.service.CustomerIdentifierCipher are what do. Each obtains
-# one data key per value from this key, enciphers locally under an authenticated
-# cipher, and stores the enciphered data key inside a self-describing envelope
-# beside the ciphertext.
-#
-# Refactoring Rationale: this block named the card verification value as the only
-# value protected here, and account-service's two identifiers were already
-# specified to land in encrypted columns. Naming one of three understated the
-# key's blast radius, which is the number a reader uses to judge whether a
-# rotation or a deletion window is safe.
-#
-# Trade-offs: one key for two contexts rather than one key each. The two task
-# roles are separated by their own encryption-context conditions -- the card
-# role's names card-cvv, the account role's names customer-identifier -- so
-# neither can reach the other's ciphertext. What is given up is separation of the
-# key MATERIAL, so a compromise of this key reaches both. That is accepted
-# because a sixth key adds an alias, a rotation schedule and a monthly charge for
-# two workloads already condition-separated, and because the values share one
-# data classification and one retention.
-#
-# Assumptions: NO kms:ViaService condition, and its absence is deliberate rather
-# than forgotten. The other four keys are reached through a service, so that
-# condition confines each grant to the one path it was added for. This key is
-# called DIRECTLY by a task role, so a ViaService condition naming any service
-# would deny every legitimate request. What replaces it as the narrowing condition
-# is the encryption context below, which is the only handle a direct grant has.
-#
-# Trade-offs: the encryption context couples this module to a literal the
-# application chooses, `carddemo:purpose`. That coupling is accepted because it is
-# what makes the grant specific: without it a role permitted to use this key could
-# encipher and decipher anything at all under it, and with it the role can only
-# work with ciphertext produced for the purpose named. The literal is a variable
-# with a default rather than a hard-coded string, so a change on the application
-# side is a change to one input value.
+# com.carddemo.account.service.CustomerIdentifierCipher, still under an
+# authenticated cipher with a per-value data key, and still separated from each
+# other by the carddemo:purpose encryption context. What the environment roots
+# publish to those two services is aurora_key_alias_name instead of a fifth
+# alias, and the two inputs governing that grant are named
+# application_envelope_user_role_arns and application_envelope_context_purposes -
+# named for the CALLER rather than for a key, precisely so no reader infers a
+# key that does not exist.
 # -----------------------------------------------------------------------------
-
-data "aws_iam_policy_document" "application" {
-  statement {
-    sid       = "AllowKeyAdministrationByAccountRoot"
-    effect    = "Allow"
-    actions   = ["kms:*"]
-    resources = ["*"]
-
-    principals {
-      type        = "AWS"
-      identifiers = [local.account_root_arn]
-    }
-  }
-
-  dynamic "statement" {
-    for_each = length(var.application_key_user_role_arns) > 0 ? [1] : []
-
-    content {
-      sid       = "AllowEnvelopeEncryptionByApplicationRoles"
-      effect    = "Allow"
-      actions   = local.workload_envelope_actions
-      resources = ["*"]
-
-      principals {
-        type        = "AWS"
-        identifiers = var.application_key_user_role_arns
-      }
-
-      # Assumptions: this condition is what a direct grant has instead of
-      # kms:ViaService. It admits only requests whose encryption context names one
-      # of the declared purposes, so a role holding this grant cannot use the key
-      # for anything but the values it was granted for -- and a ciphertext produced
-      # under one purpose cannot be deciphered by a caller asking under another.
-      condition {
-        test     = "StringEquals"
-        variable = "kms:EncryptionContext:carddemo:purpose"
-        values   = var.application_encryption_context_purposes
-      }
-
-      # Assumptions: the caller-account condition is kept for the same reason it is
-      # kept on the four keys above -- it confines the grant to requests made on
-      # behalf of this account, so the key cannot be used against another account's
-      # resource even by a principal this policy names.
-      condition {
-        test     = "StringEquals"
-        variable = "kms:CallerAccount"
-        values   = [data.aws_caller_identity.current.account_id]
-      }
-    }
-  }
-}
-
-resource "aws_kms_key" "application" {
-  description             = "CardDemo ${var.environment}: customer-managed key the application generates envelope data keys from, protecting the card verification value and the two customer identifiers the baseline held in the clear."
-  enable_key_rotation     = var.enable_key_rotation
-  deletion_window_in_days = var.deletion_window_in_days
-
-  tags = merge(var.tags, {
-    Name      = "${local.alias_prefix}application-${var.environment}"
-    DataClass = "application"
-  })
-}
-
-resource "aws_kms_key_policy" "application" {
-  key_id = aws_kms_key.application.key_id
-  policy = data.aws_iam_policy_document.application.json
-
-  lifecycle {
-    precondition {
-      condition = alltrue([
-        for arn in var.application_key_user_role_arns :
-        can(regex(local.current_account_role_arn_pattern, arn))
-      ])
-      error_message = "Every application_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
-    }
-  }
-}
-
-# Assumptions: the alias is what the application is configured with, not the key
-# identifier. An alias survives replacement of the key behind it, which matters
-# more for this key than for the other four: a rotation that replaced the key
-# would otherwise require every task definition holding the identifier to be
-# revised, and a task still holding the old identifier would fail on its next card
-# write rather than at deployment.
-resource "aws_kms_alias" "application" {
-  name          = "alias/${local.alias_prefix}application-${var.environment}"
-  target_key_id = aws_kms_key.application.key_id
-}

@@ -75,7 +75,7 @@
 // =============================================================================
 /**
  * Charter of the container-backed repository integration tests of the reference-data bounded context,
- * which exercise the six Spring Data JPA interfaces of {@code com.carddemo.reference.repository}
+ * which exercise the seven Spring Data JPA interfaces of {@code com.carddemo.reference.repository}
  * against a real PostgreSQL engine.
  *
  * <h2>Purpose, and the rule elements that have no subject here</h2>
@@ -83,7 +83,7 @@
  * <p><b>Purpose.</b> This package is the persistence-layer test boundary of reference-service. Every
  * class in it starts a PostgreSQL container, lets Flyway build the {@code reference} schema from this
  * module's {@code src/main/resources/db/migration/V1__reference.sql} and seed it from
- * {@code V2__seed_reference.sql}, and then asserts that the six repository interfaces declared in the
+ * {@code V2__seed_reference.sql}, and then asserts that the seven repository interfaces declared in the
  * main tree's package of the same name reach the rows those migrations define, through the keys and in
  * the order the COBOL baseline reached them. Nothing here substitutes a test double for a database,
  * and the reason is the single assertion this package exists to make: a referential-integrity rule
@@ -114,12 +114,23 @@
  *
  * <h2>The inventory this package owns, and the shared base that is not a further file</h2>
  *
- * <p>Assumptions: the closed set is <b>seven compilation units</b> -- this charter and six
+ * <p>Assumptions: the closed set is <b>eight compilation units</b> -- this charter and seven
  * integration-test classes, one per repository interface. The naming rule is that a class takes the
  * name of the interface it covers with {@code IT} appended, so the set is
  * {@code TransactionTypeRepositoryIT}, {@code TransactionCategoryRepositoryIT},
  * {@code DisclosureGroupRepositoryIT}, {@code UsPhoneAreaCodeRepositoryIT},
- * {@code UsStateRepositoryIT} and {@code UsStateZipPrefixRepositoryIT}.</p>
+ * {@code PhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT} and
+ * {@code UsStateZipPrefixRepositoryIT}.</p>
+ *
+ * <p>Refactoring Rationale: this set was seven units covering six interfaces, and it grew by one when
+ * the main tree reinstated {@code PhoneAreaCodeRepository} as the classification-scoped membership
+ * predicate over {@code reference.us_phone_area_codes}. Two classes therefore read the same seeded
+ * table. That is the naming rule holding rather than bending: folding the predicate's assertions into
+ * {@code UsPhoneAreaCodeRepositoryIT} would have kept the count at seven while breaking the one
+ * property the rule buys -- that the interface under test is derivable from the test's own name -- and
+ * a reader looking for the predicate's coverage would have had to find it under a different
+ * interface's name. Trade-offs: the cost is one more file and a second class reading rows the first
+ * already reads, and the shared container base means it is not a second engine start.</p>
  *
  * <p>Refactoring Rationale: the last three names carry the {@code Us} prefix because the interfaces
  * they cover carry it -- the main tree declares {@code UsPhoneAreaCodeRepository},

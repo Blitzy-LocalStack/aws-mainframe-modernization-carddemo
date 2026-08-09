@@ -70,30 +70,38 @@
 
 spring:
   config:
-    # WHY : Assumptions: the path is /carddemo/<environment>/authorization/, the
-    #       same three-part shape every context uses, so one Terraform module
-    #       writes them all and one policy can grant read on exactly one context's
-    #       subtree. The label defaults to `dev` here where the prod overlay
-    #       defaults to `prod`, so a task started on this profile with no label set
-    #       still reads the subtree belonging to it rather than another
-    #       environment's. The full rationale for taking this path at all, and for
-    #       the `optional:` marker, is in the file header above.
-    # WHY : Refactoring Rationale: the Parameter Store location this overlay declared has been
-    #       withdrawn. The reasoning, measured on this tree, is recorded in full below.
-    # WHY : Assumptions: this profile declares NO spring.config.import, and neither does
-    #       application-prod.yml, and neither does the sibling POM declare a
-    #       parameter-store starter. Those three facts are one decision and are stated
-    #       together, because each on its own reads as an omission. This context reads no
-    #       Parameter Store subtree at all: every deployment value reaches it as an
-    #       environment variable the task definition sets, which is what
-    #       application.yml's datasource, issuer and queue placeholders bind to.
+    # WHY : Assumptions: this profile imports the shared defaults document and NOTHING
+    #       else, and application-prod.yml declares the identical single-entry list, so
+    #       no document in this module claims an `aws-parameterstore:` location. This
+    #       context reads no Parameter Store subtree at all: every deployment value
+    #       reaches it as an environment variable the task definition sets, which is
+    #       what application.yml's datasource, issuer and queue placeholders bind to.
     #       reference-service, the other context whose only AWS artifact is the queue
     #       starter, takes the identical shape, so the repository holds ONE model for a
     #       queue-only context rather than two.
+    #       Refactoring Rationale: this note previously said that this profile
+    #       "declares NO spring.config.import", and that the sibling POM declares no
+    #       parameter-store starter, and it grouped the two with a third claim as "one
+    #       decision". Both were false and both are withdrawn. This profile does
+    #       declare an import -- the shared defaults, named below and required to be
+    #       first -- and what it declares no instance of is a Parameter Store LOCATION.
+    #       pom.xml does declare
+    #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store, deliberately,
+    #       to keep the resolver the queue starter already registers PAIRED with the
+    #       client that resolver builds; the reason is recorded at that dependency. The
+    #       withdrawn wording mattered because it read as evidence for the decision
+    #       while pointing at a classpath that does not exist, which is how the two
+    #       overlays came to disagree in the first place.
     #       Refactoring Rationale: an earlier revision put the overlay in production
     #       alone and left this profile without it, on the stated premise that the
     #       location could not resolve here. The premise was right about the failure and
     #       wrong about its scope, and the asymmetry it produced is what is corrected.
+    #       Assumptions: the corrected shape is asserted, not merely described.
+    #       config/ProfileConfigurationTopologyTest.eachOverlayImportsTheSharedDefaultsAlone
+    #       requires this overlay's import list to be exactly the shared defaults, and
+    #       noDocumentClaimsAParameterStoreLocation additionally checks the base document,
+    #       because the resolver is registered for the whole module and a location claimed
+    #       in the document this profile inherits from would reach it just the same.
     #       The queue starter brings spring-cloud-aws-autoconfigure, whose
     #       spring.factories registers a resolver for the `aws-parameterstore` prefix, so
     #       the location IS claimed in this module; the resolver then builds an SSM

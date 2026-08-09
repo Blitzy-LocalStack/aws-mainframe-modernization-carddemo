@@ -171,24 +171,34 @@
  *
  * <h2>Invariants every class in this package inherits</h2>
  *
- * <p><b>5. Money is {@code BigDecimal} at scale 2 under one rounding contract.</b> The
- * migration plan's transformation rule T3 fixes the representation at every hop, forbids
- * {@code double} and {@code float} in the money path -- which the shared architecture test
- * asserts rather than requests -- and states one mode,
+ * <p><b>5. Money is {@code BigDecimal} at scale 2, and the rounding mode is fixed per
+ * operation.</b> The migration plan's transformation rule T3 fixes the representation at every
+ * hop and forbids {@code double} and {@code float} in the money path -- which the shared
+ * architecture test asserts rather than requests. Two modes exist and neither is selectable:
  * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}, which is
- * {@code RoundingMode.HALF_UP}. It governs every monetary reduction in this package,
- * the accrual included: {@code Money#monthlyInterest} takes no mode parameter, so no call
- * site can select a different one.</p>
+ * {@code RoundingMode.HALF_UP}, governs every monetary reduction in this package EXCEPT the
+ * accrual quotient, which uses
+ * {@code com.carddemo.common.money.Money#BASELINE_INTEREST_ROUNDING},
+ * {@code RoundingMode.DOWN}, because that is what the reference statement does.
+ * {@code Money#monthlyInterest} takes no mode parameter, so no call site can select
+ * either one.</p>
  *
- * <p>Assumptions: the reference accrual truncates where this package rounds half up, and the
- * difference is recorded here so a later reader does not read it as an oversight. The
- * baseline statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
+ * <p>Assumptions: this package's accrual truncates toward zero, because the reference does, and the
+ * derivation is recorded here because the evidence is an ABSENCE and so cannot be read off a
+ * statement. The baseline statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
  * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and
  * carries no {@code ROUNDED} phrase -- nor does any other statement in that program -- and
  * its target field declared {@code PIC S9(09)V99} at line 168 therefore discards surplus
- * digits toward zero. That costs at most one cent, and only on a quotient landing exactly on
- * a half cent; it is registered as divergence C-ROUNDING in
- * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ * digits toward zero. {@code Money.BASELINE_INTEREST_ROUNDING} is that mode, and
+ * {@code InterestCalculationService.ACCRUAL_ROUNDING} names it beside the service for a reader who
+ * looks for it here.</p>
+ *
+ * <p>Refactoring Rationale: this package rounded the accrual half up and the resulting cent was
+ * registered as divergence C-ROUNDING. That is withdrawn: the accrual formula is one of the rules the
+ * reference test suite asserts verbatim, and the cent did not stay local -- line 467 adds each
+ * reduced term into the account total and line 352 adds that total to the balance, which the next
+ * inclusive over-limit comparison is made against. The identifier survives only as a withdrawal
+ * record in {@code docs/architecture/cobol-to-service-traceability.md} section 7.5.</p>
  *
  * <p>Assumptions: that unit of work is genuinely three writes and the baseline applies all
  * three or none. {@code app/cbl/CBTRN02C.cbl:440-442} performs

@@ -99,8 +99,39 @@ public class DateInquiryMessageListener {
 
     /**
      * The media type the fixed-width reply is published as.
+     *
+     * <p>Assumptions: this is the ONE value the migration maps {@code MQFMT-STRING} to, across all three
+     * message flows. {@code docs/architecture/messaging-contracts.md} states the mapping as a row of the
+     * descriptor table -- string format indicator to a {@code contentType} of {@code text/csv} -- and the
+     * plan's messaging design states the same, so the value is a fixed contract rather than a per-flow
+     * choice. The sibling consumers carry it under their own names:
+     * {@code com.carddemo.account.service.InquiryMessageListener.CONTENT_TYPE} and
+     * {@code com.carddemo.authorization.domain.AuthReplyOutbox.CONTENT_TYPE_CSV}. A fourth holder exists
+     * inside THIS context -- {@code DateConversionMessageListener.CONTENT_TYPE}, the co-resident second
+     * rendering of the same {@code CODATE01} reply -- and it already carried {@code text/csv}. That is worth
+     * naming rather than counting as a fourth flow: it means the value below is corroborated by an
+     * in-repository stamper for this very exchange, so the correction is checkable here and not only against
+     * the contract document.</p>
+     *
+     * <p>Refactoring Rationale: this constant held {@code text/plain}, and the divergence was not
+     * cosmetic. The contract document gives the attribute one job -- it is the DISCRIMINATOR a consumer
+     * uses to tell a positional payload from the additive JSON envelope the same document reserves the
+     * right to introduce -- so a discriminator that takes a different value on one of three flows
+     * discriminates the FLOW rather than the encoding, and a consumer written to the documented rule would
+     * read this reply as neither form. The account-service constant additionally asserted in prose that
+     * "it is the same one the authorization and date-inquiry replies carry", which was true of the
+     * authorization reply and false of this one; correcting the value here is what makes that statement
+     * true rather than requiring it to be weakened.</p>
+     *
+     * <p>Assumptions: {@code text/csv} labels the FORMAT INDICATOR and is not a claim that this particular
+     * payload is comma-delimited -- it is a forty-six-character fixed-width block whose fields are located
+     * by offset, and its exact bytes are pinned by {@code DateInquiryReplyMapperTest}. Alternatives
+     * Considered: a third value naming the fixed-width shape honestly, such as {@code text/plain} kept with
+     * a documented exception. Rejected because the value's purpose is to separate positional from
+     * structured, a distinction on which this payload and the two comma-delimited ones fall on the same
+     * side; a per-flow spelling would give a consumer three values to branch on to learn one bit.</p>
      */
-    private static final String CONTENT_TYPE_FIXED_WIDTH = "text/plain";
+    private static final String CONTENT_TYPE_FIXED_WIDTH = "text/csv";
 
     /**
      * The renderer for the reply body.

@@ -147,10 +147,16 @@ public class ExportJob {
      * cross-references, then transactions. The sequence number is a single counter spanning all
      * record types, which is what the reference's {@code WS-SEQUENCE-COUNTER} is.</p>
      *
+     * <p>Assumptions: each of the three passes walks its OWN table exactly once and in that table's
+     * key order, which is what makes the record count a property of the data rather than of the join
+     * order chosen here. The counts are one account record per account row, one cross-reference
+     * record per CARD row -- not per account, since an account may hold several cards -- and one
+     * transaction record per posted transaction.</p>
+     *
      * @param businessDate the injected business date the dataset is partitioned under; must not be
      *     {@code null}
      * @param accounts the accounts to export; must not be {@code null}
-     * @param crossReferences the per-account cross-reference reader; must not be {@code null}
+     * @param crossReferences the cross-reference table, walked in full; must not be {@code null}
      * @param transactions the transactions to export; must not be {@code null}
      * @param objectStore the object store; must not be {@code null}
      * @param bucket the dataset bucket; must not be {@code null}
@@ -191,29 +197,33 @@ public class ExportJob {
             }
         }
 
-        // WHY : the cross-reference rows are reached per exported account rather than through a
-        //       second unrestricted scan, because the cross-reference repository publishes a keyed
-        //       read and a per-account read and no scan at all -- and it publishes no scan because
-        //       no reference paragraph performs one. Assumptions: an account with no card
-        //       contributes no cross-reference record, which is what a sequential pass over a file
-        //       holding one row per card also yields. Trade-offs: an account holding several cards
-        //       contributes only its lowest-numbered one, because that is the single row the
-        //       per-account path returns; widening it would mean publishing a scan this module has
-        //       no reference paragraph to justify.
-        try (Stream<Account> rows = accounts.findAllByOrderByAccountIdAsc()) {
-            for (Account row : (Iterable<Account>) rows::iterator) {
-                CardXref crossReference = crossReferences
-                        .findFirstByAccountIdOrderByCardNumAsc(row.getAccountId())
-                        .orElse(null);
-                if (crossReference == null) {
-                    continue;
-                }
+        // WHY : Refactoring Rationale: this walked the ACCOUNT master a second time and took one
+        //       cross-reference row per account, and it lost records. app/cbl/CBEXPORT.cbl:47-51
+        //       opens the cross-reference ACCESS MODE IS SEQUENTIAL and :376-389 reads it until end
+        //       of file, so the reference writes one record per CARD -- and an account legitimately
+        //       holds many cards, because the by-account index is declared NONUNIQUEKEY at
+        //       app/jcl/XREFFILE.jcl:74-75 and idx_card_xref_account_id is created non-unique at
+        //       V1__account.sql:726. The per-account read is BOUNDED to one row by design, which is
+        //       what makes its optional return type safe, so every further card of a multi-card
+        //       account was absent from the dataset with nothing reporting it. The dataset stayed
+        //       well formed and every record in it stayed correct, which is why a round trip could
+        //       not detect the loss: the same shape wrote it and read it back.
+        // WHY : Assumptions: the walk is ordered by CARD NUMBER, not by account, because the
+        //       sequence number below is assigned in write order and the reference's order is
+        //       record-key order over the base cluster -- app/cbl/CBEXPORT.cbl:50 names the card
+        //       number as that key. Grouping by account would emit the same SET of records under
+        //       different sequence numbers.
+        // WHY : Trade-offs: this replaces one query per account with one walk of the table, so an
+        //       account holding no card now costs nothing rather than costing a query that returns
+        //       nothing. An account with no card still contributes no cross-reference record, which
+        //       is what a sequential pass over a file holding one row per card also yields.
+        try (Stream<CardXref> rows = crossReferences.findAllByOrderByCardNumAsc()) {
+            for (CardXref row : (Iterable<CardXref>) rows::iterator) {
                 sequence++;
                 crossReferenceRecords++;
                 DatasetPayloadWriter.append(payload, ExportRecordMapper.toRecord(
                         ExportRecord.ofCardXref(
-                                prefix(RecordType.CARD_XREF, timestamp, sequence),
-                                crossReference)));
+                                prefix(RecordType.CARD_XREF, timestamp, sequence), row)));
             }
         }
 
