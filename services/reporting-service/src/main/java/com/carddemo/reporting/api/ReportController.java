@@ -110,13 +110,20 @@ public class ReportController {
     /**
      * How many detail lines one page of the lines operation carries.
      *
-     * <p>Assumptions: the page size is the report's own printed page size rather than a number chosen
-     * for the wire. {@code TransactionReportService.PAGE_SIZE} is the twenty-line page
-     * {@code app/cbl/CBTRN03C.cbl} breaks its page subtotal on, so a page of this operation is one
-     * page of the report -- which is what makes a page subtotal meaningful to a caller rendering a
-     * page at a time.
+     * <p>Assumptions: the window is taken from the report's own arithmetic rather than chosen for the
+     * wire, so a caller rendering one window at a time is rendering a window the report itself is built
+     * around. {@code TransactionReportService.LINE_COUNTER_MODULUS} is the modulus
+     * {@code app/cbl/CBTRN03C.cbl} tests its line counter against at L282, taken from
+     * {@code WS-PAGE-SIZE PIC 9(03) COMP-3 VALUE 20} at its L131 and L132.
+     *
+     * <p>Assumptions: a window of this operation is NOT one printed page of the report, and the two
+     * must not be read as equal. Heading and subtotal bands advance the same counter the modulus is
+     * tested against, so the detail lines on a printed page range from 10 to 40 across the 14 pages of
+     * {@code tests/golden/reporting/e2e_full_cycle_report.expected}. The subtotal bands are published as
+     * a separate operation for exactly that reason, and its own documentation records that they cover
+     * the whole range rather than one window.
      */
-    public static final int PAGE_SIZE = TransactionReportService.PAGE_SIZE;
+    public static final int PAGE_SIZE = TransactionReportService.LINE_COUNTER_MODULUS;
 
     /**
      * Name this operation's cursor tokens are bound to.

@@ -69,8 +69,8 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * which the pending-authorization consumer makes while handling a queue message. That message carries no
  * user and therefore no token, so those calls can present no group authority at all. They are NOT decided
  * by this chain: {@link InternalApiSecurityConfig} installs an earlier-ordered chain whose security
- * matcher names those three exact paths and which accepts only a machine token, and the rules below are
- * reached by everything else.</p>
+ * matcher names those paths exactly -- among the other internal reads it claims -- and which accepts only a
+ * machine token, and the rules below are reached by everything else.</p>
  *
  * <p>Refactoring Rationale: the internal mechanism this chain used to carry has been withdrawn, and both
  * halves of the decision are recorded because the withdrawal was not a simplification. This chain
@@ -81,15 +81,21 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * length and MAC checking is re-implementing audited code, which is the reason the shared kernel adds no
  * resilience library either. What the withdrawn form bought was replay protection bound into the
  * signature, and that property is not lost -- it is asserted on the VERIFYING side instead, because the
- * surviving chain's security matcher admits its token on exactly those three paths and nowhere else, so a
- * captured token replayed against any other route of this service reaches this chain, which knows nothing
- * about it, and is refused.</p>
+ * surviving chain's security matcher admits its token on the exact method-and-path pairs it enumerates and
+ * nowhere else, so a captured token replayed against any other route of this service reaches this chain,
+ * which knows nothing about it, and is refused. The replay property rests on the matcher being exact rather
+ * than on its arity, which is why this sentence names no number: the arity rose when the customer reads were
+ * matched there and the property did not change.</p>
  *
- * <p>Assumptions: an earlier-ordered chain is workable here only because the internal matcher names three
- * EXACT paths rather than the {@code /api/v1/accounts/**} subtree. The account subtree is legitimately
- * reached by a signed-on user as well, and Spring Security serves a request with the first chain whose
- * matcher accepts it, so a subtree matcher would have captured every user request to that subtree and
- * refused it for carrying no machine token. Exact matchers are what keep both callers working.</p>
+ * <p>Assumptions: an earlier-ordered chain is workable here only because the internal matcher names EXACT
+ * method-and-path pairs rather than the {@code /api/v1/accounts/**} subtree. The account subtree is
+ * legitimately reached by a signed-on user as well, and Spring Security serves a request with the first
+ * chain whose matcher accepts it, so a subtree matcher would have captured every user request to that
+ * subtree and refused it for carrying no machine token. Exact matchers are what keep both callers working.
+ * Refactoring Rationale: this sentence counted the internal matcher's paths, and the count went stale when
+ * the customer record read and the customer scan were matched there. The count is dropped rather than
+ * raised -- the property that makes the ordering safe is exactness, not arity, and
+ * {@code InternalApiSecurityConfig.internalPaths()} is the one place the addresses are enumerated.</p>
  *
  * <p>Alternatives Considered: forwarding the end user's token from the calling workload, which needs no
  * second chain and no second credential. Rejected twice over -- there is no user token in a queue message
@@ -97,11 +103,11 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * records would grant that session an authority the migration's security mapping gives it nowhere
  * else.</p>
  *
- * <p>Alternatives Considered: publishing the three internal paths through the public edge and relying on
- * the machine token alone to protect them. Rejected because the edge's route keys and the load balancer's
- * path patterns are separate lists, and the narrower of the two is the better place to stop a request that
- * has no business reaching the edge: the environment roots forward these paths on the INTERNAL load
- * balancer only, and {@code infra/modules/api-gateway-http} publishes no route key for either of them.</p>
+ * <p>Alternatives Considered: publishing the internal paths through the public edge and relying on the
+ * machine token alone to protect them. Rejected because the edge's route keys and the load balancer's path
+ * patterns are separate lists, and the narrower of the two is the better place to stop a request that has
+ * no business reaching the edge: the environment roots forward these paths on the INTERNAL load balancer
+ * only, and {@code infra/modules/api-gateway-http} publishes no route key for either subtree.</p>
  *
  * <p>Assumptions: this chain does NOT register the shared correlation filter, and the omission is the
  * contract rather than an oversight. That filter reaches this context through
@@ -288,8 +294,9 @@ public class SecurityConfig {
      *
      * <p>Assumptions: the account-view screen renders customer fields, but it renders them through the
      * account read below rather than by addressing this subtree, so this subtree too is granted to no
-     * group. {@code COPAUA0C} paragraph {@code 5300-READ-CUST-RECORD} is its only baseline caller, and
-     * that one address is matched by {@link InternalApiSecurityConfig}'s earlier chain.</p>
+     * group. Its baseline callers are {@code COPAUA0C} paragraph {@code 5300-READ-CUST-RECORD} and the
+     * batch reader {@code app/cbl/CBCUS01C.cbl}, neither of which runs anywhere near a terminal, and each
+     * address they become is matched by {@link InternalApiSecurityConfig}'s earlier chain.</p>
      */
     public static final String CUSTOMER_PATH_PATTERN = "/api/v1/customers/**";
 

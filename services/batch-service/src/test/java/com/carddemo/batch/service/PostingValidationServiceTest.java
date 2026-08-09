@@ -1,12 +1,17 @@
 package com.carddemo.batch.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.dto.PostingValidationResult;
 import com.carddemo.batch.dto.RejectReason;
+import com.carddemo.batch.repository.AccountRepository;
+import com.carddemo.batch.repository.CardXrefRepository;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -26,8 +31,15 @@ import org.junit.jupiter.api.Test;
 @DisplayName("the posting validation chain")
 class PostingValidationServiceTest {
 
-    /** The service under test; it holds no state, so one instance serves every case. */
-    private final PostingValidationService service = new PostingValidationService();
+    /** The by-card access path, stubbed per case. */
+    private final CardXrefRepository crossReferences = mock(CardXrefRepository.class);
+
+    /** The by-account access path, held so a case can assert it was never read. */
+    private final AccountRepository accounts = mock(AccountRepository.class);
+
+    /** The service under test; it holds no mutable state, so one instance serves every case. */
+    private final PostingValidationService service =
+            new PostingValidationService(this.crossReferences, this.accounts);
 
     /** An account identifier used wherever the identity itself is not what is under test. */
     private static final long ACCOUNT_ID = 11L;
@@ -201,5 +213,75 @@ class PostingValidationServiceTest {
         assertThat(PostingValidationResult
                 .resolve(false, false, false, false, new BigDecimal("100.00")).isAccepted())
                 .isTrue();
+    }
+
+    /**
+     * An unresolved card ends validation without the account path being read at all.
+     *
+     * <p>Assumptions: this drives the resolving entry point rather than the pre-resolved overload,
+     * because the guard at {@code app/cbl/CBTRN02C.cbl:372} is about a read NOT HAPPENING and only
+     * the entry point that owns both reads can be observed to skip one. Reason 100 therefore
+     * excludes reason 101 by control flow rather than by precedence.</p>
+     */
+    @Test
+    @DisplayName("leave the account path unread when the card does not resolve")
+    void unresolvedCardLeavesTheAccountPathUnread() {
+        when(this.crossReferences.findByCardNum(CARD_NUMBER)).thenReturn(Optional.empty());
+
+        PostingValidationResult outcome =
+                this.service.validate(transaction("100.00", LocalDate.of(2022, 7, 18)));
+
+        assertThat(outcome.rejectReason())
+                .contains(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE);
+        verifyNoInteractions(this.accounts);
+    }
+
+    /**
+     * No combination of findings reports the reason the reference assigns on a failed rewrite.
+     *
+     * <p>Assumptions: reason 109 is assigned at {@code app/cbl/CBTRN02C.cbl:556}, inside the posting
+     * path that {@code :212} enters only when validation assigned no reason, so it is not a
+     * validation outcome and no input to this service may produce it.</p>
+     */
+    @Test
+    @DisplayName("never report the rewrite reason for any input")
+    void noInputEverReportsTheRewriteReason() {
+        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+                        Optional.empty(), Optional.empty()).rejectReason())
+                .isNotEqualTo(Optional.of(RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE));
+        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+                        resolved(), Optional.empty()).rejectReason())
+                .isNotEqualTo(Optional.of(RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE));
+        assertThat(this.service.validate(transaction("100.01", LocalDate.of(2022, 7, 19)),
+                        resolved(),
+                        Optional.of(account("900.00", "1000.00", LocalDate.of(2022, 7, 18))))
+                        .rejectReason())
+                .isNotEqualTo(Optional.of(RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE));
+    }
+
+    /**
+     * The projection is formed from the cycle accumulators and carries two decimal places.
+     *
+     * <p>Assumptions: the account below carries a current balance deliberately unequal to its cycle
+     * totals, so a projection taken from the wrong field would be arithmetically distinguishable.
+     * {@code app/cbl/CBTRN02C.cbl:403-405} forms the quantity as the cycle credit less the cycle
+     * debit plus the amount, giving {@code 400.00 - 25.00 + 100.00}, and never touches
+     * {@code ACCT-CURR-BAL}.</p>
+     */
+    @Test
+    @DisplayName("form the projection from the cycle accumulators, not the current balance")
+    void projectionComesFromTheCycleAccumulators() {
+        Account distinguishing = new Account(ACCOUNT_ID, "Y", new BigDecimal("7777.77"),
+                new BigDecimal("1000.00"), new BigDecimal("500.00"), LocalDate.of(2020, 1, 1),
+                LocalDate.of(2030, 1, 1), LocalDate.of(2024, 1, 1), new BigDecimal("400.00"),
+                new BigDecimal("25.00"), "98101", "DEFAULT");
+
+        PostingValidationResult outcome = this.service.validate(
+                transaction("100.00", LocalDate.of(2022, 7, 18)), resolved(),
+                Optional.of(distinguishing));
+
+        assertThat(outcome.isAccepted()).isTrue();
+        assertThat(outcome.projectedCycleBalance()).isEqualByComparingTo(new BigDecimal("475.00"));
+        assertThat(outcome.projectedCycleBalance().scale()).isEqualTo(2);
     }
 }

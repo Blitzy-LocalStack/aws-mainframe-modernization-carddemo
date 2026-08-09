@@ -1333,9 +1333,16 @@ carddemo:
     #       context's machine-to-machine bearer token against, and the same value is
     #       held by that service, which signs with it. It carries NO default: a
     #       default would be a shared secret published in source, and anything able
-    #       to read this repository could then mint a token this service accepts for
-    #       the three internal account-context reads at /api/v1/card-xrefs/lookup,
-    #       /api/v1/accounts/{accountId} and /api/v1/customers/{customerId}.
+    #       to read this repository could then mint a token this service accepts on
+    #       EVERY address config/InternalApiSecurityConfig.java's internalPaths()
+    #       claims: /api/v1/card-xrefs/lookup, /api/v1/accounts/{accountId},
+    #       /api/v1/customers, /api/v1/customers/{customerId} and
+    #       /api/v1/customers/{customerId}/record.
+    #       Refactoring Rationale: this list named the first three alone, and it went
+    #       stale when the customer scan and the customer record read were matched on
+    #       that chain. The stale form understated what a leaked key unlocks, which is
+    #       the one direction a disclosure statement must never err in, so the list is
+    #       re-stated in full and anchored to the method that enumerates it.
     #       (2) Assumptions: config/InternalApiSecurityConfig.java reads this key
     #       through @Value with no default, refuses a blank value naming this
     #       property, and refuses one shorter than the digest width. The length check
@@ -1358,6 +1365,35 @@ carddemo:
     #       it is read through @Value. A deployment missing it fails fast rather than
     #       serving the internal paths with a chain that can verify nothing.
     signing-key: ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY}
+
+  # Two properties are deliberately NOT declared in this file and are documented here instead,
+  # because service/AccountViewService.java takes CursorToken as a constructor argument -- it seals
+  # the two boundary positions of the customer scan api/CustomerController.java publishes -- and a
+  # bean that is not published cannot be injected:
+  #
+  #   carddemo.pagination.cursor.signing-key   base64 key material, at least 32 bytes
+  #   carddemo.pagination.cursor.lifetime      ISO-8601 duration, defaulting to PT15M
+  #
+  # CardDemoCommonAutoConfiguration publishes one CursorToken bean and publishes it only when the
+  # first property is set, so supplying it IS the wiring. The deployment supplies it from the
+  # purpose-scoped secret both Terraform roots create, as the environment variable
+  # CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY -- Spring Boot's relaxed binding maps that spelling onto
+  # the hyphenated property name. infra/modules/ecs-service lists the name in
+  # required_secret_environment_names for this service and asserts biconditionally that exactly the
+  # list-publishing services receive it, so a deployment that omits it fails at plan rather than at
+  # container start.
+  # Trade-offs: no key is written here even as an environment placeholder, and the second half of
+  #   that is the part worth stating. A literal default would be a signing key committed to source,
+  #   and any deployment failing to override it would accept keyset cursors minted by anyone holding
+  #   this repository. A placeholder with no default is no better: the property then EXISTS and
+  #   resolves during condition evaluation, so every context that merely imports the
+  #   auto-configuration fails on an unresolvable placeholder rather than simply doing without the
+  #   sealer -- which would break every repository integration test in this module, none of which
+  #   pages anything. Leaving the property absent withholds the bean cleanly, and a deployed task
+  #   that omits the variable still fails at startup, because the component named above requires it.
+  #   This matches the same conclusion reached in the transaction, reference, reporting and
+  #   authorization contexts; the reasoning is repeated rather than cross-referenced because a reader
+  #   of this file would otherwise see an undeclared property and add the placeholder that breaks it.
 
   reference-context:
     # WHY : (1) Assumptions: the account update path validates three address fields

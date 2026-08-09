@@ -54,16 +54,22 @@
  *   <li>{@code SqsConfig} -- the listener-container factory that feeds the account-inquiry request and
  *       reply flow transcribed from {@code app/app-vsam-mq/cbl/COACCT01.cbl}.</li>
  *   <li>{@code InternalApiSecurityConfig} -- the second filter chain, and the only one that authorises a
- *       caller which is another service rather than a person. It matches exactly the three internal read
- *       paths the authorization context calls and verifies a shared-symmetric-key service token on them.
- *       Assumptions: it is ordered <b>ahead</b> of {@code SecurityConfig}'s chain, and the ordering is
- *       absolute rather than a preference -- the framework offers a request to each chain in turn and the
- *       first matcher that accepts it decides it, so a lower-precedence internal chain would never see a
- *       request at all. Alternatives Considered: adding those three paths to the human chain under a
- *       permissive rule, which would also have made the calls succeed. Rejected because the paths would
- *       then be reachable by any authenticated cardholder and one of them resolves a primary account
- *       number, so the permissive rule buys availability with a disclosure. Assumptions: this class is
- *       why the set here is five where a context with no inbound service caller has four.</li>
+ *       caller which is a workload rather than a person. It matches exactly the internal read addresses
+ *       its own {@code internalPaths()} enumerates and verifies a shared-symmetric-key service token on
+ *       them. Refactoring Rationale: this entry read "exactly the three internal read paths the
+ *       authorization context calls" while the customer record read and the customer scan were landing on
+ *       that chain. Neither is called by the authorization context -- they are matched there because
+ *       {@code SecurityConfig}'s customer pattern denies the whole subtree on the human chain -- so the
+ *       sentence named both the wrong count and the wrong caller. It now points at the single enumeration
+ *       instead of restating it, because a restated list drifts from the list it copies and this one
+ *       already drifted once. Assumptions: it is ordered <b>ahead</b> of {@code SecurityConfig}'s chain,
+ *       and the ordering is absolute rather than a preference -- the framework offers a request to each
+ *       chain in turn and the first matcher that accepts it decides it, so a lower-precedence internal
+ *       chain would never see a request at all. Alternatives Considered: adding those paths to the human
+ *       chain under a permissive rule, which would also have made the calls succeed. Rejected because the
+ *       paths would then be reachable by any authenticated cardholder and one of them resolves a primary
+ *       account number, so the permissive rule buys availability with a disclosure. Assumptions: this
+ *       class is why the set here is five where a context with no inbound service caller has four.</li>
  * </ul>
  *
  * <p>Assumptions: each member of that set rests on a capability this module actually declares, so the

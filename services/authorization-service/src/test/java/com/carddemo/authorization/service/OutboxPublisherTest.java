@@ -33,6 +33,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
@@ -94,6 +96,17 @@ class OutboxPublisherTest {
 
     /** The reply destination every row in the behavioural cases names. */
     private static final String REPLY_QUEUE = "https://sqs.eu-west-1.amazonaws.com/1/reply.fifo";
+
+    /**
+     * A SECOND reply destination, so that per-message routing can be told apart from a static one.
+     *
+     * <p>Assumptions: one destination cannot distinguish a publisher that reads each row's recorded
+     * destination from one that sends everything to a single configured queue, because both would pass.
+     * Two destinations in one group are also realistic rather than contrived: the same card can be
+     * authorised through two acquirers, each naming its own reply queue.</p>
+     */
+    private static final String OTHER_REPLY_QUEUE =
+            "https://sqs.eu-west-1.amazonaws.com/1/other-reply.fifo";
 
     /** The primary account number the rows in the behavioural cases answer for. */
     private static final String CARD_NUM = "4111111111111111";
@@ -322,6 +335,73 @@ class OutboxPublisherTest {
     }
 
     /**
+     * Each reply is addressed to the destination its OWN row recorded, not to one shared queue.
+     *
+     * <p>Assumptions: the reference program takes the destination from the inbound request's reply-to
+     * field, saved at {@code COPAUA0C.cbl} L413 to L414 and moved into the put's object name at L742, and
+     * it uses {@code MQPUT1} at L758 -- open, put and close per message -- precisely so that each reply
+     * can go somewhere different without a pre-opened handle. A publisher that read one configured queue
+     * instead would answer the wrong caller whenever two requesters were in flight, and that is a fault
+     * no single-destination test can see, which is why two are used here.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("each reply is routed to the destination recorded on its own row")
+    void eachReplyGoesToTheDestinationItsOwnRowRecords() {
+        AuthReplyOutbox head = rowFor(1L, FIRST_TRANSACTION_ID, null);
+        AuthReplyOutbox follower = rowRoutedTo(2L, SECOND_TRANSACTION_ID, OTHER_REPLY_QUEUE);
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder().messageId("m1").build());
+        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(head));
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(1L), anyInt()))
+                .thenReturn(List.of(follower));
+        when(this.outbox.claimGroupFollowers(eq(head.getOrderGroupToken()), eq(2L), anyInt()))
+                .thenReturn(List.of());
+
+        assertThat(this.publisher.drain()).isEqualTo(2);
+
+        ArgumentCaptor<SendMessageRequest> sent = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(sent.capture());
+        assertThat(sent.getAllValues().get(0).queueUrl()).isEqualTo(head.getReplyQueueUrl());
+        assertThat(sent.getAllValues().get(1).queueUrl()).isEqualTo(follower.getReplyQueueUrl());
+        // WHY : Assumptions: the two destinations are asserted DIFFERENT as well as individually
+        // correct, because if the helper ever routed both rows to one queue the pair of equality
+        // assertions above would still pass while proving nothing about per-message routing.
+        assertThat(head.getReplyQueueUrl()).isNotEqualTo(follower.getReplyQueueUrl());
+    }
+
+    /**
+     * The stored payload reaches the queue byte-identically, neither re-encoded nor padded nor trimmed.
+     *
+     * <p>Assumptions: the transmitted body is compared to the row's OWN stored payload rather than to any
+     * expected width, because the publisher treats the payload as opaque and a test that asserted a
+     * number here would import the very wire-length question the publisher deliberately does not hold an
+     * opinion on. Comparing the raw bytes rather than the strings is what makes the claim byte-identity:
+     * a re-encode that preserved the characters but changed the encoding would pass a string comparison.
+     * </p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the stored payload is transmitted byte-identically")
+    void thePayloadReachesTheQueueByteIdentically() {
+        AuthReplyOutbox row = rowFor(1L, FIRST_TRANSACTION_ID, null);
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder().messageId("m1").build());
+        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(row));
+        when(this.outbox.claimGroupFollowers(anyString(), anyLong(), anyInt()))
+                .thenReturn(List.of());
+
+        assertThat(this.publisher.drain()).isEqualTo(1);
+
+        ArgumentCaptor<SendMessageRequest> sent = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs).sendMessage(sent.capture());
+        assertThat(sent.getValue().messageBody().getBytes(StandardCharsets.UTF_8))
+                .isEqualTo(row.getPayload().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
      * The retention sweep deletes by a cut-off that is the configured window behind the clock.
      *
      * <p>Assumptions: the cut-off is asserted rather than the delete count, because the safety property
@@ -342,6 +422,85 @@ class OutboxPublisherTest {
         verify(this.outbox).deletePublishedBefore(cutoff.capture());
         assertThat(cutoff.getValue()).isEqualTo(LocalDateTime
                 .ofInstant(FIXED_INSTANT, ZoneOffset.UTC).minusDays(VALID_RETENTION_DAYS));
+    }
+
+    /**
+     * An expired reply is retired unsent and the reason it was retired survives on its row.
+     *
+     * <p>Assumptions: the ordering of the two calls the publisher makes here is load-bearing and is the
+     * whole subject of this case. Marking a row published RESETS its diagnostic column, which is right for
+     * a reply that finally succeeded after failing, so a retirement that recorded its reason before
+     * marking would leave the column empty and an operator with no way to tell a retired reply from an
+     * ordinary one. Asserting the reason rather than only the publication instant is therefore what pins
+     * the order.</p>
+     *
+     * <p>Assumptions: the row is asserted to be marked published even though nothing was sent, because
+     * that is what removes it from the pending index the claim reads -- and the return value is asserted
+     * to be zero in the same case, because a retired reply must not be counted as one that reached the
+     * queue.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an expired reply is retired unsent and keeps the reason on its row")
+    void anExpiredReplyIsRetiredWithItsReason() {
+        LocalDateTime alreadyPast =
+                LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC).minusSeconds(1L);
+        AuthReplyOutbox stale = rowFor(1L, FIRST_TRANSACTION_ID, alreadyPast);
+        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(stale));
+
+        assertThat(this.publisher.drain()).isZero();
+
+        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
+        assertThat(stale.isPublished()).isTrue();
+        assertThat(stale.getLastError()).isEqualTo("expired before publication");
+    }
+
+    /**
+     * A transient transport fault is reattempted once and a client-side refusal is not reattempted.
+     *
+     * <p>Assumptions: the retry budget is asserted through the COUNT of send calls, because that is its
+     * only observable form at this boundary. The narrow classification is the subject: a fault the service
+     * attributes to itself is worth one further attempt, while a status in the 4xx band is a statement
+     * about the request that would be repeated identically, so reattempting it would only delay recording
+     * it. This mirrors the reference's own three-status transient set at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} L87, which likewise excludes the four
+     * data conditions declared beside it.</p>
+     *
+     * <p>Assumptions: the recovering case asserts the row ends PUBLISHED with no diagnostic, so a
+     * successful second attempt is not left looking like a failure; the refused case asserts the row ends
+     * pending, so its group stops rather than advancing past an unanswered reply.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a transient transport fault is reattempted once and a 4xx refusal is not")
+    void onlyATransientTransportFaultIsReattempted() {
+        AuthReplyOutbox recovering = rowFor(1L, FIRST_TRANSACTION_ID, null);
+        when(this.outbox.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(recovering));
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(SdkClientException.create("connection reset"))
+                .thenReturn(SendMessageResponse.builder().build());
+
+        assertThat(this.publisher.drain()).isEqualTo(1);
+
+        verify(this.sqs, times(2)).sendMessage(any(SendMessageRequest.class));
+        assertThat(recovering.isPublished()).isTrue();
+        assertThat(recovering.getLastError()).isNull();
+
+        SqsClient refusing = mock(SqsClient.class);
+        when(refusing.sendMessage(any(SendMessageRequest.class))).thenThrow(
+                AwsServiceException.builder().message("not authorized").statusCode(403).build());
+        OutboxRepository singleRow = mock(OutboxRepository.class);
+        AuthReplyOutbox refused = rowFor(2L, SECOND_TRANSACTION_ID, null);
+        when(singleRow.claimGroupHeads(VALID_BATCH_SIZE)).thenReturn(List.of(refused));
+        OutboxPublisher strict = new OutboxPublisher(singleRow, refusing, this.clock,
+                VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS);
+
+        assertThat(strict.drain()).isZero();
+
+        verify(refusing, times(1)).sendMessage(any(SendMessageRequest.class));
+        assertThat(refused.isPublished()).isFalse();
     }
 
     /**
@@ -398,6 +557,29 @@ class OutboxPublisherTest {
         AuthReplyOutbox row = new AuthReplyOutbox(REPLY_QUEUE, "corr-1",
                 reply.orderGroup(TOKENISER), reply.deduplicationKey(TOKENISER),
                 CsvAuthCodec.encodeReply(reply), expiresAt,
+                LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
+        assignIdentity(row, outboxId);
+        return row;
+    }
+
+    /**
+     * Builds a row of the SAME order group as {@link #rowFor} but naming a different destination.
+     *
+     * <p>Assumptions: the order-group token is derived from the card number, which this helper keeps
+     * identical to {@link #rowFor}'s, so the row it returns is claimed as a follower of that group. Only
+     * the destination differs, which is what isolates routing as the single variable under test.</p>
+     *
+     * @param outboxId the identity to assign
+     * @param transactionId the acquirer's transaction identifier this reply answers
+     * @param replyQueueUrl the destination this row records
+     * @return the row, never {@code null}
+     */
+    private AuthReplyOutbox rowRoutedTo(long outboxId, String transactionId, String replyQueueUrl) {
+        CsvAuthCodec.AuthReply reply = new CsvAuthCodec.AuthReply(CARD_NUM, transactionId, "104530",
+                "00", "0000", Money.of("100.99"));
+        AuthReplyOutbox row = new AuthReplyOutbox(replyQueueUrl, "corr-1",
+                reply.orderGroup(TOKENISER), reply.deduplicationKey(TOKENISER),
+                CsvAuthCodec.encodeReply(reply), null,
                 LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
         assignIdentity(row, outboxId);
         return row;

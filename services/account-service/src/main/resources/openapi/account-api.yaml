@@ -135,17 +135,33 @@ info:
   title: CardDemo Account Context API
   version: 2.0.0
   summary: >-
-    The account master, its customer and its card cross-reference, published to
-    the pending-authorization context as three internal reads and to the browser
-    client as the two migrated account screens and the by-account browse.
+    The account master, its customer and its card cross-reference, published on
+    an internal surface a workload credential reaches and on an end-user surface
+    the browser client reaches as the two migrated account screens and the
+    by-account browse.
   description: >-
-    This document covers both surfaces of the account bounded context. The three
-    internal reads each replace one keyed file read performed by a reference
+    This document covers both surfaces of the account bounded context. Three of
+    the internal reads each replace one keyed file read performed by a reference
     batch program, and together they supply the three facts an authorization
     decision needs: which account and customer a card belongs to, what that
     account's limits and balance are, and whether the customer exists. The three
     end-user operations replace app/cbl/COACTVWC.cbl, app/cbl/COACTUPC.cbl and
     the baseline's CXACAIX alternate-index browse.
+
+
+    The remaining two internal reads -- the customer record projection and the
+    ascending customer scan -- carry app/cbl/CBCUS01C.cbl, whose file definition
+    declares ACCESS MODE IS SEQUENTIAL at line 31 and RECORD KEY IS FD-CUST-ID at
+    line 32, and whose driver loop at lines 70 to 87 sweeps that key ascending
+    with no filter. They are published on the internal surface rather than the
+    end-user one because no baseline screen reads a customer record directly:
+    that program carries no EXEC CICS verb and appears in no resource definition,
+    so a workload credential is the only one that fits, and granting a business
+    group would add a capability the reference never had. This paragraph was
+    added because the two operations were mounted and declared while the prose
+    above still described the internal surface as three reads -- the same
+    contract-versus-handler drift the version note below records, in the
+    direction where the prose rather than the route set falls behind.
 
 
     Money is rendered as a JSON string throughout. That is not a stylistic
@@ -205,7 +221,11 @@ tags:
   - name: account
     description: Reads and edits of the account master.
   - name: customer
-    description: Presence checks against the customer master.
+    description: >-
+      Reads of the customer master and the presence check the authorization path
+      issues against it. The reads replace app/cbl/CBCUS01C.cbl, a batch reader
+      with no CICS transaction behind it, which is why they carry a workload
+      credential rather than an identity-provider one.
 
 paths:
 
@@ -266,6 +286,179 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/card-xrefs/lookup-by-account:
+    post:
+      tags: [internal, card-cross-reference]
+      operationId: lookupCardCrossReferenceByAccount
+      summary: Resolve an account to the account and customer its lowest card names.
+      description: >-
+        This is the CXACAIX access path as a single keyed read. The baseline
+        surfaces the alternate index to the online region under the literal
+        declared at app/cbl/COACTVWC.cbl L192 and L193, and paragraph
+        9200-GETCARDXREF-BYACCT. at L723 consumes it at L727 through L732 as ONE
+        EXEC CICS READ with RIDFLD and KEYLENGTH -- a deterministic
+        single-record read and not a browse. The base cluster cannot serve this
+        read: its key is the card number, per RECORD KEY IS FD-XREF-CARD-NUM at
+        L32 of app/cbl/CBACT03C.cbl.
+
+
+        Assumptions: the target index idx_card_xref_account_id is NOT unique, so
+        an account may hold more than one row. This operation answers with the
+        row whose card number orders lowest, which is the base cluster's own
+        order per ACCESS MODE IS SEQUENTIAL at L31 of app/cbl/CBACT03C.cbl, so
+        two identical requests cannot differ. A caller needing every row of a
+        multi-card account uses the paged walk below instead.
+
+
+        Assumptions: the account identifier travels in a body rather than in the
+        request line, for the same reason the card-keyed lookup above does. A
+        load balancer composes its access record from the request line before
+        any application code runs, and the migration's sensitive-data logging
+        contract names account identifiers among the values a durable diagnostic
+        may not hold.
+      security:
+        - internalServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountLookupRequest'
+      responses:
+        '200':
+          description: >-
+            The account is cross-referenced. The body carries the account and the
+            customer and does not echo any card number, so no primary account
+            number reaches a further response body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardXrefView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The account has no cross-referenced card. The baseline declares this
+            outcome at app/cbl/COACTVWC.cbl L129 and L130 as
+            DID-NOT-FIND-ACCT-IN-CARDXREF with the sentence "Did not find this
+            account in account card xref file". The calling context reads this
+            status as its account-not-cross-referenced decision input.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/card-xrefs/search-by-account:
+    post:
+      tags: [internal, card-cross-reference]
+      operationId: searchCardCrossReferencesByAccount
+      summary: Walk one account's cross-reference rows a page at a time.
+      description: >-
+        Refactoring Rationale: this operation is a documented SUPERSET of the
+        baseline's account-keyed access rather than a restatement of it. The
+        baseline performs a single keyed read -- one EXEC CICS READ at
+        app/cbl/COACTVWC.cbl L727 through L732, inside
+        9200-GETCARDXREF-BYACCT. at L723 -- and so answers with one record,
+        while the target index idx_card_xref_account_id is not unique and an
+        account may hold several rows. This operation therefore returns a
+        bounded, ordered set where the baseline returns one row. The divergence
+        is documented here rather than introduced silently, and the
+        single-record shape remains available at
+        /api/v1/card-xrefs/lookup-by-account.
+
+
+        Alternatives Considered: addressing a page by its ordinal position in
+        the result was rejected in favour of paging by key. Under concurrent
+        insertion a row inserted ahead of the reader's position shifts every
+        later row by one, so the following request re-serves a row already
+        received and passes over one that was not. The baseline is already a
+        keyset cursor: app/cbl/COCRDLIC.cbl carries a last-key pair at L230
+        through L232, a first-key pair at L233 through L235, a screen number at
+        L237, a last-page-displayed flag at L239 whose conditions read 0 for
+        shown at L240 and 9 for not shown at L241, and a next-page indicator at
+        L242 through L244 set by discovering one more record than the seven a
+        screen holds, declared at L177 and L178 and counted at L145. There is no
+        offset, no row number and no page-size member anywhere in that
+        structure. The screen number and the last-page flag are deliberately
+        dropped, so no page number crosses the wire.
+
+
+        Assumptions: the cursor is opaque and sealed rather than raw. The
+        physical key it carries is the card number, a PIC X(16) primary account
+        number per L5 of app/cpy/CVACT03Y.cpy, so a raw cursor would publish in
+        every page the value this context masks everywhere else. The token is
+        bound to this query, to the direction and to the subject it was issued
+        for, and the subject is read from the validated token rather than from
+        the request.
+
+
+        Assumptions: the page size is fixed by the service at the seven rows the
+        baseline screen holds and is not accepted from the caller, so the
+        surplus-row probe that settles hasNext stays inside the layer issuing
+        the query.
+      security:
+        - internalServiceToken: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            The sealed boundary token the previous page ended on. Omitted to read
+            the first page.
+          schema:
+            type: string
+            maxLength: 256
+        - name: direction
+          in: query
+          required: false
+          description: >-
+            The step to take from that boundary. A backward step with no cursor
+            reads the first page forward rather than failing, because a backward
+            walk is only expressible from a set already returned.
+          schema:
+            type: string
+            enum: [next, previous]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountLookupRequest'
+      responses:
+        '200':
+          description: >-
+            One page of the account's rows in ascending card-number order, with
+            both boundary tokens and the further-page indicator. An account with
+            no card yields an EMPTY page rather than a 404, matching an
+            alternate-index browse that ends immediately. Every card number is
+            masked to its last four digits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardXrefPage'
+        '400':
+          description: >-
+            The account identifier would not convert to a number, or the cursor
+            could not be opened because it was sealed for another query, another
+            subject or the other direction. The fieldErrors array names the
+            member at fault.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -554,6 +747,82 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/v1/customers:
+
+    # WHY : Assumptions: this operation is on the INTERNAL surface rather than the
+    #       end-user one, and the reason is the reference rather than a preference.
+    #       app/cbl/CBCUS01C.cbl carries no EXEC CICS verb and appears in no
+    #       resource definition, so it is a batch reader with no terminal behind
+    #       it; SecurityConfig accordingly denies this whole subtree to both
+    #       business groups, on the ground that granting one would add a
+    #       capability no baseline screen had.
+    get:
+      tags: [internal, customer]
+      operationId: listCustomers
+      summary: Read one ascending page of the customer master.
+      description: >-
+        Replaces the whole-file sweep of app/cbl/CBCUS01C.cbl, which walks the
+        master at L74 to L81 and writes each record out at L78. The order and the
+        access path are carried across exactly -- ascending CUST-ID, the primary
+        key declared at L32 beside ACCESS MODE IS SEQUENTIAL at L31 -- and the
+        page bound is the one accepted difference, because an operation answering
+        a request cannot stream an entire master into one response.
+
+
+        The page is positioned by KEY and never by offset or page number. The
+        reference settles that: the browse state it carries between terminal turns
+        at app/cbl/COCRDLIC.cbl L230 to L244 is already a keyset cursor, holding
+        two key pairs and two flags and no offset, row number or page-size field
+        at all. An offset is evaluated against the table as it stands when each
+        page is fetched, so a row inserted or removed between two fetches shifts
+        the window and the caller skips a row or receives one twice.
+      security:
+        - internalServiceToken: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            The opaque position a previous page issued, resumed strictly after.
+            Absent reads the opening page; a blank value also reads the opening
+            page, because blank is treated as a subset of error rather than as a
+            third state and is therefore never carried into the sealer.
+          schema:
+            type: string
+            maxLength: 256
+        - name: size
+          in: query
+          required: false
+          description: >-
+            The number of rows the page may carry. Absent takes the scan's own
+            default. The ceiling is what makes the bounded scan bounded and is
+            enforced in the service as well as here, so a second caller of that
+            method inherits it.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: >-
+            One ascending page. An exhausted scan answers 200 with no rows and no
+            boundaries rather than 404, because reaching the end of a master is a
+            normal outcome of a walk and not a missing resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/v1/customers/{customerId}:
 
     # WHY : Assumptions: BOTH methods are declared, and HEAD is declared first
@@ -638,6 +907,70 @@ paths:
             The customer master holds no such row. There is no body on this
             answer either, so that a HEAD request and a GET request receive the
             same shape.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/customers/{customerId}/record:
+
+    # WHY : Assumptions: the keyed read is published HERE and not at the address
+    #       above, although that is where a representation of one customer would
+    #       ordinarily sit. That address already carries the presence probe, whose
+    #       contract is a status and no body on either answer, and the
+    #       pending-authorization context depends on exactly that shape. One
+    #       address cannot carry both a status-only contract and a representation
+    #       without making the response shape depend on something other than the
+    #       address.
+    # WHY : Alternatives Considered: naming the segment /view, the segment the
+    #       account read above uses. Rejected because in this document /view names
+    #       a screen projection and this reference has no screen; the segment is
+    #       named for what the reference writes, DISPLAY CUSTOMER-RECORD at L78
+    #       over the group item declared at L4 of app/cpy/CVCUS01Y.cpy.
+    get:
+      tags: [internal, customer]
+      operationId: readCustomerRecord
+      summary: Read one customer of the customer master by its key.
+      description: >-
+        The keyed arm of the access surface app/cbl/CBCUS01C.cbl declares, taken
+        from RECORD KEY IS FD-CUST-ID at L32. The published fields are the
+        copybook's rather than the file description's: that description carves the
+        record into a nine-digit key at L39 and 491 opaque bytes at L40, and the
+        meaningful layout arrives at L45 through COPY CVCUS01Y.
+
+
+        Both stored identifiers are returned MASKED and never whole. CUST-SSN at
+        L17 of app/cpy/CVCUS01Y.cpy and CUST-GOVT-ISSUED-ID at L18 are held
+        encrypted, and only their disclosure treatment coincides -- L17 is
+        declared PIC 9(09), numeric, while L18 is declared PIC X(20),
+        alphanumeric.
+      security:
+        - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPath'
+      responses:
+        '200':
+          description: >-
+            The customer exists. Every numeric field is a digits-only JSON string,
+            which is the separation the reference itself keeps: app/cbl/COACTUPC.cbl
+            L671 declares the screen value as characters and L672 with L673
+            redefines the same storage as digits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The customer master holds no such row, carrying the reference sentence
+            for that outcome verbatim.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1508,6 +1841,284 @@ components:
           pattern: '^[0-9]{1,11}$'
           description: XREF-ACCT-ID PIC 9(11), as digits.
           example: '12345678901'
+
+    CustomerResponse:
+      type: object
+      additionalProperties: false
+      required: [customerId, firstName, middleName, lastName, addressLine1,
+                 addressLine2, addressLine3, stateCode, countryCode, zipCode,
+                 phoneNumber1, phoneNumber2, ssnMasked,
+                 governmentIssuedIdMasked, dateOfBirth, eftAccountId,
+                 primaryCardHolderIndicator, ficoCreditScore]
+      description: >-
+        One customer as the customer master stores it, derived at RECORD widths
+        from the eighteen named fields app/cpy/CVCUS01Y.cpy declares at L5 to L22.
+        That copybook additionally declares FILLER PIC X(168) at L23, which brings
+        the record to its documented 500 bytes and is dropped here: it is padding
+        to a fixed length rather than data.
+
+
+        This shape is NOT the customer grouping of AccountViewResponse. That one is
+        derived at the widths of the symbolic map and narrows four fields to what a
+        3270 screen could show; this one is derived at the widths of the record, so
+        it is the only projection through which the stored value of those four can
+        be read at all. Neither is a subset of the other and they are deliberately
+        separate types.
+
+
+        Every numeric field travels as a digits-only string rather than as a
+        numeric member, so that no client parses an identifier through a binary
+        representation that cannot hold it exactly.
+      properties:
+        customerId:
+          type: string
+          maxLength: 9
+          pattern: '^[0-9]{1,9}$'
+          description: CUST-ID PIC 9(09) at app/cpy/CVCUS01Y.cpy L5, as digits.
+          example: '987654321'
+        firstName:
+          type: string
+          maxLength: 25
+          description: CUST-FIRST-NAME PIC X(25) at L6.
+          example: 'JOHN'
+        middleName:
+          oneOf:
+            - type: string
+              maxLength: 25
+            - type: 'null'
+          description: >-
+            CUST-MIDDLE-NAME PIC X(25) at L7. Null when the column holds nothing:
+            a customer without a middle name is not a defective row, and the
+            declared width is a maximum for a descriptive value rather than a
+            length the value must reach.
+        lastName:
+          type: string
+          maxLength: 25
+          description: CUST-LAST-NAME PIC X(25) at L8.
+          example: 'DOE'
+        addressLine1:
+          type: string
+          maxLength: 50
+          description: CUST-ADDR-LINE-1 PIC X(50) at L9.
+        addressLine2:
+          oneOf:
+            - type: string
+              maxLength: 50
+            - type: 'null'
+          description: CUST-ADDR-LINE-2 PIC X(50) at L10. Null when unpopulated.
+        addressLine3:
+          type: string
+          maxLength: 50
+          description: >-
+            CUST-ADDR-LINE-3 PIC X(50) at L11. This component is named for the
+            copybook field and carries the value the account view screen labels as
+            the city. There is no CUST-CITY field to name it after -- a search
+            returns nothing anywhere under app -- while app/cbl/COACTVWC.cbl L513
+            moves CUST-ADDR-LINE-3 straight into the screen's city field. The two
+            widths match exactly at PIC X(50), so this is a difference of NAME and
+            not a narrowing.
+        stateCode:
+          type: string
+          maxLength: 2
+          description: CUST-ADDR-STATE-CD PIC X(02) at L12.
+          example: 'VA'
+        countryCode:
+          type: string
+          maxLength: 3
+          description: CUST-ADDR-COUNTRY-CD PIC X(03) at L13.
+          example: 'USA'
+        zipCode:
+          type: string
+          maxLength: 10
+          description: >-
+            CUST-ADDR-ZIP PIC X(10) at L14, carrying all ten characters. The
+            screen field ACSZIPCI is PIC X(5) at app/cpy-bms/COACTVW.CPY L186 and
+            app/cbl/COACTVWC.cbl L515 moves the wider value into it, so the
+            baseline itself shows five of the ten there.
+          example: '12546'
+        phoneNumber1:
+          oneOf:
+            - type: string
+              maxLength: 15
+            - type: 'null'
+          description: >-
+            CUST-PHONE-NUM-1 PIC X(15) at L15, at record width. The screen carries
+            thirteen, ACSPHN1I PIC X(13) at app/cpy-bms/COACTVW.CPY L204, and
+            app/cbl/COACTVWC.cbl L517 drops exactly the trailing two-character pad
+            the baseline's own redefinition at app/cbl/COACTUPC.cbl L723 to L731
+            accounts for.
+        phoneNumber2:
+          oneOf:
+            - type: string
+              maxLength: 15
+            - type: 'null'
+          description: CUST-PHONE-NUM-2 PIC X(15) at L16, on the same terms.
+        ssnMasked:
+          type: string
+          maxLength: 12
+          description: >-
+            Derived from CUST-SSN PIC 9(09) at L17, which is declared NUMERIC. The
+            stored value is enciphered and this context has no decipher route by
+            design, so a fixed redaction marker is published rather than any part
+            of the value. No example is given, deliberately: an example on this
+            property would be the one place a shape resembling a national
+            identifier appeared in this document.
+        governmentIssuedIdMasked:
+          type: string
+          maxLength: 20
+          description: >-
+            Derived from CUST-GOVT-ISSUED-ID PIC X(20) at L18, which is declared
+            ALPHANUMERIC and is therefore not the same kind of field as the
+            national identifier above, though its disclosure treatment is
+            identical. The screen field is ACSGOVTI PIC X(20) at
+            app/cpy-bms/COACTVW.CPY L210, matching the record width exactly. No
+            example is given, for the same reason.
+        dateOfBirth:
+          type: string
+          maxLength: 10
+          description: >-
+            CUST-DOB-YYYY-MM-DD PIC X(10) at L19, the only date the customer
+            record declares. It is already ordered year, month, day, so a lexical
+            comparison of two values orders them as dates.
+          example: '1980-01-01'
+        eftAccountId:
+          type: string
+          maxLength: 10
+          description: CUST-EFT-ACCOUNT-ID PIC X(10) at L20.
+        primaryCardHolderIndicator:
+          type: string
+          maxLength: 1
+          description: CUST-PRI-CARD-HOLDER-IND PIC X(01) at L21.
+          example: 'Y'
+        ficoCreditScore:
+          type: string
+          maxLength: 3
+          pattern: '^[0-9]{1,3}$'
+          description: >-
+            CUST-FICO-CREDIT-SCORE PIC 9(03) at L22, as digits. It is a bounded
+            small integer and is not an amount of money.
+          example: '750'
+
+    CustomerPage:
+      type: object
+      additionalProperties: false
+      required: [items, firstKey, lastKey, hasNext]
+      description: >-
+        One page of the customer scan in the shared keyset envelope. The envelope
+        has exactly these four members and carries no total count and no page
+        number, because the reference browse state it replaces carries neither: at
+        app/cbl/COCRDLIC.cbl L230 to L244 it holds a trailing key pair, a leading
+        key pair, a screen ordinal, a last-screen flag and a further-rows
+        indicator, and the two members not carried across are the screen ordinal
+        at L237 and the last-screen flag at L239 to L241, so that no page number
+        crosses the wire.
+      properties:
+        items:
+          type: array
+          description: >-
+            The rows of this page in ascending CUST-ID order, which is the order
+            the reference walk produces by construction from ACCESS MODE IS
+            SEQUENTIAL at app/cbl/CBCUS01C.cbl L31 over RECORD KEY IS FD-CUST-ID at
+            L32. Empty when the scan is exhausted.
+          items:
+            $ref: '#/components/schemas/CustomerResponse'
+        firstKey:
+          oneOf:
+            - type: string
+              maxLength: 256
+            - type: 'null'
+          description: >-
+            The opaque position of the FIRST row of this page. Null on an
+            exhausted page. It names a row the caller actually received, which is
+            a documented divergence from the reference: app/cbl/COCRDLIC.cbl
+            captures the last displayed key at L1194 with L1195 and then
+            overwrites it with the probe row's key at L1212 to L1214, so the value
+            it retains names a record the terminal never showed.
+        lastKey:
+          oneOf:
+            - type: string
+              maxLength: 256
+            - type: 'null'
+          description: >-
+            The opaque position of the LAST row of this page, to be sent back as
+            the cursor of the following request. Null on an exhausted page.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further row follows this page. It is settled by asking the
+            store for one row more than the page carries and observing whether
+            that row arrives, never by counting the master -- which is the
+            reference's own method, since the further-rows state at
+            app/cbl/COCRDLIC.cbl L242 to L244 is a single flag raised by
+            discovering one record beyond what the screen holds. The surplus row
+            is trimmed before this page is published and appears nowhere in it.
+
+    AccountLookupRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId]
+      description: >-
+        Names the account to resolve. The single property is required and is
+        range-checked before any lookup is attempted. It is a body rather than a
+        path segment because a load balancer composes its access record from the
+        request line before any application code runs, and the migration's
+        sensitive-data logging contract names account identifiers among the values
+        a durable diagnostic may not hold.
+      properties:
+        accountId:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 99999999999
+          description: >-
+            The account identifier, within the eleven-digit range XREF-ACCT-ID
+            PIC 9(11) declares at L7 of app/cpy/CVACT03Y.cpy.
+          example: 12345678901
+
+    CardXrefPage:
+      type: object
+      additionalProperties: false
+      required: [items, hasNext]
+      description: >-
+        One page of cross-reference rows together with the two boundary tokens and
+        the further-page indicator a caller needs to walk the set by key. It
+        carries exactly four members: no total count and no page number, because
+        the baseline cursor holds neither -- app/cbl/COCRDLIC.cbl keeps two key
+        pairs at L230 through L235 and a further-page indicator at L242 through
+        L244, and nothing that counts rows already consumed.
+      properties:
+        items:
+          type: array
+          description: >-
+            The rows of this page in ascending card-number order, which is the
+            base cluster's own order per RECORD KEY IS FD-XREF-CARD-NUM at L32 of
+            app/cbl/CBACT03C.cbl. An exhausted walk carries an empty array.
+          items:
+            $ref: '#/components/schemas/CardXrefResponse'
+        firstKey:
+          type: string
+          nullable: true
+          maxLength: 256
+          description: >-
+            The sealed token naming this page's leading boundary, absent when the
+            page carries no rows. Its presence is what tells a caller a backward
+            step is expressible.
+        lastKey:
+          type: string
+          nullable: true
+          maxLength: 256
+          description: >-
+            The sealed token naming this page's trailing boundary -- the last row
+            the caller actually received, never the surplus row read to settle
+            hasNext -- absent when the page carries no rows.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page follows, established by reading one row beyond
+            the page and observing whether it arrived, never from a tally of how
+            many rows exist. It is true only alongside a present lastKey, so a
+            caller told to continue always holds the position to continue from.
+
 
     Money:
       type: string

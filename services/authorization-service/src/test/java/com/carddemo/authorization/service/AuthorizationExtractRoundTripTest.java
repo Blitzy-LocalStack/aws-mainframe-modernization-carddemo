@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -19,14 +20,17 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -182,7 +186,9 @@ class AuthorizationExtractRoundTripTest {
         assertThat(outcome.read()).isEqualTo(ROOT_COUNT + CHILD_COUNT);
         assertThat(outcome.inserted()).isEqualTo(ROOT_COUNT + CHILD_COUNT);
         assertThat(outcome.alreadyPresent()).isZero();
-        assertThat(outcome.orphaned()).isZero();
+        assertThat(outcome.inserted() + outcome.alreadyPresent())
+                .as("a load that returns accounted for every record it read")
+                .isEqualTo(outcome.read());
 
         assertThat(this.storedRoots)
                 .extracting(PendingAuthSummary::getAccountId)
@@ -214,37 +220,210 @@ class AuthorizationExtractRoundTripTest {
         assertThat(rerun.read()).isEqualTo(ROOT_COUNT + CHILD_COUNT);
         assertThat(rerun.inserted()).isZero();
         assertThat(rerun.alreadyPresent()).isEqualTo(ROOT_COUNT + CHILD_COUNT);
-        assertThat(rerun.orphaned()).isZero();
         assertThat(this.storedRoots).hasSize(ROOT_COUNT);
         assertThat(this.storedChildren).hasSize(CHILD_COUNT);
     }
 
     /**
-     * A child whose parent is absent is skipped and counted separately, not refused.
+     * A condition that is neither success nor a duplicate propagates rather than being counted.
      *
-     * <p>Assumptions: the reference program discards such a child silently -- its insert sits inside the
-     * branch a successful parent position opens at L305, and a failed position falls past both the insert
-     * and the abend test nested within that branch -- so refusing it here would abort a load the reference
-     * completes. The skip is counted and logged, which the reference does not do, so an operator can see
-     * that the two extract files disagree.</p>
-     *
-     * <p>Assumptions: the orphan count is asserted DISTINCT from the already-present count, because summing
-     * them would hide a real disagreement between the two files inside the ordinary outcome of a
-     * re-run.</p>
+     * <p>Assumptions: this is the other half of the idempotence ruling and it is asserted separately,
+     * because tolerating a duplicate and swallowing everything else are the two readings of
+     * {@code cbl/PAUDBLOD.CBL} L256 to L262 that a test has to tell apart. Its L256 to L258 report the
+     * duplicate status and continue; its L259 to L262 reach the abend for every other status, and L332 to
+     * L336 do the same for a child. A loader that caught broadly would satisfy the re-run case above and
+     * still report a successful load having stored less than it read.</p>
      */
     @Test
-    @DisplayName("a child whose parent summary is absent is skipped as orphaned, not refused")
-    void anOrphanedChildIsSkippedAndCountedSeparately() {
+    @DisplayName("a store failure that is not a duplicate propagates instead of being counted as a skip")
+    void aFailureThatIsNotADuplicatePropagates() {
+        when(this.summaries.existsById(any())).thenReturn(false);
+        when(this.summaries.save(any())).thenThrow(new IllegalStateException("store unavailable"));
+
+        LoadService loader = new LoadService(this.summaries, this.details);
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> loader.loadSummaries(open(PREFIXED_SUMMARY)))
+                .withMessage("store unavailable");
+    }
+
+    /**
+     * Divergence D-C: a child whose parent summary is absent is refused, and the refusal names the account.
+     *
+     * <p>Assumptions: this asserts divergence D-C, recorded on {@link LoadService} and registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. The reference program passes such a child
+     * over in silence: its insert sits inside the branch a successful parent position opens at
+     * {@code cbl/PAUDBLOD.CBL} L305, and a failed position falls past the insert AND past the abend test
+     * nested inside that branch, reaching L315 without inserting or reporting. The target refuses
+     * instead.</p>
+     *
+     * <p>Assumptions: the assertion is on the ACCOUNT the refusal carries and not merely on its type,
+     * because carrying the key is the whole point of the divergence. A refusal that named no account would
+     * leave an operator with exactly what the reference program leaves them -- the knowledge that something
+     * was wrong and no way to find which record -- so a test that accepted any exception would pass for an
+     * implementation that had recovered none of the value.</p>
+     *
+     * <p>Assumptions: the case also asserts that NOTHING was written. The refusal is raised inside the same
+     * transaction the load runs in, so on a real store the rollback discards the earlier records; the
+     * double cannot roll back, so the assertion is made directly against the save.</p>
+     */
+    @Test
+    @DisplayName("D-C: a child whose parent summary is absent is refused, naming the account")
+    void anUnresolvableParentIsRefusedAndNamesTheAccount() {
         when(this.summaries.existsById(any())).thenReturn(false);
 
-        LoadService.LoadOutcome outcome = new LoadService(this.summaries, this.details)
-                .loadDetails(open(PREFIXED_DETAIL));
+        LoadService loader = new LoadService(this.summaries, this.details);
 
-        assertThat(outcome.read()).isEqualTo(CHILD_COUNT);
-        assertThat(outcome.inserted()).isZero();
-        assertThat(outcome.alreadyPresent()).isZero();
-        assertThat(outcome.orphaned()).isEqualTo(CHILD_COUNT);
+        assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
+                .isThrownBy(() -> loader.loadDetails(open(PREFIXED_DETAIL)))
+                .satisfies(refused -> {
+                    assertThat(refused.getAccountId())
+                            .as("the first prefixed record of this fixture names the lower account")
+                            .isEqualTo(ACCOUNT_ONE);
+                    assertThat(refused.getRecordOrdinal())
+                            .as("the refusal locates the record, one-based, so the file can be read at it")
+                            .isEqualTo(1);
+                    assertThat(refused).hasMessageContaining(String.valueOf(ACCOUNT_ONE));
+                });
+
         verify(this.details, never()).save(any());
+    }
+
+    /**
+     * Divergence D-C: the refusal stops the pass rather than continuing through the remaining records.
+     *
+     * <p>Assumptions: this is asserted separately from the case above because the two properties are
+     * independent, and an implementation can have one without the other. A loader that logged the account
+     * and then carried on would produce a refusal carrying the right key and still lose the remaining
+     * records, which is the outcome the divergence exists to prevent. What fixes the count at one is that
+     * the parent check precedes the save for every record and raises on the first failure: the fixture
+     * holds four children whose parents are all absent, and exactly one is reached.</p>
+     */
+    @Test
+    @DisplayName("D-C: the refusal ends the pass at the first unresolvable record")
+    void anUnresolvableParentEndsThePass() {
+        when(this.summaries.existsById(any())).thenReturn(false);
+
+        LoadService loader = new LoadService(this.summaries, this.details);
+
+        assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
+                .isThrownBy(() -> loader.loadDetails(open(PREFIXED_DETAIL)));
+
+        verify(this.summaries, times(1)).existsById(any());
+        verify(this.details, never()).existsById(any());
+        verify(this.details, never()).save(any());
+    }
+
+    /**
+     * A child record whose six-byte prefix does not decode is refused, naming the record.
+     *
+     * <p>Assumptions: this is the second condition {@code cbl/PAUDBLOD.CBL} passes over. Its
+     * {@code 3000-READ-CHILD-SEG-FILE} guards the insert with {@code IF ROOT-SEG-KEY IS NUMERIC} at
+     * <strong>L275</strong> and supplies no {@code ELSE}, so a prefix failing that test takes the record
+     * out of the run with no message at all.</p>
+     *
+     * <p>Assumptions: the corrupted prefix is built by writing a byte whose low nibble is a DIGIT into the
+     * sign position, which is the last of the six. A packed field's final nibble is its sign, so a digit
+     * there is exactly what the reference numeric test rejects, and it is a corruption the length check
+     * cannot catch -- the record is still 206 bytes.</p>
+     *
+     * <p>Assumptions: the refusal is asserted to name the ordinal and NOT an account, because an
+     * undecodable prefix names none. That asymmetry with D-C is the reason the two refusals are separate
+     * types rather than one carrying an optional key.</p>
+     */
+    @Test
+    @DisplayName("a child record whose packed prefix does not decode is refused, naming the record")
+    void anUndecodablePrefixIsRefused() {
+        byte[] corrupted = bytes(PREFIXED_DETAIL).clone();
+        int signByte = PendingAuthDetailMapper.unloadRecordLength()
+                - PendingAuthDetailMapper.segmentLength() - 1;
+        corrupted[signByte] = (byte) 0x05;
+
+        LoadService loader = new LoadService(this.summaries, this.details);
+
+        assertThatExceptionOfType(LoadService.MalformedParentKeyException.class)
+                .isThrownBy(() -> loader.loadDetails(new ByteArrayInputStream(corrupted)))
+                .satisfies(refused -> assertThat(refused.getRecordOrdinal()).isEqualTo(1))
+                .withMessageContaining("record 1")
+                .havingCause()
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verify(this.details, never()).save(any());
+    }
+
+    /**
+     * The six-byte prefix is decoded as PACKED decimal, and a text reading of it yields another number.
+     *
+     * <p>Assumptions: this asserts the prefix's storage regime rather than the loader's plumbing, because a
+     * reader that took those six bytes as characters would not fail -- it would attribute the child to a
+     * different account, which is a wrong answer rather than an error. The case therefore states both
+     * readings and asserts they disagree, so an implementation that switched to a text read would fail here
+     * instead of loading plausible rows under the wrong account.</p>
+     *
+     * <p>Assumptions: the packed reading is the one the reference declaration fixes.
+     * {@code cbl/PAUDBLOD.CBL} <strong>L47</strong> declares the prefix
+     * {@code 05 ROOT-SEG-KEY PIC S9(11) COMP-3}, six bytes carrying two digits each and a sign nibble.</p>
+     */
+    @Test
+    @DisplayName("the packed prefix decodes to an account a text reading of the same bytes does not give")
+    void theParentPrefixIsReadAsPackedDecimalAndNotAsText() {
+        byte[] first = Arrays.copyOfRange(bytes(PREFIXED_DETAIL), 0,
+                PendingAuthDetailMapper.unloadRecordLength());
+        int prefixWidth = PendingAuthDetailMapper.unloadRecordLength()
+                - PendingAuthDetailMapper.segmentLength();
+        String asText = new String(Arrays.copyOfRange(first, 0, prefixWidth),
+                StandardCharsets.ISO_8859_1);
+
+        assertThat(PendingAuthDetailMapper.unloadedAccountId(first))
+                .as("the packed reading is the account the fixture was written for")
+                .isEqualTo(ACCOUNT_ONE);
+        assertThat(asText.trim())
+                .as("the same six bytes read as characters are not the digits of that account")
+                .isNotEqualTo(String.valueOf(ACCOUNT_ONE));
+
+        givenSummariesRemember();
+        givenDetailsRemember();
+        this.summaries.save(PendingAuthSummaryMapper.fromExtractRecord(Arrays.copyOfRange(
+                bytes(PREFIXED_SUMMARY), PendingAuthSummaryMapper.unloadRecordLength(),
+                ROOT_COUNT * PendingAuthSummaryMapper.unloadRecordLength())));
+
+        LoadService.LoadOutcome outcome = new LoadService(this.summaries, this.details)
+                .loadDetails(new ByteArrayInputStream(first));
+
+        assertThat(outcome.inserted()).isEqualTo(1);
+        assertThat(this.storedChildren)
+                .singleElement()
+                .extracting(child -> child.getId().getAccountId())
+                .isEqualTo(ACCOUNT_ONE);
+    }
+
+    /**
+     * Loading the child file before the summary file is refused, which is why the two passes are ordered.
+     *
+     * <p>Assumptions: {@code MAIN-PARA} at {@code cbl/PAUDBLOD.CBL} <strong>L169 to L187</strong> runs its
+     * root loop at L177 to L178 to exhaustion before its child loop at L180 to L181 begins, and this case
+     * asserts the ordering is load-bearing rather than incidental. Reversing the two passes refuses the
+     * first child, because no parent has been written yet -- so a loader that interleaved them, or that
+     * ran the child pass first, would fail here rather than silently attributing children to rows that do
+     * not exist.</p>
+     */
+    @Test
+    @DisplayName("the child pass depends on the root pass having run first, so the order is asserted")
+    void theTwoPassesRunInTheReferenceOrder() {
+        givenSummariesRemember();
+        givenDetailsRemember();
+        LoadService loader = new LoadService(this.summaries, this.details);
+
+        assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
+                .as("the child pass alone finds no parent, because the root pass writes them")
+                .isThrownBy(() -> loader.loadDetails(open(PREFIXED_DETAIL)));
+
+        LoadService.LoadOutcome ordered =
+                loader.load(open(PREFIXED_SUMMARY), open(PREFIXED_DETAIL));
+
+        assertThat(ordered.inserted()).isEqualTo(ROOT_COUNT + CHILD_COUNT);
+        assertThat(this.storedRoots).hasSize(ROOT_COUNT);
+        assertThat(this.storedChildren).hasSize(CHILD_COUNT);
     }
 
     /**
@@ -272,6 +451,36 @@ class AuthorizationExtractRoundTripTest {
 
         verify(this.summaries, never()).save(any());
         verify(this.details, never()).save(any());
+    }
+
+    /**
+     * A truncated record ends the pass rather than leaving the reader turning on the same bytes.
+     *
+     * <p>Assumptions: this asserts the removal of the non-termination hazard in the reference read loops.
+     * Both end only when a status of {@code '10'} sets an end flag -- {@code END-ROOT-SEG-FILE} at
+     * {@code cbl/PAUDBLOD.CBL} L233 and {@code END-CHILD-SEG-FILE} at its L285 -- and each has one further
+     * branch that sets no flag and does not abend, at <strong>L235</strong> and <strong>L287</strong>
+     * respectively. Under the {@code PERFORM ... UNTIL} at L178 and L181, reaching that branch leaves both
+     * the flag and the file position unchanged, so the loop reads the same condition again.</p>
+     *
+     * <p>Assumptions: the case is expressed as a bounded assertion rather than as a plain call, because the
+     * property under test is TERMINATION and a test that merely called the method would hang rather than
+     * fail if the property were lost. Failing inside a timeout is the difference between a red build and a
+     * stuck one.</p>
+     */
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @DisplayName("a truncated final record terminates the pass instead of being read repeatedly")
+    void aTruncatedRecordTerminatesRatherThanLooping() {
+        byte[] whole = bytes(PREFIXED_SUMMARY);
+        byte[] truncated = Arrays.copyOfRange(whole, 0, whole.length - 1);
+        LoadService loader = new LoadService(this.summaries, this.details);
+
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> loader.loadSummaries(new ByteArrayInputStream(truncated)))
+                .withMessageContaining("must hold a whole number of 100-byte records");
+
+        verify(this.summaries, never()).save(any());
     }
 
     /**

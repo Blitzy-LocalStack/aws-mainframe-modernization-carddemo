@@ -9,11 +9,15 @@ import java.util.Objects;
  * <p>Purpose: the published contract declares the statement-transactions operation's body as an
  * object carrying a single {@code items} array, and this record is that object.
  *
- * <p>Assumptions: this is deliberately NOT a page. The set is bounded by the statement's own period
- * and by {@code StatementService.MAX_STATEMENT_TRANSACTIONS}, so there is no open-ended sequence for
- * a cursor to walk, and publishing a page envelope here would offer a caller a forward step that
- * could never yield anything. That is why the member is {@code items} alone and why no boundary key
- * accompanies it.
+ * <p>Assumptions: this is deliberately NOT a page. The set is delimited by the statement's own period
+ * and is read to be rendered in full, so there is no open-ended sequence for a cursor to walk, and
+ * publishing a page envelope here would offer a caller a forward step that could never yield
+ * anything. That is why the member is {@code items} alone and why no boundary key accompanies it.
+ *
+ * <p>Assumptions: delimited by a period is not the same as capped by a row count, and only the first
+ * is true. An earlier revision of this paragraph also cited a row ceiling on
+ * {@code com.carddemo.reporting.service.StatementService}; no such ceiling exists, because carrying
+ * no ceiling is divergence D-2, which that service owns and documents.
  *
  * <p>Alternatives Considered: reusing the shared page envelope for uniformity with the report's line
  * operation. Rejected for the reason above: a page envelope whose {@code hasNext} is always false and

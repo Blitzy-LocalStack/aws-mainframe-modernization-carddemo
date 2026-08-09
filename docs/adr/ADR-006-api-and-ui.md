@@ -1202,7 +1202,7 @@ plainly, and the first item is the largest:
   narrowed twice. It first recorded that `account-service` published neither a
   contract nor controllers; it then recorded that six of seven contracts had a
   contract test and that `account-service` was the exception. Both are now wrong —
-  `account-api.yaml` declares three operations, `api/` holds `AccountController`,
+  `account-api.yaml` declares both of this context's surfaces, `api/` holds `AccountController`,
   `CustomerController` and `CardXrefController`, and `AccountContextContractTest`
   pins the document to what the module serves. What is genuinely still outstanding is
   narrower again and is stated in the enforcement matrix above rather than repeated
@@ -1279,11 +1279,17 @@ contract, and this record was the only one that disagreed.
 
 Assumptions: `account-api.yaml` is counted as a contract and not as a
 browser-facing one, and the distinction is load-bearing rather than pedantic. It
-titles itself an internal read API; its three operations are governed by
-`InternalApiSecurityConfig` in account-service, an ordered filter chain requiring a
-machine token minted by the calling service, and that chain refuses the
-identity-provider token every browser holds. Its only consumer is the
-pending-authorization context. The SPA therefore has **six** client modules for
+marks its machine-facing operations with an `internal` tag, and every operation so
+tagged is governed by `InternalApiSecurityConfig` in account-service, an ordered
+filter chain requiring a machine token minted by the calling service, and that chain
+refuses the identity-provider token every browser holds. Refactoring Rationale: this
+sentence said the document "titles itself an internal read API" and counted three
+operations. Neither held: the document covers both surfaces and marks each operation
+with the one it belongs to, and the internal-tagged set grew when the customer scan
+and the customer record read landed. The claim this paragraph actually needs is that
+no browser client addresses an internal-tagged operation, and that is asserted
+mechanically by the gate named below rather than by a count here. The SPA therefore
+has **six** client modules for
 seven contracts, and [`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts)
 asserts that the internal one has none rather than leaving the exclusion to prose.
 

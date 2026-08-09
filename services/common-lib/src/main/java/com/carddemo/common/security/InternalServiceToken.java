@@ -113,10 +113,18 @@ public final class InternalServiceToken {
     /**
      * The scope a token authorising the account-context reads carries.
      *
-     * <p>Assumptions: one scope for the three account-context reads rather than one per operation. The three
-     * are read by a single caller as a single unit -- the authorization decision needs all three or none -- so
-     * separate scopes would be three values always issued and always checked together, which is a distinction
-     * with no decision behind it.</p>
+     * <p>Assumptions: one scope for the whole family of account-context reads rather than one per operation.
+     * The three the authorization decision makes are read by a single caller as a single unit -- it needs all
+     * three or none -- so separate scopes would be three values always issued and always checked together,
+     * which is a distinction with no decision behind it.</p>
+     *
+     * <p>Refactoring Rationale: this described the scope as covering "the three account-context reads", and
+     * the reach outgrew the number when the customer scan and the customer record read were matched on the
+     * verifying chain. Those two are not made by the authorization decision, so the count named neither the
+     * right size nor the right caller. The reach is now stated as a family and enumerated in exactly one
+     * place, {@code InternalApiSecurityConfig.internalPaths()} in the account context -- which is also the
+     * reason a per-operation scope is still refused: one scope means adding a route moves that enumeration
+     * alone, where per-operation scopes would move the minter and the verifier as well.</p>
      */
     public static final String SCOPE_ACCOUNT_CONTEXT_READ = "internal:account-context.read";
 

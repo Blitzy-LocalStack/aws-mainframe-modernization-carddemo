@@ -25,10 +25,12 @@ import com.carddemo.account.repository.CustomerRepository;
 import com.carddemo.account.service.AccountUpdateService;
 import com.carddemo.account.service.AccountViewService;
 import com.carddemo.common.money.MoneyModule;
+import com.carddemo.common.web.CursorToken;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -89,6 +91,16 @@ class AccountContextContractTest {
     private static final String XREF_LOOKUP_PATH = "/api/v1/card-xrefs/lookup";
 
     /**
+     * The account-keyed cross-reference lookup path, written as a literal on purpose.
+     */
+    private static final String XREF_LOOKUP_BY_ACCOUNT_PATH = "/api/v1/card-xrefs/lookup-by-account";
+
+    /**
+     * The paged account-keyed cross-reference walk path, written as a literal on purpose.
+     */
+    private static final String XREF_SEARCH_BY_ACCOUNT_PATH = "/api/v1/card-xrefs/search-by-account";
+
+    /**
      * The account read path template, written as a literal on purpose.
      */
     private static final String ACCOUNT_PATH_TEMPLATE = "/api/v1/accounts/{accountId}";
@@ -100,6 +112,19 @@ class AccountContextContractTest {
 
     /** The end-user account-view path template. */
     private static final String ACCOUNT_VIEW_PATH_TEMPLATE = "/api/v1/accounts/{accountId}/view";
+
+    /**
+     * The customer scan path, written as a literal on purpose.
+     *
+     * <p>Assumptions: this is the COLLECTION address and is an internal one, unlike the collection address
+     * of any other subtree in this context. The application chain denies the customer subtree outright, so
+     * an address published here that were not claimed by the internal chain would answer no caller at
+     * all.</p>
+     */
+    private static final String CUSTOMER_SCAN_PATH = "/api/v1/customers";
+
+    /** The keyed customer read path template, written as a literal on purpose. */
+    private static final String CUSTOMER_RECORD_PATH_TEMPLATE = "/api/v1/customers/{customerId}/record";
 
     /** The end-user by-account cross-reference listing path template. */
     private static final String ACCOUNT_XREF_PATH_TEMPLATE =
@@ -194,6 +219,12 @@ class AccountContextContractTest {
      * touches the human view. Constructing a real customer mapper would additionally require the
      * protected-identifier port, which is a dependency this class's subject does not use.</p>
      *
+     * <p>Assumptions: the cursor sealer is a REAL instance over fixed key material rather than a
+     * substitute, matching how every sibling suite in this reactor obtains one. The type is final, so a
+     * substitute would depend on the inline mock maker to exist at all, and a real sealer over a constant
+     * key costs nothing and keeps the constructor satisfiable without that dependency. No case in this
+     * class reads a page, so the sealer is never exercised.</p>
+     *
      * @param crossReferences the cross-reference repository substitute
      * @param accounts the account repository substitute
      * @param customers the customer repository substitute
@@ -202,8 +233,16 @@ class AccountContextContractTest {
     private AccountViewService reads(CardXrefRepository crossReferences,
             AccountRepository accounts,
             CustomerRepository customers) {
+        // WHY : Assumptions: no case in this class walks a page -- every one asserts the MACHINE contract
+        //   or a single keyed read, neither of which seals a boundary token -- so the sealer is present
+        //   only to satisfy the constructor. It is a REAL instance over fixed key material rather than a
+        //   substitute because the type is final, so a substitute would depend on the inline mock maker
+        //   existing at all, and a real sealer over a constant key costs nothing.
+        byte[] keyMaterial = new byte[CursorToken.MIN_KEY_LENGTH];
+        Arrays.fill(keyMaterial, (byte) 0x2B);
         return new AccountViewService(accounts, customers, crossReferences, this.mapper,
-                mock(AccountMapper.class), mock(CustomerMapper.class), mock(CardXrefMapper.class));
+                mock(AccountMapper.class), mock(CustomerMapper.class), mock(CardXrefMapper.class),
+                new CursorToken(keyMaterial, Duration.ofMinutes(5)));
     }
 
     /**
@@ -233,11 +272,19 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies the three internal paths are exactly the ones the neighbouring context builds.
+     * Verifies the paths the neighbouring context BUILDS are exactly the three it is pinned to.
+     *
+     * <p>Refactoring Rationale: this case was named for "the three internal paths", which read as a claim
+     * about the internal surface and stopped being one when the customer scan and the customer record read
+     * were mounted there. Its subject was never the surface: it is the path set
+     * {@code RestAccountContextClient} in the authorization context assembles, and that set is three
+     * because that consumer makes three reads. Naming the consumer instead of the surface keeps the
+     * sentence true the next time an internal route lands, and the assertions below are unchanged -- only
+     * the description of what they measure is.</p>
      */
     @Test
-    @DisplayName("the three internal paths are exactly the ones the consumer builds")
-    void theThreeInternalPathsArePinned() {
+    @DisplayName("the paths the consumer builds are exactly the three it is pinned to")
+    void theConsumerBuiltPathsArePinned() {
         assertThat(CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH)
                 .isEqualTo(XREF_LOOKUP_PATH);
         assertThat(AccountController.BASE_PATH + "/{accountId}").isEqualTo(ACCOUNT_PATH_TEMPLATE);
@@ -245,8 +292,8 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies the published contract declares exactly the five paths this context serves, with exactly
-     * the operations it serves at each.
+     * Verifies the published contract declares exactly the paths this context serves, with exactly the
+     * operations it serves at each.
      *
      * <p>Assumptions: the document is read from the classpath rather than from a source path, so what is
      * asserted is the copy that is packaged and served rather than a file that merely exists in the tree.</p>
@@ -256,18 +303,36 @@ class AccountContextContractTest {
      * account update and the by-account cross-reference listing. A closed-set assertion over the DOCUMENT
      * can only ever detect a contract entry that should not be there; it cannot see a handler the contract
      * omits, which is what the mounted-versus-published case below exists for. Both are kept because they
-     * fail on different mistakes.</p>
+     * fail on different mistakes. The set is widened as routes are added rather than left to drift, which
+     * is what makes it an assertion instead of a snapshot.</p>
+     *
+     * <p>Assumptions: the two customer reads are named individually rather than folded into the probe's
+     * entry, because each is a separate address with one operation. The scan sits at the collection address
+     * and the keyed read at a segment below the probe, for the reason recorded on
+     * {@code CustomerController.RECORD_PATH}: the probe's address already carries a status-only contract a
+     * neighbouring context depends on.</p>
      *
      * @throws Exception if the packaged document is absent or unreadable, which is itself the defect
      */
     @Test
-    @DisplayName("the contract declares exactly the five served paths and their operations")
+    @DisplayName("the contract declares exactly the served paths and their operations")
     void theContractDocumentDeclaresEveryServedOperation() throws Exception {
         Map<String, Object> paths = contractPaths();
 
-        assertThat(paths).containsOnlyKeys(XREF_LOOKUP_PATH, ACCOUNT_PATH_TEMPLATE,
-                ACCOUNT_VIEW_PATH_TEMPLATE, ACCOUNT_XREF_PATH_TEMPLATE, CUSTOMER_PATH_TEMPLATE);
+        assertThat(paths).containsOnlyKeys(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
+                XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_PATH_TEMPLATE, ACCOUNT_VIEW_PATH_TEMPLATE,
+                ACCOUNT_XREF_PATH_TEMPLATE, CUSTOMER_PATH_TEMPLATE, CUSTOMER_SCAN_PATH,
+                CUSTOMER_RECORD_PATH_TEMPLATE);
         assertThat(operation(paths, XREF_LOOKUP_PATH)).containsOnlyKeys("post");
+
+        // WHY : Assumptions: all three cross-reference addresses declare a post and nothing else, and the
+        //   verb is the same on each for one reason rather than three. Each keys on a value the migration's
+        //   logging contract withholds from a durable diagnostic -- a primary account number on the first,
+        //   an account identifier on the other two -- and a request line is composed into an access record
+        //   before any application code runs, whereas a body is not. Declaring a get on any of them would
+        //   publish the shape that puts the key back in the target.
+        assertThat(operation(paths, XREF_LOOKUP_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
+        assertThat(operation(paths, XREF_SEARCH_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
 
         // WHY : Assumptions: the account address carries BOTH a get and a put, and the two serve
         //   different surfaces -- the get is the neighbouring context's machine read, the put is the
@@ -284,6 +349,14 @@ class AccountContextContractTest {
         //   GET mapping and the framework answers HEAD from it -- so a document naming only HEAD would
         //   misdescribe the mapping that actually exists.
         assertThat(operation(paths, CUSTOMER_PATH_TEMPLATE)).containsOnlyKeys("head", "get");
+
+        // WHY : Assumptions: each customer READ declares a GET and nothing else. Neither is paired with a
+        //   HEAD entry, unlike the probe above, and the asymmetry is deliberate: HEAD is implicitly
+        //   available on every GET in this system, and it is declared on the probe only because that is the
+        //   method its consumer actually issues. Declaring it on a read that returns a representation would
+        //   document an operation no caller has a reason to send.
+        assertThat(operation(paths, CUSTOMER_SCAN_PATH)).containsOnlyKeys("get");
+        assertThat(operation(paths, CUSTOMER_RECORD_PATH_TEMPLATE)).containsOnlyKeys("get");
     }
 
     /**
@@ -382,8 +455,8 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies the internal surface is exactly the three addresses the internal chain is built from, and
-     * that every operation on it requires the internal credential.
+     * Verifies the internal surface is exactly the addresses the internal chain is built from, and that
+     * every operation on it requires the internal credential.
      *
      * <p>Assumptions: the comparison is against the CONSTANTS the internal chain composes its matcher
      * from rather than against the matcher itself, and the reason is deliberate rather than a
@@ -402,17 +475,23 @@ class AccountContextContractTest {
      * @throws Exception if the packaged document is absent or unreadable, which is itself the defect
      */
     @Test
-    @DisplayName("the internal surface is exactly the three addresses the internal chain governs")
+    @DisplayName("the internal surface is exactly the addresses the internal chain governs")
     void theInternalSurfaceIsExactlyTheInternalAddresses() throws Exception {
         Map<String, Map<String, Object>> operations = publishedOperationDetail();
         Map<String, Map<String, Object>> internal = surfaceSubset(operations, INTERNAL_TAG);
         Map<String, Map<String, Object>> endUser = surfaceSubset(operations, END_USER_TAG);
 
+        // WHY : Assumptions: both customer READS belong on this surface and not the end-user one, which is
+        //   settled by the application chain rather than by preference: SecurityConfig denies the whole
+        //   customer subtree there, so an operation tagged end-user inside it would be refused to every
+        //   caller. Their reference, app/cbl/CBCUS01C.cbl, carries no EXEC CICS verb and appears in no
+        //   resource definition, so there is no screen behind either of them to grant to a business group.
         assertThat(internal.keySet().stream().map(AccountContextContractTest::pathOf).distinct())
-                .as("the internal surface must be exactly the three addresses the internal chain is"
-                        + " composed from")
-                .containsExactlyInAnyOrder(XREF_LOOKUP_PATH, ACCOUNT_PATH_TEMPLATE,
-                        CUSTOMER_PATH_TEMPLATE);
+                .as("the internal surface must be exactly the addresses the internal chain is composed"
+                        + " from")
+                .containsExactlyInAnyOrder(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
+                        XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_PATH_TEMPLATE,
+                        CUSTOMER_PATH_TEMPLATE, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH_TEMPLATE);
         internal.forEach((name, operation) ->
                 assertThat(securitySchemesOf(operation))
                         .as("%s must require the internal token", name)

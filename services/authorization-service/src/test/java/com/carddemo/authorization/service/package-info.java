@@ -13,7 +13,7 @@
  * divergence, and how far the parity claim actually reaches. It declares no type and holds no import, so
  * nothing here executes; its entire effect is on what the classes beside it assert.</p>
  *
- * <h2>The closed inventory: eleven files here, ten of them tests</h2>
+ * <h2>The closed inventory: twelve files here, eleven of them tests</h2>
  *
  * <p>The parent charter at {@code com.carddemo.authorization} deliberately fixes no leaf-class count and
  * names no leaf class, making each package's own charter the authority for its own inventory. This is that
@@ -23,7 +23,7 @@
  * citation that normalises either half points at nothing.</p>
  *
  * <pre>
- * this directory: 11 java files = 10 tests + 1 charter
+ * this directory: 12 java files = 11 tests + 1 charter
  * </pre>
  *
  * <p>Alternatives Considered: stating the inventory in prose alone, which is what this charter did before
@@ -41,6 +41,15 @@
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl}.</li>
  *   <li>{@code PendingAuthDetailServiceTest} exercises {@code PendingAuthDetailService} against
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl}.</li>
+ *   <li>{@code PendingAuthDetailProjectionTest} exercises that same service for the screen projection
+ *       half of that same program: the ten-entry response-reason display table declared at its lines 57
+ *       to 73, the twelve-character money edit mask at its line 52 held apart from the fourteen-character
+ *       wire mask at line 66 of {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}, the
+ *       empty-state literals its lines 53 and 54 declare, and the direction of the forward step at its
+ *       lines 493 to 519. Refactoring Rationale: this is a second class over one service rather than
+ *       more cases in the first, because the first asserts that ONE query is issued and verifies no
+ *       further interaction with the repository, so cases needing a different stubbing of that same
+ *       repository cannot share its fixture without weakening that verification.</li>
  *   <li>{@code FraudMarkingServiceTest} exercises {@code FraudMarkingService} against
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl} and
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl}.</li>

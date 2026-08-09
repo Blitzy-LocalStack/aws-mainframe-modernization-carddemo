@@ -517,7 +517,7 @@ locals {
     #       and page into rows no query scoped to it.
     # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY
     #       and CARDDEMO_MESSAGING_HMAC_KEY above, and the separation is purpose-scoping
-    #       rather than naming habit. Its holder set is the four list-publishing services;
+    #       rather than naming habit. Its holder set is the list-publishing services;
     #       the internal-identity key's is three and the messaging key's is one. Sharing
     #       one value across the three purposes would mean a service able to seal a
     #       cursor could also mint an internal bearer token, and rotating any purpose
@@ -800,8 +800,8 @@ locals {
     # WHY : Assumptions: account requires the internal-identity signing key because
     #       config/InternalApiSecurityConfig.java reads it through a fallback-free
     #       @Value and refuses a blank value, so a deployment without it fails at
-    #       container start rather than serving the three internal read paths with a
-    #       chain that can verify nothing. Requiring the name here is what turns that
+    #       container start rather than serving its internal read paths with a chain
+    #       that can verify nothing. Requiring the name here is what turns that
     #       into a plan-time failure instead.
     # WHY : Refactoring Rationale: CARDDEMO_SERVER_TLS_CERTIFICATE and
     #       CARDDEMO_SERVER_TLS_PRIVATE_KEY were listed here and in the
@@ -813,8 +813,21 @@ locals {
     #       pair and self-signed certificate before the JVM starts, and this
     #       module's own variables.tf records the same withdrawal for the same
     #       reason. Requiring them would fail every correct call at plan time.
+    # WHY : Refactoring Rationale: CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY is required
+    #       of this service, and the omission it corrects would have been a crash
+    #       loop rather than a missing feature. account-service publishes a keyset
+    #       scan of the customer master -- api/CustomerController.java lists it and
+    #       service/AccountViewService.java takes CursorToken as a constructor
+    #       argument to seal each page boundary -- and that bean is withheld when the
+    #       key is unset, so the context cannot refresh at all. The service reached
+    #       this set when that scan was published; before it, nothing here
+    #       constructed the bean. The same component also seals the boundary tokens of
+    #       the paged cross-reference walk published at
+    #       /api/v1/card-xrefs/search-by-account, so BOTH paged reads of this context
+    #       depend on the name and neither could be withdrawn to drop the requirement.
     account = toset([
       "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
@@ -1755,17 +1768,24 @@ resource "aws_ecs_task_definition" "this" {
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET") &&
         (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET") &&
 
-        # WHY : Assumptions: the cursor clause is gated on FOUR services and, like every
-        #       clause above, it is biconditional in both directions for a reason on each
-        #       side. Missing from a service that needs it, the CursorToken bean is
-        #       withheld and the context cannot refresh -- a crash loop rather than a
-        #       degraded list. Present on a service that does not, it hands cursor-forging
+        # WHY : Assumptions: the cursor clause is gated on the list-publishing services
+        #       and, like every clause above, it is biconditional in both directions for a
+        #       reason on each side. Missing from a service that needs it, the CursorToken
+        #       bean is withheld and the context cannot refresh -- a crash loop rather than
+        #       a degraded list. Present on a service that does not, it hands cursor-forging
         #       capability to a task that publishes no page, which is exactly the silent
-        #       widening every other clause here refuses. The four are the services holding
-        #       a component that takes CursorToken as a constructor argument; the list is
-        #       asserted from this side and from the roots' own gate, so adding a fifth in
-        #       one place without the other fails at plan time.
-        contains(["transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY")
+        #       widening every other clause here refuses. The set is the services holding a
+        #       component that takes CursorToken as a constructor argument; it is asserted
+        #       from this side and from the roots' own gate, so adding a service in one
+        #       place without the other fails at plan time.
+        # WHY : Refactoring Rationale: account joined the set when it began publishing a
+        #       keyset scan of the customer master. service/AccountViewService.java takes
+        #       CursorToken as a constructor argument to seal the boundaries of that page,
+        #       so this service moved from not constructing the bean to requiring it, and
+        #       the gate is widened rather than the requirement being worked around. The
+        #       same component now also seals the boundaries of the by-account
+        #       cross-reference walk, so two published reads rest on the key rather than one.
+        contains(["account", "transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY")
       )
       error_message = "service-specific secret and trust configuration was distributed to the wrong bounded context."
     }

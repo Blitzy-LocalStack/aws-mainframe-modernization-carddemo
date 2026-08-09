@@ -18,9 +18,15 @@ import java.util.Objects;
  * cursor exists to let a caller walk a set larger than it wants to hold at once; a statement is
  * bounded by one card's activity in one period and is read to be rendered in full, so paging it would
  * add a cursor round trip per screen for a document whose consumer needs all of it before it can
- * render any of it. The read behind this shape is nonetheless bounded, at
- * {@code com.carddemo.reporting.service.StatementService#MAX_STATEMENT_TRANSACTIONS}, so an
- * unexpectedly large card cannot make the response unbounded.
+ * render any of it.
+ *
+ * <p>Assumptions: the read behind this shape carries every row the card has and is <b>not</b> capped.
+ * That is divergence D-2, which {@code com.carddemo.reporting.service.StatementService} owns and
+ * documents; an earlier revision of this paragraph cited a row ceiling on that service, and no such
+ * ceiling exists there or here. Trade-offs: an unusually active card therefore yields a large
+ * document, and that is accepted because the alternative truncates a cardholder's statement at a
+ * number the business never chose. A caller that does not want the rows has the heading-only
+ * operation instead.
  *
  * <p>Alternatives Considered: exposing only the heading and asking a caller to fetch the transactions
  * from the transaction context. Rejected because the statement's transaction list is not the same

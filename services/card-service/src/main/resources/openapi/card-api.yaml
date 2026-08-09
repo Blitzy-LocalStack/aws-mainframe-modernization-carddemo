@@ -29,15 +29,21 @@
 #     module's response shapes (dto/CardSummary, dto/CardDetail), request shape
 #     (dto/CardUpdateRequest), mapper (mapper/CardMapper), repository, entity,
 #     sealed selector, verification-value cipher and four configuration classes.
-#   - NOT yet authored: a CardController. The api package holds its charter
-#     alone, so NONE of the five operations below is served yet, and a reader
-#     should not expect to find a handler for one. Refactoring Rationale: an
-#     earlier revision of this header listed "this module's own controllers"
-#     among the consumers implementing these shapes, which read as a claim that
-#     handlers existed; the shapes, the mapper and the tests do, and the handler
-#     does not, so the two are now stated separately.
+#   - ALSO present, and serving every operation below: the adapter
+#     services/card-service/src/main/java/com/carddemo/card/api/CardController.java,
+#     which mounts all five, together with the read and update services it
+#     delegates to. Refactoring Rationale: this bullet twice stated the opposite
+#     - an earlier revision listed "this module's own controllers" among the
+#     consumers of these shapes while no handler existed, and the revision that
+#     withdrew that overstatement recorded the handler as "NOT yet authored",
+#     which then outlived the handler's arrival. Both readings misdescribed the
+#     delivery state at the moment they were read, which is why the state is no
+#     longer asserted by prose alone: CardControllerContractCensusTest reads every
+#     operationId out of this document and requires a mapped handler of the same
+#     name for each, so a disagreement between this bullet and the code fails a
+#     build rather than waiting to mislead a reader.
 #
-#   Once handlers exist, the document the springdoc library generates from them
+#   Because handlers exist, the document the springdoc library generates from them
 #   at run time is not a second source of truth - it is a check on this one. The
 #   two must agree, and a difference between them is a defect in whichever side
 #   drifted rather than a formatting artifact to be tolerated.

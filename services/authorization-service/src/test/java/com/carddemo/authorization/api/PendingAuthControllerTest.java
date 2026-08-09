@@ -30,7 +30,6 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
-import java.util.NoSuchElementException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -282,21 +281,36 @@ class PendingAuthControllerTest {
     }
 
     /**
-     * An account with no summary row answers 404 rather than an empty page.
+     * An account with no summary row answers 200 carrying a zeroed summary and an empty page.
+     *
+     * <p>Assumptions: this route publishes no 404 at all, and the assertion is written at the HTTP boundary
+     * because that is where the difference is observable. The baseline settles the case twice over: its keyed
+     * retrieval evaluates a found arm and a not-found arm with no end-of-database arm at
+     * {@code cbl/COPAUS0C.cbl} L980 to L996, and its caller then RENDERS the absence rather than reporting
+     * it, moving zero into all six aggregate positions at L800 to L807 and skipping the browse at L354 to
+     * L356. The published contract states the same on this operation's 200, and declares no 404 for it.</p>
      *
      * @throws Exception if the request cannot be performed
      */
     @Test
-    @DisplayName("an account with no summary row answers 404")
-    void accountWithNoSummaryRowAnswersNotFound() throws Exception {
-        when(this.summaries.list(ACCOUNT_ID, null, null, SUBJECT))
-                .thenThrow(new NoSuchElementException("no summary exists for the requested account"));
+    @DisplayName("an account with no summary row answers 200 with a zeroed summary and no rows")
+    void accountWithNoSummaryRowAnswersZeroedEmptyPage() throws Exception {
+        when(this.summaries.list(ACCOUNT_ID, null, null, SUBJECT)).thenReturn(zeroedListView());
 
         this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
                         .content(listBody(ACCOUNT_ID_DIGITS, null))
                         .principal(PRINCIPAL))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.code").value(ApiError.CODE_NOT_FOUND));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary.accountId").value(ACCOUNT_ID_DIGITS))
+                .andExpect(jsonPath("$.summary.approvedAuthCnt").value(0))
+                .andExpect(jsonPath("$.summary.declinedAuthCnt").value(0))
+                .andExpect(jsonPath("$.summary.creditBalance").value("0.00"))
+                .andExpect(jsonPath("$.summary.approvedAuthAmt").value("0.00"))
+                .andExpect(jsonPath("$.page.items").isEmpty())
+                .andExpect(jsonPath("$.page.hasNext").value(false))
+                .andExpect(jsonPath("$.page.firstKey").doesNotExist())
+                .andExpect(jsonPath("$.page.lastKey").doesNotExist())
+                .andExpect(jsonPath("$.screenMessage").doesNotExist());
     }
 
     /**
@@ -353,6 +367,21 @@ class PendingAuthControllerTest {
         summary.refreshLimits(new BigDecimal("5000.00"), new BigDecimal("1000.00"));
         summary.recordApproved(new BigDecimal("250.00"));
         return this.mapper.toListView(summary, List.of(row()), false, null, SUBJECT);
+    }
+
+    /**
+     * Builds the body an account with no summary row is answered with: zeros and no rows.
+     *
+     * <p>Assumptions: the zeroed state comes from the domain type's own identified-and-otherwise-zeroed
+     * constructor, which is the same instrument the service under test uses, so this double cannot assert a
+     * shape the service does not produce. The customer identifier is zero because that field is sourced from
+     * a cross-context read this context does not perform.</p>
+     *
+     * @return a mapped list view carrying a zeroed summary block, no rows and no boundary cursors
+     */
+    private PendingAuthListView zeroedListView() {
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, 0L), List.of(), false, null,
+                SUBJECT);
     }
 
     /**

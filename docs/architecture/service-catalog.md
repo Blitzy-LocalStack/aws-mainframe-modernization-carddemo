@@ -519,7 +519,7 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | `account-service` | 38 | `V1__account.sql` |
 | `card-service` | 23 | `V1__card.sql` |
 | `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
-| `reference-service` | 54 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `reference-service` | 55 | `V1__reference.sql`, `V2__seed_reference.sql` |
 | `batch-service` | 51 | `V1__batch.sql` |
 | `authorization-service` | 49 | `V1__authorization.sql` |
 | `reporting-service` | 44 | none by design — it owns no table, only read-only views |

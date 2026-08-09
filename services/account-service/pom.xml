@@ -432,11 +432,20 @@
               into that service's request path, which is the one path a national
               identifier must not travel; the rationale is recorded in full on
               the cipher class.
+        WHY : Refactoring Rationale: the coordinate this block justifies is declared
+              ONCE, in the AWS client section above, and is deliberately not repeated
+              here. It was declared twice, once for the client the inquiry listener
+              needs and once for the cipher this block describes, and Maven reported the
+              pair as a duplicate declaration of version, warning that such a model
+              threatens build stability and may stop being accepted outright. Two
+              declarations of one coordinate also make a later version or scope change
+              apply to whichever of the two a reader happens to find first. The
+              justification stays here beside the consumer it belongs to, because the
+              reason this module needs a key-management client is not one reason but
+              two, and deleting this block along with the duplicate element would have
+              discarded the second.
         -->
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>kms</artifactId>
-        </dependency>
+
 
         <!--
         WHY : Assumptions: the STARTER is what activates migration, and naming it

@@ -172,10 +172,13 @@ public class StatementController {
      * <p>Refactoring Rationale: the body carries the TRANSACTIONS alone, where an earlier revision
      * returned the whole document -- the heading summary and the transactions together. The published
      * contract declares two operations here, one for the summary and one for the rows, and the reason
-     * is size rather than taste: a statement may cover up to
-     * {@code StatementService.MAX_STATEMENT_TRANSACTIONS} rows, and a caller that wants only the
-     * heading figures and the two artifact locations should not have to receive all of them. The
-     * summary operation above answers that caller.
+     * is size rather than taste: a statement carries as many rows as the card has activity, with no
+     * ceiling on that count, and a caller that wants only the heading figures and the two artifact
+     * locations should not have to receive all of them. The summary operation above answers that
+     * caller. Assumptions: the absence of a ceiling is divergence D-2, which
+     * {@code com.carddemo.reporting.service.StatementService} owns and documents; an earlier revision
+     * of this paragraph cited a row ceiling on that service, and no such ceiling exists, because
+     * capping a statement would stop it at a number the business never chose.
      *
      * <p>Assumptions: this is not a page and carries no cursor. The set is bounded by the statement's
      * own period, so there is no open-ended sequence to walk, which is the argument recorded on

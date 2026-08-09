@@ -1146,7 +1146,7 @@ carddemo:
   # CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY -- Spring Boot's relaxed binding maps that spelling onto
   # the hyphenated property name, which CardDemoCommonAutoConfigurationIT asserts rather than
   # assumes. infra/modules/ecs-service lists the name in required_secret_environment_names for this
-  # service and asserts biconditionally that exactly the four list-publishing services receive it,
+  # service and asserts biconditionally that exactly the list-publishing services receive it,
   # so a deployment that omits it fails at plan rather than at container start.
   # Trade-offs: no key is written here even as an environment placeholder, and the second half of
   #   that is the part worth stating. A literal default would be a signing key committed to source,

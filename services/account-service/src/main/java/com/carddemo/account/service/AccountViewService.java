@@ -7,6 +7,7 @@ import com.carddemo.account.dto.AccountContextView;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
+import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.account.mapper.AccountContextMapper;
 import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CardXrefMapper;
@@ -17,10 +18,15 @@ import com.carddemo.account.repository.CustomerRepository;
 import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CursorToken;
+import com.carddemo.common.web.PageResponse;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -349,6 +355,44 @@ public class AccountViewService {
      */
     private static final String ABEND_REASON_BLANK = "";
 
+    /**
+     * The query identity every cursor of the customer scan is sealed against.
+     *
+     * <p>Assumptions: the binding names THIS scan and nothing else, so a cursor minted by another
+     * listing is refused rather than silently resumed against the wrong key column. It is composed as a
+     * literal rather than through {@code CursorToken.binding(String, String, String)} because that
+     * composition requires a non-blank authenticated subject, and the customer scan carries no subject
+     * into this layer: it stands in for the whole-file walk of a batch reader, which
+     * {@code app/cbl/CBCUS01C.cbl} drives from {@code PROCEDURE DIVISION} at L70 with no terminal and
+     * therefore no signed-on user at all.</p>
+     */
+    private static final String CUSTOMER_SCAN_BINDING = "account.customers.scan";
+
+    /**
+     * The greatest number of customer rows one page of the scan may carry.
+     *
+     * <p>Trade-offs: the reference sweep is UNBOUNDED -- {@code app/cbl/CBCUS01C.cbl} runs
+     * {@code PERFORM UNTIL END-OF-FILE = 'Y'} at L74 to L81 over the whole master and writes each
+     * record to a print stream at L78 -- and this ceiling is the compromise that makes the same access
+     * path answerable over a request-response protocol. What is preserved exactly is the ORDER and the
+     * ACCESS PATH: ascending {@code CUST-ID}, which is the primary key the file declares at L32 beside
+     * {@code ACCESS MODE IS SEQUENTIAL} at L31. What is given up is that a caller wanting the whole
+     * master now issues several requests instead of one job step. The ceiling is enforced here as well
+     * as on the request parameter, because a bound only declared at the edge is a bound a second caller
+     * of this method would not inherit.</p>
+     */
+    public static final int CUSTOMER_SCAN_MAX_PAGE_SIZE = 100;
+
+    /**
+     * The number of customer rows a page carries when the caller expresses no preference.
+     *
+     * <p>Assumptions: a default exists because the reference asks for no page size and has none to
+     * migrate, so a caller reproducing its whole-file walk has nothing to supply. The value is well
+     * inside the ceiling above rather than equal to it, so the commonest request is not also the
+     * heaviest one this operation admits.</p>
+     */
+    public static final int CUSTOMER_SCAN_DEFAULT_PAGE_SIZE = 20;
+
     /** The account master rows this bounded context owns. */
     private final AccountRepository accounts;
 
@@ -369,6 +413,59 @@ public class AccountViewService {
 
     /** Projects cross-reference rows onto the by-account response list. */
     private final CardXrefMapper crossReferenceMapper;
+
+    /**
+     * Seals and opens the page positions of every paged read this class publishes.
+     *
+     * <p>Assumptions: this collaborator is what makes the paged envelope buildable at this layer and
+     * nowhere below it. The envelope refuses a cursor component that is not a sealed token, and sealing
+     * needs key material, so the repository interface -- which holds none -- states that the envelope is
+     * assembled one layer up. This field is that layer, and it serves both paged reads here: the
+     * customer scan and the by-account cross-reference walk. Each seals against its own query name, so a
+     * token issued for one cannot be presented to the other.</p>
+     */
+    private final CursorToken cursorToken;
+
+    /**
+     * The rows one page of a cross-reference walk carries.
+     *
+     * <p>Assumptions: seven is read from the reference rather than chosen here.
+     * {@code app/cbl/COCRDLIC.cbl} declares {@code WS-MAX-SCREEN-LINES PIC S9(4) COMP} at L177 with
+     * {@code VALUE 7.} at L178, and that is the count its browse fills before it probes for one more
+     * record to settle whether a further page exists.</p>
+     */
+    private static final int CARD_XREF_PAGE_SIZE = 7;
+
+    /**
+     * The query name every cross-reference cursor is sealed against.
+     *
+     * <p>Assumptions: the name is part of the seal, so a token issued for this walk cannot be presented
+     * to any other paged read in the migration even by a caller holding both. Naming the query rather
+     * than sealing on the subject alone is what makes that substitution fail.</p>
+     */
+    private static final String CARD_XREF_CURSOR_QUERY = "account.card-xrefs.by-account";
+
+    /**
+     * The scope a forward cross-reference cursor is sealed against.
+     *
+     * <p>Assumptions: the direction is sealed in rather than trusted from the request, so the trailing
+     * boundary of a page cannot be replayed as a leading one. The reference keeps the two boundaries in
+     * separate fields for the same reason, at L230 through L232 and L233 through L235 of
+     * {@code app/cbl/COCRDLIC.cbl}.</p>
+     */
+    private static final String CARD_XREF_CURSOR_SCOPE_FORWARD = "direction:next";
+
+    /** The scope a backward cross-reference cursor is sealed against. */
+    private static final String CARD_XREF_CURSOR_SCOPE_BACKWARD = "direction:previous";
+
+    /**
+     * The request word that asks a cross-reference walk to step backward.
+     *
+     * <p>Assumptions: any other word, the empty string included, reads forward. That is the reference's
+     * own default: {@code app/cbl/COCRDLIC.cbl} advances with its forward read and takes its backward
+     * path only when the backward key is asked for explicitly.</p>
+     */
+    private static final String CARD_XREF_DIRECTION_PREVIOUS = "previous";
 
     /**
      * Creates the read path over its repositories and projections.
@@ -403,6 +500,8 @@ public class AccountViewService {
      *     must not be {@code null}
      * @param crossReferenceMapper the projection to the by-account cross-reference list, a
      *     {@link CardXrefMapper}; must not be {@code null}
+     * @param cursorToken the sealer the customer scan and the paged cross-reference walk position
+     *     their page boundaries with, a {@link CursorToken}; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public AccountViewService(AccountRepository accounts,
@@ -411,7 +510,8 @@ public class AccountViewService {
             AccountContextMapper contextMapper,
             AccountMapper accountMapper,
             CustomerMapper customerMapper,
-            CardXrefMapper crossReferenceMapper) {
+            CardXrefMapper crossReferenceMapper,
+            CursorToken cursorToken) {
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.customers = Objects.requireNonNull(customers, "customers must not be null");
         this.crossReferences = Objects.requireNonNull(crossReferences, "crossReferences must not be null");
@@ -420,6 +520,7 @@ public class AccountViewService {
         this.customerMapper = Objects.requireNonNull(customerMapper, "customerMapper must not be null");
         this.crossReferenceMapper =
                 Objects.requireNonNull(crossReferenceMapper, "crossReferenceMapper must not be null");
+        this.cursorToken = Objects.requireNonNull(cursorToken, "cursorToken must not be null");
     }
 
     /**
@@ -492,6 +593,181 @@ public class AccountViewService {
     @Transactional(readOnly = true)
     public boolean customerExists(long customerId) {
         return this.customers.existsById(customerId);
+    }
+
+    /**
+     * Reads one customer of the customer master by its key.
+     *
+     * <p>Purpose: this is the keyed arm of the access surface {@code app/cbl/CBCUS01C.cbl} declares.
+     * That program names {@code RECORD KEY IS FD-CUST-ID} at L32 over a file whose record it carves
+     * into a nine-digit key at L39 and four hundred and ninety-one opaque bytes at L40, and it copies
+     * the meaningful layout in at L45 with {@code COPY CVCUS01Y.} -- so the key is the customer
+     * identifier and the published fields are the copybook's, not the file description's.</p>
+     *
+     * <p>Assumptions: the projection is applied here rather than by the caller, because the mapper is
+     * what masks the two identifiers the record holds -- the national identifier at L17 of
+     * {@code app/cpy/CVCUS01Y.cpy} and the government-issued identifier at L18 -- and a caller handed a
+     * stored row could publish either one whole. Returning the projection is what makes the masking an
+     * invariant of this method rather than an obligation on whoever calls it.</p>
+     *
+     * <p>Trade-offs: an absent row is RAISED rather than returned as an empty optional, which differs
+     * from the presence check beside this method and does so deliberately. That one answers a
+     * yes-or-no question a caller acts on; this one promises a representation, and there is no
+     * representation of a row that is not there. The sentence carried is the reference's own, declared
+     * at L133 with L134 of {@code app/cbl/COACTVWC.cbl} and reached at its gate at L713, which is the
+     * same text the update program declares at L501 with L502 of {@code app/cbl/COACTUPC.cbl}.</p>
+     *
+     * @param customerId the nine-digit customer identifier, the {@code long} rendering of the key
+     *     {@code CUST-ID} declares at L5 of {@code app/cpy/CVCUS01Y.cpy}
+     * @return the customer with both stored identifiers masked, a {@link CustomerResponse}, never
+     *     {@code null}
+     * @throws NoSuchElementException if the customer master holds no such row, which the shared advice
+     *     renders as HTTP 404 carrying the reference sentence
+     */
+    @Transactional(readOnly = true)
+    public CustomerResponse readCustomer(long customerId) {
+        return this.customers.findById(customerId)
+                .map(this.customerMapper::toCustomerResponse)
+                .orElseThrow(() -> new NoSuchElementException(RETURN_NOT_FOUND_IN_CUSTOMER_MASTER));
+    }
+
+    /**
+     * Reads one ascending page of the customer master, resuming from a sealed position.
+     *
+     * <p>Purpose: this is the bounded form of the whole-file sweep {@code app/cbl/CBCUS01C.cbl} drives
+     * at L74 through L81 -- a {@code PERFORM UNTIL END-OF-FILE = 'Y'} whose body reads the next record
+     * at L76 and writes it at L78, entered after the open at L72 and left at the close at L83. The
+     * reference filters nothing and pages nothing, so the ORDER is the whole of what has to be
+     * preserved, and it is: ascending {@code CUST-ID}, which follows from
+     * {@code ACCESS MODE IS SEQUENTIAL} at L31 over {@code RECORD KEY IS FD-CUST-ID} at L32.</p>
+     *
+     * <p>Alternatives Considered: positioning the page by offset, rejected on correctness rather than
+     * on cost. The reference's own browse state is already a keyset cursor: at L230 through L244 of
+     * {@code app/cbl/COCRDLIC.cbl} it carries a trailing key pair at L230 through L232, a leading key
+     * pair at L233 through L235, a screen ordinal at L237, a last-screen flag at L239 through L241 and a
+     * further-rows indicator at L242 through L244, with a row counter at L145 -- and not one offset, row
+     * number or page-size field anywhere in it. An offset is evaluated against the table as it stands
+     * when each page is fetched, so rows inserted or removed between two fetches shift the window and
+     * the caller silently skips rows or receives one twice; a position naming the last key seen is not
+     * moved by a concurrent write.</p>
+     *
+     * <p>Assumptions: the scan is FORWARD only, and the descending query the repository also declares
+     * is deliberately not reached from here. The reference walk is one-directional -- its loop has a
+     * single get-next paragraph at L92 and no backward counterpart at all -- so a backward step would be
+     * a capability this program never had. The two boundary keys are still published, because the
+     * envelope carries both and the leading one is what tells a caller it is holding the opening
+     * page.</p>
+     *
+     * <p>Assumptions: one row MORE than the page carries is requested, and the arrival of that surplus
+     * row is the whole of how the further-rows answer is reached. It is never reached by counting the
+     * master. This is the reference's own method: at L242 through L244 of
+     * {@code app/cbl/COCRDLIC.cbl} the further-rows state is a single flag, raised by discovering one
+     * record beyond what the screen holds. The surplus row is trimmed here and published nowhere, so it
+     * never reaches a caller as data.</p>
+     *
+     * @param cursor the sealed position to resume strictly after, or {@code null} to read the opening
+     *     page of the scan
+     * @param pageSize the number of rows the page may carry, clamped into the range this class declares
+     *     between one and {@link #CUSTOMER_SCAN_MAX_PAGE_SIZE}
+     * @return one ascending page with both boundary positions sealed and the further-rows indicator set,
+     *     a {@link PageResponse} of {@link CustomerResponse}, exhausted when no row follows the
+     *     position; never {@code null}
+     * @throws CursorToken.InvalidCursorException if the supplied position is not one this scan sealed,
+     *     which the shared advice renders as HTTP 400 keyed to the cursor
+     */
+    @Transactional(readOnly = true)
+    public PageResponse<CustomerResponse> listCustomers(String cursor, int pageSize) {
+        int size = Math.clamp(pageSize, 1, CUSTOMER_SCAN_MAX_PAGE_SIZE);
+
+        // WHY : Assumptions: the surplus row is requested through the limit and NOT through a second
+        //       query, because the repository states that whether further rows follow is settled by
+        //       asking for one more row than will be published and observing whether it arrives. The
+        //       limit therefore carries size plus one, and the extra row is removed below.
+        Limit window = Limit.of(size + 1);
+
+        // WHY : Assumptions: an absent position enters the scan through the repository's opening query
+        //       rather than through the resuming one with a sentinel key. The reference enters the same
+        //       way -- the open at L72 of app/cbl/CBCUS01C.cbl falls straight into the get-next
+        //       paragraph at L92 and seeks no lowest identifier first -- and the resuming query declares
+        //       its bound as required, so there is no absent value to pass it.
+        // WHY : Assumptions: the position is OPENED before it reaches a predicate rather than trusted as
+        //       supplied. This replaces the reference's trust in an echoed communication area, which it
+        //       reads back from the terminal at each turn per the block at L229 onward of
+        //       app/cbl/COCRDLIC.cbl; a position this scan did not seal is refused instead of used.
+        // WHY : Assumptions: the opened value is parsed as a number with NO defensive branch, and the
+        //       parse is total rather than merely likely to succeed. Two facts make it so, and both are
+        //       contracts rather than observations: open() either returns the exact key material that was
+        //       sealed under this binding or raises instead of returning, and the only place this binding
+        //       is ever sealed is pageOfCustomers below, which seals the stored identifier of a row.
+        //       That identifier is numeric in the reference itself -- CUST-ID is PIC 9(09) at L5 of
+        //       app/cpy/CVCUS01Y.cpy and is the RECORD KEY at L32 of app/cbl/CBCUS01C.cbl -- so a value
+        //       that opens successfully cannot be non-numeric, and no NumberFormatException is reachable
+        //       or declared.
+        // WHY : Alternatives Considered: catching the parse failure and re-raising it as a refused
+        //       cursor, which would be defensible if the payload could be attacker-chosen. It cannot:
+        //       an attacker-chosen payload fails the seal check and never reaches the parse, so the catch
+        //       would be unreachable code that reads as though the parse were untrusted -- and it would
+        //       additionally convert any FUTURE non-numeric binding sealed by mistake into a client error
+        //       rather than surfacing it as the programming error it would be.
+        List<Customer> rows = cursor == null
+                ? this.customers.findAllByOrderByCustomerIdAsc(window)
+                : this.customers.findByCustomerIdGreaterThanOrderByCustomerIdAsc(
+                        Long.parseLong(this.cursorToken.open(CUSTOMER_SCAN_BINDING, cursor)), window);
+
+        return pageOfCustomers(rows, size);
+    }
+
+    /**
+     * Trims a read window to its page and seals both boundary positions.
+     *
+     * <p>Assumptions: the surplus row is removed from the END of the window, and the end is the correct
+     * one because this scan travels one way only. A read that also travelled backward would have to trim
+     * the other end for that direction, since its surplus row is the one furthest from the position;
+     * having no backward arm, this method has one case rather than two.</p>
+     *
+     * <p>Assumptions: both boundaries are sealed from the TRIMMED page, so each names a row the caller
+     * actually received. The reference does otherwise for its trailing boundary and the divergence is
+     * recorded rather than inherited: {@code app/cbl/COCRDLIC.cbl} captures the last displayed key at
+     * L1194 and L1195 and then overwrites it with the probe row's key at L1212 through L1214, so the
+     * value it keeps names a record the terminal never showed. Publishing that would advance a caller's
+     * position one row too far and drop a row from the following page.</p>
+     *
+     * @param rows the window the store returned, at most the page size plus one, in ascending
+     *     identifier order; must not be {@code null}
+     * @param size the number of rows the page may carry
+     * @return the page with both boundaries sealed, or the exhausted page when the window holds no row;
+     *     never {@code null}
+     * @throws IllegalArgumentException if a sealed boundary is refused by the envelope's own cursor
+     *     check, which no value produced here can provoke
+     */
+    private PageResponse<CustomerResponse> pageOfCustomers(List<Customer> rows, int size) {
+        boolean hasSurplus = rows.size() > size;
+        List<Customer> shown = hasSurplus ? rows.subList(0, size) : rows;
+
+        // WHY : Assumptions: an exhausted read answers with the envelope's own exhausted page rather
+        //       than with boundaries sealed over nothing, because the envelope refuses a row-bearing
+        //       page that names no boundary and because this is the state the reference reaches when its
+        //       read reports end-of-file at L98 and L99 of app/cbl/CBCUS01C.cbl and raises the
+        //       end-of-file flag at L108.
+        if (shown.isEmpty()) {
+            return PageResponse.empty();
+        }
+
+        List<CustomerResponse> items = new ArrayList<>(shown.size());
+        for (Customer row : shown) {
+            items.add(this.customerMapper.toCustomerResponse(row));
+        }
+
+        // WHY : Assumptions: the boundaries are sealed from the STORED key rather than from the
+        //       published projection, because the projection renders the identifier as text for the
+        //       reason recorded on the response record while the resuming query binds a numeric key.
+        //       Sealing the rendered form would make the next page's bound depend on a display decision.
+        return PageResponse.ofRows(items,
+                this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
+                        String.valueOf(shown.getFirst().getCustomerId())),
+                this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
+                        String.valueOf(shown.getLast().getCustomerId())),
+                hasSurplus);
     }
 
     /**
@@ -573,6 +849,199 @@ public class AccountViewService {
     public List<CardXrefResponse> listCardCrossReferences(long accountId) {
         return this.crossReferenceMapper.toCardXrefResponses(
                 this.crossReferences.findByAccountIdOrderByCardNumAsc(accountId));
+    }
+
+    /**
+     * Resolves an account to the account and customer its lowest-ordering cross-referenced card names.
+     *
+     * <p>Purpose: this is the migrated form of {@code 9200-GETCARDXREF-BYACCT.} at L723 of
+     * {@code app/cbl/COACTVWC.cbl}, whose body at L727 through L732 issues ONE {@code EXEC CICS READ}
+     * against the alternate-index literal declared at L192 and L193 and receives one record. The target
+     * reaches the same access path through the secondary index {@code idx_card_xref_account_id}.</p>
+     *
+     * <p>Assumptions: exactly one row answers, and the tie-break is stated rather than left to the
+     * store. The index is not unique, so an account may hold several rows; the row taken is the one whose
+     * card number orders lowest, which is the base cluster's own order per
+     * {@code ACCESS MODE  IS SEQUENTIAL} at L31 beside {@code RECORD KEY   IS FD-XREF-CARD-NUM} at L32 of
+     * {@code app/cbl/CBACT03C.cbl}. Without the ordering the answer would be whichever row the plan
+     * happened to reach first and two identical requests could differ.</p>
+     *
+     * <p>Trade-offs: the read is bounded to one row in the STATEMENT rather than by reading the account's
+     * rows and keeping the first. An account with many cards would otherwise materialise every one of
+     * them to answer a question about a single row, and every row carries a primary account number, so
+     * the wider read would carry cardholder data into this process's heap for no purpose.</p>
+     *
+     * @param accountId the account to resolve, the eleven-digit identifier {@code XREF-ACCT-ID} declares
+     *     at L7 of {@code app/cpy/CVACT03Y.cpy}
+     * @return the account and customer the lowest-ordering cross-referenced card names, a
+     *     {@link CardXrefView}, never {@code null}
+     * @throws NoSuchElementException if the account has no cross-referenced card, which the shared advice
+     *     renders as HTTP 404
+     */
+    @Transactional(readOnly = true)
+    public CardXrefView resolveCardCrossReferenceByAccount(long accountId) {
+        return this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId)
+                .map(this.contextMapper::toCardXrefView)
+                // WHY : Assumptions: the raised message names the account and no card number. The
+                //       account identifier already travelled in the request and appears in this
+                //       service's own account-master refusal, whereas a card number is the one value
+                //       the migration's logging contract withholds from a durable diagnostic -- and
+                //       naming a card here would disclose one the caller never asked for.
+                .orElseThrow(() -> new NoSuchElementException(
+                        "no cross-reference row exists for account " + accountId));
+    }
+
+    /**
+     * Walks one account's cross-reference rows a page at a time, positioned by key rather than by count.
+     *
+     * <p>Refactoring Rationale: this is the SUPERSET of the single account-keyed read above, and it
+     * exists because that read cannot describe an account holding several cards. The reference answers
+     * with one record because {@code app/cbl/COACTVWC.cbl} L727 issues a keyed {@code READ} rather than a
+     * browse, whereas {@code idx_card_xref_account_id} is not unique. The divergence is recorded rather
+     * than introduced quietly, and the single-record shape stays available beside this one.</p>
+     *
+     * <p>Refactoring Rationale: the browse state that used to live outside the request lives in the
+     * request now. The reference kept it in a structure the terminal echoed back, declared from L229 of
+     * {@code app/cbl/COCRDLIC.cbl}, so continuity depended on the client returning that buffer intact;
+     * the batch reader kept it in an open file handle instead, opened at L118 of
+     * {@code app/cbl/CBACT03C.cbl} and released at L136. A sealed token in the request needs neither, and
+     * it is verified on the way back in rather than trusted.</p>
+     *
+     * <p>Assumptions: the further-page indicator is settled by reading ONE row beyond the page and
+     * observing whether it arrived, never by counting how many rows exist. That is the reference's own
+     * device -- {@code app/cbl/COCRDLIC.cbl} sets the indicator at L242 through L244 after discovering a
+     * record beyond the seven a screen holds -- and the surplus row's key is dropped rather than
+     * published, because publishing it would advance the cursor past a row the caller never received.</p>
+     *
+     * <p>Assumptions: a backward step with NO cursor reads the first page forward rather than failing. A
+     * backward walk is only expressible from a set already returned, so there is no earlier position to
+     * seek from, and the reference reaches the same answer when the backward key it holds is still its
+     * low-value sentinel at L243 of {@code app/cbl/COCRDLIC.cbl}.</p>
+     *
+     * @param accountId the account whose rows are walked, the eleven-digit identifier
+     *     {@code XREF-ACCT-ID} declares at L7 of {@code app/cpy/CVACT03Y.cpy}
+     * @param cursor the sealed boundary token the previous page ended on, or {@code null} or blank to
+     *     read the first page
+     * @param direction the step to take, {@code previous} to walk backward and anything else to walk
+     *     forward
+     * @param subject the validated caller the cursor is sealed for, taken from the token rather than
+     *     from the request body; must not be {@code null}
+     * @return one page of rows in ascending card-number order with both boundary tokens sealed and the
+     *     further-page indicator settled, a {@link PageResponse} of {@link CardXrefResponse}, never
+     *     {@code null}
+     * @throws NullPointerException if {@code subject} is {@code null}
+     * @throws CursorToken.InvalidCursorException if the cursor cannot be opened, or was sealed for
+     *     another query, another subject or the other direction, which the shared advice renders as HTTP
+     *     400
+     */
+    @Transactional(readOnly = true)
+    public PageResponse<CardXrefResponse> listCardCrossReferences(
+            long accountId, String cursor, String direction, String subject) {
+
+        Objects.requireNonNull(subject, "subject must not be null");
+
+        boolean backward = CARD_XREF_DIRECTION_PREVIOUS.equals(direction);
+        String position = cursor == null || cursor.isBlank()
+                ? null
+                : this.cursorToken.open(cardXrefCursorBinding(subject, backward), cursor);
+
+        // WHY : Assumptions: a backward step needs a position and the repository's backward statement
+        //       declares its cursor mandatory, so an absent one cannot be passed to it. Reading forward
+        //       from the start of the set is the answer rather than a refusal, for the reason recorded
+        //       in this method's contract.
+        List<CardXref> window = position == null
+                ? this.crossReferences.findForwardFromCursor(
+                        null, accountId, Limit.of(CARD_XREF_PAGE_SIZE + 1))
+                : cardXrefWindow(accountId, position, backward);
+
+        return cardXrefPage(window, backward && position != null, subject);
+    }
+
+    /**
+     * Reads one row beyond a page in the direction asked for, from a known position.
+     *
+     * @param accountId the account the read is narrowed to, resolving through
+     *     {@code idx_card_xref_account_id}
+     * @param position the card number the previous page bounded on, exclusive
+     * @param backward {@code true} to read the rows preceding the position in descending order,
+     *     {@code false} to read those following it in ascending order
+     * @return the rows the statement returned, at most one more than a page holds, never {@code null}
+     */
+    private List<CardXref> cardXrefWindow(long accountId, String position, boolean backward) {
+        Limit limit = Limit.of(CARD_XREF_PAGE_SIZE + 1);
+
+        // WHY : Trade-offs: the bound is one row wider than the page in both directions, which is the
+        //       cost of settling the further-page indicator without a count. A count over the account's
+        //       rows would answer the same question and would scan every row the index holds for that
+        //       account, where this reads one.
+        return backward
+                ? this.crossReferences.findBackwardFromCursor(position, accountId, limit)
+                : this.crossReferences.findForwardFromCursor(position, accountId, limit);
+    }
+
+    /**
+     * Assembles a read window into the published page envelope, boundaries sealed.
+     *
+     * <p>Assumptions: the surplus row is dropped from the END of the window in BOTH directions, and the
+     * backward window is reversed only afterwards. The repository's backward statement returns descending
+     * rows, so its surplus row is the smallest key and therefore the last element, while the row adjacent
+     * to the cursor is the first; reversing before dropping would discard that adjacent row and leave a
+     * gap at the boundary that no caller could detect.</p>
+     *
+     * @param window the rows the statement returned, at most one more than a page holds
+     * @param backward {@code true} when the window was read in descending order and must be reversed
+     *     into presentation order
+     * @param subject the validated caller the boundary tokens are sealed for
+     * @return the page envelope carrying the rows, both sealed boundaries and the further-page
+     *     indicator, never {@code null}
+     */
+    private PageResponse<CardXrefResponse> cardXrefPage(
+            List<CardXref> window, boolean backward, String subject) {
+
+        List<CardXref> rows = new ArrayList<>(window);
+        boolean more = rows.size() > CARD_XREF_PAGE_SIZE;
+        if (more) {
+            rows.remove(rows.size() - 1);
+        }
+
+        // WHY : Assumptions: an exhausted walk yields the shared empty envelope rather than a page
+        //       naming boundaries it has no rows to take them from. An account legitimately holds no
+        //       card, and a browse over an absent alternate-index key ends the same way rather than
+        //       failing.
+        if (rows.isEmpty()) {
+            return PageResponse.empty();
+        }
+        if (backward) {
+            Collections.reverse(rows);
+        }
+
+        List<CardXrefResponse> items = this.crossReferenceMapper.toCardXrefResponses(rows);
+        String leading = rows.get(0).getCardNum();
+        String trailing = rows.get(rows.size() - 1).getCardNum();
+
+        // WHY : Assumptions: a backward page always reports a further page forward, because the set the
+        //       caller stepped back from is itself ahead of this one. The reference makes the same
+        //       unconditional claim on its backward path rather than probing for it.
+        return PageResponse.ofRows(items,
+                this.cursorToken.seal(cardXrefCursorBinding(subject, true), leading),
+                this.cursorToken.seal(cardXrefCursorBinding(subject, false), trailing),
+                backward || more);
+    }
+
+    /**
+     * Composes the binding a cross-reference cursor is sealed against.
+     *
+     * <p>Assumptions: the binding names the query, the subject and the direction together, so a token is
+     * usable only for the walk, the caller and the step it was issued for. Sealing on the subject alone
+     * would let one caller present the leading boundary of a page as a trailing one and step over rows.</p>
+     *
+     * @param subject the validated caller the token is issued for
+     * @param backward {@code true} for the backward scope, {@code false} for the forward scope
+     * @return the binding string the seal and the matching open are performed with, never {@code null}
+     */
+    private static String cardXrefCursorBinding(String subject, boolean backward) {
+        return CursorToken.binding(CARD_XREF_CURSOR_QUERY, subject,
+                backward ? CARD_XREF_CURSOR_SCOPE_BACKWARD : CARD_XREF_CURSOR_SCOPE_FORWARD);
     }
 
 

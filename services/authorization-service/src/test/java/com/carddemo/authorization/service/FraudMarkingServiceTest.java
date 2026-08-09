@@ -3,8 +3,11 @@ package com.carddemo.authorization.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -33,6 +36,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Verifies the one write this context publishes: the selector-versus-body key comparison that guards it,
@@ -360,6 +365,82 @@ class FraudMarkingServiceTest {
         assertThatExceptionOfType(IllegalStateException.class).isThrownBy(() -> this.service
                 .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
         verify(this.fraudRows, never()).save(any(AuthFraud.class));
+    }
+
+    /**
+     * A failure of the SECOND write leaves the first one to be rolled back with it, not committed.
+     *
+     * <p><strong>This is the divergence D-6 assertion.</strong> The reference system obtains this property
+     * from a coordinator driving two resource managers to one syncpoint at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl} L557 and L558; the target obtains it from
+     * both writes sharing one local transaction. The test forces the fraud row to be written and THEN the
+     * authorization row's own write to fail, which is the ordering in which a partial commit would be
+     * possible if the two writes did not share a boundary.</p>
+     *
+     * <p>Assumptions: two things together are what make the property hold, so both are asserted. The
+     * exception must ESCAPE the method, because propagation is what marks the transaction for rollback --
+     * rule T5 maps {@code SYNCPOINT ROLLBACK} onto exactly that, and a caught-and-reported failure would
+     * commit the staged first write. And the method must carry a single {@link Transactional} declaration,
+     * because propagation only rolls the first write back if that write was inside the same boundary. The
+     * annotation is read reflectively rather than assumed: a unit test with repository doubles has no real
+     * transaction to observe, so the declaration is the observable fact, and the boundary's runtime effect
+     * is asserted against a live engine by this module's {@code *RepositoryIT}.</p>
+     *
+     * <p>Alternatives Considered: asserting only that the exception propagates. Rejected because
+     * propagation alone is satisfied by a method with no transaction at all, which is precisely the state
+     * this test exists to exclude -- the first write would then already have been committed on its own.</p>
+     *
+     * @throws NoSuchMethodException if the operation's signature changes without this assertion following
+     *     it, which should fail the build rather than silently stop checking the boundary
+     */
+    @Test
+    @DisplayName("a failure of the second write shares one boundary with the first, so neither survives")
+    void aFailureOfTheSecondWriteRollsTheFirstBackWithIt() throws NoSuchMethodException {
+        PendingAuthDetail row = spy(rowWithOriginalDate(AUTH_ORIG_DATE));
+        when(this.details.findById(any(PendingAuthDetailKey.class))).thenReturn(Optional.of(row));
+        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+        // WHY : Assumptions: the second write is the authorization row's own state change, so the failure is
+        //       injected there rather than on a repository double. Failing a repository would only prove
+        //       that a mock throws; failing the entity operation reproduces the shape the reference guards
+        //       against, where the relational write has already been issued when the hierarchical one does
+        //       not complete.
+        doThrow(new IllegalStateException("the authorization row refused the mark"))
+                .when(row).applyFraudMark(any(), any());
+
+        assertThatExceptionOfType(IllegalStateException.class).isThrownBy(() -> this.service
+                .mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT));
+
+        verify(this.fraudRows)
+                .save(any(AuthFraud.class));
+        assertThat(FraudMarkingService.class
+                .getMethod("mark", String.class, FraudMarkRequest.class, String.class)
+                .getAnnotation(Transactional.class))
+                .as("both writes share the one transaction that divergence D-6 collapses them into")
+                .isNotNull();
+    }
+
+    /**
+     * The authorization row is re-read by key before either write is staged.
+     *
+     * <p>Assumptions: the ORDER is the assertion, not merely the presence of the read. The reference
+     * replace at {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl} L525 to L528 is unqualified and
+     * acts on the position its earlier retrieval established, so the target's fetch by composite key is
+     * what stands in for that position. A write staged before the fetch would be operating on a row this
+     * transaction had not established, and verifying the two calls without their order would pass either
+     * way.</p>
+     */
+    @Test
+    @DisplayName("the row is re-read by composite key before either write is staged")
+    void theRowIsReReadByKeyBeforeEitherWriteIsStaged() {
+        givenExistingRow();
+        when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
+
+        this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
+
+        InOrder sequence = inOrder(this.details, this.fraudRows);
+        sequence.verify(this.details).findById(any(PendingAuthDetailKey.class));
+        sequence.verify(this.fraudRows).findById(any(AuthFraudKey.class));
+        sequence.verify(this.fraudRows).save(any(AuthFraud.class));
     }
 
     /**

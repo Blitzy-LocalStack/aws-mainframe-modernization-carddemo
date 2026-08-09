@@ -36,21 +36,30 @@
  * in a request BODY. The lesson recorded rather than the number: a count belongs beside the roster that
  * justifies it, and the entries below are the authority for this one.
  *
- * <p><b>Assumptions: {@code CardController} is contracted and NOT yet authored.</b> No
- * {@code CardController.java} exists in this directory -- it holds this charter alone -- so none of the
- * five operations is served, and a reader should not expect to find a handler for one. What does exist
- * around it is the whole of the rest of the chain: the five operations' request and response shapes in
- * {@code com.carddemo.card.dto}, the mapper in {@code com.carddemo.card.mapper}, the repository in
- * {@code com.carddemo.card.repository}, the entity and the sealed selector in
- * {@code com.carddemo.card.domain}, the cipher in {@code com.carddemo.card.service}, the four
- * configuration classes in {@code com.carddemo.card.config}, and the contract test that binds this
- * document to {@code SecurityConfig}. The distinction is stated here because "one controller belongs to
- * this package and the set is closed" is a statement about the contract, not about the directory, and a
- * reader who read it as the latter would go looking for a file that is not there.
+ * <p><b>Assumptions: {@code CardController} is authored and every one of the five operations is
+ * served.</b> {@code CardController.java} sits beside this charter and mounts all five, so the chain is
+ * complete end to end: the request and response shapes in {@code com.carddemo.card.dto}, the mapper in
+ * {@code com.carddemo.card.mapper}, the repository in {@code com.carddemo.card.repository}, the entity
+ * and the sealed selector in {@code com.carddemo.card.domain}, the read and write services in
+ * {@code com.carddemo.card.service}, the configuration classes in {@code com.carddemo.card.config}, and
+ * the adapter that binds them to the published paths.
+ *
+ * <p>Refactoring Rationale: this paragraph previously stated that no {@code CardController.java} existed
+ * in this directory and that none of the five operations was served. That was accurate while the package
+ * held this charter alone and is not accurate now, so it is restated rather than left to be discovered by
+ * a reader who opened the directory. The delivery state is asserted mechanically as well as described
+ * here, which is what keeps the two from parting again:
+ * {@code com.carddemo.card.api.CardControllerContractCensusTest} reads every {@code operationId} out of
+ * the packaged contract and requires a mapped handler of the same name for each, so a claim that an
+ * operation is served cannot outlive the handler that serves it.
  *
  * <ul>
- *   <li>{@code listCards}, one page of the card list positioned by key rather than by offset,
- *       served by {@code GET} on the collection path {@code /api/v1/cards}</li>
+ *   <li>{@code listCards}, one page of the card list positioned by key and never by a row count,
+ *       served by {@code POST} on {@code /api/v1/cards/search} with the account narrowing, the
+ *       cursor and the direction in the request BODY. The verb and the literal segment are both
+ *       consequences of the same finding the lookup below records: a query string is part of the
+ *       request line, and the migration's logging contract names account and customer identifiers
+ *       alongside the primary account number</li>
  *   <li>{@code lookupCard}, the resolution of a card number a user typed into the card it names,
  *       served by {@code POST} on {@code /api/v1/cards/lookup} with the number in the request
  *       BODY. It is the one operation that accepts a full primary account number, and the body is

@@ -2,57 +2,144 @@
 # infra/modules/network/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Publishes the complete consumer contract of the CardDemo network module.
-#   Environment roots use these values to place load balancers, VPC Links,
-#   services, batch tasks and Aurora into the correct tier without looking up a
-#   resource by name.
+#   Publishes the complete public contract of the CardDemo network module.
+#   This file is the only channel by which another module or an environment
+#   root learns a network identifier: module outputs are the sole source of
+#   runtime endpoints and identifiers in this package, and no service
+#   hard-codes one. A value not published here cannot be reached by a sibling
+#   at all, so every name below is load-bearing. Most are already read by the
+#   consumer their description names, and each description that has no reader
+#   yet says so rather than implying one.
 #
 # Parameters:
-#   None are declared here. Every value is derived from resources in main.tf or
-#   from the two shared port inputs whose purpose is to keep network rules and
-#   their listeners on one source of truth.
+#   None. This file declares no input. All eleven module inputs are declared,
+#   typed, described and validated in variables.tf and are consumed by main.tf.
+#   Three outputs nevertheless originate in an input rather than in a created
+#   resource: vpc_cidr_block reads the address space back off aws_vpc.this so
+#   the published value is what AWS accepted rather than what the caller asked
+#   for, while app_container_port and database_port are republished so a root
+#   passes one number to both a security-group rule owned here and the
+#   listener that rule protects. variables.tf states that republication
+#   obligation on both port inputs, so it is a contract, not a shortcut.
 #
 # Return values:
-#   Eighteen outputs: VPC identity and address space; zone and subnet placement;
-#   three published security groups; route tables and NAT gateways; private
-#   endpoint identifiers; and the application and database ports.
+#   Twenty-one outputs in eight groups.
+#     Identity and addressing - vpc_id, vpc_cidr_block, availability_zones.
+#     Subnets, one ordered list per tier - public_subnet_ids,
+#       private_app_subnet_ids, isolated_data_subnet_ids.
+#     Security groups, the three a sibling attaches to - alb_security_group_id,
+#       app_security_group_id, data_security_group_id.
+#     Route tables - public_route_table_id, plus the zone-keyed maps
+#       private_app_route_table_ids and isolated_data_route_table_ids.
+#     NAT - nat_gateway_ids, nat_gateway_public_ips.
+#     Private service paths - interface_vpc_endpoint_ids and
+#       s3_gateway_endpoint_id.
+#     Shared port contracts - app_container_port, database_port.
+#     Flow-log delivery - flow_log_group_name, flow_log_group_arn, flow_log_id.
+#   Each description states its own shape, because a consumer indexes a list
+#   positionally but addresses a map by key; the two are not interchangeable.
 #
 # Exceptions or errors:
-#   Terraform does not evaluate an output until the resource it references is
-#   in the graph. A failed network resource therefore prevents the matching
-#   output from being produced rather than publishing a partial value.
+#   An output cannot raise. The failure mode that does exist is contractual:
+#   renaming or removing any output below is a breaking change for every
+#   consumer its description names, and the break does not surface in this
+#   module. It surfaces in the calling configuration as an unresolved reference
+#   to a module output, so validation fails in infra/envs/dev and
+#   infra/envs/prod rather than here. That is why each consumer is recorded in
+#   the description itself, where an author editing this file will read it
+#   before making the change rather than after.
+#   The generated Outputs table in this module's README.md is produced from the
+#   names and descriptions below, and its freshness is drift-checked in
+#   check-only mode. Editing any name or any description without regenerating
+#   that README therefore leaves it stale and fails the build.
 #
 # WHY (non-obvious design decisions):
-#   - Assumptions: subnet outputs are ordered by availability_zones rather than
-#     by a resource-map iteration. Consumers receive stable positional lists,
-#     while route-table and gateway outputs remain maps keyed by zone where the
-#     association itself is the useful information.
-#   - Refactoring Rationale: the two port inputs are intentionally returned.
-#     The environment root passes these outputs to ecs-service and
-#     aurora-postgresql, which prevents a listener from drifting from the
-#     security-group rule this module owns.
-#   - Trade-offs: the flow-log role and internet gateway are not published. No
-#     sibling attaches to them, and exposing them would invite a second owner
-#     for an internal boundary.
+#   - Assumptions: the three subnet lists are built by iterating
+#     local.availability_zones rather than a resource map, so index n of any
+#     subnet list is in zone n of availability_zones. That ordering is
+#     a published guarantee consumers rely on to pair a subnet with its zone
+#     without a second lookup, which is why it is contract and not detail.
+#   - Alternatives Considered: returning the route-table and NAT identifiers as
+#     positional lists too, for uniformity with the subnet lists. Rejected
+#     because for those resources the zone association is the useful fact
+#     rather than an incidental ordering, and a keyed map states it outright
+#     instead of asking a reader to trust that two lists were built in step.
+#   - Trade-offs: the interface-endpoint security group, the flow-log IAM role
+#     and the internet gateway are all created by main.tf and deliberately not
+#     published. The endpoint group is the omission a reader is most likely to
+#     mistake for an oversight, so it is argued at the security-group group
+#     below rather than left to inference.
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# On `sensitive`: nothing below is marked, and that is a decision rather
+# than an omission.
+#
+# Alternatives Considered: marking every output `sensitive = true`, the
+# defensive default some trees apply to anything shaped like an identifier.
+# Rejected on two specific grounds rather than as a preference. First, none of
+# these values is credential material: they are resource identifiers,
+# availability-zone names, one IPv4 CIDR block, two TCP port numbers, a
+# log-group name and ARN, and the Elastic IP addresses of the NAT gateways.
+# None authenticates anything and none grants access on its own - the
+# isolated-data subnets have no route to the internet, and reaching the
+# application tier still requires membership of a named security group. Second,
+# `sensitive` propagates and suppresses: a root re-exporting a sensitive output
+# must mark its own output sensitive too, and Terraform then redacts the value
+# from plan output, from `terraform output` and from generated documentation.
+# Both environment roots pass these values onward to sibling modules, and the
+# deploy and teardown runbooks instruct an operator to read several of them
+# back, so marking them would hide precisely the values an operator needs while
+# protecting nothing an attacker could use.
+#
+# Assumptions: the genuinely secret material in this package - database
+# credentials and seed-user passwords - is generated at apply time into Secrets
+# Manager and never passes through this module, so there is nothing here for
+# `sensitive` to protect.
+#
+# Trade-offs: nat_gateway_public_ips does publish routable addresses once a
+# root is applied. That is accepted, and is the reason the output exists: an
+# operator cannot allow-list an egress source without knowing it, and AWS
+# publishes a NAT gateway's public address to the internet regardless of how
+# this file describes it.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Identity and addressing
+# -----------------------------------------------------------------------------
+
 output "vpc_id" {
-  description = "Identifier of the VPC that owns every subnet, route table, security group and endpoint this module creates; consumed by the ALB, API Gateway, Aurora and observability modules."
+  description = "Identifier (string) of the VPC that owns every subnet, route table, security group and endpoint this module creates. Read by api-gateway-http for its VPC Link and by ecs-service for its target groups, and required by any further module that creates a VPC-scoped resource."
   value       = aws_vpc.this.id
 }
 
+# Assumptions: the address space is read back off the created VPC rather than
+#   echoed from var.vpc_cidr. A consumer handed only the variable would have to
+#   be trusted to pass the same value into two modules, and a divergence would
+#   surface as a silently over- or under-scoped rule rather than as an error;
+#   the resource attribute is what AWS actually accepted, so it is the one
+#   authoritative form of the answer.
 output "vpc_cidr_block" {
-  description = "IPv4 CIDR block of the VPC, published for consumers that must scope an AWS rule or validate that an address belongs to this network without repeating the input."
+  description = "IPv4 CIDR block (string) AWS assigned to this VPC. Its consumer is the environment root, which needs it whenever a rule or policy has to be scoped to the whole network rather than to a peer security group; no sibling module reads it today, because every tier-to-tier flow this topology allows is expressed group-to-group instead. Publishing it means no consumer is ever handed var.vpc_cidr a second time."
   value       = aws_vpc.this.cidr_block
 }
 
+# Assumptions: this list defines the module's canonical zone order. The three
+#   subnet-id lists below are built by iterating it, so index n of any of them
+#   is in zone n of this list. Consumers pair a subnet with its zone on that
+#   guarantee alone, so reordering this list silently re-homes every subnet a
+#   consumer thought it had placed.
 output "availability_zones" {
-  description = "Ordered availability-zone names used by all three subnet tiers. Every subnet-id list below follows this same order."
+  description = "Ordered list of the availability-zone names this module actually used, after az_count is clamped to the zones the account can place a subnet in. Its consumer is the environment root, for zone-aware sizing and for confirming the span a deployment really got rather than the span it asked for; no sibling module reads it today. Every subnet-id list below is ordered to match it."
   value       = local.availability_zones
 }
 
+# -----------------------------------------------------------------------------
+# Subnets - one ordered list per tier, in availability_zones order
+# -----------------------------------------------------------------------------
+
 output "public_subnet_ids" {
-  description = "Ordered identifiers of the public subnets, one per availability zone, for the internal ALB and the zone-local NAT gateways."
+  description = "Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, which are its only current occupants, and an internet-facing load balancer. No module consumes this output today, because the load balancer in this deployment is internal and both roots therefore place it in the private-application subnets; the environment root is its only consumer. Nothing holding application state or record data belongs here."
   value = [
     for zone in local.availability_zones :
     aws_subnet.public[zone].id
@@ -60,7 +147,7 @@ output "public_subnet_ids" {
 }
 
 output "private_app_subnet_ids" {
-  description = "Ordered identifiers of the private application subnets, one per availability zone, for ECS tasks, API Gateway VPC Link interfaces and interface endpoint ENIs."
+  description = "Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, by api-gateway-http for its VPC Link, and by alb - the load balancer is internal, so it belongs in this tier rather than in the public one. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions and SSM without its traffic leaving the VPC."
   value = [
     for zone in local.availability_zones :
     aws_subnet.private_app[zone].id
@@ -68,35 +155,61 @@ output "private_app_subnet_ids" {
 }
 
 output "isolated_data_subnet_ids" {
-  description = "Ordered identifiers of the isolated data subnets, one per availability zone, whose route tables contain no default route and which form the Aurora DB subnet group."
+  description = "Ordered list of the isolated data subnet identifiers, one per availability zone, forming the DB subnet group read by aurora-postgresql. These subnets have no route to the internet at all - their route tables carry no default route, no NAT and no gateway - which is what makes them the correct home for the database and the wrong home for anything needing egress."
   value = [
     for zone in local.availability_zones :
     aws_subnet.isolated_data[zone].id
   ]
 }
 
+# -----------------------------------------------------------------------------
+# Security groups - the three a sibling module attaches to
+#
+# Alternatives Considered: publishing the fourth group as well, the one main.tf
+# creates for the interface-endpoint ENIs, so that the set of published groups
+# mirrored the set of created groups. Rejected because nothing outside this
+# module attaches to it: the endpoints that carry it are created here, and its
+# only rule pair is the 443 flow from the application group, declared here too.
+# Publishing it would widen the contract with a value no consumer reads.
+# Trade-offs: a reader comparing this file against main.tf will notice the
+# omission, which is why it is recorded here rather than left to inference. The
+# omission is also protective. An identifier that is reachable invites a future
+# caller to attach something to that group, and whatever is attached inherits
+# the application tier's 443 path to every private AWS service endpoint;
+# leaving it unpublished keeps that group's membership decided in one file.
+# -----------------------------------------------------------------------------
+
 output "alb_security_group_id" {
-  description = "Identifier of the internal ALB's listener security group, attached by the alb module and opened on 443 by the api-gateway-http module from the VPC Link's own group; this module gives it only egress to the application group on app_container_port."
+  description = "Identifier (string) of the internal load balancer's security group, attached by alb and given its 443 ingress by api-gateway-http from the VPC Link's own group. The only flow this module grants it is egress to the application group on app_container_port, so the load balancer can forward requests and health checks and can reach nothing else."
   value       = aws_security_group.alb.id
 }
 
 output "app_security_group_id" {
-  description = "Identifier of the application-tier security group attached to ECS service and batch-task interfaces; it admits ALB traffic and permits only the declared dependency flows."
+  description = "Identifier (string) of the application-tier security group, attached by ecs-service to its task ENIs and by step-functions-batch to its Fargate task network configuration. Its permitted flows are exactly three: ingress from the load-balancer group on app_container_port, egress to the data group on database_port, and egress to the interface-endpoint group on 443. Egress is enumerated rather than left as a new group's implicit allow-all, so a further outbound dependency has to arrive as a named rule visible in a plan diff."
   value       = aws_security_group.app.id
 }
 
 output "data_security_group_id" {
-  description = "Identifier of the isolated-data security group attached to Aurora, admitting PostgreSQL sessions from the application-tier group only."
+  description = "Identifier (string) of the isolated-data security group, attached by aurora-postgresql to its cluster. It grants exactly one flow: ingress from the application-tier group on database_port. It admits no CIDR range, so a host that is not a member of the application group cannot open a database session even from inside the VPC."
   value       = aws_security_group.data.id
 }
 
+# -----------------------------------------------------------------------------
+# Route tables
+# -----------------------------------------------------------------------------
+
+# Assumptions: one table serves every public subnet, which is why this output
+#   is a single identifier while the two below are maps. All public subnets
+#   share one default route to the single internet gateway, so per-zone tables
+#   would be identical copies of each other; the private-application and
+#   isolated-data tiers genuinely differ per zone and cannot be collapsed.
 output "public_route_table_id" {
-  description = "Identifier of the public route table whose default route targets the internet gateway and which is associated only with public subnets."
+  description = "Identifier (string) of the one route table shared by every public subnet, whose default route targets the internet gateway. Its only consumer is the environment root, which needs it if it ever adds a further public route; no sibling module reads it."
   value       = aws_route_table.public.id
 }
 
 output "private_app_route_table_ids" {
-  description = "Map from availability-zone name to the private-application route-table identifier whose default route targets that zone's NAT gateway."
+  description = "Map from availability-zone name to that zone's private-application route-table identifier. There is one table per zone rather than one shared table because each carries a default route to that zone's own NAT gateway, keeping egress zone-local so losing a zone cannot strand the others. Its consumer is the environment root, which needs these if it ever adds a route of its own - a prefix-list route for a further managed service, for instance; no sibling module reads them today."
   value = {
     for zone in local.availability_zones :
     zone => aws_route_table.private_app[zone].id
@@ -104,31 +217,52 @@ output "private_app_route_table_ids" {
 }
 
 output "isolated_data_route_table_ids" {
-  description = "Map from availability-zone name to the isolated-data route-table identifier. These tables have no default route; only the service-specific S3 gateway route is added."
+  description = "Map from availability-zone name to that zone's isolated-data route-table identifier. These tables carry no default route of any kind, and that absence - not a security-group rule a later edit could widen - is the mechanism that keeps the data tier off the internet. The S3 gateway endpoint is associated with them, so S3 is the only non-local destination they can reach. Consumed by the environment roots."
   value = {
     for zone in local.availability_zones :
     zone => aws_route_table.isolated_data[zone].id
   }
 }
 
+# -----------------------------------------------------------------------------
+# NAT
+# -----------------------------------------------------------------------------
+
 output "nat_gateway_ids" {
-  description = "Map from availability-zone name to the NAT gateway serving the private application subnet in that zone."
+  description = "Map from availability-zone name to the NAT gateway serving that zone's private application subnet. Its consumer is the environment root, which has the gateway identity an alarm on a per-gateway metric needs - a failed-connection count, for instance. The zone key is what lets such an alarm name the zone it describes instead of an opaque identifier. No sibling module reads it today; observability takes only the flow-log group name from this module."
   value = {
     for zone in local.availability_zones :
     zone => aws_nat_gateway.this[zone].id
   }
 }
 
+# Assumptions: a downstream system that allow-lists source addresses needs
+#   every entry in this map, not one of them. A task's egress leaves via the
+#   NAT gateway of whichever zone the task is running in, and placement moves
+#   between zones on any scaling event or task replacement, so an allow-list
+#   holding a single address appears to work and then fails intermittently -
+#   which is the hardest form of this failure to diagnose.
 output "nat_gateway_public_ips" {
-  description = "Map from availability-zone name to the Elastic IP attached to that zone's NAT gateway, for allow-listing and operational inventory."
+  description = "Map from availability-zone name to the Elastic IP address attached to that zone's NAT gateway. Its consumer is the environment root, which hands the set to any operator or downstream system that has to allow-list CardDemo's egress. All az_count entries are required, because egress can leave from any zone."
   value = {
     for zone in local.availability_zones :
     zone => aws_eip.nat[zone].public_ip
   }
 }
 
+# -----------------------------------------------------------------------------
+# Private AWS service paths
+# -----------------------------------------------------------------------------
+
+# Alternatives Considered: returning these as a list, which would have matched
+#   the subnet outputs above. Rejected because a consumer wanting one specific
+#   endpoint - observability attaching an alarm to a single service's path -
+#   would then depend on that service's position within
+#   var.interface_endpoint_services, and adding a ninth service would silently
+#   renumber every position after it. Keying by the short service name lets a
+#   consumer ask for the endpoint it actually means.
 output "interface_vpc_endpoint_ids" {
-  description = "Map from short AWS service name to the interface VPC endpoint identifier that provides its private path."
+  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
   value = {
     for service, endpoint in aws_vpc_endpoint.interface :
     service => endpoint.id
@@ -136,31 +270,53 @@ output "interface_vpc_endpoint_ids" {
 }
 
 output "s3_gateway_endpoint_id" {
-  description = "Identifier of the S3 gateway endpoint associated with the private-application and isolated-data route tables."
+  description = "Identifier (string) of the S3 gateway endpoint. Its consumer is the environment root, which needs it to name the private path to S3 in a bucket policy that restricts access to this VPC's endpoint; no sibling module reads it today. Being a gateway rather than an interface endpoint, it is associated with route tables instead of subnets, places no ENI and carries no security group - so which tiers can reach S3 is decided by route-table association, not by a security-group rule."
   value       = aws_vpc_endpoint.s3.id
 }
 
+# -----------------------------------------------------------------------------
+# Shared port contracts
+#
+# Refactoring Rationale: these two are module inputs returned unchanged, which
+# is unusual enough to state plainly rather than leave a reader to wonder at.
+# Each port appears twice in a deployment - once in a security-group rule this
+# module owns, and once in the listener or engine configuration a sibling
+# module owns - and the two must agree or the rule permits traffic to a port
+# nothing is listening on, which presents as an unexplained health-check
+# failure rather than as a configuration error. Republishing lets a root pass
+# one value into both places instead of repeating a literal, and variables.tf
+# records the same obligation on both inputs.
+# -----------------------------------------------------------------------------
+
 output "app_container_port" {
-  description = "Application listener port enforced by the ALB-to-application security-group rules; pass this output to every ecs-service container and target group."
+  description = "TCP port (number) this module admits from the load-balancer group to the application group. Both environment roots pass it to ecs-service as its container and target-group port, so the rule and the listener cannot drift apart."
   value       = var.app_container_port
 }
 
 output "database_port" {
-  description = "Aurora PostgreSQL listener port enforced by the application-to-data security-group rules; pass this output to aurora-postgresql."
+  description = "TCP port (number) this module admits from the application group to the isolated-data group. Both environment roots pass it to aurora-postgresql as its cluster port, so the rule and the engine cannot drift apart."
   value       = var.database_port
 }
 
+# -----------------------------------------------------------------------------
+# Flow-log delivery
+# -----------------------------------------------------------------------------
+
 output "flow_log_group_name" {
-  description = "Exact CloudWatch log-group name receiving VPC flow records. Pass this to observability.vpc_flow_log_group_name so its Logs Insights widget queries the group this module actually created."
+  description = "Exact name (string) of the CloudWatch log group receiving this VPC's flow records. Both environment roots pass it to observability as its required vpc_flow_log_group_name input, which points that module's Logs Insights widgets at the group this module created rather than at a name reassembled from a prefix and an environment."
   value       = aws_cloudwatch_log_group.flow_logs.name
 }
 
+# Assumptions: the trailing stream wildcard is trimmed so the value identifies
+#   the group itself. A policy statement needing every stream can append the
+#   wildcard, whereas one that must name the group cannot reliably strip it
+#   back off, so the unsuffixed form is the more composable of the two.
 output "flow_log_group_arn" {
-  description = "CloudWatch log-group ARN without the trailing stream wildcard, for IAM policies that grant read access to VPC flow records without granting access to every log group."
+  description = "ARN (string) of the flow-log CloudWatch log group with the trailing stream wildcard removed, for an IAM policy granting read access to VPC flow records without granting it over every log group in the account. Its consumer is the environment root; no sibling module reads it today. It is published because a group ARN cannot be derived from the group name without the account identifier and the Region, and this module hands its consumers neither."
   value       = trimsuffix(aws_cloudwatch_log_group.flow_logs.arn, ":*")
 }
 
 output "flow_log_id" {
-  description = "Identifier of the VPC flow-log resource for inventory and diagnostics that need to distinguish the delivery configuration from its destination log group."
+  description = "Identifier (string) of the flow-log resource itself, as distinct from the log group it delivers into. Its consumer is the environment root; no sibling module reads it today. It is published so an operator can tell the delivery configuration apart from its destination when records stop arriving while the log group still exists - a state the group name alone cannot distinguish, because the group looks healthy either way."
   value       = aws_flow_log.this.id
 }

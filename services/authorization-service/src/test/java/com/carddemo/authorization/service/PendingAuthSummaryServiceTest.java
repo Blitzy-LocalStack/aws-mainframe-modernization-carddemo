@@ -25,7 +25,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -68,6 +67,15 @@ class PendingAuthSummaryServiceTest {
 
     /** The Julian date component shared by every row, so ordering turns on the time component alone. */
     private static final int AUTH_DATE = 26215;
+
+    /**
+     * The time component of the newest row every descending run in this class starts from.
+     *
+     * <p>Assumptions: named rather than repeated as a literal, because three helpers derive positions from
+     * it and a run built from one number while an expectation was built from another would fail on the
+     * position rather than on the property under test.</p>
+     */
+    private static final int NEWEST_TIME = 9_1644_902;
 
     /** The summary-row double's source, rebuilt per test so no assertion depends on another. */
     private PendingAuthSummaryRepository summaries;
@@ -160,16 +168,129 @@ class PendingAuthSummaryServiceTest {
     }
 
     /**
-     * An account with no summary row is not found, and no authorization query is issued for it.
+     * An account with no summary row is answered with a zeroed summary, not with a raised condition.
+     *
+     * <p>Assumptions: the absent summary is a NORMAL outcome, which the reference program settles twice
+     * over. Its keyed retrieval evaluates a found arm and a not-found arm and no end-of-database arm at
+     * {@code cbl/COPAUS0C.cbl} L980 to L996, so absence is a state and not a failure; and its caller
+     * renders that state rather than reporting it, moving zero into all six aggregate positions at L800 to
+     * L807 and skipping the browse at L354 to L356 so the five row positions stay blank. Asserting a raised
+     * condition here would pin the opposite behaviour, under which a request naming an account with no
+     * pending authorizations is answered with an error status where the reference program answers with a
+     * zeroed summary and an empty list.</p>
+     *
+     * <p>Assumptions: the absence of any detail query is asserted rather than assumed, and the schema is
+     * why it holds: the child segment is declared {@code PARENT=((PAUTSUM0,))} at
+     * {@code ims/DBPAUTP0.dbd} L36 and the migration carries that forward as
+     * {@code fk_pending_auth_detail_summary}, so with no summary row there can be no authorization row to
+     * find.</p>
      */
     @Test
-    @DisplayName("an account with no summary row is not found and costs no detail query")
-    void accountWithNoSummaryRowIsNotFound() {
+    @DisplayName("an account with no summary row is a zeroed empty page and costs no detail query")
+    void accountWithNoSummaryRowIsAZeroedEmptyPage() {
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
 
-        assertThatExceptionOfType(NoSuchElementException.class)
-                .isThrownBy(() -> this.service.list(ACCOUNT_ID, null, null, SUBJECT));
+        PendingAuthListView view = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+
+        assertThat(view.page().items()).isEmpty();
+        assertThat(view.page().hasNext()).isFalse();
+        assertThat(view.page().firstKey()).isNull();
+        assertThat(view.page().lastKey()).isNull();
+        assertThat(view.screenMessage()).isNull();
+        assertThat(view.summary().approvedAuthCnt()).isZero();
+        assertThat(view.summary().declinedAuthCnt()).isZero();
+        assertThat(view.summary().creditBalance().amount()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(view.summary().cashBalance().amount()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(view.summary().approvedAuthAmt().amount()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(view.summary().declinedAuthAmt().amount()).isEqualByComparingTo(BigDecimal.ZERO);
         verifyNoInteractions(this.details);
+    }
+
+    /**
+     * A read returning EXACTLY the page size reports no further page, which is the off-by-one boundary.
+     *
+     * <p>Assumptions: this is the case the look-ahead exists to separate, and it is asserted on its own
+     * because it is the one an implementation gets wrong silently. A read of exactly five rows and a read of
+     * six both render five, so the two are indistinguishable from the rendered count alone; only the
+     * PRESENCE of the sixth row separates them. An implementation deriving has-next from
+     * {@code size >= PAGE_SIZE} rather than {@code size > PAGE_SIZE} passes every other case in this class
+     * and fails only here, offering a further page that does not exist. The reference program avoids the
+     * same ambiguity by carrying an explicit indicator at {@code cbl/COPAUS0C.cbl} L123 to L125, set from
+     * the probe retrieval at L445 to L452, rather than by counting rendered rows.</p>
+     */
+    @Test
+    @DisplayName("a read of exactly the page size reports no further page")
+    void readOfExactlyThePageSizeReportsNoFurtherPage() {
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(ACCOUNT_ID), any(Limit.class)))
+                .thenReturn(rowsDescending(PendingAuthSummaryService.PAGE_SIZE));
+
+        PendingAuthListView view = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+
+        assertThat(view.page().items()).hasSize(PendingAuthSummaryService.PAGE_SIZE);
+        assertThat(view.page().hasNext()).isFalse();
+        assertThat(view.screenMessage()).isNull();
+    }
+
+    /**
+     * A cursor that is not a redeemable token is refused rather than coerced into a position.
+     *
+     * <p>Assumptions: the cursor is an OPAQUE sealed token, so a value that does not open is refused and
+     * never interpreted. The alternative an implementation can drift into is to treat an unopenable cursor
+     * as no cursor and answer the opening page; its concrete consequence is that a client whose token was
+     * truncated in transit would be silently returned to the first page and would page the account from the
+     * beginning again with nothing reporting a fault. The refusal is keyed to the cursor field so the caller
+     * learns which value failed, and no detail query is issued for a request that never resolved a
+     * position.</p>
+     */
+    @Test
+    @DisplayName("a malformed cursor is refused and keyed to the cursor rather than coerced")
+    void malformedCursorIsRefused() {
+        assertThatExceptionOfType(PendingAuthViewMapper.InvalidSelectorException.class)
+                .isThrownBy(() -> this.service.list(ACCOUNT_ID, "not-a-sealed-token", "next", SUBJECT))
+                .satisfies(refusal -> assertThat(refusal.fields())
+                        .containsExactly(PendingAuthViewMapper.CURSOR_FIELD));
+        verifyNoInteractions(this.details);
+    }
+
+    /**
+     * Forward paging across a concurrent insert neither skips a row nor repeats one.
+     *
+     * <p>Assumptions: this is the concrete property that decides keyset paging over counting from the start
+     * of the ordering, so it is asserted against a table that CHANGES between the two requests rather than a
+     * unchanging stub. The repository doubles here evaluate the real predicate over a mutable list, and a row
+     * newer than every existing one is inserted after the first page is served -- which is exactly what the
+     * message-driven half of this context does continuously. Because the second request resumes from the
+     * VALUE of the last row it was shown, the inserted row cannot enter the second page and no row between
+     * the two pages can fall out of the sequence. Under a count from the start the same insert would shift
+     * every later row by one place, so the second page would begin one row earlier and repeat a row the
+     * caller had already been shown.</p>
+     */
+    @Test
+    @DisplayName("forward paging across a concurrent insert neither skips nor repeats a row")
+    void forwardPagingAcrossAConcurrentInsertNeitherSkipsNorRepeats() {
+        List<PendingAuthDetail> table = new ArrayList<>(rowsDescending(12));
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                eq(ACCOUNT_ID), any(Limit.class)))
+                .thenAnswer(call -> olderThan(table, Integer.MAX_VALUE, call.getArgument(1)));
+        when(this.details.findOlderThan(eq(ACCOUNT_ID), any(), any(), any(Limit.class)))
+                .thenAnswer(call -> olderThan(table, call.getArgument(2), call.getArgument(3)));
+
+        PendingAuthListView first = this.service.list(ACCOUNT_ID, null, null, SUBJECT);
+
+        // WHY : Assumptions: the insert is NEWER than every row already returned, which is the position an
+        //       arriving authorization takes in a newest-first ordering and therefore the position that
+        //       displaces rows under a counted page. Inserting an older row would not exercise the
+        //       property, because it lands behind the reader rather than ahead of it.
+        table.add(0, rowAt(NEWEST_TIME + 1));
+
+        PendingAuthListView second =
+                this.service.list(ACCOUNT_ID, first.page().lastKey(), "next", SUBJECT);
+
+        List<String> shown = new ArrayList<>(renderedTimes(first));
+        shown.addAll(renderedTimes(second));
+        assertThat(shown).doesNotHaveDuplicates();
+        assertThat(shown).isEqualTo(expectedTimes(2 * PendingAuthSummaryService.PAGE_SIZE));
     }
 
     /**
@@ -209,7 +330,7 @@ class PendingAuthSummaryServiceTest {
     @Test
     @DisplayName("a forward move past the last row reports the bottom-of-page sentence")
     void forwardMovePastTheLastRowReportsBottomOfPage() {
-        String cursor = sealedCursorAt(9_1644_902);
+        String cursor = sealedCursorAt(NEWEST_TIME);
         when(this.details.findOlderThan(eq(ACCOUNT_ID), any(), any(), any(Limit.class)))
                 .thenReturn(List.of());
 
@@ -343,7 +464,7 @@ class PendingAuthSummaryServiceTest {
     private static List<PendingAuthDetail> rowsDescending(int count) {
         List<PendingAuthDetail> rows = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
-            rows.add(rowAt(9_1644_902 - index));
+            rows.add(rowAt(NEWEST_TIME - index));
         }
         return rows;
     }
@@ -355,7 +476,7 @@ class PendingAuthSummaryServiceTest {
      * @return the time key the forward predicate should be given
      */
     private static int lastRenderedTime() {
-        return 9_1644_902 - (PendingAuthSummaryService.PAGE_SIZE - 1);
+        return NEWEST_TIME - (PendingAuthSummaryService.PAGE_SIZE - 1);
     }
 
     /**
@@ -403,5 +524,57 @@ class PendingAuthSummaryServiceTest {
      */
     private String sealedCursorAt(int authTime) {
         return this.mapper.toRowView(rowAt(authTime), SUBJECT).key();
+    }
+
+    /**
+     * Evaluates the forward keyset predicate over a live table, as the repository would.
+     *
+     * <p>Assumptions: the double applies the SAME predicate the repository declares -- strictly below the
+     * position, newest first, limited -- because a stub returning an unchanging list cannot demonstrate anything
+     * about concurrent modification. The date component is constant across every row in this class, so
+     * comparing the time component alone is the whole of the row-pair comparison here.</p>
+     *
+     * @param table the live table, ordered newest first, which a test may modify between calls
+     * @param exclusiveTime the time component the result must fall strictly below
+     * @param limit the row limit the service asked for
+     * @return the qualifying rows, newest first, capped at {@code limit}
+     */
+    private static List<PendingAuthDetail> olderThan(List<PendingAuthDetail> table,
+            int exclusiveTime, Limit limit) {
+        List<PendingAuthDetail> qualifying = new ArrayList<>();
+        for (PendingAuthDetail row : table) {
+            if (row.getId().getAuthTime() < exclusiveTime && qualifying.size() < limit.max()) {
+                qualifying.add(row);
+            }
+        }
+        return qualifying;
+    }
+
+    /**
+     * Lists the originating time of every row a page rendered, in the order it rendered them.
+     *
+     * @param view the page to read
+     * @return the rendered originating times, which identify the rows uniquely in this class
+     */
+    private static List<String> renderedTimes(PendingAuthListView view) {
+        List<String> times = new ArrayList<>(view.page().items().size());
+        for (PendingAuthRowView row : view.page().items()) {
+            times.add(row.authOrigTime());
+        }
+        return times;
+    }
+
+    /**
+     * Builds the originating times the first {@code count} rows of the untouched table would render.
+     *
+     * @param count how many rows the sequence should cover
+     * @return the expected rendered times, newest first
+     */
+    private static List<String> expectedTimes(int count) {
+        List<String> times = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            times.add(String.format("%06d", (NEWEST_TIME - index) % 1_000_000));
+        }
+        return times;
     }
 }

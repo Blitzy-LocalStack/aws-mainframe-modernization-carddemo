@@ -85,7 +85,8 @@
 > `MIGRATION_README.md` links it at L156 as *"Traceability and divergences"*.
 > Beyond those two, every service whose
 > divergences are registered here consumes it: `auth-service` (D-4),
-> `authorization-service` (D-5, D-6), `batch-service` (D-1, D-3),
+> `authorization-service` (D-5, D-6, and the segment loader's D-C,
+> D-LOAD-PREFIX-REFUSED and D-LOAD-READ-BOUNDED), `batch-service` (D-1, D-3),
 > `reporting-service` (D-2), and `account-service`, `card-service`,
 > `transaction-service` and `reference-service` through the structural divergences
 > in [§7.3](#73-structural-divergences-that-are-not-defects). **One consumer is not
@@ -452,7 +453,7 @@ transaction definition anywhere ([§4.1](#41-copaus2c-present-in-neither-transac
 | `COPAUS2C` | online | [`COPAUS2C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl) | `FraudController` | *Mark Authorization Message Fraud*; reached by transfer of control, not by its own transaction |
 | `COPAUA0C` | batch | [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) | `AuthorizationRequestListener`, `OutboxPublisher` | The queue consumer. Registered divergences: [D-5](#d-5--the-reply-published-before-the-decision-is-committed), [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
 | `CBPAUP0C` | batch | [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) | `PurgeJob` | Expiry and purge of pending authorizations |
-| `PAUDBLOD` | batch | [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL) | `LoadService` | Segment load utility |
+| `PAUDBLOD` | batch | [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL) | `LoadService` | Segment load utility. Registered divergences: [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported), [D-LOAD-PREFIX-REFUSED](#d-load-prefix-refused--an-undecodable-parent-key-is-reported-where-the-guard-has-no-else-branch), [D-LOAD-READ-BOUNDED](#d-load-read-bounded--the-load-walk-cannot-fail-to-terminate-where-two-read-branches-suspend-it) |
 | `PAUDBUNL` | batch | [`PAUDBUNL.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL) | `UnloadService` | Segment unload utility |
 | `DBUNLDGS` | batch | [`DBUNLDGS.CBL`](../../app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL) | `UnloadService` sequential path | Sequential unload utility |
 
@@ -639,6 +640,43 @@ L547, L560, L595, L608, L639, L778, L846, L931** and **L975**.
 | the administrator branch | L232 | client-side navigation to `/admin` | Chosen from the signed group claim rather than from a client-supplied field |
 | the user branch | L237 | client-side navigation to `/menu` | As above |
 | `POPULATE-HEADER-INFO` | L177 | `ui/src/layout/ScreenHeader.tsx` | The shared two-row title band. Its target owner is a **client-side component, not a service method** — the paragraph paints the screen's own frame, which the target renders in the browser. The clock read at **L179** is registered as [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in). The band is authored **once** and reused because the baseline shares nothing here: 12 of the 17 screen-painting programs declare this paragraph by this name and the other five do the same work under a `1100-SCREEN-INIT` or `3100-SCREEN-INIT` paragraph, so the target replaces 17 copies with one component |
+
+### 3.5 `PAUDBLOD` — the segment load
+
+Assumptions: the line ranges below are read with **columns 73 to 80 stripped**, because
+[`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL) carries
+eight-digit legacy sequence numbers in those columns. A paragraph-label search that does
+not strip them returns nothing at all, which is why the stripping is stated rather than
+assumed.
+
+| COBOL paragraph | Line | Target method | What it does |
+|---|---|---|---|
+| `MAIN-PARA` | L169–L187 | `LoadService.load` | The **two-pass** control flow. Its root loop at **L177**–**L178** runs to exhaustion before its child loop at **L180**–**L181** begins, so the passes are sequential and never interleaved |
+| `1000-INITIALIZE` | L190–L215 | *no method* | Opens both files. The target receives streams a caller already owns, so there is nothing to open. Its two clock reads at **L193**–**L194** feed only the `DISPLAY` at **L197** and are stored nowhere, so no date is parameterised — `CURRENT-YYDDD` is never referenced again, and `WS-AUTH-DATE`, `WS-EXPIRY-DAYS` and `WS-DAY-DIFF` are declared and never used |
+| `2000-READ-ROOT-SEG-FILE` | L222–L237 | `LoadService.loadSummaries` | Reads one hundred-byte root image and moves it into the summary segment at **L229** |
+| `2100-INSERT-ROOT-SEG` | L242–L263 | `LoadService.loadSummaries` | Inserts the root. **Three FLAT independently closed tests**: success at L253–L255, the duplicate status tolerated at **L256**–**L258**, and every other status reaching the abend at **L259**–**L262**. This is the shape the child path does not share, which is what establishes [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported) |
+| `3000-READ-CHILD-SEG-FILE` | L269–L289 | `LoadService.loadDetails` | Reads one 206-byte prefixed record. Its numeric guard at **L275** has no `ELSE`; registered as [D-LOAD-PREFIX-REFUSED](#d-load-prefix-refused--an-undecodable-parent-key-is-reported-where-the-guard-has-no-else-branch). Its third read branch at **L287** sets no end flag and does not abend; registered as [D-LOAD-READ-BOUNDED](#d-load-read-bounded--the-load-walk-cannot-fail-to-terminate-where-two-read-branches-suspend-it), whose root-side counterpart is **L235** |
+| `3100-INSERT-CHILD-SEG` | L292–L316 | `LoadService.requireParent` | Positions on the child's parent at **L296**–**L299**, terminated by a **period at L299**. **L305** opens the success branch and **L310**'s failure test is nested inside it, closed by one `END-IF.` at **L314**; registered as [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported) |
+| `3200-INSERT-IMS-CALL` | L318–L336 | `LoadService.loadDetails` | Inserts the child. The flat three-way shape a second time: success at L326–L328, the duplicate tolerated at **L329**–**L331**, every other status abending at **L332**–**L336** |
+| the read at L226 and L272 | L226, L272 | `LoadService.records` | Resolves a stream into whole fixed-length records. The strides are taken from the layout descriptors the two mappers own, never restated |
+| the prefix decode | L277, and its FD at **L47** | `LoadService.decodeChild` | Decodes the six-byte `PIC S9(11) COMP-3` parent key through `com.carddemo.common.codec.PackedDecimalCodec`, never as text |
+| `4000-FILE-CLOSE` | L341–L356 | *no method* | Closes both files, reporting a bad close without abending. The caller owns the streams, so the target closes neither |
+| `9999-ABEND` | L360–L369 | a propagated exception | Sets return code **16** at **L365**. The target raises instead, and the surrounding transaction discards the load |
+
+Assumptions: the job stream supplies **no parameters** to any of these paragraphs, and the
+absence is recorded here because a reader looking for a parameter table will otherwise assume
+one was omitted. Neither
+[`LOADPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/LOADPADB.JCL) nor
+[`UNLDPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDPADB.JCL) has a `SYSIN` DD —
+across the module's five job streams only the purge job does — and `PRM-INFO`, declared at
+`PAUDBLOD.CBL` **L129**, is never referenced in its procedure division.
+
+Assumptions: **no `COND=` of either form occurs anywhere in this module's job streams**, and
+the finding is stated because condition-code inversion is a headline hazard elsewhere in this
+migration. All five streams were read whole with columns 73 to 80 stripped: no step-gating
+`COND=`, no record-selecting `INCLUDE COND=` — the two share a keyword — no job-level `IF`,
+`THEN` or `ELSE`, no `RESTART=` and no `CHKPT=`. There is nothing to invert and no branch
+predicate to derive for this program.
 
 Where a program's paragraph structure is analysed in depth by a sibling, the
 analysis is cited rather than repeated:
@@ -1101,6 +1139,26 @@ each produce one registered divergence.
   two-phase protocol and no equivalent construct in the target.
 * Refactoring Rationale: co-locating the data replaces distributed coordination
   with a local transaction while preserving atomicity.
+* **The resource definitions date the two-manager topology, and it is not the
+  original one.** Four `DEFINETIME` stamps in
+  [`CRDDEMO2.csd`](../../app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd) order it:
+  `DEFINE DB2ENTRY(AWS01PLN)` is stamped `22/11/27 19:11:50` at **L73**, `COPAUS1C` is
+  stamped `23/03/13 15:32:12` at **L30**, `COPAUS2C` is stamped `23/03/24 11:15:11` at
+  **L37**, and the `DB2TRAN(CPVDTRAN)` that attaches Db2 to transaction `CPVD` is
+  stamped `23/03/24 11:16:32` at **L77** — the same day as the program it serves and
+  **81 seconds after it**. Before `COPAUS2C` existed, `CPVD` therefore had no Db2
+  attachment at all and was a purely hierarchical transaction. Each half is provable
+  by census as well:
+  [`COPAUS1C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl) contains
+  **no `EXEC SQL`** in its 604 lines, and
+  [`COPAUS2C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl) contains
+  **no `EXEC DLI`** and no program communication block in its 244 lines — and no
+  `EXEC CICS SYNCPOINT` either, its only three monitor calls being the two clock
+  requests at **L91** and **L95** and the return at **L218**, so it returns
+  uncommitted and both writes hang on the caller's syncpoint at **L557**–**L558**.
+  The second resource manager is an incremental accretion onto a single-manager
+  transaction, so one schema **returns** the action to the one unit of work it began
+  as rather than redesigning it.
 * **Why the difference is accepted.** Co-locating the data makes the atomicity
   requirement expressible with strictly weaker machinery, and no observable state is
   added: the operation is atomic before and after, so a reader of the data can never
@@ -1108,8 +1166,16 @@ each produce one registered divergence.
   explicitly out of scope ([§10](#10-out-of-scope-including-the-baselines-own-stated-future-work)),
   and this entry is the opposite of that** — it records the removal of a distributed
   commit, not the exposure of one.
-* **Where it is verified.** Integration tests asserting atomic rollback across the
-  co-located tables. [`messaging-contracts.md`](messaging-contracts.md) and
+* **Where it is verified.** In the fraud path, by
+  `services/authorization-service/src/test/java/com/carddemo/authorization/service/FraudMarkingServiceTest.java`,
+  whose `aFailureOfTheSecondWriteRollsTheFirstBackWithIt` forces the SECOND write to
+  fail after the first is staged and asserts both that the failure propagates — which
+  is what marks the transaction for rollback — and that the operation carries a single
+  `@Transactional` declaration, since propagation only rolls the first write back if
+  that write shared the boundary. Assumptions: the annotation is read reflectively
+  because a unit test with repository doubles has no real transaction to observe; the
+  boundary's runtime effect is asserted against a live engine by this module's
+  `*RepositoryIT`. [`messaging-contracts.md`](messaging-contracts.md) and
   [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) own the
   transport and schema halves respectively.
 
@@ -1352,7 +1418,7 @@ which carries the same citations at its update method.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **forty-three** are cited **by identifier**, the identifier here being the
+source, and all **fifty-two** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1362,10 +1428,24 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-forty-three is a measured count of the `####` headings in this section and not a running
+fifty-two is a measured count of the `####` headings in this section and not a running
 tally kept by hand, so a reader adding an entry updates one number here and nothing else.
+Refactoring Rationale: the figure read forty-three when the section already held forty-five
+headings, so three entries were added against a number that was already two short. It is
+restated as the measured value rather than incremented from the stale one, because
+incrementing a wrong tally is how the figure came to be wrong.
 Count the `####` headings themselves rather than the ones beginning `D-`: one entry is
-identified `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one.
+identified `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one and
+returns fifty-one.
+
+Assumptions: several entries carry TWO identifiers in one heading, and both are the
+identifier used in shipped source character for character. The four purge entries that
+close this section are the case: the letter forms `D-E`, `D-F` and `D-G` are the ones the
+authorization service's test package charters use, while the descriptive `D-PURGE-*` forms
+are the ones `PurgeJob` itself uses, and the two schemes name the same differences. Citing
+both in the heading is what keeps the reconcile-by-search discipline below workable from
+either side; assigning one and retiring the other would silently break every citation
+written in the scheme that lost.
 
 Refactoring Rationale: a `D-REFDATA-CATEGORY-BATCH` entry stood here and has been
 withdrawn. It registered the maintenance-action batch as additionally addressing
@@ -2477,7 +2557,7 @@ a register of this size stays true.
 
 * **Baseline behaviour.**
   [`COPAUS1C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl) `MARK-AUTH-FRAUD`
-  at **L230-L243** takes **no** action argument. It re-reads the detail segment at **L234**
+  at **L230-L266** takes **no** action argument. It re-reads the detail segment at **L234**
   and then inverts whatever it found: `IF PA-FRAUD-CONFIRMED` at **L236** sets
   `PA-FRAUD-REMOVED` at **L237**, and the `ELSE` at **L239** sets `PA-FRAUD-CONFIRMED` at
   **L240**. The two condition names are declared on
@@ -2488,7 +2568,7 @@ a register of this size stays true.
   one PF key, so the resulting state is a function of the state already stored and of
   nothing the operator supplied. Pressing the key twice returns the row to where it began.
 * **Target behaviour.** `PUT /api/v1/authorizations/{key}/fraud` carries
-  `FraudMarkRequest.fraudAction`, whose closed domain is the same `'F'`/`'R'` pair, and the
+  `FraudMarkRequest.action`, whose closed domain is the same `'F'`/`'R'` pair, and the
   write sets the column to **the state the body names**. Two identical requests therefore
   leave the row in the state the first one produced; they do not return it to its original
   state.
@@ -3222,6 +3302,272 @@ a register of this size stays true.
   `thePublishedRevisionIsAcceptedByTheUpdate`, so both sides of the comparison are covered.
   The sentence itself is asserted in `common-lib` by `ApiErrorTest`.
 * **Files.** `services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`.
+#### D-C — an unresolvable parent is reported, where the nested branch leaves it unreported
+
+* **Baseline behaviour.**
+  [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL)
+  `3100-INSERT-CHILD-SEG` at **L292**–**L316** positions on a child record's parent with a
+  `CALL 'CBLTDLI'` spanning **L296**–**L299** that is terminated by a **period at L299**, after
+  which indentation no longer tracks scope. **L305**, `IF PAUT-PCB-STATUS = SPACES`, opens the
+  branch taken when that positioning SUCCEEDED; the insert follows at **L309**; and the failure
+  test at **L310**, `IF PAUT-PCB-STATUS NOT EQUAL TO SPACES AND 'II'`, sits **inside** that
+  success branch, with one `END-IF.` at **L314** closing both. A genuine positioning failure
+  therefore makes L305 false and control passes from L305 to **L315** without reaching either
+  the insert or the failure test, so the child is neither stored nor reported.
+* **Target behaviour.** `LoadService.loadDetails` resolves the parent explicitly before writing.
+  When no `pending_auth_summary` row exists for the account the record's prefix names, it logs the
+  account and the record's one-based ordinal at error level and raises
+  `LoadService.UnresolvedParentException`, which carries both. The pass stops at that record.
+* **Category.** Documented divergence — a condition the baseline passes over becomes a reported
+  failure. No rule content changes.
+* **Why the difference is accepted.** Three readings internal to the same program establish that
+  the outcome follows from the nested structure rather than from a stated tolerance, and none of
+  them rests on a judgement about the source. First, the sibling ROOT path
+  `2100-INSERT-ROOT-SEG` is shaped differently: **L253**–**L262** are three FLAT tests each closed
+  by its own `END-IF` — success at L253–L255, the duplicate status at L256–L258, and everything
+  else at L259–L262, which reaches the abend — so the same program handles the same class of
+  condition loudly one paragraph earlier. Second, the child insert at **L326**–**L336** carries
+  that flat three-way shape a second time, leaving the nested shape at L305–L314 the only one of
+  the three that differs. Third, L310's own body says what it was written for: **L311** writes
+  `'ROOT GU CALL FAIL:'` with the status and **L312** writes the key feedback area, both
+  describing a positioning failure the enclosing branch prevents them from observing.
+  Alternatives Considered: reproducing the fall-through, so an unattributable child would be
+  counted and passed over. Rejected because the two outcomes are not equally recoverable. Passing
+  the record over loses an authorization with no trace of which one — the detail extract holds
+  rows the summary extract does not account for, and afterwards neither the target nor the log
+  names them, so the only way to learn what was lost is to re-derive it from the two files by
+  hand. Refusing names the account on the first such record, which is the difference between one
+  corrective pass and a shortfall discovered later from a balance that does not agree. The
+  refusal is safe to make loud precisely because the re-run is safe: the duplicate tolerance the
+  same class transcribes from L256–L258 and L329–L331 makes a second run over the same input skip
+  everything already stored. Assumptions: the relational form asserts the same dependency in any
+  case — `fk_pending_auth_detail_summary` in `V1__authorization.sql` declares `account_id` a
+  foreign key onto `pending_auth_summary` — so leaving the check to the constraint was also
+  weighed and rejected: a constraint violation surfaces from a flush, names the constraint rather
+  than the extract record, and arrives wherever the provider chose to flush, identifying neither
+  which record nor which account.
+* **Where it is verified.** `AuthorizationExtractRoundTripTest` asserts both halves separately,
+  because an implementation can have one without the other.
+  `anUnresolvableParentIsRefusedAndNamesTheAccount` asserts the refusal type, the account it
+  carries, the ordinal it carries and the account's presence in the message, and that nothing was
+  written; `anUnresolvableParentEndsThePass` asserts that exactly one record is reached, so a
+  loader that logged the account and continued would fail. Parity honesty: **no golden master
+  exists for any path in this module** — the baseline programs are IMS-resident and the test suite
+  runs none of them — so the oracle here is the copybook, DBD and job-stream geometry contracts
+  together with the transcribed logic, and no produced output is compared.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/LoadService.java`.
+
+#### D-LOAD-PREFIX-REFUSED — an undecodable parent key is reported, where the guard has no else branch
+
+* **Baseline behaviour.**
+  [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL)
+  `3000-READ-CHILD-SEG-FILE` at **L269**–**L289** guards the whole child insert with
+  `IF ROOT-SEG-KEY IS NUMERIC` at **L275** — the six-byte `PIC S9(11) COMP-3` prefix its FD
+  declares at **L47** — and supplies no `ELSE`. Its true branch moves the key at **L277** and
+  performs the insert at **L281**; a record failing the test reaches the `END-IF` at **L282** and
+  leaves the run with no message and no return code.
+* **Target behaviour.** `LoadService.decodeChild` decodes the prefix through
+  `com.carddemo.common.codec.PackedDecimalCodec`, reached by
+  `PendingAuthDetailMapper.unloadedAccountId`, and re-raises a codec or arithmetic refusal as
+  `LoadService.MalformedParentKeyException` carrying the record's one-based ordinal.
+* **Category.** Documented divergence — a condition the baseline passes over becomes a reported
+  failure. No rule content changes.
+* **Why the difference is accepted.** It is the same argument as [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported)
+  with less to work with, and the difference is why the two are registered separately. An
+  undecodable prefix names no account at all, so unlike D-C this refusal cannot report a key —
+  which is exactly why it reports the ordinal, the only handle a reader has on the record.
+  Continuing past it would consume a record that no later run has any way to identify as missing,
+  because nothing in the child segment names the account it belonged to. Assumptions: the refusal
+  is caught around the PREFIX decode alone and not around the whole record. Both halves contain
+  packed fields — the prefix, and the two amounts `cpy/CIPAUDTY.cpy` declares at its **L34** and
+  **L35** — so both raise the same codec refusal for entirely different faults, and a catch wide
+  enough to cover the record would report a malformed transaction amount as an undecodable parent
+  key, sending an operator to inspect the one part of the record that was well formed.
+* **Where it is verified.** `AuthorizationExtractRoundTripTest.anUndecodablePrefixIsRefused`
+  corrupts the sign nibble of the first record's prefix — a digit in the sign position is what the
+  baseline numeric test rejects, and it leaves the record still 206 bytes long, so the length check
+  cannot catch it — and asserts the refusal type, its ordinal, its message and its retained cause,
+  and that nothing was written.
+  `theParentPrefixIsReadAsPackedDecimalAndNotAsText` asserts the storage regime rather than the
+  plumbing: it states both readings of the same six bytes and asserts they disagree, because a
+  reader taking them as characters would not fail but would attribute the child to a different
+  account. Parity honesty: no golden master exists for this path either.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/LoadService.java`.
+
+#### D-LOAD-READ-BOUNDED — the load walk cannot fail to terminate, where two read branches suspend it
+
+* **Baseline behaviour.**
+  [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL)
+  drives both files with `PERFORM ... UNTIL` at **L177**–**L178** and **L180**–**L181**, and each
+  loop ends only when a file status of `'10'` sets its end flag — `END-ROOT-SEG-FILE` at **L233**
+  and `END-CHILD-SEG-FILE` at **L285**. Each read paragraph also has a third branch, reached from
+  any status that is neither success nor `'10'`, which writes a message and returns without setting
+  the flag and without abending: **L235** for the root file and **L287** for the child file. Read
+  against the two `UNTIL` conditions, reaching either leaves both the end flag and the file
+  position unchanged.
+* **Target behaviour.** `LoadService.records` resolves each stream into a known number of whole
+  fixed-length records once, refusing a length remainder and naming the stride, after which each
+  pass is a counted walk of that many elements. There is no third outcome that returns control to
+  the top of a loop without consuming an element.
+* **Category.** Documented divergence — a control-flow hazard is removed rather than transcribed.
+  No rule content changes.
+* **Why the difference is accepted.** The branch cannot be carried across as written, because the
+  target has no file-status register for it to test: an input stream either yields bytes or ends.
+  Transcribing its shape — reporting a condition and returning to the loop — would reproduce the
+  suspension without reproducing anything a caller could act on. Settling the element count before
+  the walk begins removes the possibility instead of guarding against it. Trade-offs: the stream is
+  drained whole and divided before any record is decoded, which holds the whole extract in memory
+  where a record-at-a-time read would hold one. Draining is chosen for a diagnostic reason the
+  alternative cannot match. A length remainder is the symptom of one of these two files being handed
+  to the other's reader, and the strides are 100 and 206, so the child file divided by the root
+  stride leaves two whole records and a six-byte remainder — read one at a time those two records
+  would be DECODED first, and a child record read against the summary layout fails inside a packed
+  money field, so the run would report a malformed field rather than the mismatched file that caused
+  it. The memory cost is bounded by the same transaction that already holds every entity the load
+  produces, and the entities are the larger half.
+* **Where it is verified.**
+  `AuthorizationExtractRoundTripTest.aTruncatedRecordTerminatesRatherThanLooping` removes one byte
+  from a whole summary extract and asserts the refusal names the stride, under a bounded timeout —
+  expressed as a timeout deliberately, because the property under test is termination and a plain
+  call would hang rather than fail if it were lost. `aPartialRecordIsRefused` asserts the same
+  refusal for each file handed to the other's reader, naming both strides.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/LoadService.java`.
+
+#### D-E, also D-PURGE-YEAR-BOUNDARY — ordinal day numbers are subtracted as plain integers
+
+* **Baseline behaviour.**
+  [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) recovers the stored
+  authorization date at **L280** by complementing it against 99999, subtracts it from the current day
+  number at **L282**, and qualifies the row at **L284** with an inclusive comparison against the
+  threshold. Both operands are five-digit ordinals of the form `YYDDD` and the subtraction is plain
+  integer arithmetic, so it does not yield a calendar-day difference across a year boundary: ordinal
+  23365 is 31 December 2023 and 24001 is 1 January 2024, one day apart, and subtracting them gives
+  **636**. The receiving field is the second limb — `WS-DAY-DIFF` is declared `PIC S9(4) COMP` at
+  **L47**, so it holds at most ±9999 while the widest ordinal span, 99999 less 00001, is 99998. The
+  business date itself is read from the platform at **L187** by `ACCEPT CURRENT-YYDDD FROM DAY`.
+* **Target behaviour.** `PurgeJob` converts both ordinals to calendar dates and differences those, so
+  31 December and 1 January are one day apart, and the four-digit ceiling disappears. The business date
+  is a required component of `PurgeJob.PurgeParameters` with no default at all, and the `Clock` that
+  previously supplied one was removed from the constructor rather than left unused.
+* **Category.** Documented divergence — date arithmetic, plus removal of a wall-clock read.
+* **Why the difference is accepted.** With the five-day default from **L199**, 636 satisfies **L284**,
+  so a run made near New Year removes December authorizations that are days old. Alternatives
+  Considered: reproducing the ordinal subtraction for parity. Rejected because the rows it removes have
+  not aged, and destroying live authorizations is not a behaviour a parity argument reaches. Retaining a
+  no-argument entry point that read a clock was also evaluated and rejected: a caller omitting the date
+  would obtain exactly the non-determinism this entry removes, and a rerun made to investigate a run
+  would select a different set of rows from the run it was investigating.
+* **Where it is verified.** `PurgeJobTest.theYearBoundaryDoesNotExpireAOneDayOldAuthorization` asserts
+  that the ordinal subtraction gives 636, that 636 exceeds the default threshold, that the calendar
+  difference is 1, and that the row is read but not removed — so the case cannot pass on arithmetic that
+  merely happens to agree. `PendingAuthDetailNewYearFixtureTest` names both values against the committed
+  fixture `pautdtl1-newyear-pair.bin`.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
+
+#### D-F, also D-PURGE-DELETE-GUARD — one counter is tested twice, so the second condition is unreachable
+
+* **Baseline behaviour.**
+  [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) **L156** reads
+  `IF PA-APPROVED-AUTH-CNT <= 0 AND PA-APPROVED-AUTH-CNT <= 0`. The approved counter is named on both
+  sides of the conjunction and the declined counter — `PA-DECLINED-AUTH-CNT` at
+  [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) **L28** — is never
+  mentioned, so the second condition adds nothing and the root delete at **L157** runs on the approved
+  count alone.
+* **Target behaviour.** `PurgeJob` removes a summary only when BOTH counters have fallen to zero or
+  below. The comparison stays `<=` rather than becoming `==`, because the counters are signed
+  four-digit fields whose negative half the schema's own check constraint admits.
+* **Category.** Documented divergence — delete-guard predicate widened to the field the baseline
+  omitted.
+* **Why the difference is accepted.** The consequence of the baseline guard is not cosmetic: a summary
+  whose approved count has reached zero satisfies it while unexpired DECLINED authorizations remain
+  beneath it, and the hierarchical delete then removes those rows too. Alternatives Considered:
+  reproducing the duplicated condition. Rejected on the same ground as the entry above — it removes rows
+  that have not aged. The change runs one way only, refusing a delete the baseline performed and
+  performing none the baseline refused.
+* **Where it is verified.** `PurgeJobTest.aSummaryWithLiveDeclinedChildrenIsNotDeleted` expires only the
+  approved pair, which is precisely the state that distinguishes the two guards, and asserts that the
+  summary survives and that no parent delete is issued.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
+
+#### D-G, also D-PURGE-COUNTER-PERSISTENCE — four decrements are computed and never persisted
+
+* **Baseline behaviour.**
+  [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) **L287 to L292** reverses
+  the expiring authorization out of its parent's four running totals — subtracting one and the approved
+  amount for an approved row at **L288** and **L289**, and one and the transaction amount otherwise at
+  **L291** and **L292** — into the working-storage copy its **L223 to L226** retrieved. It then has no
+  verb able to write that copy back: the program's complete data-language inventory is one `CHKP` at
+  **L355**, two `DLET` at **L310** and **L335**, one `GN` at **L223** and one `GNP` at **L255**, with no
+  `REPL` and no `ISRT` anywhere in its 386 lines. A summary that keeps some children is therefore left
+  holding counters and totals that still include the rows just removed.
+* **Target behaviour.** The reversal is applied to the managed entity and persisted at the same commit
+  as the child delete, so the adjustment and the deletion cannot diverge.
+* **Category.** Documented divergence — durability of an adjustment the baseline computes but cannot
+  store.
+* **Why the difference is accepted.** The baseline plainly INTENDS the reversal, because its own delete
+  guard at **L156** reads the reversed values, so the arithmetic is load-bearing and only the
+  hierarchical storage model prevents it being kept. Alternatives Considered: reproducing the behaviour
+  by computing the reversal locally and leaving the row untouched. Rejected on two grounds — in the
+  relational target the retrieved copy and the row ARE the same object, so not persisting would mean
+  adding code to detach or shadow the entity in order to reproduce an artifact of the reference's
+  storage model rather than any of its business rules, and the result would be a summary whose displayed
+  counts permanently disagreed with the authorizations beneath it on a screen that shows both. The
+  divergence is narrow: it is observable only in the two counters and two totals of a summary that
+  survives a run, and it moves them towards agreement with the rows that remain.
+* **Where it is verified.** `PurgeJobTest.expiringEveryChildBalancesTheParentToZero` asserts all four
+  totals reach zero, with the fixture built so that each declined row's transaction amount differs from
+  its approved amount — so an implementation passing one amount to both arms leaves the declined total
+  short instead of at zero. `PurgeJobTest.aFailureInsideAWindowRollsTheWindowBack` asserts the same-commit
+  property from the other side, by proving a failed window is rolled back and never committed.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
+
+#### D-PURGE-EXPIRY-FLOOR — an expiry threshold of zero is refused rather than admitted
+
+* **Baseline behaviour.** Three guards in `1000-INITIALIZE` of
+  [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) are not written alike.
+  **L196** guards the expiry parameter with `IF P-EXPIRY-DAYS IS NUMERIC` alone, while **L201** and
+  **L204** guard the two checkpoint parameters with `= SPACES OR 0 OR LOW-VALUES`, which additionally
+  tests for zero. The card shipped at
+  [`CBPAUP0J.jcl`](../../app/app-authorization-ims-db2-mq/jcl/CBPAUP0J.jcl) **L37** is
+  `00,00001,00001,Y`; its first field is numeric, so **L196** is satisfied, **L197** moves it, the
+  **L199** fallback of five is never reached, and **L284** then reads as a comparison against zero,
+  which holds for every authorization dated on or before the run date. The two checkpoint values on the
+  same card are `00001` rather than `00000`, so their zero guards never fire either, which is harmless
+  because one is a serviceable frequency.
+* **Target behaviour.** `PurgeJob.PurgeParameters` refuses a non-positive expiry threshold in its
+  canonical constructor, before anything is read, and refuses both frequencies on the same terms. The
+  three defaults remain the baseline's own five, five and ten from **L199**, **L202** and **L205**.
+* **Category.** Documented divergence — parameter domain narrowed at the boundary.
+* **Why the difference is accepted.** The threshold is the only value standing between a run and the
+  whole table, and a parameter that disqualifies nothing is indistinguishable at the call site from one
+  that was never supplied. Alternatives Considered: admitting zero and relying on the caller, as the
+  baseline does. Rejected because the guard asymmetry above shows how easily a zero reaches the
+  comparison unnoticed — had **L196** carried the same zero test as its two neighbours, the shipped card
+  would have taken the default. Refusal is reported as an argument failure rather than as a failed run,
+  because the baseline substitutes defaults for its parameters and never ends a run over one.
+* **Where it is verified.** `PurgeJobTest.theRunParametersCarryTheReferenceDefaultsAndRefuseZero`
+  asserts the three defaults are five, five and ten, and asserts each of the three counts is refused at
+  zero with the offending parameter named in the message, together with an absent business date.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
+
+Assumptions: `D-PURGE-BALANCE` is cited by identifier in shipped source — in `PurgeJob`, in
+`PurgeJobTest` and in `PendingAuthSummaryReversalTest` — and deliberately has NO entry in this section,
+because it names a PRESERVED asymmetry rather than a difference. The authorization consumer adds an
+approved amount to the reserved credit balance at
+[`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) **L817** and the purge program
+releases nothing — a search for `BALANCE` across all 386 lines of
+[`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) returns no match — so an
+account whose authorizations all expire retains the reserved balance, and the target retains it too. Its
+rationale sits on `PendingAuthSummary.reverseApproved` and it is asserted by
+`PurgeJobTest.expiringEveryChildBalancesTheParentToZero`. It is recorded here so that a reader searching
+this register for the identifier learns why it is absent rather than concluding the claim is unhonoured.
 
 ## 8. Inventory caveats a reader will otherwise contradict
 

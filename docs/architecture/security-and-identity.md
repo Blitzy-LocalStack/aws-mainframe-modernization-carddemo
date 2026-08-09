@@ -449,7 +449,7 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 | Minting | `InternalIdentityConfig` in `authorization-service` supplies the minter with subject `carddemo-authorization-service`; `RestAccountContextClient` mints a FRESH token per request rather than reusing one, so a token is never presented near its expiry |
 | Checking | `InternalApiSecurityConfig` in `account-service`, through `NimbusJwtDecoder.withSecretKey` plus validators pinning the issuer to `InternalServiceToken.ISSUER` and requiring `InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT` among the audiences |
 | Authority granted | `InternalApiSecurityConfig.INTERNAL_READ_AUTHORITY`, which is `SCOPE_internal:account-context.read` and is **not** either group authority, so no user token reaches an internal path and no machine token reaches a business route |
-| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names the three internal endpoints EXACTLY — `/api/v1/card-xrefs/lookup`, `/api/v1/accounts/{accountId}` and `/api/v1/customers/{customerId}` — so the internal surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads |
+| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names EXACT method-and-path pairs, enumerated in one place by `InternalApiSecurityConfig.internalPaths()` — `POST /api/v1/card-xrefs/lookup`, `GET /api/v1/accounts/{accountId}`, `GET` and `HEAD /api/v1/customers/{customerId}`, `GET /api/v1/customers` and `GET /api/v1/customers/{customerId}/record` — so the internal surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads. Refactoring Rationale: this row named three endpoints as an exact set. It was already one short, because the customer probe is claimed on both `GET` and `HEAD` from a single handler, and it went two further short when the customer scan and the customer record read were matched on that chain — those two are matched there not because the authorization context calls them but because `SecurityConfig`'s customer pattern denies the whole subtree on the human chain. The row now states the pairs and names the method that enumerates them, so a future route moves one list rather than three |
 | Callers admitted | exactly two — `authorization-service` and `transaction-service`, each minting through its own `InternalIdentityConfig` — because the signing key is held by exactly those two callers plus the one callee, and the audience constant names exactly one callee; a token minted for any other audience is refused by the validator rather than by an allow-list the application maintains. Refactoring Rationale: this row read "exactly one" caller and "exactly two" key holders while a second consumer of the account context was landing. The two numbers move together and were corrected together, because reading either alone would have understated who can mint |
 | Lifetime | 60 seconds from `InternalIdentityConfig.DEFAULT_LIFETIME`, bounded absolutely at 5 minutes by `InternalServiceToken.MAX_LIFETIME`; a longer lifetime is refused at minting rather than truncated |
 | Key material | one Secrets Manager entry created by [`infra/modules/secrets`](../../infra/modules/secrets), at least `InternalServiceToken.MIN_KEY_LENGTH` bytes, injected as the container secret `CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY` into exactly three task definitions — the two minting callers and the verifying callee — and readable by exactly those three task roles. `infra/modules/ecs-service` asserts the membership as a biconditional, so a fourth workload receiving the secret and a listed workload missing it both fail the plan |
@@ -519,7 +519,7 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 > verification would be application code on the authentication path, where a signed JWT is
 > verified by the framework's own audited decoder and validators; and the replay window the
 > path binding closes is closed differently here, because the chain admits the token on
-> **three exact addresses and nowhere else**, all three of them reads. Choosing the
+> **exact method-and-path pairs and nowhere else**, every one of them a read. Choosing the
 > hand-written form would have traded audited verification for a binding whose benefit this
 > topology already obtains structurally.
 >
@@ -528,8 +528,12 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 > `/api/v1/accounts/**`, because a person and the posting decision read the same record —
 > and an either-or rule on a subtree is the weaker statement, since it also admits the
 > machine token on every future route added beneath it. Two chains state the narrower rule
-> directly: the machine token is accepted on three addresses, and the user chain is left
-> exactly as strict as it was.
+> directly: the machine token is accepted on named addresses only, and the user chain is left
+> exactly as strict as it was. Refactoring Rationale: both sentences above counted those
+> addresses, and the count rose when the customer scan and the customer record read were
+> matched on that chain. What carries the argument is that the matcher is exact and the
+> addresses are enumerated in one place, so the counts are dropped rather than restated in
+> two more places that would have to move together.
 
 ## RACF: a mapping, not a port
 
@@ -1755,7 +1759,7 @@ assert {
     "transaction-service/BillPaymentController.java",
     "transaction-service/TransactionController.java",
 }, "eighteen handler classes across all seven request-serving services"
-# The three internal addresses named by the machine-identity table are the three
+# Every internal address named by the machine-identity table is served by one of the three
 # account-context controllers, so that seam serves a response rather than only carrying
 # a credential to a 404. The set grew from five to fifteen to eighteen as the reference,
 # reporting, transaction, auth and card handlers landed, and it is re-stated in full
@@ -1822,12 +1826,21 @@ assert {
     if "ObjectMapper" in path.read_text(encoding="utf-8")
 } == {
     "BatchErrorEventTest.java",
+    "BillPaymentMapperTest.java",
     "CardDetailRenderingTest.java",
+    "CardMapperTest.java",
     "MoneyModuleTest.java",
     "MoneyTest.java",
+    "OpenApiDocumentTest.java",
     "ReportingDtoMapperTest.java",
     "TransactionMapperTest.java",
 }, "CardDetailRenderingTest asserts the serialised card body keeps the number masked"
+# Refactoring Rationale: BillPaymentMapperTest, CardMapperTest and OpenApiDocumentTest
+# were absent from this set and had already landed, so this assertion was failing on the
+# tree it describes -- which made the WHOLE block unable to reach the checks below it,
+# including the internal-chain checks. It is corrected rather than relaxed to a count or
+# a subset test, because the both-directions property stated above is the point: a
+# customer serialization test appearing must fail here just as one disappearing does.
 # Refactoring Rationale: TransactionMapperTest joined this set when the transaction
 # mapper's own serialisation cases landed, and it belongs here for the same reason the
 # card one does -- it renders a body through the mapper and asserts what the rendering
@@ -1882,12 +1895,19 @@ assert "setBearerAuth" in client.read_text(encoding="utf-8"), (
 )
 internal_chain = verifier.read_text(encoding="utf-8")
 assert "CHAIN_ORDER = 10" in internal_chain and "@Order(CHAIN_ORDER)" in internal_chain, (
-    "a separately-ordered chain is what lets the matcher name three exact addresses"
+    "a separately-ordered chain is what lets the matcher name exact addresses at all"
 )
 assert 'INTERNAL_READ_AUTHORITY =\n            "SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_CONTEXT_READ' in internal_chain
-assert internal_chain.count("matchers.matcher(") == 3, (
-    "exactly three internal addresses, all reads; a subtree pattern would admit future routes too"
+assert internal_chain.count("matchers.matcher(") == 6, (
+    "six exact method-and-path pairs over five addresses, all reads bar the lookup POST; "
+    "a subtree pattern would admit future routes too"
 )
+# This assertion read == 3 and was wrong in BOTH directions at once, which is why it is
+# restated as pairs rather than addresses. It was already one short before any route moved,
+# because the customer probe is claimed on GET and on HEAD from one handler; and it went
+# two further short when the customer scan and the customer record read were matched on
+# this chain. Counting matcher CALLS is what the expression actually measures, so the
+# stated number and the measured thing now agree.
 assert "NimbusJwtDecoder" in internal_chain and "withSecretKey" in internal_chain
 # The user chain must NOT have been loosened to admit the machine token anywhere.
 account_chain = (

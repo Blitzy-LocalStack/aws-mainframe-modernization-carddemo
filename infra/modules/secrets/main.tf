@@ -406,7 +406,8 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 #   short-lived token carrying an issuer, a subject, an audience, a scope and an
 #   expiry, and com.carddemo.account.config.InternalApiSecurityConfig verifies it
 #   with the framework's own NimbusJwtDecoder on an earlier-ordered filter chain
-#   whose security matcher names the three internal paths and nothing else. Its
+#   whose security matcher names exact method-and-path pairs and nothing else,
+#   enumerated in InternalApiSecurityConfig.internalPaths(). Its
 #   key material is the internal-identity entry the environment roots create and
 #   inject into exactly those two task definitions as
 #   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY.
@@ -415,8 +416,12 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 #   method and the path INTO the signature, so a captured credential could not be
 #   replayed against another operation. The surviving form asserts the same
 #   property on the verifying side instead: its token is accepted only on the
-#   three exact paths that chain matches, so a replay elsewhere reaches a chain
-#   that knows nothing about it and is refused. What is gained in exchange is that
+#   exact pairs that chain matches, so a replay elsewhere reaches a chain that
+#   knows nothing about it and is refused. The count was dropped from this
+#   sentence rather than raised when the customer scan and the customer record
+#   read were matched on that chain -- the replay argument rests on the matcher
+#   being EXACT, not on how many pairs it names, and a number here would go stale
+#   on the next route while the argument would not. What is gained in exchange is that
 #   expiry, length and signature checking are the framework's audited code rather
 #   than this repository's.
 #

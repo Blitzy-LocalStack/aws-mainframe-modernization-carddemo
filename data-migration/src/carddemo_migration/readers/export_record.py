@@ -29,7 +29,21 @@ INSIDE binary sequence numbers. Those spans are not characters in any code page,
 rendering of the record round-trips, and splitting the file on a newline yields six pieces where
 it holds five hundred records. This module therefore publishes byte-mode entry points ONLY, and
 the absence of the ``decode_ascii_*`` / ``iter_ascii_*`` / ``read_ascii_*`` trio its siblings
-publish is the deliberate, visible signal that no text form is available to read.
+publish is the deliberate, visible signal that no text form is available to read. The unavailability
+of an ASCII corpus is the weaker half of that reasoning and is recorded second on purpose: even if
+one were committed tomorrow, a text form of a record holding packed nibbles and big-endian words
+would be structurally meaningless rather than merely absent.
+
+Assumptions: this module has NOTHING to do with comma-separated values, and the disclaimer is
+written here because the two are adjacent enough in the migration to be conflated. The
+eighteen-field authorization request and the six-field reply, whose field order and delimiter
+genuinely ARE their wire contract, belong to ``CsvAuthCodec`` in the Java ``services/common-lib``
+module and travel over the messaging path. What this module reads is a fixed-position 500-byte
+dataset record with no delimiter of any kind: three of its regimes are not text, so a delimiter
+could not be found in it and a comma inside a packed span is a digit pair rather than a separator.
+No part of this file parses, emits or recognises a delimited format, and none may be added to it --
+putting a messaging wire format into the extract-transform-load path would give one record two
+incompatible readings.
 
 Decoded shape
 -------------
@@ -39,6 +53,35 @@ record's discriminator selected. A character field maps to its characters at ful
 untrimmed; every numeric regime -- unsigned display, signed display, packed and binary -- maps to
 an exact :class:`decimal.Decimal`, except unsigned display, which stays characters so a leading
 zero survives.
+
+Assumptions: this is the only record in the corpus that reaches all three numeric regimes, and the
+mixture is not merely spread across its five overlays -- ``EXPORT-ACCOUNT-DATA`` alone declares
+signed display, packed and binary together, which measured against every declared layout no other
+one does: the eight display-money records declare only signed display, and the two authorization
+segments only packed and binary. That overlay holds five money fields in three different encodings:
+``EXP-ACCT-CURR-BAL`` and ``EXP-ACCT-CASH-CREDIT-LIMIT`` are ``COMP-3`` at seven bytes each,
+``EXP-ACCT-CREDIT-LIMIT`` and ``EXP-ACCT-CURR-CYC-CREDIT`` are plain display at twelve bytes each,
+and ``EXP-ACCT-CURR-CYC-DEBIT`` is ``COMP`` at eight -- and all five write the SAME picture clause,
+``PIC S9(10)V99``. A regime inferred from the picture clause, or assumed uniform across an overlay,
+would therefore slice the wrong width for four of the five and shift every field after the first
+mismatch. Each field's regime consequently comes from its own descriptor's ``kind`` and from nothing
+else, and the routing is performed by the codec that owns each regime rather than by any branch
+written in this module. Whichever way it arrives, money converges on one type: an exact
+:class:`decimal.Decimal` at the scale the field declares. A binary float cannot represent ten cents
+exactly, so a float money path drifts from the total the baseline computed by an amount that grows
+with the row count -- and a round trip through this record, which re-encodes the same amount three
+ways, would then not be value-preserving.
+
+Assumptions: that all five overlays reconcile to exactly the declared 460-byte payload is what
+VALIDATES the width rules those regimes depend on rather than merely being consistent with them. The
+rules are ``COMP-3`` occupying ``ceil((digits + 1) / 2)`` bytes -- digits plus one sign nibble,
+packed two to a byte -- and ``COMP`` occupying two bytes for one to four digits, four for five to
+nine and eight for ten to eighteen. Five independent overlays, declaring between them three packed
+amounts and seven binary identifiers across all three binary tiers, each land on 460 only if every
+one of those widths is right; a single wrong tier leaves its overlay short or long and
+``validate_geometry`` refuses it at import. This module states none of those widths and computes
+none of them: it asserts nothing about them either, because the layouts module has already proven
+them before this module can be imported at all.
 
 Two entries a caller might expect are absent, and both absences are projections this reader makes
 deliberately rather than omissions; see :data:`DROPPED_FIELD_NAMES` and
@@ -82,6 +125,26 @@ disclosure decisions are stated here in full:
 * Diagnostics never echo record content. A refusal names a field's declared geometry and nothing
   else, which is enough to locate a defect that is in a layout rather than in the data.
 
+Trade-offs: which fields those decisions actually TOUCH varies by record type, and it varies because
+the sensitive set is a property of the overlay rather than of the record. A ``'C'`` record risks a
+whole identity -- three names, a national identifier, a government-issued identifier, a date of
+birth, two telephone numbers and three address lines -- while an ``'A'`` record carries an account
+identifier, five money amounts and no personal datum at all. One blanket policy over the envelope
+plus 460 bytes could only be wrong in one of two directions: broad enough for the customer overlay
+it would redact an account's money fields and make an account row unreadable in a diagnostic, and
+narrow enough for the account overlay it would emit a date of birth in cleartext. The policy is
+therefore driven from each overlay's OWN descriptors -- the ``sensitive`` mark the layouts module
+already carries, field by field -- which is what lets both overlays be handled correctly by one rule
+instead of correctly by two. The accepted cost is that "what does this reader redact" has no single
+answer: it is answered per record type, through :func:`branch_loaded_fields`.
+
+Assumptions: every one of those refusals is a ``raise`` and not an ``assert``, here and in every
+helper below. ``assert`` is removed outright by the interpreter under ``-O``, so a check written
+that way is present in development and absent in the container that runs the load -- and the checks
+in this module are the ones that separate a decoded record from five hundred plausible wrong ones. A
+validation that an optimisation flag can delete is not a validation, so none of them is written as
+one, and no ``assert`` statement appears in this file.
+
 Assumptions: the masked renderings redact this record's card numbers and national identifier as
 KEYED TAGS and not as a last-four reveal, where the equivalent base-master fields reveal their
 last four characters. That asymmetry is inherited rather than corrected, and it is the
@@ -92,6 +155,37 @@ disclosed by the difference, and cross-record linkage is absent by design in any
 folds the field name into its derivation, so one card number under two field names produces two
 unrelated tags.
 
+Run-clock stamps
+----------------
+Three of this record's fields hold a 26-character timestamp and they do not all mean the same thing.
+``EXPORT-TIMESTAMP`` in the envelope is written from the run clock by the export program, so two
+exports of identical data differ in it. ``EXP-TRAN-ORIG-TS`` in the transaction overlay is the
+originating stamp the transaction itself carries, which is deterministic business data.
+``EXP-TRAN-PROC-TS`` in that same overlay is written by the posting run, so it is a run-clock stamp
+like the envelope's.
+
+Assumptions: which stamp is which is read from the DESCRIPTOR's ``normalize_ts`` mark and is never
+re-derived from a field name written here. The mark is published, per half, as
+:data:`ENVELOPE_NORMALIZED_TIMESTAMP_FIELD_NAMES` and
+:func:`branch_normalized_timestamp_field_names`, with their complements alongside, so a checksum or
+a golden comparison reads the same mark this reader validates against instead of deciding for
+itself. Naming a field here would restate a fact the descriptor already carries, and the two would
+then be free to disagree -- at which point a wall-clock stamp inside a checksummed span would make
+two loads of identical data produce two different digests, with nothing naming the cause. It also
+matters that the mark is per-half: only the ``'T'`` overlay contributes a marked field, so a rule
+stated once for "the export record" would be wrong for four record types out of five.
+
+Assumptions: a run-clock stamp is VALIDATED before it is published, and an unwritten one is a
+LEGITIMATE value rather than a decode failure. COBOL leaves a stamp nobody has written as the
+field's initial state, so a uniformly blank or uniformly low-value span is accepted and returned
+unchanged -- and it is the ordinary case rather than an edge one, since every ``'T'`` record in the
+shipped extract carries 26 blanks in ``EXP-TRAN-PROC-TS`` because the posting run is what writes it.
+Anything else that is not a well-formed stamp is REFUSED. Accepting it would paper over exactly the
+two faults this pipeline must surface -- a record whose bytes are corrupt, and a reader whose
+offsets have moved -- and a moved offset still yields plausible characters, so nothing else would
+report it. Nothing is normalised on the way through: the mark says which field a COMPARISON may
+blank, and blanking here would leave the parity check unable to show what actually differed.
+
 Design decisions (WHY)
 ----------------------
 Assumptions:
@@ -99,9 +193,29 @@ Assumptions:
     overlays are exactly 460 bytes, so decoding a payload against the wrong branch does not raise,
     does not change the record's width and does not invalidate a later offset: it returns a full
     set of well-formed, meaningless values -- a card number read out of a customer's address, a
-    money amount read out of a merchant name. The dispatch is delegated to ``export_branch``,
-    which refuses an unknown discriminator rather than defaulting to a branch, and that refusal is
-    the only thing standing between a corrupt extract and five hundred plausible rows.
+    money amount read out of a merchant name. Nothing about the bytes distinguishes the five: the
+    single byte at offset zero is the whole of the evidence, which is why it is read from the
+    envelope's own descriptor and why no heuristic over the payload is offered as a fallback. The
+    dispatch is delegated to ``export_branch``, which refuses an unknown discriminator rather than
+    defaulting to a branch, and that refusal is the only thing standing between a corrupt extract
+    and five hundred plausible rows.
+Alternatives Considered:
+    **An unrecognised discriminator raises, rather than being skipped or defaulted.** Both weaker
+    options were evaluated. Skipping the record was rejected because it removes a row from the load
+    without removing it from the source, so the row-count pass in
+    ``carddemo_migration.verify.row_counts`` would report a shortfall it could not attribute and the
+    money-total pass would report a difference with no offending record to point at -- a silent skip
+    converts a detectable corruption into an unexplainable one. Defaulting to a branch was rejected
+    for the reason stated just above: every overlay is the same width, so the default would succeed.
+    The baseline settles the question rather than leaving it to taste: ``app/cbl/CBIMPORT.cbl``
+    lines 272-285 close their ``EVALUATE EXPORT-REC-TYPE`` with ``WHEN OTHER`` performing
+    ``2700-PROCESS-UNKNOWN-RECORD``, which at lines 425-434 counts the record and writes an error
+    record carrying the offending type and the record's sequence number. An unknown type is
+    therefore a REPORTED condition in the program this reader replaces, and raising an error that
+    names the offending value is the faithful translation of reporting it. The accepted cost is that
+    one corrupt byte stops a whole stream; a caller that wants the baseline's count-and-continue
+    behaviour builds it by catching the refusal per record, which keeps the decision at the call
+    site that can act on it.
 Assumptions:
     **Every offset, length, storage regime and record length is imported, never declared.** This
     module states no byte position of its own -- not the payload offset, not the branch length,
@@ -143,6 +257,7 @@ Trade-offs:
 from __future__ import annotations
 
 import pathlib
+import string
 from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from types import MappingProxyType
@@ -175,11 +290,16 @@ from carddemo_migration.copybook.layouts import (
 __all__ = [
     "EXPORT_HEADER_LAYOUT",
     "DROPPED_FIELD_NAMES",
+    "ENVELOPE_DETERMINISTIC_FIELD_NAMES",
     "ENVELOPE_LOADED_FIELDS",
+    "ENVELOPE_NORMALIZED_TIMESTAMP_FIELD_NAMES",
     "DecodedExportRecord",
     "SUPPRESSED_FIELD_NAMES",
+    "branch_deterministic_field_names",
     "branch_loaded_fields",
+    "branch_normalized_timestamp_field_names",
     "decode_ebcdic_export_record",
+    "is_normalized_timestamp_field",
     "iter_ebcdic_export_records",
     "read_ebcdic_export_records",
     "record_key",
@@ -200,6 +320,16 @@ DecodedExportRecord = dict[str, str | Decimal]
 #   the 460-byte branch length. Testing the name keeps this module free of any byte position of
 #   its own; the hyphen-suffixed form is admitted too so this rule stays identical across the
 #   package, where one record qualifies the pad name.
+# WHY : Assumptions: those pads carry no data and are DROPPED from every decoded record, which is
+#   the projection the migration plan's copybook rule states. They are the largest single component
+#   of this record by a wide margin -- 134 bytes on the customer overlay, 352 on the account
+#   overlay, 140 on the transaction overlay, 427 on the cross-reference overlay and 373 on the card
+#   overlay -- and each exists only to fill its overlay out to the fixed 460-byte payload the
+#   envelope declares, because the five overlays redefine one area and must therefore all be its
+#   width. Carrying 427 bytes of pad into a cross-reference row would put a column into the target
+#   whose only content is the difference between two record lengths. The drop is published as
+#   :data:`DROPPED_FIELD_NAMES` rather than performed silently, so a verification pass can assert
+#   it instead of discovering that a decoded record is a partial description of its own bytes.
 _PAD_FIELD_NAME: Final[str] = "FILLER"
 _PAD_NAME_SUFFIX: Final[str] = f"-{_PAD_FIELD_NAME}"
 
@@ -450,6 +580,191 @@ DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
 )
 
 
+# WHY : Assumptions: both halves of the mark are published, per half, because this record has five
+#   decoded shapes and only ONE of them contributes a marked field. The envelope always contributes
+#   `EXPORT-TIMESTAMP`, which the export program writes from the run clock; the transaction overlay
+#   additionally contributes `EXP-TRAN-PROC-TS`, which the posting run writes, while the other four
+#   overlays contribute none. A single set stated for "the export record" would therefore be wrong
+#   for four record types out of five -- it would either claim a marked field a customer record does
+#   not have, or omit the one a transaction record does.
+# WHY : Trade-offs: the marked half is a frozenset and the deterministic half an ORDERED tuple, and
+#   the asymmetry is the same one the sibling readers chose for the same reason. A digest is
+#   computed over an explicit ordered sequence of field names, because a mapping's iteration order
+#   is a property of how it was built; handing a caller a set would oblige the caller to pick an
+#   order, and two callers picking differently would compute two incomparable digests of identical
+#   data. The order here is declaration order, which is the record's byte order. Together the two
+#   names partition the published fields of that half exactly, so a caller can assert the split
+#   rather than trust it.
+ENVELOPE_NORMALIZED_TIMESTAMP_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    field.name for field in ENVELOPE_LOADED_FIELDS if field.normalize_ts
+)
+ENVELOPE_DETERMINISTIC_FIELD_NAMES: Final[tuple[str, ...]] = tuple(
+    field.name for field in ENVELOPE_LOADED_FIELDS if not field.normalize_ts
+)
+
+
+# WHY : Assumptions: these are the two uniform forms an UNWRITTEN fixed-width stamp takes in this
+#   corpus, and they are named as constants because both are tested through one helper so the two
+#   cannot come to be recognised by slightly different rules. The blank is what COBOL leaves in a
+#   character field nobody has moved a value into; the low value is the same fact for a record whose
+#   storage was never written at all.
+_BLANK: Final[str] = " "
+_LOW_VALUE: Final[str] = "\x00"
+
+# WHY : Assumptions: these are positions WITHIN one decoded stamp and the characters admitted at
+#   them -- not record geometry, of which this module still states none, and the stamp's own width
+#   is taken from its descriptor rather than written here. The rule admits the union of four
+#   separators at these six positions so that ONE rule covers both dialects CardDemo emits: the
+#   `YYYY-MM-DD HH:MM:SS.ffffff` form the posting program writes, and the
+#   `YYYY-MM-DD-HH.MM.SS.NNNNNN` form a program taking the current date writes. Both genuinely reach
+#   this record, because the export extract is produced from masters the posting pipeline writes.
+#   Every other position is a digit. A dialect-specific matcher would have to know which program
+#   wrote the record, which a reader cannot know from the bytes it was handed.
+_TIMESTAMP_SEPARATOR_OFFSETS: Final[frozenset[int]] = frozenset({4, 7, 10, 13, 16, 19})
+_TIMESTAMP_SEPARATOR_CHARACTERS: Final[frozenset[str]] = frozenset("-.: ")
+
+# WHY : Trade-offs: the digit test is this explicit ASCII set rather than the string method that
+#   reads more naturally. That method also answers true for a superscript and for the digit forms of
+#   other scripts, so a mis-decoded span could satisfy it while holding characters no timestamp
+#   column can parse. The accepted cost is one more name; what it buys is that the check means what
+#   it says on a byte path, where which characters appear is decided by the code page rather than by
+#   anything a caller controls.
+_TIMESTAMP_DIGITS: Final[frozenset[str]] = frozenset(string.digits)
+
+
+def _is_uniformly(value: str, character: str) -> bool:
+    """Report whether every position of a value holds one given character.
+
+    Purpose
+    -------
+    Recognise one of the two uniform forms an unwritten fixed-width stamp takes, as a single test
+    both forms are checked through, so the two cannot be recognised by slightly different rules.
+
+    Parameters
+    ----------
+    value : str
+        The decoded field characters to test.
+    character : str
+        The single character the whole value must consist of.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value is non-empty and every position equals ``character``; ``False``
+        otherwise, an empty value included.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: an EMPTY value must not read as uniform, which is why the emptiness test is
+    #   here rather than left to the generator. A test over no positions is vacuously true, so
+    #   without this an empty span would be accepted as an unwritten stamp -- and an empty span is a
+    #   field that was sliced wrongly, which is the opposite of a stamp nobody has written yet.
+    return bool(value) and all(position == character for position in value)
+
+
+def _is_timestamp_position(offset: int, character: str) -> bool:
+    """Report whether one position of a stamp holds a character its shape admits there.
+
+    Purpose
+    -------
+    Express the timestamp shape as a per-position rule, so the whole-value test reads as the
+    quantifier it is and the two kinds of position are decided in one named place.
+
+    Parameters
+    ----------
+    offset : int
+        The zero-based position WITHIN the stamp, not within the record.
+    character : str
+        The single character at that position.
+
+    Returns
+    -------
+    bool
+        ``True`` when a separator position holds one of the admitted separators, or a non-separator
+        position holds a digit; ``False`` otherwise.
+
+    Raises
+    ------
+    None
+    """
+    if offset in _TIMESTAMP_SEPARATOR_OFFSETS:
+        return character in _TIMESTAMP_SEPARATOR_CHARACTERS
+    return character in _TIMESTAMP_DIGITS
+
+
+def _require_timestamp_shape(value: str, field: FieldSpec, layout_name: str) -> str:
+    """Require a run-clock stamp to be either unwritten or a well-formed timestamp.
+
+    Purpose
+    -------
+    Validate the fields of this record whose values a parity comparison is allowed to blank, BEFORE
+    they are published, so a corrupt stamp is reported rather than carried into a load and then
+    blanked out of the very comparison that would have caught it.
+
+    Parameters
+    ----------
+    value : str
+        The decoded characters of the stamp, at the field's full declared width.
+    field : FieldSpec
+        The descriptor for the stamp, supplying its declared width for the check and its geometry
+        for the diagnostic. Nothing about the field is taken from anywhere else.
+    layout_name : str
+        The name of the layout the field belongs to -- the envelope or one branch -- so a refusal
+        says which of the two halves is at fault.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged. Nothing is normalised, blanked or reformatted here: the mark on the
+        descriptor says which field a COMPARISON may blank, and producing that rendering belongs to
+        the comparison, because a reader that blanked on the way through would leave the parity
+        check unable to show what actually differed.
+
+    Raises
+    ------
+    LayoutError
+        If the value is not the field's declared width, or is neither uniformly unwritten nor a
+        well-formed timestamp in either dialect.
+    """
+    # WHY : Assumptions: an unwritten stamp is a LEGITIMATE value and not a decode failure, and it
+    #   is the ORDINARY case in this extract rather than an edge one. Measured: every one of the 300
+    #   transaction records in `AWS.M2.CARDDEMO.EXPORT.DATA.PS` carries 26 blanks in
+    #   `EXP-TRAN-PROC-TS`, because the posting run is what writes that stamp and the export is
+    #   produced from its input. Refusing the blank form would therefore refuse three fifths of the
+    #   shipped extract.
+    if len(value) == field.length:
+        if _is_uniformly(value, _BLANK) or _is_uniformly(value, _LOW_VALUE):
+            return value
+        if all(_is_timestamp_position(offset, character) for offset, character in enumerate(value)):
+            return value
+
+    # WHY : Trade-offs: a stamp that is NEITHER unwritten NOR well formed is refused rather than
+    #   accepted or quietly blanked, and a span holding a MIXTURE of the two unwritten forms falls
+    #   through to the same refusal deliberately -- only a UNIFORM span denotes a stamp nobody
+    #   wrote, and no writer in this corpus produces a mixture. Blanking by position would paper
+    #   over exactly two faults this pipeline must surface: a record whose bytes are corrupt, and a
+    #   reader whose offsets have moved. A moved offset still yields plausible characters, so
+    #   nothing else would report it. The cost accepted is that a genuinely new timestamp dialect
+    #   fails loudly here rather than passing through, which is the cheaper failure because it names
+    #   the field.
+    # WHY : Trade-offs: the refusal names the field's GEOMETRY and the width it failed against, and
+    #   quotes NO part of the value -- not the offending character and not its position.
+    #   `LayoutError` is chosen over the two nearer alternatives for reasons that are not stylistic:
+    #   a record-length error would misdescribe a record of exactly the right width whose CONTENT is
+    #   wrong, and the display-numeric codec's error belongs to a numeric regime this character
+    #   field does not declare, so borrowing it would send a reader looking in the wrong codec. It
+    #   is a `ValueError` either way, so a caller guarding that base type still catches it.
+    raise LayoutError(
+        f"field {field.describe()} of record {layout_name} holds neither a well-formed"
+        f" {field.length}-character timestamp nor a uniformly unwritten span, so either the stamp"
+        " is corrupt or the field offsets have moved; it is refused rather than accepted or"
+        " blanked, because blanking it would remove the evidence from the comparison that otherwise"
+        " have reported it"
+    )
+
+
 def _require_full_record_image(record: bytes | bytearray | memoryview) -> bytes:
     """Require one whole export record image of exactly the declared record length.
 
@@ -588,6 +903,70 @@ def _require_scalar_value(
     )
 
 
+def _publishable_value(
+    value: str | Decimal | bytes,
+    field: FieldSpec,
+    layout_name: str,
+) -> str | Decimal:
+    """Narrow and validate one decoded field into the value this reader publishes for it.
+
+    Purpose
+    -------
+    Apply, in ONE place, the two checks every published field of either half must pass: that it
+    decoded to a value this reader's union can hold, and -- where the descriptor marks it as a
+    run-clock stamp -- that the stamp is either unwritten or well formed.
+
+    Parameters
+    ----------
+    value : str | Decimal | bytes
+        One field's decoded result, as the record decoder returns it.
+    field : FieldSpec
+        The descriptor the value was decoded from. It supplies the sole answer to whether this field
+        is a run-clock stamp, and its geometry for any refusal.
+    layout_name : str
+        The name of the layout the field belongs to -- the envelope or one branch -- so a refusal
+        says which of the two halves is at fault.
+
+    Returns
+    -------
+    str | Decimal
+        ``value`` unchanged, once it is proven publishable and, where marked, proven to be a
+        legitimate stamp. Nothing is normalised: a validated stamp is returned exactly as decoded.
+
+    Raises
+    ------
+    LayoutError
+        If the decode returned raw bytes; if a marked stamp decoded to a value that is not
+        characters; or if a marked stamp is neither uniformly unwritten nor a well-formed timestamp.
+    """
+    # WHY : Alternatives Considered: the stamp policy is applied HERE, inside the one narrowing
+    #   step both halves already pass through, rather than as a second pass over the marked names
+    #   afterwards -- which is the shape the sibling readers use. Those readers have two ingestion
+    #   encodings and one fixed field list, so a separate pass is what stops the two encodings
+    #   enforcing different rules. This record has ONE encoding and SIX field lists, so the risk is
+    #   the mirror image: a pass keyed on names would have to re-resolve which of the five overlays
+    #   this record selected, and that resolution could disagree with the one the decode just made.
+    #   Folding the check into the per-field step removes the second resolution entirely -- the
+    #   descriptor being checked IS the descriptor the value was decoded from.
+    scalar = _require_scalar_value(value, field, layout_name)
+    if not field.normalize_ts:
+        return scalar
+
+    # WHY : Trade-offs: a marked field that did not decode to characters is REFUSED rather than
+    #   skipped. A skip would be justified by this record declaring both its marked stamps as
+    #   character data today, which it does -- but the moment a descriptor edit made that false, a
+    #   skip would silently stop validating the one field a comparison is allowed to blank, and an
+    #   unvalidated stamp is exactly what that blanking would then hide. The package's timestamp
+    #   codec refuses a non-character stamp for the same reason.
+    if not isinstance(scalar, str):
+        raise LayoutError(
+            f"field {field.describe()} of record {layout_name} is marked as a run-clock stamp but"
+            " decoded to a value that is not characters, so its descriptor no longer declares the"
+            " character regime a timestamp is written in"
+        )
+    return _require_timestamp_shape(scalar, field, layout_name)
+
+
 def branch_loaded_fields(record_type_value: str) -> tuple[FieldSpec, ...]:
     """Return the projected payload fields for one record-type discriminator.
 
@@ -620,6 +999,169 @@ def branch_loaded_fields(record_type_value: str) -> tuple[FieldSpec, ...]:
     #   exactly one place a discriminator is resolved, so this function cannot disagree with the
     #   decode path about which overlay a byte selects.
     return _BRANCH_LOADED_FIELDS[export_branch(record_type_value).name]
+
+
+def _published_field_index(discriminator: str) -> Mapping[str, FieldSpec]:
+    """Build the published field index for one record type, envelope first then branch.
+
+    Purpose
+    -------
+    Resolve a field name to its descriptor over exactly the fields this reader publishes for a
+    given record type. It is the single name-to-descriptor lookup for this record, so a masked
+    rendering, a single-field rendering and the run-clock stamp question all agree about which
+    fields exist for a given type instead of each deciding for itself.
+
+    Parameters
+    ----------
+    discriminator : str
+        The one-character record-type discriminator.
+
+    Returns
+    -------
+    Mapping[str, FieldSpec]
+        A read-only mapping from published field name to descriptor. Dropped and suppressed fields
+        are absent.
+
+    Raises
+    ------
+    LayoutError
+        If the discriminator is not one of the five the export program writes.
+    """
+    # WHY : Assumptions: the index is composed from the same two tuples the decode path iterates,
+    #   so a field is present here exactly when it is present in a decoded record. Building it from
+    #   the layouts directly would readmit the pad, the opaque payload area and the suppressed
+    #   verification value, and a caller could then ask for a rendering of a field that no decoded
+    #   record contains -- or ask whether the opaque payload area is a run-clock stamp, a question
+    #   that has no meaning.
+    index: dict[str, FieldSpec] = {field.name: field for field in ENVELOPE_LOADED_FIELDS}
+    index.update(
+        {field.name: field for field in _BRANCH_LOADED_FIELDS[export_branch(discriminator).name]}
+    )
+    return MappingProxyType(index)
+
+
+def branch_normalized_timestamp_field_names(record_type_value: str) -> frozenset[str]:
+    """Return the run-clock stamp field names one record type's payload contributes.
+
+    Purpose
+    -------
+    Publish, for a single record type, which of its payload fields are written from a run clock and
+    are therefore expected to differ between two runs over identical data. It is the payload-side
+    counterpart to :data:`ENVELOPE_NORMALIZED_TIMESTAMP_FIELD_NAMES`, so a checksum or a golden
+    comparison can exclude exactly the fields this reader validates as stamps.
+
+    Parameters
+    ----------
+    record_type_value : str
+        The one-character discriminator, exactly as :func:`record_type` returns it.
+
+    Returns
+    -------
+    frozenset[str]
+        The marked field names the named branch contributes. It is EMPTY for four of the five record
+        types, because only the transaction overlay declares a run-clock stamp of its own, and an
+        empty result is therefore a correct answer rather than a sign of a failed lookup.
+
+    Raises
+    ------
+    LayoutError
+        If the discriminator is not one of the five the export program writes. Raised by
+        ``export_branch`` and left to propagate, because its message already lists the five.
+    """
+    # WHY : Assumptions: the answer is derived from the PUBLISHED field tuple for that branch and
+    #   from each descriptor's own mark, so a field is named here exactly when a decoded record of
+    #   that type carries it. Deriving it from the branch layout directly would readmit the pad and
+    #   the suppressed verification value into the set a comparison partitions, and a comparison
+    #   would then exclude or include a field no decoded record contains.
+    return frozenset(
+        field.name for field in branch_loaded_fields(record_type_value) if field.normalize_ts
+    )
+
+
+def branch_deterministic_field_names(record_type_value: str) -> tuple[str, ...]:
+    """Return the deterministic payload field names of one record type, in byte order.
+
+    Purpose
+    -------
+    Publish the complement of :func:`branch_normalized_timestamp_field_names`: the payload fields
+    whose values are a function of the data rather than of when the extract was produced, which is
+    the span a digest may be computed over.
+
+    Parameters
+    ----------
+    record_type_value : str
+        The one-character discriminator, exactly as :func:`record_type` returns it.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The branch's deterministic field names in declaration order, which is the record's byte
+        order. For the transaction overlay this includes ``EXP-TRAN-ORIG-TS``, which is a timestamp
+        the transaction itself carries rather than one a run wrote.
+
+    Raises
+    ------
+    LayoutError
+        If the discriminator is not one of the five the export program writes. Raised by
+        ``export_branch`` and left to propagate.
+    """
+    # WHY : Assumptions: the originating stamp falls on THIS side of the split even though it is a
+    #   timestamp, because the descriptor does not mark it -- and that is the distinction the mark
+    #   exists to carry. Excluding every field that merely looks like a timestamp would drop
+    #   deterministic business data out of the digest, which would make the digest blind to a real
+    #   difference in it.
+    return tuple(
+        field.name for field in branch_loaded_fields(record_type_value) if not field.normalize_ts
+    )
+
+
+def is_normalized_timestamp_field(record_type_value: str, field_name: str) -> bool:
+    """Report whether one named field of one record type is a run-clock stamp.
+
+    Purpose
+    -------
+    Answer, for a single field of a single record type, the question a checksum or a golden
+    comparison must ask before including that field in a compared span: is this value written from a
+    run clock, and therefore expected to differ between two runs over the same data?
+
+    Parameters
+    ----------
+    record_type_value : str
+        The one-character discriminator, exactly as :func:`record_type` returns it. It is required
+        rather than optional because the payload's field set is a function of the record type: a
+        field name alone does not identify a field of THIS record.
+    field_name : str
+        The field name exactly as the copybook spells it, including any baseline misspelling, since
+        the descriptors preserve the copybook's own spelling.
+
+    Returns
+    -------
+    bool
+        ``True`` when the descriptor marks the field as a run-clock stamp a comparison may blank;
+        ``False`` for every field carrying deterministic data, the originating stamp included.
+
+    Raises
+    ------
+    LayoutError
+        If the discriminator is not one of the five the export program writes, or if this reader
+        publishes no field of that name for that record type.
+    """
+    # WHY : Alternatives Considered: an unknown or misspelled name RAISES here rather than answering
+    #   `False`. Answering `False` was the shorter option and was rejected because `False` is a
+    #   meaningful answer -- it means "this field is deterministic" -- so a typo would quietly place
+    #   a run-clock stamp inside a checksummed span, and the digest would then differ between two
+    #   loads of identical data with nothing naming the cause. Raising also catches the mistake this
+    #   record makes uniquely easy: asking a customer record about a transaction field, since all
+    #   five overlays share one envelope and one width.
+    field = _published_field_index(record_type_value).get(field_name)
+    if field is None:
+        raise LayoutError(
+            f"record {EXPORT_HEADER_LAYOUT.name} publishes no field named {field_name!r} for record"
+            f" type {record_type_value!r}, so whether it is a run-clock stamp has no answer; the"
+            " envelope's own fields and that record type's branch fields are the whole published"
+            " set"
+        )
+    return field.normalize_ts
 
 
 def record_type(record: bytes | bytearray | memoryview) -> str:
@@ -717,7 +1259,8 @@ def decode_ebcdic_export_record(record: bytes | bytearray | memoryview) -> Decod
     -------
     Turn a single fixed-length record image into one row-shaped mapping: the envelope's own data
     fields followed by the fields of the branch its discriminator selects, with the opaque payload
-    area, the branch pad and the suppressed verification value all absent.
+    area, the branch pad and the suppressed verification value all absent, and with every run-clock
+    stamp validated before it is published.
 
     Parameters
     ----------
@@ -745,7 +1288,8 @@ def decode_ebcdic_export_record(record: bytes | bytearray | memoryview) -> Decod
         those same bytes.
     LayoutError
         If the discriminator is not one of the five the export program writes, if it decoded to
-        something other than characters, or if a published field decoded to raw bytes.
+        something other than characters, if a published field decoded to raw bytes, or if a
+        run-clock stamp holds neither a uniformly unwritten span nor a well-formed timestamp.
     ZonedDecimalError
         If a display span in either half violates its contract.
     PackedDecimalError
@@ -755,8 +1299,8 @@ def decode_ebcdic_export_record(record: bytes | bytearray | memoryview) -> Decod
     #   That codec reads the discriminator from the decoded envelope, resolves the branch through
     #   the layouts module, slices the payload with the published payload offset and the branch's
     #   own declared length, and checks the two agree -- so this reader states none of those four
-    #   things and cannot state any of them differently. What remains here is the projection,
-    #   which is a reader decision and belongs nowhere else.
+    #   things and cannot state any of them differently. What remains here is the projection and the
+    #   run-clock stamp policy, both of which are reader decisions and belong nowhere else.
     envelope, payload = decode_export_record(record)
     discriminator = _require_discriminator_characters(envelope[_DISCRIMINATOR_FIELD.name])
 
@@ -768,12 +1312,12 @@ def decode_ebcdic_export_record(record: bytes | bytearray | memoryview) -> Decod
     #   this call. Deleting a key afterwards would leave the value reachable through every
     #   intermediate a caller might hold.
     decoded: DecodedExportRecord = {
-        field.name: _require_scalar_value(envelope[field.name], field, EXPORT_HEADER_LAYOUT.name)
+        field.name: _publishable_value(envelope[field.name], field, EXPORT_HEADER_LAYOUT.name)
         for field in ENVELOPE_LOADED_FIELDS
     }
     branch = export_branch(discriminator)
     for field in _BRANCH_LOADED_FIELDS[branch.name]:
-        decoded[field.name] = _require_scalar_value(payload[field.name], field, branch.name)
+        decoded[field.name] = _publishable_value(payload[field.name], field, branch.name)
     return decoded
 
 
@@ -812,21 +1356,28 @@ def iter_ebcdic_export_records(
         If a character span does not decode to exactly one character per byte.
     LayoutError
         If the source is neither a byte image nor readable nor iterable, produces a piece that is
-        not a byte object, carries an unknown discriminator, or has a published field that decoded
-        to raw bytes.
+        not a byte object, carries an unknown discriminator, has a published field that decoded to
+        raw bytes, or carries a run-clock stamp that is neither unwritten nor well formed.
     ZonedDecimalError
         If a display span violates its contract.
     PackedDecimalError
         If a packed or binary span violates its contract.
     """
     # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
-    #   terminator is looked for, honoured, stripped or padded on this path. This extract is the
-    #   sharpest illustration in the corpus of why that matters: it contains five 0x0A bytes
-    #   INSIDE its binary sequence numbers, so splitting it on a newline yields six pieces where
-    #   it holds five hundred records, and it contains 4,153 NUL bytes, so a text-mode read would
-    #   not survive either. The correctness test for this dataset is that its size divides by the
-    #   declared record length with no remainder, which the delegated iterator checks before it
-    #   yields the first record.
+    #   terminator is looked for, honoured, stripped or padded on this path -- not the newline, not
+    #   the carriage return, and not the pair. This extract is the sharpest illustration in the
+    #   corpus of why that matters, and all three cases are measured rather than argued: it carries
+    #   FIVE 0x0A bytes and ELEVEN 0x0D bytes, at in-record offsets 30, 43, 63, 72 and 177. Offset
+    #   30 is the low-order byte of `EXPORT-SEQUENCE-NUM PIC 9(9) COMP`, four bytes big-endian at
+    #   offset 27, so that byte is the number 10 or 266 rather than a terminator; offset 43 is the
+    #   fourth byte of the customer overlay's `EXP-CUST-ID PIC 9(09) COMP`, and the remaining three
+    #   sit inside further computational spans. Every one of them is legitimate field data, so a
+    #   split on 0x0A, a split on 0x0D and a split on the pair each yield garbage -- and each yields
+    #   a DIFFERENT count of garbage, none of them 500. It also carries 4,153 NUL bytes, so a
+    #   text-mode read would not survive either. The one correct boundary test is that the size
+    #   divides by the declared record length with no remainder, which for this extract is
+    #   250,000 over 500 exactly; the delegated iterator applies that test before it yields the
+    #   first record, and refuses the dataset outright when it fails.
     for image in iter_ebcdic_records(source, EXPORT_HEADER_LAYOUT):
         yield decode_ebcdic_export_record(image)
 
@@ -860,7 +1411,8 @@ def read_ebcdic_export_records(path: pathlib.Path) -> Iterator[DecodedExportReco
     EbcdicFieldDecodeError
         If a character span does not decode to exactly one character per byte.
     LayoutError
-        If a record carries an unknown discriminator, or a published field decoded to raw bytes.
+        If a record carries an unknown discriminator, a published field decoded to raw bytes, or a
+        run-clock stamp is neither uniformly unwritten nor a well-formed timestamp.
     ZonedDecimalError
         If a display span violates its contract.
     PackedDecimalError
@@ -872,42 +1424,6 @@ def read_ebcdic_export_records(path: pathlib.Path) -> Iterator[DecodedExportReco
     #   through a load, and it owns the open, the forward-only read and the close. Opening the file
     #   here would duplicate that lifecycle for no gain.
     yield from iter_ebcdic_export_records(pathlib.PurePath(path))
-
-
-def _masked_field_index(discriminator: str) -> Mapping[str, FieldSpec]:
-    """Build the published field index for one record type, envelope first then branch.
-
-    Purpose
-    -------
-    Resolve a field name to its descriptor over exactly the fields this reader publishes for a
-    given record type, so a masked rendering and a name lookup agree about what exists.
-
-    Parameters
-    ----------
-    discriminator : str
-        The one-character record-type discriminator.
-
-    Returns
-    -------
-    Mapping[str, FieldSpec]
-        A read-only mapping from published field name to descriptor. Dropped and suppressed fields
-        are absent.
-
-    Raises
-    ------
-    LayoutError
-        If the discriminator is not one of the five the export program writes.
-    """
-    # WHY : Assumptions: the index is composed from the same two tuples the decode path iterates,
-    #   so a field is present here exactly when it is present in a decoded record. Building it
-    #   from the layouts directly would readmit the pad, the opaque payload area and the
-    #   suppressed verification value, and a caller could then ask for a rendering of a field that
-    #   no decoded record contains.
-    index: dict[str, FieldSpec] = {field.name: field for field in ENVELOPE_LOADED_FIELDS}
-    index.update(
-        {field.name: field for field in _BRANCH_LOADED_FIELDS[export_branch(discriminator).name]}
-    )
-    return MappingProxyType(index)
 
 
 def render_masked_export_record(record: bytes | bytearray | memoryview) -> dict[str, str]:
@@ -939,7 +1455,8 @@ def render_masked_export_record(record: bytes | bytearray | memoryview) -> dict[
     EbcdicFieldDecodeError
         If a character span does not decode to exactly one character per byte.
     LayoutError
-        If the discriminator is unknown, or a published field decoded to raw bytes.
+        If the discriminator is unknown, a published field decoded to raw bytes, or a run-clock
+        stamp is neither uniformly unwritten nor a well-formed timestamp.
     ZonedDecimalError
         If a display span violates its contract.
     PackedDecimalError
@@ -959,7 +1476,7 @@ def render_masked_export_record(record: bytes | bytearray | memoryview) -> dict[
     #   length -- a decoded amount is not the width of its stored form -- and bounds the tag by
     #   the field's declared width so the tag cannot leak a value's magnitude through its length.
     decoded = decode_ebcdic_export_record(record)
-    index = _masked_field_index(
+    index = _published_field_index(
         _require_discriminator_characters(decoded[_DISCRIMINATOR_FIELD.name])
     )
     return {name: mask_rendered_value(index[name], str(value)) for name, value in decoded.items()}
@@ -998,7 +1515,8 @@ def render_masked_export_field(record: bytes | bytearray | memoryview, field_nam
     LayoutError
         If the named field is the one this reader suppresses, is one of the names this reader
         drops, or is not published for this record's type -- and also if the discriminator is
-        unknown or a published field decoded to raw bytes.
+        unknown, a published field decoded to raw bytes, or a run-clock stamp is neither uniformly
+        unwritten nor a well-formed timestamp.
     ZonedDecimalError
         If a display span violates its contract.
     PackedDecimalError
@@ -1026,7 +1544,7 @@ def render_masked_export_field(record: bytes | bytearray | memoryview, field_nam
 
     decoded = decode_ebcdic_export_record(record)
     discriminator = _require_discriminator_characters(decoded[_DISCRIMINATOR_FIELD.name])
-    index = _masked_field_index(discriminator)
+    index = _published_field_index(discriminator)
     field = index.get(field_name)
     if field is None:
         # WHY : Trade-offs: the refusal names the branch this record selected and does NOT list

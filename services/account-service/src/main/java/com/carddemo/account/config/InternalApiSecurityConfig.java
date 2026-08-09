@@ -34,23 +34,32 @@ import org.springframework.security.web.servlet.util.matcher.PathPatternRequestM
 import org.springframework.security.web.util.matcher.RequestMatcher;
 
 /**
- * Authorises the three internal reads another bounded context makes against this one.
+ * Authorises the reads a caller that is a WORKLOAD rather than a signed-in person makes against this context.
  *
  * <h2>Why a second filter chain</h2>
  *
  * <p>Refactoring Rationale: this context authenticates every request against the identity provider, and the
- * three account-context reads are made by a QUEUE CONSUMER rather than by a signed-in person -- so there is no
+ * cross-context account reads are made by a QUEUE CONSUMER rather than by a signed-in person -- so there is no
  * identity-provider token for it to present, and every one of those calls would have been refused. That refusal
  * is not a security outcome but an outage: the caller treats any non-not-found failure as the dependency being
- * unavailable, so each authorization would have been redelivered until the queue dead-lettered it. Adding these
- * three paths to the human chain with a permissive rule would have been the other way to make the calls
- * succeed, and it is the wrong one -- the paths would then be open to any authenticated cardholder, and one of
- * them resolves a primary account number.</p>
+ * unavailable, so each authorization would have been redelivered until the queue dead-lettered it. Adding those
+ * paths to the human chain with a permissive rule would have been the other way to make the calls succeed, and
+ * it is the wrong one -- the paths would then be open to any authenticated cardholder, and one of them resolves
+ * a primary account number.</p>
  *
- * <p>Assumptions: this chain is ordered BEFORE the identity-provider chain and matches only the three internal
- * paths, so every other request falls through to the chain that was already there. Ordering matters absolutely
- * here: the framework offers a request to each chain in order and the first whose matcher accepts it decides it,
- * so a lower-precedence internal chain would never see a request at all.</p>
+ * <p>Refactoring Rationale: this Javadoc read "the three internal reads another bounded context makes" while
+ * the customer record read and the customer scan were landing on this chain. Neither of those is called by
+ * another bounded context: they are here because {@code SecurityConfig.CUSTOMER_PATH_PATTERN} denies the whole
+ * customer subtree on the human chain, since no baseline screen reaches a customer record directly and granting
+ * a business group would add a capability the reference never had. The count was replaced rather than raised,
+ * because a count goes stale on the next mounted route while the property -- a workload credential, not a
+ * person's -- does not. The addresses themselves are enumerated once, in {@link #internalPaths()}.</p>
+ *
+ * <p>Assumptions: this chain is ordered BEFORE the identity-provider chain and matches only the addresses
+ * {@link #internalPaths()} enumerates, so every other request falls through to the chain that was already
+ * there. Ordering matters absolutely here: the framework offers a request to each chain in order and the first
+ * whose matcher accepts it decides it, so a lower-precedence internal chain would never see a request at
+ * all.</p>
  *
  * <p>Assumptions: the token is verified against a SHARED SYMMETRIC key rather than against the identity
  * provider's published keys. The reasoning belongs to the shared minter and is not restated here beyond the
@@ -64,10 +73,12 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  * would admit any internal token for any purpose, which is the same mistake as having one credential for the
  * whole system.</p>
  *
- * <p>Trade-offs: the three paths are enumerated from the controllers' own constants rather than written as a
- * pattern such as an internal path prefix. A prefix would be shorter and would automatically cover a fourth
+ * <p>Trade-offs: the paths are enumerated from the controllers' own constants rather than written as a
+ * pattern such as an internal path prefix. A prefix would be shorter and would automatically cover an
  * operation added later -- which is exactly the objection to it: a new operation would become reachable by an
- * internal caller without anyone deciding it should be. Enumeration makes each addition a visible edit here.</p>
+ * internal caller without anyone deciding it should be. Enumeration makes each addition a visible edit here,
+ * and it has already been paid: the customer scan and the customer record read were added as two further
+ * explicit entries rather than admitted for free by a customer prefix.</p>
  */
 @Configuration(proxyBeanMethods = false)
 public class InternalApiSecurityConfig {
@@ -100,19 +111,20 @@ public class InternalApiSecurityConfig {
      * expose the moved path to the human chain instead.</p>
      *
      * <p>Trade-offs: package-visible rather than private. A test in this package asserts that this matcher
-     * accepts exactly the three internal paths and refuses every neighbouring one, which is the property that
+     * accepts exactly these internal paths and refuses every neighbouring one, which is the property that
      * decides whether a path is governed by this chain or by the human one. Reaching that through the assembled
      * chain instead would require a servlet container and would report a mismatch as a status code, naming
      * neither the pattern that matched nor the one that did not. Widening to package visibility keeps the
      * method out of the module's API while making the discriminator directly assertable.</p>
      *
-     * @return a matcher accepting exactly the three internal paths and nothing else, never {@code null}
+     * @return a matcher accepting exactly the internal addresses of this context and nothing else, never
+     *     {@code null}
      */
     static RequestMatcher internalPaths() {
         PathPatternRequestMatcher.Builder matchers = PathPatternRequestMatcher.withDefaults();
 
         // WHY : Refactoring Rationale: each matcher is bound to the METHOD its operation serves, where
-        //   all three were previously bound to a path alone. A path-only matcher claims every method at
+        //   they were previously bound to a path alone. A path-only matcher claims every method at
         //   that address, and the account address is served by TWO surfaces: the machine read is a GET
         //   and the end-user edit is a PUT on the same address, separated by chain rather than by
         //   prefix. Claiming the PUT here demanded the internal read scope from a browser token, which a
@@ -129,10 +141,37 @@ public class InternalApiSecurityConfig {
         //   two internal-only subtrees that is strictly narrower -- the application chain denies them
         //   outright -- so a GET to the lookup address is refused rather than authorised and then
         //   answered as an unsupported method.
+        // WHY : Assumptions: the two customer READS are claimed here rather than left to the application
+        //   chain, and the reason is that the application chain DENIES the whole customer subtree
+        //   outright -- SecurityConfig.CUSTOMER_PATH_PATTERN is refused there because no baseline screen
+        //   reaches a customer record directly, so granting a business group would add a capability the
+        //   reference never had. Their reference is app/cbl/CBCUS01C.cbl, which carries no EXEC CICS verb
+        //   and appears in no resource definition, so it is a batch reader with no terminal behind it and
+        //   a workload credential is the only one that fits. Leaving either address unclaimed would mount
+        //   a handler nothing could reach and report it as a refusal nobody could explain.
+        // WHY : Assumptions: the collection address is claimed for GET ALONE, unlike the record address
+        //   below it. The scan publishes one method at that address and no other, so claiming more would
+        //   authorise a method the dispatcher would then refuse, where leaving it unclaimed lets the
+        //   application chain deny it first -- which for this subtree is the narrower of the two.
+        // WHY : Assumptions: the two account-keyed cross-reference operations are claimed HERE alongside
+        //       the card-keyed one, because the application chain denies the whole cross-reference
+        //       subtree and a path it denies that this chain does not claim reaches no handler at all.
+        //       They belong on this chain rather than on the human one on the merits: no baseline screen
+        //       reads a cross-reference row directly -- the account-view program reaches it only as a
+        //       step inside its own composition at app/cbl/COACTVWC.cbl L723 -- so granting either to a
+        //       business group would ADD a capability rather than preserve one, which is the same
+        //       reading SecurityConfig.CARD_XREF_PATH_PATTERN records for the subtree as a whole.
         return new OrRequestMatcher(
                 matchers.matcher(HttpMethod.POST,
                         CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
+                matchers.matcher(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH),
+                matchers.matcher(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH),
                 matchers.matcher(HttpMethod.GET, AccountController.BASE_PATH + "/{accountId}"),
+                matchers.matcher(HttpMethod.GET, CustomerController.BASE_PATH),
+                matchers.matcher(HttpMethod.GET,
+                        CustomerController.BASE_PATH + CustomerController.RECORD_PATH),
                 matchers.matcher(HttpMethod.GET, CustomerController.BASE_PATH + "/{customerId}"),
                 matchers.matcher(HttpMethod.HEAD, CustomerController.BASE_PATH + "/{customerId}"));
     }

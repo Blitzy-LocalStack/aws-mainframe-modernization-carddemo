@@ -203,13 +203,20 @@ import org.springframework.transaction.annotation.Transactional;
  * fails the build on a binary floating-point type in any member position, including as a generic
  * type argument, so the prohibition is executable rather than advisory.</p>
  *
- * <p>Alternatives Considered: importing the nested identifier type directly, which is what the
- * sibling {@code DisclosureGroupRepository} does and which would shorten the declaration below.
- * Written in qualified {@code TransactionCategoryBalance.TransactionCategoryBalanceId} form instead,
- * so that the identifier is visibly the entity's OWN nested type rather than a same-named type from
- * somewhere else. The entity records at its own nested declaration that this name was chosen over a
- * bare {@code Id} precisely because it appears unqualified in a repository query signature, and the
- * qualified spelling carries that intent one step further at the cost of a longer line.</p>
+ * <p>Alternatives Considered: importing the nested identifier type directly, which would shorten the
+ * declaration below. Written in qualified
+ * {@code TransactionCategoryBalance.TransactionCategoryBalanceId} form instead, so that the
+ * identifier is visibly the entity's OWN nested type rather than a same-named type from
+ * somewhere else. The entity records at its own nested declaration that this
+ * name was chosen over a bare {@code Id} precisely because it appears unqualified in a repository
+ * query signature, and the qualified spelling carries that intent one step further at the cost of a
+ * longer line. Refactoring Rationale: this note previously cited the sibling
+ * {@code DisclosureGroupRepository} as the counter-example that imported its nested identifier bare.
+ * That stopped being true when that interface adopted the qualified form too, so the citation was
+ * describing a package state that no longer existed -- and a reader checking it would have found the
+ * opposite of what it claimed. Both of the module's composite-key interfaces now spell the
+ * identifier qualified, which is what makes this the package convention rather than one file's
+ * preference.</p>
  *
  * @see TransactionCategoryBalance
  */

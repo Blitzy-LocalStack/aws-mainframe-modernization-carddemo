@@ -120,16 +120,17 @@ locals {
       priority   = 10
       paths      = ["/api/v1/auth", "/api/v1/auth/*"]
     }
-    # WHY : (1) Refactoring Rationale: this service is forwarded on FOUR patterns
-    #       rather than two, because it publishes three internal read operations on
-    #       two prefixes outside its own subtree -- POST /api/v1/card-xrefs/lookup
-    #       and GET /api/v1/customers/{customerId}, alongside
-    #       GET /api/v1/accounts/{accountId}. The two out-of-subtree prefixes were
-    #       absent from this list while the controllers existed, which is not a
-    #       cosmetic gap: a listener with no matching rule answers 404 itself, so the
-    #       pending-authorization context's cross-reference and customer calls failed
-    #       at the load balancer without reaching a task, and no log in the account
-    #       service recorded a request at all.
+    # WHY : (1) Refactoring Rationale: this service is forwarded on FIVE patterns
+    #       rather than two, because it publishes internal read operations on two
+    #       prefixes outside its own subtree -- POST /api/v1/card-xrefs/lookup and
+    #       the customer reads GET /api/v1/customers/{customerId},
+    #       GET /api/v1/customers/{customerId}/record and GET /api/v1/customers,
+    #       alongside GET /api/v1/accounts/{accountId}. The two out-of-subtree
+    #       prefixes were absent from this list while the controllers existed, which
+    #       is not a cosmetic gap: a listener with no matching rule answers 404
+    #       itself, so the pending-authorization context's cross-reference and
+    #       customer calls failed at the load balancer without reaching a task, and
+    #       no log in the account service recorded a request at all.
     #       (2) Assumptions: `/api/v1/card-xrefs/lookup` is listed as the EXACT
     #       operation path rather than as a `/api/v1/card-xrefs/*` subtree, and the
     #       narrower form is chosen deliberately. That prefix carries exactly one
@@ -139,18 +140,29 @@ locals {
     #       to be refused there. The customer prefix uses the subtree form because its
     #       operation is parameterised by identifier and an exact path cannot express
     #       that.
-    #       (3) Trade-offs: no bare `/api/v1/card-xrefs` or `/api/v1/customers`
-    #       pattern is carried, which is a departure from the pairing the auth and
-    #       card entries use. It is forced rather than chosen: a single path-pattern
-    #       condition accepts five values, as the card entry below records, and pairing
-    #       both new prefixes would need six. Since no operation sits on either bare
-    #       prefix, the cost is only that a request to one reports as misrouted from
-    #       the load balancer rather than as unimplemented from the service.
+    #       (3) Refactoring Rationale: the bare `/api/v1/customers` pattern IS now
+    #       carried, where this entry previously omitted it and justified the omission
+    #       with "no operation sits on either bare prefix". That premise stopped
+    #       holding when the ascending customer scan mounted ON the collection
+    #       address: a path pattern matches `*` against zero or more characters
+    #       including `/`, so `/api/v1/customers/*` covers
+    #       `/api/v1/customers/{customerId}` and its `/record` segment but NOT the
+    #       bare collection, which requires the separator to be present. Without this
+    #       value the scan is answered 404 by the listener itself -- the same failure
+    #       mode paragraph (1) records for the two prefixes that were missing
+    #       entirely, and the one that leaves no request in the service's own log.
+    #       (3a) Trade-offs: no bare `/api/v1/card-xrefs` pattern is carried, and this
+    #       list is now AT the ceiling: a single path-pattern condition accepts five
+    #       values, as the card entry below records, and this entry uses all five.
+    #       Pairing the card-xrefs prefix too would need six. It is not needed --
+    #       no operation sits on that bare prefix -- but a sixth account pattern of
+    #       any kind now requires splitting the rule rather than extending it.
     #       (4) Assumptions: these two prefixes are deliberately NOT added to the
     #       api-gateway-http route table. That module is the PUBLIC edge and its
-    #       authorizer validates identity-provider tokens; the three operations here
-    #       require a machine token the gateway cannot mint and the account service's
-    #       internal filter chain refuses an identity-provider token on these paths.
+    #       authorizer validates identity-provider tokens; every operation on these
+    #       two prefixes requires a machine token the gateway cannot mint, and the
+    #       account service's internal filter chain refuses an identity-provider
+    #       token on these paths.
     #       Publishing them at the edge would therefore expose a PAN-carrying request
     #       path to the internet in exchange for no reachable operation.
     account = {
@@ -160,7 +172,7 @@ locals {
       paths = [
         "/api/v1/accounts", "/api/v1/accounts/*",
         "/api/v1/card-xrefs/lookup",
-        "/api/v1/customers/*"
+        "/api/v1/customers", "/api/v1/customers/*"
       ]
     }
     # WHY : Refactoring Rationale: this service is forwarded on FOUR patterns rather
@@ -2005,17 +2017,21 @@ locals {
   #       Spring Boot applies, and
   #       services/common-lib/.../CardDemoCommonAutoConfiguration.java resolves it
   #       with no default. infra/modules/ecs-service asserts biconditionally that
-  #       exactly the four list-publishing services receive it, so the name is a
+  #       exactly the list-publishing services receive it, so the name is a
   #       contract rather than a convention.
-  #       (2) Assumptions: FOUR workloads receive it, and the four are the whole of
-  #       the gate: transaction, reference, reporting and authorization. Each holds at
-  #       least one component that requires the CursorToken bean --
-  #       TransactionController; TransactionTypeController, TransactionCategoryController
-  #       and AddressLookupController; ReportController; and PendingAuthViewMapper --
-  #       and a service whose context requires the bean cannot refresh without the key.
-  #       account, card, auth, batch and data-migration are absent because none of them
-  #       constructs the bean, and giving them the key would widen the set able to
-  #       forge a cursor for no capability any of them exercises.
+  #       (2) Assumptions: FIVE workloads receive it, and the five are the whole of
+  #       the gate: account, transaction, reference, reporting and authorization. Each
+  #       holds at least one component that requires the CursorToken bean --
+  #       AccountViewService; TransactionController; TransactionTypeController,
+  #       TransactionCategoryController and AddressLookupController; ReportController;
+  #       and PendingAuthViewMapper -- and a service whose context requires the bean
+  #       cannot refresh without the key. batch and data-migration are absent because
+  #       neither constructs the bean, and giving them the key would widen the set able
+  #       to forge a cursor for no capability either exercises.
+  #       (3) Refactoring Rationale: account joined the set when it began publishing a
+  #       keyset scan of the customer master, whose page boundaries
+  #       service/AccountViewService.java seals. Until then it constructed no sealer and
+  #       was listed here as an absence for that reason.
   #       (3) Assumptions: the entry reads from the SCALAR secret this root creates, so
   #       value_from is the base ARN with no JSON-key selector and IAM authorizes
   #       exactly the ARN each container reads -- the same shape as
@@ -2091,15 +2107,17 @@ locals {
       #       client holding no key would be answered 401 on every add and every payment.
       contains(["authorization", "account", "transaction"], service) ? local.internal_identity_secret_sources : {},
 
-      # WHY : Assumptions: gated on the FOUR list-publishing services by exact name, and
-      #       the four are the whole of the gate. Each holds at least one component whose
+      # WHY : Assumptions: gated on the list-publishing services by exact name, and that
+      #       set is the whole of the gate. Account is among them because its read path
+      #       seals the boundary tokens of two paged reads -- the customer scan and the
+      #       by-account cross-reference walk. Each holds at least one component whose
       #       constructor requires the CursorToken bean, and that bean is withheld when
       #       the key is unset, so a service in this set without the key does not start
       #       degraded -- it fails context refresh and crash-loops. The biconditional
-      #       precondition in infra/modules/ecs-service asserts the same four from the
+      #       precondition in infra/modules/ecs-service asserts the same set from the
       #       other side, so adding a service here without adding it there fails at plan
       #       time rather than silently widening the set able to forge a cursor.
-      contains(["transaction", "reference", "reporting", "authorization"], service) ? local.pagination_cursor_secret_sources : {},
+      contains(["account", "transaction", "reference", "reporting", "authorization"], service) ? local.pagination_cursor_secret_sources : {},
     )
   }
 

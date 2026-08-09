@@ -137,7 +137,7 @@ separation is what bounds the damage a single disclosure does:
 | --- | --- | --- |
 | Internal TLS pair | every online service | terminating internal TLS as the internal service name |
 | `messaging/hmac-key` | authorization only | computing pending-authorization queue group and correlation identities |
-| `internal-identity/signing-key` | authorization **and** account | minting or verifying the bearer token that admits a caller to the three internal account-context reads |
+| `internal-identity/signing-key` | authorization **and** account | minting or verifying the bearer token that admits a caller to EVERY internal account-context read the chain in `InternalApiSecurityConfig.internalPaths()` claims. This cell said "the three internal account-context reads" and understated the reach once the customer scan and the customer record read were matched on that chain; a cell describing what a leaked key unlocks is the one place a count must not be short, so it names the enumerating method rather than a number |
 
 The signing key is the only one of the three that is deliberately shared between
 two services, because it is symmetric: authorization signs the internal token and

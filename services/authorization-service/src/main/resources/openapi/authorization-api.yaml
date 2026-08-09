@@ -262,8 +262,29 @@ paths:
           description: >-
             The account summary and one page of its pending authorizations. An
             account with a summary row and no pending authorizations returns 200
-            with an empty items array and absent cursor tokens rather than 404,
-            because a query that matched no rows succeeded.
+            with an empty items array and absent cursor tokens, because a query
+            that matched no rows succeeded.
+
+
+            An account with NO summary row returns 200 as well, carrying a
+            summary block whose counts and totals are all zero, an empty items
+            array and absent cursor tokens. This operation therefore has no 404:
+            the baseline settles the case twice over, evaluating a found arm and
+            a not-found arm with no end-of-database arm at cbl/COPAUS0C.cbl
+            L980-L996, and then RENDERING the absence rather than reporting it --
+            moving zero into all six aggregate positions at L800-L807 and
+            skipping the browse at L354-L356 so the five row positions stay as
+            INITIALIZE-AUTH-DATA left them. Answering an error status here would
+            differ from that observably.
+
+
+            Assumptions: the customer identifier on a zeroed summary block is
+            zero-filled. The baseline sources that field from the cross-context
+            customer read at L920, which this context does not perform, so with
+            no summary row there is no customer identifier available to it; the
+            block declares nine digits, and zero-filling is the treatment the
+            baseline itself applies to every position it cannot source from an
+            absent segment.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
@@ -277,8 +298,6 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
 

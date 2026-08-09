@@ -29,7 +29,7 @@ import org.springframework.security.oauth2.jwt.JwtException;
  * Asserts what the account context accepts as proof that a caller is the authorization service.
  *
  * <h2>Purpose</h2>
- * <p>The three internal read paths carry no human credential, so the only thing standing between them and an
+ * <p>The internal read paths carry no human credential, so the only thing standing between them and an
  * unauthenticated caller is this configuration. This class asserts the four independent refusals -- wrong
  * signature, wrong issuer, wrong audience, expired -- plus the authority mapping that decides whether a
  * correctly signed token actually satisfies the rule, plus the matcher that decides which paths this chain
@@ -244,25 +244,60 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
-     * Verifies the chain governs exactly the three internal paths and nothing adjacent.
+     * Verifies the chain governs exactly the internal addresses of this context and nothing adjacent.
      *
      * <p>Assumptions: the negative half carries the weight. A matcher that was too wide would place a human
      * business path under a chain that accepts a machine token and demands a scope no human token carries,
      * which would refuse legitimate traffic; one that was too narrow would leave an internal path under the
-     * human chain, which would accept an identity-provider token in its place. Both collection paths and both
-     * bases are probed for that reason.</p>
+     * human chain, which would accept an identity-provider token in its place. The cross-reference
+     * collection path and both bases are probed for that reason.</p>
+     *
+     * <p>Refactoring Rationale: the CUSTOMER collection path is now asserted CLAIMED where an earlier
+     * revision asserted it left to the application chain. That earlier reading was correct only while the
+     * customer subtree published a single address: the application chain denies that whole subtree, so the
+     * customer scan mounted at the collection path would have been refused to every caller rather than
+     * merely to human ones. Its reference is {@code app/cbl/CBCUS01C.cbl}, which carries no
+     * {@code EXEC CICS} verb and appears in no resource definition, so a workload credential is the only
+     * one that fits it.</p>
      */
     @Test
-    @DisplayName("the chain matches exactly the three internal paths")
-    void theChainMatchesExactlyTheThreeInternalPaths() {
+    @DisplayName("the chain matches exactly the internal addresses and nothing adjacent")
+    void theChainMatchesExactlyTheInternalPaths() {
         var matcher = InternalApiSecurityConfig.internalPaths();
 
         assertThat(matcher.matches(request(HttpMethod.POST,
                 CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH))).isTrue();
+
+        // WHY : Assumptions: both account-keyed cross-reference operations are probed as well as the
+        //   card-keyed one, because the application chain denies the whole cross-reference subtree. A
+        //   path this chain fails to claim therefore reaches no handler at all rather than falling
+        //   through to a laxer rule, so an omission here presents as a 403 on a correctly mounted route.
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH))).isTrue();
+
+        // WHY : Assumptions: the GET form of each account-keyed operation is refused, which is the half
+        //   that keeps the disclosure property. Each keys on a value the logging contract withholds from
+        //   a durable diagnostic, and claiming the GET here would authorise the shape that puts that key
+        //   back into a request line before the dispatcher rejected the method.
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH))).isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH))).isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET,
                 AccountController.BASE_PATH + "/12345678901"))).isTrue();
         assertThat(matcher.matches(request(HttpMethod.HEAD,
                 CustomerController.BASE_PATH + "/987654321"))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CustomerController.BASE_PATH + "/987654321/record")))
+                .as("the keyed customer read is an internal address")
+                .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.GET, CustomerController.BASE_PATH)))
+                .as("the customer scan is an internal address: the application chain denies this whole"
+                        + " subtree, so leaving it there would refuse every caller and not merely the"
+                        + " human ones")
+                .isTrue();
 
         assertThat(matcher.matches(request(HttpMethod.GET, CardXrefController.BASE_PATH)))
                 .as("the cross-reference collection path is not an internal read")
@@ -270,12 +305,13 @@ class InternalApiSecurityConfigTest {
         assertThat(matcher.matches(request(HttpMethod.GET, AccountController.BASE_PATH)))
                 .as("the account collection path stays on the human chain")
                 .isFalse();
-        assertThat(matcher.matches(request(HttpMethod.GET, CustomerController.BASE_PATH)))
-                .as("the customer collection path stays on the human chain")
-                .isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET,
                 AccountController.BASE_PATH + "/12345678901/statements")))
                 .as("a deeper path under the account base is not an internal read")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET,
+                CustomerController.BASE_PATH + "/987654321/statements")))
+                .as("a deeper path under the customer base that no operation serves is not claimed")
                 .isFalse();
         assertThat(matcher.matches(request(HttpMethod.GET, "/actuator/health")))
                 .as("the health probe stays unauthenticated on the other chain")
@@ -299,6 +335,11 @@ class InternalApiSecurityConfigTest {
      *
      * <p>Assumptions: the customer probe is asserted for GET and HEAD together. One handler serves both, so
      * claiming one and not the other would make the two forms of one operation answer differently.</p>
+     *
+     * <p>Assumptions: the two customer READS are asserted for the one method each publishes and refused for
+     * a write method neither publishes. Unlike the account address, no end-user operation shares either of
+     * them, so the narrowing here does not separate two surfaces -- it keeps the chain from authorising a
+     * method the dispatcher would refuse afterwards.</p>
      */
     @Test
     @DisplayName("the chain claims only the method each internal operation serves")
@@ -324,6 +365,18 @@ class InternalApiSecurityConfigTest {
                 .as("one handler serves both forms, so both are claimed")
                 .isTrue();
         assertThat(matcher.matches(request(HttpMethod.PUT, customer))).isFalse();
+
+        assertThat(matcher.matches(request(HttpMethod.GET, customer + "/record")))
+                .as("the keyed customer read is a GET and must stay on this chain")
+                .isTrue();
+        assertThat(matcher.matches(request(HttpMethod.PUT, customer + "/record")))
+                .as("no operation writes a customer record, so the method is not claimed here")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.GET, CustomerController.BASE_PATH))).isTrue();
+        assertThat(matcher.matches(request(HttpMethod.POST, CustomerController.BASE_PATH)))
+                .as("the scan publishes GET alone at the collection address, so claiming a POST would"
+                        + " authorise a method the dispatcher would then refuse")
+                .isFalse();
 
         assertThat(matcher.matches(request(HttpMethod.POST, lookup))).isTrue();
         assertThat(matcher.matches(request(HttpMethod.GET, lookup)))
