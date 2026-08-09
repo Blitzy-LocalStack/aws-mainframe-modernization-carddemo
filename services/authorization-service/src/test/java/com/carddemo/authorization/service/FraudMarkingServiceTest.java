@@ -152,7 +152,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a first mark inserts the fraud row and reports the reference insert sentence")
     void firstMarkInsertsTheFraudRow() {
-        givenLockedRow();
+        givenExistingRow();
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
 
         FraudMarkingService.FraudMarkOutcome outcome =
@@ -190,7 +190,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("an account with no parent summary cannot file a fraud row")
     void anAccountWithNoParentSummaryCannotFileAFraudRow() {
-        givenLockedRow();
+        givenExistingRow();
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
 
@@ -213,7 +213,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a second mark replaces the state on the existing row and reports the update sentence")
     void secondMarkReplacesTheExistingRow() {
-        PendingAuthDetail row = givenLockedRow();
+        PendingAuthDetail row = givenExistingRow();
         AuthFraud existing = AuthFraud.from(row, expectedAuthTs(), ACCOUNT_ID, 11L,
                 PendingAuthDetail.FRAUD_REPORTED, LocalDate.of(2026, 8, 4));
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.of(existing));
@@ -248,7 +248,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("the fraud key composes the acquirer date with the positionally decoded time key")
     void fraudKeyComposesTheAcquirerDateWithThePositionalTimeKey() {
-        givenLockedRow();
+        givenExistingRow();
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
@@ -272,7 +272,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("the authorization row is marked with the segment's month-first report date")
     void theAuthorizationRowIsMarkedWithTheSegmentDate() {
-        PendingAuthDetail row = givenLockedRow();
+        PendingAuthDetail row = givenExistingRow();
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REMOVED), SUBJECT);
@@ -309,7 +309,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("both report dates one operation writes are the same day")
     void bothReportDatesOneOperationWritesAreTheSameDay() {
-        PendingAuthDetail row = givenLockedRow();
+        PendingAuthDetail row = givenExistingRow();
         when(this.fraudRows.findById(any(AuthFraudKey.class))).thenReturn(Optional.empty());
 
         this.service.mark(selector(), requestWith(PendingAuthDetail.FRAUD_REPORTED), SUBJECT);
@@ -333,7 +333,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a selector naming no row is not found")
     void selectorNamingNoRowIsNotFound() {
-        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
+        when(this.details.findById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.empty());
 
         assertThatExceptionOfType(NoSuchElementException.class).isThrownBy(() -> this.service
@@ -354,7 +354,7 @@ class FraudMarkingServiceTest {
     @Test
     @DisplayName("a row with an unparseable original date cannot be marked and reports a fault")
     void rowWithUnparseableOriginalDateCannotBeMarked() {
-        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
+        when(this.details.findById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.of(rowWithOriginalDate("      ")));
 
         assertThatExceptionOfType(IllegalStateException.class).isThrownBy(() -> this.service
@@ -363,13 +363,13 @@ class FraudMarkingServiceTest {
     }
 
     /**
-     * Arranges the locked read to return the canonical authorization row.
+     * Arranges the re-read by key to return the canonical authorization row.
      *
      * @return the row the service will mark, retained so its post-state can be asserted
      */
-    private PendingAuthDetail givenLockedRow() {
+    private PendingAuthDetail givenExistingRow() {
         PendingAuthDetail row = rowWithOriginalDate(AUTH_ORIG_DATE);
-        when(this.details.findWithLockById(any(PendingAuthDetailKey.class)))
+        when(this.details.findById(any(PendingAuthDetailKey.class)))
                 .thenReturn(Optional.of(row));
         return row;
     }

@@ -76,7 +76,7 @@ output "isolated_data_subnet_ids" {
 }
 
 output "alb_security_group_id" {
-  description = "Identifier of the managed-boundary security group shared by the API Gateway VPC Link, internal ALB and interface endpoint ENIs; its rules separate listener, endpoint and ALB-to-application flows by source group and port."
+  description = "Identifier of the internal ALB's listener security group, attached by the alb module and opened on 443 by the api-gateway-http module from the VPC Link's own group; this module gives it only egress to the application group on app_container_port."
   value       = aws_security_group.alb.id
 }
 

@@ -65,7 +65,7 @@ public class FraudMarkingService {
             DateTimeFormatter.ofPattern("MM/dd/yy");
 
     /**
-     * The authorization rows, read under a pessimistic lock and updated in place.
+     * The authorization rows, re-read by key and updated in place.
      */
     private final PendingAuthDetailRepository details;
 
@@ -156,14 +156,25 @@ public class FraudMarkingService {
 
         PendingAuthDetailKey key = this.mapper.openKey(selector, subject);
 
-        // WHY : Assumptions: the row is read under a PESSIMISTIC WRITE lock, which is the migrated form of
-        //       the reference re-read for update -- cbl/COPAUS1C.cbl L233 performs READ-AUTH-RECORD, whose
-        //       retrievals run against an update-capable program communication block, before the replace at
-        //       L525 to L528. The lock also makes the probe below safe: two requests naming one
-        //       authorization serialise here, so they cannot both observe an absent fraud row and both take
-        //       the insert path, where the second would hit a primary-key violation that inside one
-        //       transaction is unrecoverable rather than retryable.
-        PendingAuthDetail detail = this.details.findWithLockById(key)
+        // WHY : Assumptions: the row is re-read by KEY and no lock mode is requested, because the
+        //       reference programs hold nothing between a read and the write that follows it. The detail
+        //       screen re-reads the segment at cbl/COPAUS1C.cbl L233 through READ-AUTH-RECORD before the
+        //       replace at L525 to L528, but every retrieval it uses is a NON-HOLD form: cpy/IMSFUNCS.cpy
+        //       declares the three get-hold codes at L19, L21 and L23 and no program in the reference tree
+        //       passes any of them to a retrieval. Requesting a pessimistic lock here would therefore add
+        //       lock-wait queueing and deadlock-victim rollback to a path that has neither today, which is
+        //       new behaviour rather than preserved behaviour, and the package charter records it as the
+        //       rejected alternative on that boundary.
+        // WHY : Alternatives Considered: serialising two concurrent marks of one authorization on this read,
+        //       so that the probe below could never see an absent fraud row twice. Rejected because the
+        //       reference system does not prevent that collision either -- it lets the duplicate key fire and
+        //       branches on it, inserting at cbl/COPAUS2C.cbl L199 and taking PERFORM FRAUD-UPDATE at L203
+        //       and L204 on the duplicate-key code, with the update itself at L221 to L229. The fraud table's
+        //       primary key is therefore the arbiter of a concurrent duplicate here as well; the consequence
+        //       accepted is that of two simultaneous marks of the SAME authorization one is rejected rather
+        //       than both being applied, and because both would assert the same fraud state the committed
+        //       state of the row is the same either way.
+        PendingAuthDetail detail = this.details.findById(key)
                 .orElseThrow(() -> new NoSuchElementException(
                         "the selector names no pending authorization"));
 
@@ -211,7 +222,8 @@ public class FraudMarkingService {
     /**
      * Inserts the fraud row, or replaces the state on the one already there.
      *
-     * @param detail the authorization being marked, already locked; never {@code null}
+     * @param detail the authorization being marked, re-read by key in this transaction; never
+     *     {@code null}
      * @param request the validated request body; never {@code null}
      * @param today the server date both report dates are taken from; never {@code null}
      * @param key the row identity the sealed selector redeemed to, whose leading component is the
@@ -277,7 +289,8 @@ public class FraudMarkingService {
      * copy back over the segment at {@code cbl/COPAUS1C.cbl} L520 before replacing it. The duplication is
      * the baseline's and is reproduced rather than normalised away.</p>
      *
-     * @param detail the authorization being marked, already locked; never {@code null}
+     * @param detail the authorization being marked, re-read by key in this transaction; never
+     *     {@code null}
      * @param action the requested state, either the reported or the removed character; never {@code null}
      * @param segmentDate the report date in the segment's own month-first eight-character form; never
      *     {@code null}

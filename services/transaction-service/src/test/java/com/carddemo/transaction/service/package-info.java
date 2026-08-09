@@ -176,6 +176,16 @@
  * meeting {@code AccountContextClient} would have had to treat as either a
  * stale charter or a layering breach, with nothing here to say which.
  *
+ * <p>Assumptions: five test classes exercise those four units, because the paged
+ * browse is covered by two. The production package does hold one interface,
+ * {@code AccountContextClient}, and its own charter records why: it abstracts the
+ * OUTBOUND call this module makes into the account context, so a test can supply
+ * a stub for a collaborator that lives in another service rather than for the
+ * unit under test. That is the opposite direction from the stand-in this paragraph
+ * rules out, and the earlier wording -- "no interface declared beside any of
+ * them" -- said something measurably false about that directory while meaning
+ * this.
+ *
  * <p>Assumptions: that shape is settled by the production charter at
  * {@code services/transaction-service/src/main/java/com/carddemo/transaction/service/package-info.java},
  * which records why the four were neither merged into one service nor split

@@ -672,7 +672,17 @@ def test_the_money_totals_query_coalesces_every_column(qualified_table: str, col
         If the column is totalled without a coalesce, or is declared by no migration.
     """
     sql = _executable_sql("money_totals.sql")
-    assert f"COALESCE(SUM({column}), 0)" in sql, f"{column} is not totalled with a coalesce"
+    # WHY : Refactoring Rationale: the zero literal is matched as 0 OR 0.00 rather than as a
+    #   bare 0, because money_totals.sql now substitutes a SCALE-CARRYING zero and the earlier
+    #   exact-text assertion rejected it. Pinning the unscaled spelling was over-specification:
+    #   the property this test exists to protect is that the sum is COALESCED at all, so that a
+    #   legitimately empty table -- ledger.transactions, which has no seed dataset -- reports a
+    #   number instead of a NULL indistinguishable in a diff from a failed query. Which zero
+    #   does that is the query's business, and 0.00 does it better, keeping the empty row's
+    #   format identical to the eight populated ones so the report stays line-diffable.
+    assert re.search(rf"COALESCE\(SUM\({re.escape(column)}\), 0(?:\.00)?\)", sql), (
+        f"{column} is not totalled with a coalesce"
+    )
     assert re.search(rf"\bFROM {re.escape(qualified_table)}\b", sql)
     assert re.search(rf"\b{column}\b", _migration_text())
 
@@ -702,7 +712,7 @@ def test_the_money_totals_query_totals_every_money_column_and_no_other() -> None
 
 
 def test_both_verification_queries_stop_on_the_first_error() -> None:
-    """Stop on the first error in both queries, each by the mechanism its own form allows.
+    """Stop on the first error in both queries, each now by the same single-statement form.
 
     Returns
     -------
@@ -712,27 +722,35 @@ def test_both_verification_queries_stop_on_the_first_error() -> None:
     Raises
     ------
     AssertionError
-        If money_totals.sql omits the switch, or row_counts.sql is not pure SQL.
+        If either query holds a psql meta-command, or is not a single statement.
     """
     # WHY : without an error-stop psql reports the failing statement and carries on, so a
     #   verification run against a schema missing one table prints an error among a screen
     #   of successful counts and exits zero. An operator reading the tail of that output
-    #   would conclude the load verified. That hazard is real for a file of MANY statements.
-    money = _executable_sql("money_totals.sql")
-    assert "\\set ON_ERROR_STOP on" in money, "money_totals.sql does not stop on error"
-
-    # WHY : Refactoring Rationale: row_counts.sql is asserted PURE rather than asserted to
-    #   carry the same switch, because it was rewritten as a SINGLE statement and the switch
-    #   is both redundant and harmful there. Redundant on two counts: there is no second
-    #   statement for the switch to skip, and docs/runbooks/data-migration.md already invokes
-    #   the file with -v ON_ERROR_STOP=1 on the command line. Harmful because a backslash
-    #   meta-command is psql-only syntax that a driver cursor rejects outright, so keeping it
-    #   would bar the file from the very harness it pairs with -- and pure SQL is the settled
-    #   convention for this directory, recorded at V0__schemas_and_roles.sql L130-L135.
-    counts = _executable_sql("row_counts.sql")
-    assert "\\" not in counts, "row_counts.sql holds a psql meta-command and is not pure SQL"
-    # WHY : one terminating semicolon is the property that makes a driver cursor return the
-    #   whole report. A cursor's execute() exposes only the LAST result set, so a second
-    #   statement here would silently discard the counts of every table but one while the
-    #   harness reported that it had verified the load.
-    assert counts.count(";") == 1, "row_counts.sql is not a single statement"
+    #   would conclude the load verified. That hazard is real for a file of MANY statements,
+    #   and it is the hazard BOTH files now close by holding exactly one statement: there is
+    #   no second statement left for an error to be buried among.
+    #
+    # WHY : Refactoring Rationale: money_totals.sql is asserted PURE here, where an earlier
+    #   revision of this test asserted it carried a `\set ON_ERROR_STOP on` meta-command. That
+    #   assertion described a superseded draft. money_totals.sql has since been rewritten as a
+    #   SINGLE statement, which makes the switch both redundant and harmful for exactly the
+    #   three reasons already recorded below for row_counts.sql -- there is no second statement
+    #   for it to skip, docs/runbooks/data-migration.md already passes -v ON_ERROR_STOP=1 on
+    #   the command line, and a backslash meta-command is psql-only syntax a driver cursor
+    #   rejects outright. Keeping the old assertion would have forced the file to carry syntax
+    #   that bars it from the money_parity.py pass it belongs to, so the two files are now held
+    #   to ONE convention rather than two. Pure SQL is the settled convention for this
+    #   directory, recorded at V0__schemas_and_roles.sql L130-L135.
+    #
+    # WHY : Assumptions: both files are checked in the same test, and by an identical pair of
+    #   assertions, so neither can drift back to psql-only syntax on its own. A per-file test
+    #   would let one of the pair regress while the other stayed green.
+    for name in ("money_totals.sql", "row_counts.sql"):
+        sql = _executable_sql(name)
+        assert "\\" not in sql, f"{name} holds a psql meta-command and is not pure SQL"
+        # WHY : one terminating semicolon is the property that makes a driver cursor return
+        #   the whole report. A cursor's execute() exposes only the LAST result set, so a
+        #   second statement here would silently discard every row of the report but one
+        #   while the harness reported that it had verified the load.
+        assert sql.count(";") == 1, f"{name} is not a single statement"

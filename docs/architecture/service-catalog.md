@@ -52,11 +52,14 @@
 >
 > **Caveats.** Three, stated up front rather than buried. First, this is a catalog
 > of a **target design**, not a report on a running system. The current Terraform
-> tree passes formatting and validates in all 19 directories, but five directories
-> still lack a resource graph and recursive TFLint reports the measured 86-warning
-> baseline described under [The deployment boundary](#the-deployment-boundary).
+> tree passes formatting, validates in all 19 directories, declares a resource or
+> module graph in every one of them, and passes recursive TFLint with no reported
+> issue, as recorded under [The deployment boundary](#the-deployment-boundary).
 > Applying it to a live account is outside this scope, so nothing here asserts that
-> a provisioned environment exists or that any figure was measured on one. Second, a substantial
+> a provisioned environment exists or that any figure was measured on one. An earlier
+> revision of this caveat reported five directories without a resource graph and an
+> 86-warning TFLint baseline; both were measured on an earlier tree and neither holds
+> now. Second, a substantial
 > list of technologies is deliberately **out of scope** and is named as such in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope) —
 > none of it is described anywhere in this document as delivered. Third, the
@@ -75,9 +78,10 @@ them is what makes the additive claim above checkable rather than asserted. They
 `README.md`, `CONTRIBUTING.md` and `.gitignore`; there is no fourth, and every other
 artifact of the migration is a new file in a new tree. The current `.gitignore`
 contains the migration's build-output, Terraform-state, plan-file and environment
-patterns. The root `README.md` and `CONTRIBUTING.md` migration updates have not been
-authored, which is why the root README consumer described in the header remains a
-contract rather than an existing reference.
+patterns. The root `README.md` carries its migration section and `CONTRIBUTING.md`
+extends the documentation convention to the four new languages, so the root README
+consumer described in the header is an existing reference rather than a contract. An
+earlier revision of this paragraph recorded both updates as unauthored.
 
 
 ## WHY (non-obvious design decisions)
@@ -511,7 +515,7 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
 | `common-lib` | 35 | none — it owns no schema |
-| `auth-service` | 26 | `V1__auth.sql` |
+| `auth-service` | 27 | `V1__auth.sql` |
 | `account-service` | 38 | `V1__account.sql` |
 | `card-service` | 23 | `V1__card.sql` |
 | `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
@@ -632,12 +636,22 @@ a lost update.
 | Asynchronous dependencies | None |
 
 The `CARDAIX` path becomes a secondary index on the account-identifier column of
-`cards`, so cards-by-account remains an indexed access path. The target API contract
+`cards`, so cards-by-account remains an indexed access path. The API contract
 requires primary account numbers to be masked to the last four digits except on the
-administrative detail endpoint, and requires the card verification value never to
-be returned. No card controller, mapper or response-serialization test is authored
-yet, so those exposure controls remain delivery requirements rather than verified
-runtime behaviour.
+administrative detail endpoint, and requires the card verification value never to be
+returned. Both controls are delivered and asserted: `CardMapper` produces the masked
+rendering, `CardDetail` and `CardSummary` carry the masked type rather than a raw
+string, and the tests that hold them there are `CardDetailRenderingTest`,
+`CardDtoContractTest`, `DiagnosticRenderingTest`, `EncryptedCvvTest` and
+`EncryptedCvvPersistenceBoundaryTest`, with `CardControllerContractCensusTest` and
+`CardApiContractTest` holding the five published operations to their handlers.
+
+*Refactoring Rationale:* this paragraph said no card controller, mapper or
+response-serialization test was authored, so the exposure controls were "delivery
+requirements rather than verified runtime behaviour". All three now exist. The
+correction names the artifacts rather than restating the claim in the present tense,
+because the failure here was a claim of absence that no longer held and nothing in
+its wording could have revealed that.
 
 > Alternatives Considered: the card list pages by key, not by offset. This is
 > the clearest instance of a browse becoming keyset pagination, so the choice is
@@ -783,10 +797,10 @@ while being wrong.
 > exchange for aligning a visible reply with a committed decision. Publishing inline
 > was the alternative and reproduces the original inconsistency.
 
-**The outbox is a target table in this schema, not an implementation detail.** It is
-named `auth_reply_outbox` and is assigned to this context like the other three, but
-the module migration that creates it has not been authored. Its specified shape
-follows from the two jobs it has to do. It carries the reply exactly as the wire
+**The outbox is a table in this schema, not an implementation detail.** It is named
+`auth_reply_outbox`, is assigned to this context like the other three, and is created
+by this module's `V1__authorization.sql` alongside them. Its shape follows from the
+two jobs it has to do. It carries the reply exactly as the wire
 format states it, the
 six-field CSV, so that draining a row is a send and never a re-derivation. It
 carries the two identities the FIFO reply queue needs as purpose-scoped opaque
@@ -898,8 +912,9 @@ contexts**. Six contexts own a schema and the tables designed for it; one owns a
 schema, its tables and narrowly-scoped write grants outside it; and one owns a schema
 in which IT owns no table -- the schema nonetheless holds exactly one,
 `reporting.card_grouping_key`, owned by a non-login role and revoked from the reporting
-login, as the reporting entry above sets out. The table states that target contract,
-not which service migrations are already authored.
+login, as the reporting entry above sets out. Every service migration the table
+implies is now authored -- the per-module list is measured in the implementation-status
+table above -- so the table describes both the contract and the delivered set.
 
 | Schema | Owning context | Written by | Read by |
 |---|---|---|---|
@@ -955,9 +970,14 @@ There are few target synchronous hops by design: `account-service` and
 `transaction-service` are to read reference data from `reference-service`, and
 nothing else calls across a context boundary in the request path. The target
 contract keeps every such hop inside the private network behind an internal load
-balancer and requires explicit connect and read timeouts. Those clients have not
-been authored yet, so the timeout rule is a delivery requirement, not a measured
-runtime property.
+balancer and requires explicit connect and read timeouts. Those clients are
+authored: `account-service` reads reference data through
+`com.carddemo.account.service.RestReferenceAddressLookup`, and the two contexts that
+read account context do so through their own `RestAccountContextClient` in
+`com.carddemo.transaction.service` and `com.carddemo.authorization.service`. Each
+sets both timeouts explicitly from bound properties rather than inheriting a
+library default, so the timeout rule is a delivered property of those clients. It
+remains unverified against a deployed environment, which is a different claim.
 
 > Alternatives Considered: no circuit breaker is fitted. A circuit breaker
 > was considered and is **deliberately omitted from the target design**. The only
@@ -990,18 +1010,25 @@ consumes and publishes what.
 The target package rule forbids cross-service imports of another context's
 `domain` package.
 
-> Trade-offs: the prohibition is intended to be a test, not only a convention.
-> The required ArchUnit test has not been authored yet. The target is a build-failing
-> architecture rule because the alternative — documenting the boundary and relying
+> Trade-offs: the prohibition is a test, not only a convention. It is
+> `services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java`,
+> which declares nine cases: a non-vacuity guard on the imported class graph, a
+> check that ownership is exactly the nine fixed package roots, a check that its own
+> prohibition lists still name constructs that exist, then the domain-isolation rule,
+> the no-foreign-domain rule, the no-binary-floating-point money rule, a rule that
+> security chains render their refusals through the shared handlers, a rule that no
+> class uses a resilience library, and a self-test proving the money rule rejects a
+> planted `double` member. Because the class lives in `common-lib`, every service
+> module inherits it as a test-jar dependency and runs it against its own compiled
+> classes. It is a build-failing architecture rule because the alternative — documenting the boundary and relying
 > on review to catch violations — was rejected: an unenforced convention
 > decays: the first import that crosses a boundary is invisible in a diff that
 > looks otherwise reasonable, and by the time the coupling is noticed it is load-bearing.
 > The accepted cost is that the boundary cannot be crossed even temporarily
 > without either changing the rule deliberately or introducing a shared type in
-> `common-lib`, which is the friction the rule is for. The planned test must also
-> assert the other two invariants that must not decay: no infrastructure or web
-> types inside a `domain` package, and no binary floating-point type anywhere in
-> the money path.
+> `common-lib`, which is the friction the rule is for. The same class asserts the
+> other two invariants that must not decay: no infrastructure or web types inside a
+> `domain` package, and no binary floating-point type anywhere in the money path.
 
 ### Dependency graph
 
@@ -1051,9 +1078,9 @@ graph TB
     REPT -->|"SELECT-only views"| REF
     REPT -->|"starts execution"| ORCH
 
-    LIB -.->|"target: compiled into all eight"| contexts
+    LIB -.->|"compiled into all eight"| contexts
 %% Solid edges are synchronous or transactional; dashed edges are asynchronous or
-%% build-time target relationships. The two BATCH edges are the single documented exception to
+%% build-time relationships. The two BATCH edges are the single documented exception to
 %% database-per-service ownership, and they are write grants on two named schemas
 %% rather than service-to-service calls. The four REPT edges are the four SELECT-only
 %% grants in data-migration/sql/V0__schemas_and_roles.sql section 5 -- ledger,

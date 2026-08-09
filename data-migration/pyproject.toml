@@ -276,13 +276,25 @@ dependencies = [
 #   rather than disappeared, and a reader who had learned the old limitation needs
 #   to be told which part of it still holds.
 # WHY : Assumptions: what the entry point covers is narrower than what
-#   `data-migration/README.md` section 5.2 contracts. It registers `list-datasets`,
-#   `stage-dataset` and `apply-credentials` -- the three subcommands whose backing
-#   modules are in this distribution -- and does NOT register `load-dataset` or the
-#   three `verify-*` passes, which need `readers/`, `loaders/aurora.py` and
-#   `verify/`. Naming one of those is refused as a usage error, so a complete data
-#   cutover still cannot be claimed from this distribution, and schema/security
-#   validation must not be mistaken for one.
+#   `data-migration/README.md` section 5.2 contracts, by exactly one command. It
+#   registers `list-datasets`, `decode-record`, `stage-dataset`,
+#   `apply-credentials`, `load-dataset`, `verify-row-counts`, `verify-checksum` and
+#   `verify-money-parity` -- the eight whose backing modules are in this
+#   distribution -- and does NOT register `verify-all`, the aggregator over the
+#   three verification passes. Naming it is refused as a usage error. Since each of
+#   the three passes it would aggregate is individually reachable, what is withheld
+#   is the convenience of one invocation, not any capability.
+# WHY : Refactoring Rationale: this note listed `load-dataset` and the three
+#   `verify-*` passes as unregistered for exactly as long as `readers/`,
+#   `loaders/aurora.py` and `verify/` were absent from the distribution. All three
+#   are now present, so those four are registered. The rule the note records has
+#   not changed -- only which commands fall on which side of it.
+# WHY : Assumptions: `load-dataset` refuses `CUSTOMER` and `CARD` by name, because
+#   `account.customers` and `card.cards` declare ciphertext columns as `BYTEA NOT
+#   NULL` under a key the owning services hold and this package does not. A
+#   complete data cutover therefore still has to account for those two records,
+#   and for the fact that nothing here has been exercised against a provisioned
+#   cluster; schema and security validation must not be mistaken for a cutover.
 carddemo-migrate = "carddemo_migration.cli:main"
 
 [tool.setuptools.packages.find]

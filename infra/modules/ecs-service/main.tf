@@ -395,9 +395,33 @@ locals {
     "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
-    "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
+    # WHY : Refactoring Rationale: CARDDEMO_AUTH_COGNITO_CLIENT_ID and
+    #       CARDDEMO_COGNITO_APP_CLIENT_ID were both admitted here and both are
+    #       removed, for two different reasons that happened to look alike.
+    #       The first was a DUPLICATE CHANNEL: the note on the required map below
+    #       records that the app client's identifier and its secret are two JSON
+    #       keys of ONE Secrets Manager entry, that both roots inject them from
+    #       that single entry through secret_arns, and that requiring it as a
+    #       parameter obliged a root to publish a second copy of a value it
+    #       already delivers. The required map was moved to the Secrets Manager
+    #       channel then; admitting the name in BOTH channels afterwards left the
+    #       module still able to distribute it as a clear-text parameter, which is
+    #       the thing that move existed to stop. It stays admitted in
+    #       secret_environment_names below, which is the one channel that matches
+    #       how the value exists.
+    #       The second had NO reader and NO producer: CARDDEMO_COGNITO_APP_CLIENT_ID
+    #       is resolved by no application.yml in any service and published by
+    #       neither root, so admitting it granted every workload the right to
+    #       receive a value nothing consumes. It is not a rename of the first --
+    #       the reader that does exist resolves CARDDEMO_AUTH_COGNITO_CLIENT_ID --
+    #       so removing it drops a name, not a capability.
+    # WHY : Assumptions: an admissibility set is a distribution grant, not a
+    #       catalogue. A name admitted here may be injected into ANY workload this
+    #       module builds, so a name kept "in case something needs it later" widens
+    #       the blast radius of this module for as long as it sits here. That is why
+    #       the set is pruned to names with a current reader rather than left to
+    #       accumulate.
     "CARDDEMO_AUTH_COGNITO_USER_POOL_ID",
-    "CARDDEMO_COGNITO_APP_CLIENT_ID",
     "CARDDEMO_CONFIG_PREFIX",
     "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
     "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST",
@@ -475,6 +499,30 @@ locals {
     #       identities, and rotating either purpose would require a coordinated stop of
     #       an interactive consumer and a batch workload at once.
     "CARDDEMO_MESSAGING_HMAC_KEY",
+    # WHY : Refactoring Rationale: this name was absent from this set while four
+    #       services could not start without it, and the absence was the whole defect.
+    #       services/common-lib/.../CardDemoCommonAutoConfiguration.java resolves
+    #       carddemo.pagination.cursor.signing-key with NO default and WITHHOLDS the
+    #       CursorToken bean when it is unset; six components across transaction,
+    #       reference, reporting and authorization require that bean in their
+    #       constructors, so each of those contexts failed to refresh. Because this set
+    #       did not admit the name, a root could not even supply it -- the
+    #       task-definition precondition below refuses a name it does not admit, so the
+    #       fix had to start here rather than in the roots.
+    # WHY : Assumptions: it is a SECRET channel rather than a parameter one because it
+    #       is key material. A cursor sealed with it is unforgeable only while the key
+    #       is confidential; published through Parameter Store as a plain value it
+    #       would appear in the task definition's clear-text environment array, and any
+    #       principal able to describe the task definition could then forge a cursor
+    #       and page into rows no query scoped to it.
+    # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY
+    #       and CARDDEMO_MESSAGING_HMAC_KEY above, and the separation is purpose-scoping
+    #       rather than naming habit. Its holder set is the four list-publishing services;
+    #       the internal-identity key's is three and the messaging key's is one. Sharing
+    #       one value across the three purposes would mean a service able to seal a
+    #       cursor could also mint an internal bearer token, and rotating any purpose
+    #       would invalidate all three at once.
+    "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
     # WHY : Assumptions: this keys the opaque selector the CARD service addresses a
     #       row by. card-service/.../config/CardSelectorConfig.java binds
     #       carddemo.security.card-selector.signing-key through a fallback-free
@@ -648,6 +696,22 @@ locals {
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
     reference = toset([
+      # WHY : Refactoring Rationale: CARDDEMO_REFERENCE_CONTEXT_BASE_URL was required
+      #       HERE as well as of account, and requiring it of this service was wrong in
+      #       a way `terraform validate` cannot report. The address names the reference
+      #       context as a CALLEE; the only reader in the tree is account-service's
+      #       application.yml, and both environment roots publish it under the
+      #       "account|..." key alone. Requiring it of the callee therefore obliged a
+      #       root to hand reference-service its own address, which nothing resolves --
+      #       and because no root supplies it for this service, the required-name
+      #       precondition below refused the REFERENCE task definition outright. It is
+      #       required of account only, which is where the dependency actually is.
+      # WHY : Assumptions: the mirror-image name CARDDEMO_ACCOUNT_CONTEXT_BASE_URL is
+      #       the reason this looked plausible, and the asymmetry is worth stating. That
+      #       one is required of authorization and transaction -- the CALLERS of the
+      #       account context -- and not of account itself. Both names follow the same
+      #       rule, that a service address is required of whoever dials it; listing this
+      #       one under its owner broke the rule rather than extending it.
       "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
       "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
       "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
@@ -779,12 +843,24 @@ locals {
     #       payment with a refusal no message names.
     transaction = toset([
       "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
+      # WHY : Assumptions: this service requires the cursor signing key because at least
+      #       one of its components takes CursorToken as a constructor argument, and
+      #       common-lib withholds that bean when the key is unset. The failure is a
+      #       context-refresh abort and a crash loop, not a degraded list, so requiring
+      #       the name here turns a container-start failure into a plan-time one.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
       "SPRING_FLYWAY_PASSWORD",
     ])
     reference = toset([
+      # WHY : Assumptions: this service requires the cursor signing key because at least
+      #       one of its components takes CursorToken as a constructor argument, and
+      #       common-lib withholds that bean when the key is unset. The failure is a
+      #       context-refresh abort and a crash loop, not a degraded list, so requiring
+      #       the name here turns a container-start failure into a plan-time one.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
       "SPRING_FLYWAY_USER",
@@ -830,6 +906,12 @@ locals {
       #       consuming authorizations it can never resolve an account context for.
       "CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY",
       "CARDDEMO_MESSAGING_HMAC_KEY",
+      # WHY : Assumptions: this service requires the cursor signing key because at least
+      #       one of its components takes CursorToken as a constructor argument, and
+      #       common-lib withholds that bean when the key is unset. The failure is a
+      #       context-refresh abort and a crash loop, not a degraded list, so requiring
+      #       the name here turns a container-start failure into a plan-time one.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
 
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
@@ -837,6 +919,12 @@ locals {
       "SPRING_FLYWAY_PASSWORD",
     ])
     reporting = toset([
+      # WHY : Assumptions: this service requires the cursor signing key because at least
+      #       one of its components takes CursorToken as a constructor argument, and
+      #       common-lib withholds that bean when the key is unset. The failure is a
+      #       context-refresh abort and a crash loop, not a degraded list, so requiring
+      #       the name here turns a container-start failure into a plan-time one.
+      "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
       "SPRING_DATASOURCE_USERNAME",
       "SPRING_DATASOURCE_PASSWORD",
     ])
@@ -1665,9 +1753,76 @@ resource "aws_ecs_task_definition" "this" {
 
         (var.service_name == "reporting") == contains(keys(var.environment_variables), "CARDDEMO_TRUSTED_PROXY_PATTERN") &&
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET") &&
-        (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET")
+        (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET") &&
+
+        # WHY : Assumptions: the cursor clause is gated on FOUR services and, like every
+        #       clause above, it is biconditional in both directions for a reason on each
+        #       side. Missing from a service that needs it, the CursorToken bean is
+        #       withheld and the context cannot refresh -- a crash loop rather than a
+        #       degraded list. Present on a service that does not, it hands cursor-forging
+        #       capability to a task that publishes no page, which is exactly the silent
+        #       widening every other clause here refuses. The four are the services holding
+        #       a component that takes CursorToken as a constructor argument; the list is
+        #       asserted from this side and from the roots' own gate, so adding a fifth in
+        #       one place without the other fails at plan time.
+        contains(["transaction", "reference", "reporting", "authorization"], var.service_name) == contains(keys(var.secret_arns), "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY")
       )
       error_message = "service-specific secret and trust configuration was distributed to the wrong bounded context."
+    }
+
+    precondition {
+      # WHY : Refactoring Rationale: admissibility and authorisation were being
+      #       conflated, and this block separates them. The first precondition above
+      #       checks that a supplied name appears in the module's exact schema, which
+      #       is a check on the NAME. It says nothing about WHICH workload may receive
+      #       it, so every admitted name was distributable to all ten -- the card
+      #       service could be handed the reporting state-machine ARN, and reference
+      #       the account inquiry queues, and both would plan cleanly. The block above
+      #       closed that for eleven names one at a time as each was noticed; the
+      #       thirteen clauses here complete the set, so "exact allowlist" now
+      #       constrains the pairing of name and workload rather than the name alone.
+      # WHY : Assumptions: every clause is biconditional, and the reverse direction is
+      #       the half that earns the block. Forward-only ("if the service is card it
+      #       must have the CVV key alias") catches an omission, which the required
+      #       maps above already catch. The reverse ("if it has the CVV key alias it
+      #       must be card") is what catches a name reaching a service that has no
+      #       reader for it, and that is the least-privilege property being asserted:
+      #       a workload should not hold configuration it cannot use.
+      # WHY : Assumptions: each authorised set is the name's MEASURED reader set, taken
+      #       from which application.yml resolves the placeholder, not from which
+      #       service sounds like the owner. Two of them are counter-intuitive and are
+      #       the reason the derivation matters. CARDDEMO_ACCOUNT_INQUIRY_* belongs to
+      #       ACCOUNT and not to a caller, because account-service hosts the inquiry
+      #       listener that consumes the request queue and answers on the reply queue --
+      #       the queues are its own consumption endpoints. CARDDEMO_ACCOUNT_CONTEXT_-
+      #       APPROVED_ORIGIN belongs to AUTHORIZATION and not to account, because it is
+      #       the origin the CALLER checks the context's answer came from.
+      # WHY : Trade-offs: CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID is scoped to the seven
+      #       request-serving services rather than to all ten, which is the one clause
+      #       here that lists more services than it excludes. It is still worth stating:
+      #       the two it excludes are batch and data-migration, neither of which serves a
+      #       request or validates a token, so the clause is what stops an audience
+      #       expectation being handed to a workload with no resource server to apply it
+      #       to. The cost is that adding an eighth request-serving service means editing
+      #       this line, which is the intended friction -- the alternative is a set that
+      #       silently admits whatever is added next.
+      condition = (
+        (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_ID") &&
+        (var.service_name == "auth") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_AUTH_COGNITO_USER_POOL_ID") &&
+        (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN") &&
+        (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE") &&
+        (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE") &&
+        (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE") &&
+        (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE") &&
+        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE") &&
+        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE") &&
+        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE") &&
+        (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN") &&
+        (var.service_name == "card") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_SECURITY_CVV_KEY_ID") &&
+        contains(["auth", "account", "card", "transaction", "reference", "authorization", "reporting"], var.service_name) == contains(keys(var.ssm_parameter_arns), "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID") &&
+        contains(["auth", "account", "card", "transaction", "reference", "authorization", "reporting"], var.service_name) == contains(keys(var.ssm_parameter_arns), "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI")
+      )
+      error_message = "a configuration name was distributed to a workload that has no reader for it, or withheld from the workload that does. Every admitted name is authorised for an exact set of services, derived from which application.yml resolves it."
     }
 
     precondition {

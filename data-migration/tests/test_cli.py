@@ -17,9 +17,15 @@ from carddemo_migration.copybook import layouts
 from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXIT_USAGE
 
 # Assumptions: the subcommands asserted here are exactly the ones cli.build_parser
-#   registers, and the test states them literally rather than reading them back from the
-#   parser. Reading them back would make this test pass for any surface the module
-#   happens to expose, including one that had silently lost a command.
+#   registers, in registration order, and the test states them literally rather than reading
+#   them back from the parser. Reading them back would make this test pass for any surface
+#   the module happens to expose, including one that had silently lost a command.
+# Refactoring Rationale: the last four were moved here out of the denial tuple below when
+#   their backing modules landed -- readers/, loaders/aurora.py and verify/ are now in the
+#   distribution, so a parser that did NOT advertise them would be the defect. Updating this
+#   tuple is deliberately the work required to change the delivered surface: a test that read
+#   the parser back would have accepted the four new commands silently, and would equally have
+#   accepted their disappearance.
 _IMPLEMENTED_SUBCOMMANDS = (
     "list-datasets",
     "decode-record",
@@ -62,6 +68,12 @@ _EBCDIC_DIRECTORY = Path(__file__).resolve().parents[2] / "app" / "data" / "EBCD
 _ACCOUNT_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.ACCTDATA.PS"
 _CARD_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.CARDDATA.PS"
 _USER_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.USRSEC.PS"
+# Assumptions: the disclosure-group extract is read for one reason the other three cannot
+#   serve. DIS-INT-RATE is the only SIGNED ZONED field the corpus disclosure allowlist in
+#   layouts.py admits, so it is the only shipped value through which this command's end-to-end
+#   assembly of a sign-overpunched fixed-point number stays ASSERTABLE now that every account
+#   balance and transaction amount is withheld from the rendering.
+_DISCLOSURE_GROUP_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.DISCGRP.PS"
 
 
 class _FakeS3Client:
@@ -754,6 +766,93 @@ def test_decode_record_decodes_a_shipped_extract(
     assert fields["ACCT-ID"] != "00000000001"
     assert "ACCT-CURR-BAL" in fields
     assert fields["ACCT-CURR-BAL"] != "194.00"
+
+    # WHY (Refactoring Rationale): the fixed-point half of this proof read
+    #   ACCT-CURR-BAL == "194.00", and it is moved to DIS-INT-RATE because layouts.py now
+    #   WITHHOLDS every account balance from a diagnostic rendering. Asserting the cleartext
+    #   balance would have held this command to the fail-open behaviour that closure removed,
+    #   and asserting the redaction instead would have proved nothing about the codecs -- a tag
+    #   is computed from the rendered characters, so a wrong value yields a different tag that
+    #   this test has no independent way to predict. The disclosure-group rate keeps the
+    #   property intact: 15.00 is assembled from the six EBCDIC bytes "00150{" through the same
+    #   cp037 transcode and the same sign-overpunch branch, and the allowlist admits it because
+    #   it is seeded reference configuration rather than a customer's money.
+    assert cli.main(_decode_arguments(_DISCLOSURE_GROUP_EXTRACT, dataset="DISGROUP")) == EXIT_OK
+    group = json.loads(capsys.readouterr().out)
+    assert group["DIS-ACCT-GROUP-ID"] == "A000000000"
+    assert group["DIS-INT-RATE"] == "15.00"
+
+
+def test_decode_record_withholds_account_money_and_its_postal_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Never print a balance, a credit limit, a cycle total or a postal code."""
+    # WHY (Assumptions): the account master carries no field any factory in layouts.py had
+    #   marked sensitive, so before the corpus disclosure allowlist existed this command printed
+    #   every one of its thirteen fields in cleartext -- five money fields among them. The
+    #   assertion is therefore made on the ABSENCE of the decoded cleartext rather than on the
+    #   presence of a tag: a rendering that reverted to disclosure would still contain a tag for
+    #   some other field, so only the absence distinguishes the two behaviours.
+    assert cli.main(_decode_arguments(_ACCOUNT_EXTRACT)) == EXIT_OK
+    printed = capsys.readouterr().out
+    fields = json.loads(printed)
+
+    # WHY (Assumptions): each expected cleartext is the value the codecs really produce for
+    #   record one of the shipped extract, captured by running the command against it. Naming
+    #   the actual values is what makes this a disclosure test rather than a shape test -- a
+    #   check that merely looked for a "<" would pass on a rendering that printed the balance
+    #   in one field and a tag in another.
+    withheld = {
+        "ACCT-CURR-BAL": "194.00",
+        "ACCT-CREDIT-LIMIT": "5000.00",
+        "ACCT-CASH-CREDIT-LIMIT": "500.00",
+        "ACCT-CURR-CYC-CREDIT": "0.00",
+        "ACCT-CURR-CYC-DEBIT": "0.00",
+    }
+    for name, cleartext in withheld.items():
+        assert cleartext not in printed, f"{name}'s decoded value must not be printed"
+        # WHY (Assumptions): a money field renders the fixed literal and NOT a keyed tag, and
+        #   the exact literal is asserted rather than a leading "<". A decoded number's text is
+        #   a different length from the declared field width, so the only chunk available to a
+        #   tag on this path would be a constant -- which would yield a tag that is equal for
+        #   two different balances while looking value-derived. Asserting the literal is what
+        #   pins the command to the honest rendering instead of the plausible one.
+        assert fields[name] == "<withheld>", f"{name} must render the withheld literal"
+
+    # WHY (Trade-offs): the postal code is asserted alongside the money because it is the
+    #   member of this record whose classification is least obvious -- it is neither money nor
+    #   an identifier -- and it is withheld deliberately, on the ground that ten characters of
+    #   postal code narrow a household where the two-character state code does not.
+    # WHY (Assumptions): it renders a keyed TAG rather than the literal, because it is a
+    #   character field whose decoded rendering is its own ten bytes and therefore already the
+    #   declared width. Both renderings are asserted in one test so that the distinction between
+    #   them is pinned as a consequence of the field's width and not of a hand-kept list.
+    postal = fields["ACCT-ADDR-ZIP"]
+    assert postal != "<withheld>"
+    assert postal.startswith("<") and postal.endswith(">")
+    assert len(postal) == layouts.layout("ACCOUNT").field("ACCT-ADDR-ZIP").length
+
+    # WHY (Assumptions): the three lifecycle dates, the status code and the key stay in
+    #   cleartext, and that half is asserted in the same test for the reason the codec
+    #   diagnostics use: "the balance was withheld" is only evidence of a POLICY if something
+    #   the policy admits is still disclosed. A command that had begun redacting everything
+    #   would otherwise pass every assertion above while having become useless.
+    # WHY (Refactoring Rationale): the key is asserted PRESENT and NOT in clear, where this case
+    #   first asserted `ACCT-ID == "00000000001"`. The account master is closed under the
+    #   fail-closed master disclosure policy and `_ACCOUNT_MASTER_DISCLOSABLE_FIELDS` does not
+    #   name `ACCT-ID`, so the field is sensitive and this command renders it as a keyed tag. The
+    #   assertion is moved to the policy rather than the policy relaxed to the assertion, which is
+    #   the same direction `test_decode_record_decodes_a_shipped_extract` above records for the
+    #   identifier and the balance. The exact tag text is not asserted because the tag is keyed and
+    #   this case supplies no key.
+    assert "ACCT-ID" in fields
+    assert fields["ACCT-ID"] != "00000000001"
+
+    # WHY (Assumptions): the status and the expiry stay in clear and are asserted verbatim, and
+    #   they are what keep this a disclosure test rather than a redact-everything test. Both are
+    #   named by the master allowlist, so a change that began withholding them would fail here.
+    assert fields["ACCT-ACTIVE-STATUS"] == "Y"
+    assert fields["ACCT-EXPIRAION-DATE"] == "2025-05-20"
 
 
 def test_decode_record_renders_money_as_a_string(

@@ -42,7 +42,7 @@
  *   <li>{@code AddressLookupController} -- the three seeded allow-lists of telephone area codes, states
  *       and state-with-postal-prefix pairs, drawn from the condition-name lists of
  *       {@code app/cpy/CSLKPCDY.cpy}.</li>
- *   <li>{@code DateEvaluationController} -- the date evaluation, delegating as the third labelled
+ *   <li>{@code DateConversionController} -- the date evaluation, delegating as the third labelled
  *       decision below records.</li>
  *   <li>{@code ReferenceMaintenanceController} -- the batched maintenance action, from
  *       {@code app/app-transaction-type-db2/cbl/COBTUPDT.cbl}.</li>

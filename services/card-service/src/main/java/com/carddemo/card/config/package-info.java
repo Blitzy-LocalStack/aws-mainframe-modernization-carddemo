@@ -148,11 +148,19 @@
  *
  * <ul>
  *   <li>{@code com.carddemo.common.CardDemoCommonAutoConfiguration} contributes
- *       {@code GlobalExceptionHandler}, {@code MetricsConfig}, the money codec
- *       module and the {@code CorrelationIdFilter} registration. The framework
- *       loads it from the shared module's own
+ *       six components: {@code MetricsConfig}, which it pulls in with
+ *       {@code @Import}, and five {@code @Bean} declarations -- a {@code Clock},
+ *       the money codec module, a {@code CursorToken}, the
+ *       {@code CorrelationIdFilter} registration and
+ *       {@code GlobalExceptionHandler}. The framework loads it from the shared
+ *       module's own
  *       {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}
- *       entry, so this context receives all four without naming any of them.
+ *       entry, so this context receives all six without naming any of them.
+ *       Refactoring Rationale: this list read "four" and omitted the
+ *       {@code Clock} and the {@code CursorToken}. The second omission mattered
+ *       most: this service's keyset paging seals its boundary keys through that
+ *       bean, so a reader tracing where the sealing key comes from was sent to
+ *       look for a registration this charter said did not exist.
  *       Refactoring Rationale: an earlier design had {@code CardApplication}
  *       import the first two explicitly and this charter described that. It was
  *       superseded because a registration a service has to remember is a
@@ -175,9 +183,10 @@
  * <p>Alternatives Considered: the scan root is never widened to
  * {@code com.carddemo} to shorten either list. Widening it would pull every
  * shared kernel component into every service at once, including the ones a given
- * context has no use for, and would replace four explicit registrations that can
- * be read in two files with an implicit set that changes silently whenever the
- * shared kernel gains a component. Trade-offs: the price of the narrow root is
+ * context has no use for, and would replace eight registrations that can be read
+ * in two files -- the six above plus {@code SecurityConfig}'s two -- with an
+ * implicit set that changes silently whenever the shared kernel gains a component.
+ * Trade-offs: the price of the narrow root is
  * that a newly added shared component has to be registered by hand in one of the
  * two places above, and that a reader has to consult both to see the whole set.
  * That price buys a registration list which only changes when someone edits

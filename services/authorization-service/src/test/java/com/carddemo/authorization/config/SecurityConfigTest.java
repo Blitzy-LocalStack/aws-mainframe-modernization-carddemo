@@ -3,29 +3,50 @@ package com.carddemo.authorization.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import com.carddemo.common.web.CorrelationIdFilter;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.security.autoconfigure.web.servlet.SecurityFilterProperties;
+import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.authorization.AuthorizationResult;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.util.AntPathMatcher;
 
 /**
- * Verifies that {@link SecurityConfig} refuses a token carrying no recognised group, keeps the health
- * probe open, and holds the management namespace to the operator authority.
+ * Verifies the route authorization matrix {@link SecurityConfig} installs, together with the health
+ * probe's openness, the operator scoping of the management namespace, and the fail-fast property checks.
  *
  * <p>Assumptions: tokens are assembled in memory because signature, issuer and time validation all happen
  * before the authority conversion this class exercises. Each assertion therefore controls only the claim
  * shape whose authorization outcome it asserts.</p>
  *
- * <p>Assumptions: the decision object under test is the one the chain installs, obtained from
- * {@link SecurityConfig#businessAccess()}, rather than a manager this test constructs from the same two
- * names. Constructing one here would make the test agree with itself while the rule narrowed or
- * widened.</p>
+ * <p>Assumptions: every decision object under test is the one the chain installs, obtained from
+ * {@link SecurityConfig#businessAccess()} or {@link SecurityConfig#fraudAccess()}, rather than a manager
+ * this test constructs from the same names. Constructing one here would make the test agree with itself
+ * while the rule narrowed or widened.</p>
+ *
+ * <p>Assumptions: no servlet container is stood up for the authorization assertions, and that is a
+ * constraint of this module rather than a preference. The decoder the chain builds resolves the issuer's
+ * discovery document eagerly, so a Spring context here would require a reachable identity provider; the
+ * two rules are therefore exercised as objects. The one assertion that does build a context runs only the
+ * shared kernel's auto-configuration, which needs no issuer.</p>
+ *
+ * <p>Trade-offs: exercising the managers directly binds the DECISION but not the wiring, so it cannot
+ * witness that the fraud rule is declared before the read rule. The pattern assertion below covers the
+ * premise that ordering rests on -- that the fraud pattern is a strict subset of the read pattern -- and
+ * the residual risk of the two rules being transposed is accepted rather than hidden.</p>
  */
 class SecurityConfigTest {
 
@@ -85,11 +106,17 @@ class SecurityConfigTest {
     }
 
     /**
-     * Confirms the catch-all admits exactly the two closed groups and nothing else.
+     * Confirms the read rule's authority set is exactly the two closed groups and nothing else.
+     *
+     * <p>Refactoring Rationale: this test and the one below were both named for the catch-all, which they
+     * have not described since that rule became {@code denyAll()}; the list and the manager they assert on
+     * govern the READ surface. The names are brought into line because a test named for the wrong rule
+     * sends a reader looking for a gap in the wrong place, and the two rules here have different
+     * strengths.</p>
      */
     @Test
-    @DisplayName("the catch-all authority set is the two closed groups")
-    void catchAllAuthoritySetIsTheTwoClosedGroups() {
+    @DisplayName("the read rule's authority set is the two closed groups")
+    void readRuleAuthoritySetIsTheTwoClosedGroups() {
         assertThat(SecurityConfig.BUSINESS_AUTHORITIES)
                 .containsExactly(JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY);
     }
@@ -102,9 +129,15 @@ class SecurityConfigTest {
      * shapes are the complete set the shared converter documents as yielding no name: an absent claim, an
      * empty array, an array naming only unrecognised groups, a claim encoded as neither string nor
      * collection, and an array whose entries are not textual.</p>
+     *
+     * <p>Assumptions: each such principal still carries the authentication-factor authority this framework
+     * version's resource-server converter contributes, so "granted no authority" means granted none of the
+     * two BUSINESS authorities rather than holding an empty collection. That is why the assertion is on the
+     * rule's verdict and not on the collection's size: a size assertion would pass or fail on a
+     * framework-supplied value instead of on the rule under test.</p>
      */
     @Test
-    @DisplayName("a validly signed token granted no authority is refused by the catch-all")
+    @DisplayName("a validly signed token granted no business authority is refused by the read rule")
     void validlySignedTokenGrantedNoAuthorityIsRefused() {
         List<Map<String, Object>> shapesGrantingNothing = List.of(
                 Map.of("sub", "subject-with-no-group-claim"),
@@ -124,24 +157,6 @@ class SecurityConfigTest {
                     .as("a principal holding %s must not reach a business route",
                             authentication.getAuthorities())
                     .isFalse();
-        }
-    }
-
-    /**
-     * Confirms the catch-all still admits both closed groups, so the tightening removed no capability.
-     *
-     * <p>Assumptions: the administrator is asserted as well as the ordinary user. The baseline reaches this
-     * context's screens from a menu both user types reach, so a rule that admitted only one of them would
-     * be a behavioural change rather than a correction.</p>
-     */
-    @Test
-    @DisplayName("both closed groups still reach a business route")
-    void bothClosedGroupsStillReachABusinessRoute() {
-        for (String group : SecurityConfig.BUSINESS_AUTHORITIES) {
-            assertThat(isGranted(authenticationFrom(
-                            Map.of(JwtRoleConverter.GROUPS_CLAIM, List.of(group)))))
-                    .as("the %s group must keep the access it has today", group)
-                    .isTrue();
         }
     }
 
@@ -178,15 +193,221 @@ class SecurityConfigTest {
     }
 
     /**
-     * Applies the installed catch-all decision to one authentication.
+     * The administrative half of the matrix: fraud marking admits an administrator and nobody else.
+     *
+     * <p>Assumptions: this is the assertion the narrowing on {@code FRAUD_PATH_PATTERN} is argued for, so
+     * it exercises the manager the chain installs rather than one built here from the same constant. The
+     * ordinary-user token is the case that matters most: it is a fully valid token for the configured
+     * pool holding a group this service recognises and admits everywhere else, so if the fraud rule ever
+     * widened to the read authority this is the only assertion that would notice.</p>
+     */
+    @Test
+    @DisplayName("fraud marking admits an administrator and refuses an ordinary user")
+    void fraudMarkingAdmitsAnAdministratorAndRefusesAnOrdinaryUser() {
+        assertThat(grantedBy(SecurityConfig.fraudAccess(), JwtRoleConverter.ADMIN_AUTHORITY))
+                .as("an administrator must be able to mark an authorization fraudulent")
+                .isTrue();
+        assertThat(grantedBy(SecurityConfig.fraudAccess(), JwtRoleConverter.USER_AUTHORITY))
+                .as("an ordinary user must NOT be able to mark an authorization fraudulent")
+                .isFalse();
+        assertThat(grantedBy(SecurityConfig.fraudAccess(), "carddemo-unknown"))
+                .as("an unrecognised group must not reach the administrative rule")
+                .isFalse();
+    }
+
+    /**
+     * The read half of the matrix: both recognised groups reach it, and no other principal does.
+     *
+     * <p>Assumptions: the administrator is asserted alongside the ordinary user because the published
+     * contract's ordinary-user marker means EITHER group, so a read rule that admitted only one of them
+     * would refuse an administrator a route the contract grants. This is the counterpart of the fraud
+     * assertion above and the two together are the whole matrix.</p>
+     */
+    @Test
+    @DisplayName("the read rule admits either recognised group")
+    void readRuleAdmitsEitherRecognisedGroup() {
+        for (String group : SecurityConfig.BUSINESS_AUTHORITIES) {
+            assertThat(grantedBy(SecurityConfig.businessAccess(), group))
+                    .as("the %s group must reach this context's read surface", group)
+                    .isTrue();
+        }
+        assertThat(grantedBy(SecurityConfig.businessAccess(), "carddemo-unknown"))
+                .as("an unrecognised group must not reach the read surface")
+                .isFalse();
+    }
+
+    /**
+     * Confirms neither rule admits a caller that has not authenticated.
+     *
+     * <p>Assumptions: an unauthenticated request is normally answered by the entry point before any
+     * authorization manager runs, so this asserts the second line rather than the first: were the entry
+     * point ever removed or reordered, the managers themselves must still refuse. Both the absent
+     * principal and the present-but-unauthenticated one are covered because they arrive by different
+     * routes -- no credential at all versus a credential that failed -- and a manager that tested only
+     * the authority collection would admit the second.</p>
+     */
+    @Test
+    @DisplayName("neither rule admits an unauthenticated caller")
+    void neitherRuleAdmitsAnUnauthenticatedCaller() {
+        Authentication unauthenticated =
+                UsernamePasswordAuthenticationToken.unauthenticated("someone", "secret-not-checked");
+
+        for (AuthorizationManager<RequestAuthorizationContext> rule :
+                List.of(SecurityConfig.fraudAccess(), SecurityConfig.businessAccess())) {
+            assertThat(decide(rule, unauthenticated))
+                    .as("a principal that failed authentication must reach nothing")
+                    .isFalse();
+            assertThat(decide(rule, null))
+                    .as("a request with no principal at all must reach nothing")
+                    .isFalse();
+        }
+    }
+
+    /**
+     * Confirms the two path patterns discriminate the published operations the way the chain relies on.
+     *
+     * <p>Assumptions: the fraud pattern is a strict SUBSET of the read pattern, which is exactly why the
+     * chain declares the fraud rule first. This asserts the subset property rather than assuming it,
+     * because it is the premise of the ordering comment in the chain: if the fraud pattern ever stopped
+     * matching the fraud path, the request would fall to the read rule and the administrative narrowing
+     * would be gone with no rule appearing to have changed. The three paths used are the ones the
+     * contract publishes -- the search listing, the single-resource read and the fraud write.</p>
+     */
+    @Test
+    @DisplayName("the fraud pattern matches only the fraud route and is covered by the read pattern")
+    void fraudPatternMatchesOnlyTheFraudRouteAndIsCoveredByTheReadPattern() {
+        String search = BUSINESS_PATH + "/search";
+        String resource = BUSINESS_PATH + "/v1.some-opaque-cursor-key";
+        String fraud = resource + "/fraud";
+
+        assertThat(MATCHER.match(SecurityConfig.FRAUD_PATH_PATTERN, fraud))
+                .as("the administrative rule must match the fraud route")
+                .isTrue();
+        for (String read : List.of(search, resource)) {
+            assertThat(MATCHER.match(SecurityConfig.FRAUD_PATH_PATTERN, read))
+                    .as("%s must not be swept into the administrative rule", read)
+                    .isFalse();
+        }
+        for (String published : List.of(search, resource, fraud)) {
+            assertThat(MATCHER.match(SecurityConfig.READ_PATH_PATTERN, published))
+                    .as("%s must be covered by the read pattern, which is why order decides", published)
+                    .isTrue();
+        }
+    }
+
+    /**
+     * Confirms the group-to-authority conversion is the shared one and adds no prefix.
+     *
+     * <p>Assumptions: the group is asserted to appear as an authority of exactly its own name, because
+     * that is what makes {@code hasAuthority} the correct predicate and the role predicate the wrong one.
+     * A prefix introduced anywhere in the conversion would leave every rule in this chain matching
+     * nothing, and it would present as a blanket 403 at run time rather than as a startup failure -- so
+     * the prefixed forms are asserted ABSENT rather than merely the plain form present, since a
+     * conversion emitting both would satisfy the weaker check while making the vocabulary ambiguous.</p>
+     *
+     * <p>Assumptions: the authority collection is a SUPERSET of the group names, and the assertion is
+     * written to allow that deliberately. This framework version has its resource-server converter
+     * contribute an authentication-factor authority of its own alongside whatever the delegated converter
+     * returns, so an exact-match assertion would fail on a framework-supplied value rather than on
+     * anything this repository decides. The rules are unaffected because both installed managers test for
+     * the presence of a named authority, and a factor authority is not one of the two business names;
+     * the point being pinned here is the SPELLING of the group authorities, not the size of the
+     * collection.</p>
+     */
+    @Test
+    @DisplayName("authorities carry the provider group names verbatim, with no role or scope prefix")
+    void authoritiesCarryTheProviderGroupNamesVerbatim() {
+        for (String group : SecurityConfig.BUSINESS_AUTHORITIES) {
+            Authentication authentication =
+                    authenticationFrom(Map.of(JwtRoleConverter.GROUPS_CLAIM, List.of(group)));
+
+            assertThat(authentication.getAuthorities())
+                    .extracting(GrantedAuthority::getAuthority)
+                    .as("the %s group must become an authority of exactly that name", group)
+                    .contains(group)
+                    .as("no prefixed spelling of %s may be minted, or the rules would match nothing",
+                            group)
+                    .doesNotContain("ROLE_" + group, "SCOPE_" + group);
+        }
+    }
+
+    /**
+     * Confirms the correlation filter is registered by the shared kernel, ahead of the security chain.
+     *
+     * <p>Assumptions: this class declares no registration of its own, and that omission is only correct
+     * if the shared kernel's registration is genuinely present for a servlet application, so the absence
+     * is asserted positively rather than assumed. The bean is looked up by the NAME the kernel guards its
+     * own registration on, because that name is the mechanism: a registration contributed under any other
+     * name would not suppress the kernel's, and a reader needs the name to be load-bearing rather than
+     * incidental.</p>
+     *
+     * <p>Assumptions: the ordering claim is compared against the framework's own default position for the
+     * security chain rather than a number written here. The relationship is what matters -- the identity
+     * has to be bound before the bearer-token filter runs, or a request refused with 401 or 403, which
+     * never reaches a controller, would carry no identity on any of its log lines.</p>
+     */
+    @Test
+    @DisplayName("the shared kernel registers the correlation filter ahead of the security chain")
+    void sharedKernelRegistersTheCorrelationFilterAheadOfTheSecurityChain() {
+        new WebApplicationContextRunner()
+                .withConfiguration(
+                        AutoConfigurations.of(CardDemoCommonAutoConfiguration.class))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context)
+                            .as("this chain relies on the kernel's registration instead of its own")
+                            .hasBean("carddemoCorrelationIdFilterRegistration");
+
+                    FilterRegistrationBean<?> registration = context.getBean(
+                            "carddemoCorrelationIdFilterRegistration", FilterRegistrationBean.class);
+
+                    assertThat(registration.getFilter()).isInstanceOf(CorrelationIdFilter.class);
+                    assertThat(registration.getOrder())
+                            .as("the identity must be bound before the security chain runs")
+                            .isEqualTo(CardDemoCommonAutoConfiguration.CORRELATION_FILTER_ORDER)
+                            .isLessThan(SecurityFilterProperties.DEFAULT_FILTER_ORDER);
+                });
+    }
+
+    /**
+     * Applies one installed decision to a principal holding exactly one authority.
+     *
+     * @param rule the decision object the chain installs; must not be {@code null}
+     * @param authority the single authority the principal holds; must not be {@code null}
+     * @return {@code true} when the rule grants access to that principal, {@code false} when it does not
+     */
+    private boolean grantedBy(AuthorizationManager<RequestAuthorizationContext> rule,
+            String authority) {
+        return decide(rule, authenticationFrom(
+                Map.of(JwtRoleConverter.GROUPS_CLAIM, List.of(authority))));
+    }
+
+    /**
+     * Applies one installed decision to one authentication, tolerating an absent principal.
+     *
+     * @param rule the decision object the chain installs; must not be {@code null}
+     * @param authentication the principal to test, or {@code null} to model a request that carried none
+     * @return {@code true} when the rule grants access, {@code false} when it refuses or abstains
+     */
+    private boolean decide(AuthorizationManager<RequestAuthorizationContext> rule,
+            Authentication authentication) {
+        AuthorizationResult result = rule.authorize(() -> authentication, null);
+        return result != null && result.isGranted();
+    }
+
+    /**
+     * Applies the installed read decision to one authentication.
+     *
+     * <p>Refactoring Rationale: this delegates to {@link #decide} rather than invoking the manager itself,
+     * which it previously did. Two helpers each calling {@code authorize} meant two places where the
+     * treatment of an abstaining result could drift, and an abstain read as a grant is the direction that
+     * fails open.</p>
      *
      * @param authentication the principal to test; must not be {@code null}
      * @return {@code true} when the installed manager grants access, {@code false} when it does not
      */
     private boolean isGranted(Authentication authentication) {
-        AuthorizationResult result =
-                SecurityConfig.businessAccess().authorize(() -> authentication, null);
-        return result != null && result.isGranted();
+        return decide(SecurityConfig.businessAccess(), authentication);
     }
 
     /**

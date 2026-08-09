@@ -123,7 +123,10 @@ class ReportingQueryBootstrapIT {
     private StatementCardXrefRepository cardXrefs;
 
     /**
-     * The keyed customer lookup, injected so that its derived query is parsed.
+     * The keyed customer lookup, injected so that its identity fetch is resolved against the base
+     * fragment. Unlike the sibling roles this one declares no derived query, so injecting it proves
+     * that the selectively exposed read resolves at bootstrap rather than being parsed as a property
+     * expression.
      */
     @Autowired
     private StatementCustomerRepository customers;

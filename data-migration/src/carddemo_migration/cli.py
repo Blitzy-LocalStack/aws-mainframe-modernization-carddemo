@@ -29,14 +29,22 @@ SystemExit
     never sees a traceback in place of a status.
 
 Assumptions: only the subcommands whose backing modules are present in this
-distribution are registered here. ``load-dataset`` and the three ``verify-*`` passes
-that ``README.md`` section 5.2 contracts require ``readers/``, ``loaders/aurora.py``
-and ``verify/``, none of which this distribution contains, so they are absent from the
-parser rather than registered as commands that fail when invoked. A registered
-subcommand that cannot do its work is worse than an unregistered one: ``--help`` would
-advertise it, an orchestrator author would wire a state to it, and the failure would
-arrive in a deployment rather than at the point where the command was chosen. What this
-module guarantees is that every subcommand it lists is fully implemented.
+distribution are registered here. A registered subcommand that cannot do its work is
+worse than an unregistered one: ``--help`` would advertise it, an orchestrator author
+would wire a state to it, and the failure would arrive in a deployment rather than at
+the point where the command was chosen. What this module guarantees is that every
+subcommand it lists is fully implemented.
+
+Refactoring Rationale: ``load-dataset``, ``verify-row-counts``, ``verify-checksum`` and
+``verify-money-parity`` were absent from the parser for exactly as long as their backing
+modules were absent, and they are registered now that :mod:`carddemo_migration.readers`,
+:mod:`carddemo_migration.loaders.aurora` and :mod:`carddemo_migration.verify` are in the
+distribution. The rule above did not change; what changed is which side of it these four
+fall on. One command ``README.md`` section 5.2 contracts, ``verify-all``, remains
+unregistered, and remains so for the stated reason rather than by oversight: it is an
+aggregator over the three verification passes, each of which is individually reachable
+here, so nothing an operator needs is out of reach -- only the convenience of asking for
+all three in one invocation.
 
 Trade-offs: exit-code constants and the credential step's failure mapping are imported
 from :mod:`carddemo_migration.credentials` rather than restated. The cost is that this
@@ -136,11 +144,29 @@ _TABLE_COLUMNS: Final[tuple[str, ...]] = (
     "provenance",
 )
 
-# Assumptions: the placeholder is a blank, so a sensitive field whose rendering is not the
-#   declared width is masked from a chunk that carries none of the value at all. It exists
-#   only to satisfy mask_field's width contract on that path; the redaction it produces is a
-#   keyed tag, so nothing about the real value reaches the output through it.
-_REDACTION_PLACEHOLDER: Final[str] = " "
+# Refactoring Rationale: this stood as a blank placeholder that was multiplied to the
+#   field's declared width and then passed through mask_field, and it is replaced by a literal
+#   because that construction became a TRAP the moment its branch became reachable. The tag
+#   mask_field returns is an HMAC over the chunk, so a chunk that is a constant run of blanks
+#   yields a tag that is constant for the field name -- it looks exactly like the value-derived
+#   tag the same function returns on the equal-width path, and a reader comparing two decoded
+#   records would see identical tags for two DIFFERENT balances and conclude they matched. That
+#   is the "a diff reports no difference where one exists" failure the keyed tag exists to
+#   prevent, reintroduced by the one path that could not carry a real chunk.
+# Assumptions: a rendering whose length is not the field's declared width is now replaced
+#   by this literal, which no field of this corpus can produce and which claims nothing. It is
+#   reached for every numeric sensitive field, because a decoded number is rendered as its
+#   VALUE -- "194.00" for a twelve-byte zoned balance, "-1234567890.12" for a wide negative one
+#   -- so it is shorter or longer than the declared width far more often than equal to it.
+# Trade-offs: the value-stability a tag would have offered on that path is given up rather
+#   than approximated, and nothing is lost by it. This command decodes ONE record per
+#   invocation and never diffs two, so it has no use for stability; and mask_record, which does
+#   render whole records for comparison, is unaffected because it slices RAW characters and
+#   therefore always passes mask_field a chunk of exactly the declared width.
+#   Alternatives Considered: padding or truncating the rendering to the declared width to
+#   recover stability, rejected because truncation makes two balances differing only in cents
+#   render identically -- the same collision, arrived at by a route that looks correct.
+_WITHHELD_RENDERING: Final[str] = "<withheld>"
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -437,7 +463,7 @@ def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
         if len(value) == field.length:
             safe[field.name] = layouts.mask_field(field, value)
         else:
-            safe[field.name] = layouts.mask_field(field, _REDACTION_PLACEHOLDER * field.length)
+            safe[field.name] = _WITHHELD_RENDERING
     return safe
 
 
@@ -1198,8 +1224,11 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Stage CardDemo extracts into the versioned dataset bucket, apply the "
             "database credentials the service roles authenticate with, report the "
-            "record-layout contract the extracts are decoded against, and decode one "
-            "record of an extract through that contract to prove it before a load."
+            "record-layout contract the extracts are decoded against, decode one "
+            "record of an extract through that contract to prove it before a load, "
+            "bulk-load one dataset into the schema that owns it, and verify a load "
+            "three independent ways -- row counts, record checksums and exact money "
+            "totals."
         ),
         epilog=(
             "Exit codes follow tests/README.md section 8: 0 success, 2 usage, 8 the "

@@ -21,6 +21,7 @@ import java.net.URI;
 import java.security.Principal;
 import java.time.Clock;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,6 +55,49 @@ import org.springframework.web.bind.annotation.RestController;
  * collection path and the single-user subtree and requires the authority on both before any handler
  * runs, so a caller holding an ordinary token never reaches this class. Annotating each method as well
  * would put the rule in two places, and the copy that went stale would be the one no test exercised.
+ *
+ * <p>Assumptions: a method-level authorization annotation would be INERT here, which is the reason none
+ * is written rather than an omission. Method security is opt-in, and the annotation that installs its
+ * interceptor appears nowhere in this repository's services, so a handler-level rule would compile,
+ * activate nothing and refuse nobody. The failure mode is what makes this worth recording: a test
+ * asserting that an ordinary token is forbidden would still pass, because the filter chain refuses the
+ * request anyway, so the annotation would look proven while guarding nothing. The chain is therefore
+ * both the only place this rule takes effect and the only place a test can establish it. The predicate
+ * it uses must also stay in the AUTHORITY family: the converter in the shared kernel emits the identity
+ * provider's group name verbatim with no framework role prefix, so a role-family predicate would search
+ * for a prefixed authority nothing produces, match nothing, and answer every administrative request
+ * with a refusal while the context started cleanly.
+ *
+ * <p>Refactoring Rationale: nothing is remembered between requests. The baseline ended its task at every
+ * screen turn and carried continuity in one communication area that the terminal handed back --
+ * {@code app/cbl/COSGN00C.cbl} declares it across lines 64 to 67 as a byte string whose length depends
+ * on what was passed, detects a first entry from that length at line 80, and returns it at lines 98 to
+ * 102, naming it on line 100 -- and that single structure decomposes here into three separate
+ * mechanisms: the caller's identity arrives as validated token claims, the selected row arrives in the
+ * request path, and navigation is the browser client's own route change. The entry-versus-re-entry
+ * discriminator at {@code app/cpy/COCOM01Y.cpy} lines 29 to 31 has no counterpart at all, and the
+ * coupling that severs is the point: the baseline gated its field highlighting on that flag, so a field
+ * could be marked in error only on a re-entry, whereas what a caller sees here is decided solely by the
+ * response body it has just received.
+ *
+ * <p>Assumptions: a field entry is keyed by the caller-visible member name, and which field the baseline
+ * blamed is recoverable from where it homed the cursor -- each refusal ends in a {@code MOVE -1} to one
+ * field's length, as {@code app/cbl/COUSR01C.cbl} does to {@code USERIDL} on line 265 and to
+ * {@code FNAMEL} on line 272. It is NOT recoverable from a highlighting copybook, because no program in
+ * this domain copies one: the templated attribute book, the abend-data book and the function-key
+ * normaliser are absent from all five of them, each copying exactly eight books and testing the
+ * attention identifier against the framework's own constants directly. The keys this contract publishes
+ * are therefore the request members themselves -- {@code userId}, {@code firstName}, {@code lastName}
+ * and {@code userType} -- plus the one key this adapter originates below, for a parameter the baseline
+ * had no field for.
+ *
+ * <p>Assumptions: no sentence is shortened on its way out, and no truncation path exists here to be
+ * tested. The baseline's message field is {@code ERRMSGI PIC X(78)} -- at
+ * {@code app/cpy-bms/COUSR00.CPY} line 372, and the same declared width on the other three maps in this
+ * domain -- while the longest sentence any of these operations can produce is the 44-character "You are
+ * already at the bottom of the page..." of the list browse. Every sentence fits its baseline field with
+ * room to spare, so the decision about what to drop from an over-long message never arises and nothing
+ * here makes it.
  *
  * <p>Refactoring Rationale: the five operations sit on one adapter rather than on four, one per
  * reference program. This context owns a single aggregate -- the {@code auth.users} row -- and the five
@@ -165,16 +209,48 @@ public class UserController {
      * the committed contract fixes it, so a caller cannot ask for more; the alternative would let one
      * request read the whole table, which is the enumeration keyset paging exists to avoid.
      *
+     * <p>Alternatives Considered: positioning a page by an ordinal offset, which is the obvious shape and
+     * is rejected on a specific defect rather than a preference. Under concurrent insertion the number of
+     * rows preceding a position changes between one request and the next, so an offset-paged reader skips
+     * and repeats rows -- a row inserted ahead of the cursor pushes an unread row past the window, and a
+     * row deleted ahead of it pulls an already-read row back into view. A key that has been read keeps its
+     * place in the ordering no matter what is inserted or removed around it. This is a substitution rather
+     * than an approximation, because the baseline's browse was already a cursor over keys: it stored the
+     * page's last and first key as real key values at {@code app/cbl/COUSR00C.cbl} lines 435 and 389.
+     *
+     * <p>Refactoring Rationale: no page number is accepted, although the baseline screen genuinely had
+     * one. It exists as {@code PAGENUMI PIC X(8)} at {@code app/cpy-bms/COUSR00.CPY} line 60 and as
+     * {@code CDEMO-CU00-PAGE-NUM PIC 9(08)} at {@code app/cbl/COUSR00C.cbl} line 70 -- note that the two
+     * disagree on type, the map field being text and the working-storage field numeric -- but it never
+     * positioned a read. It is moved to the screen at lines 327 and 376 for display, and its only
+     * control-flow use is the guard at line 248 deciding whether an already-at-the-top message is shown.
+     * Accepting it would invent positioning the baseline never had, and an absolute ordinal cannot be
+     * honoured by a key-positioned query without counting every row ahead of the cursor, which is the
+     * enumeration this shape exists to avoid.
+     *
      * <p>Assumptions: reaching an end of the list is a SUCCESS. A request that lands on the last page
      * answers 200 with no further page available, and a request that cannot move at all answers 200 with
-     * the boundary page unchanged. The reference distinguished those two by message; the contract keeps
-     * them distinguishable by response, and the browser client composes the five reference sentences from
-     * the envelope.
+     * the boundary page unchanged. The baseline distinguished those two situations by message and the
+     * contract keeps them distinguishable by response, which is why neither is a 4xx. The two are
+     * genuinely distinct and are not merged: the baseline refused a move it could see was impossible
+     * before reading anything, at {@code app/cbl/COUSR00C.cbl} line 251 going back and line 273 going
+     * forward, and separately reported an end the read itself ran into, at line 603 on a not-found
+     * opening the browse, line 637 on end-of-file reading forward and line 671 on end-of-file reading
+     * back. Those are five distinct sentences, not three with repeats -- lines 603 and 671 differ from
+     * each other -- and the browser client composes whichever of the five applies from this envelope.
      *
      * <p>Assumptions: the cursor's SHAPE is constrained here and nothing else about it is. Whether it
      * authenticates, whether it has expired and which query, subject and direction it was issued for are
      * the sealer's to decide inside the service, which is where a refusal is turned into the field entry
      * the contract promises.
+     *
+     * <p>Trade-offs: the envelope publishes forward availability only -- there is no backward equivalent
+     * beside it -- so a client wanting to know whether it may page back reads whether it is holding a
+     * first key at all, an absent one meaning it is already at the beginning. Publishing a second flag
+     * would have cost an extra read per page, because the only way to know a preceding row exists is to
+     * look for one, and the client already has the cheaper answer in its hand. What is given up is that
+     * the two directions are not symmetrical in the envelope, which a reader comparing the four members
+     * would otherwise expect.
      *
      * @param cursor the sealed position to continue from, or {@code null} for the first page
      * @param direction {@code next} or {@code previous}, or {@code null} to default to next; meaningful
@@ -184,6 +260,10 @@ public class UserController {
      *     another
      * @return HTTP 200 carrying one page of at most ten summaries in ascending identifier order, with
      *     both boundary cursors and the forward availability indicator; never {@code null}
+     * @throws ClientInputException if the supplied cursor cannot be opened, or names a direction other
+     *     than the one requested, which the shared advice renders as 400 keyed to the cursor
+     * @throws IllegalStateException if the store could not be read, carrying the sentence the baseline
+     *     wrote for a failed lookup at {@code app/cbl/COUSR00C.cbl} lines 610, 644 and 678
      */
     @GetMapping
     public PageResponse<UserSummary> listUsers(
@@ -208,6 +288,23 @@ public class UserController {
      * creates the pool account itself and reads the subject back from the provider. Accepting a subject
      * would let a caller choose which pool identity the new row authenticates as, which is the whole of
      * the authorization decision.
+     *
+     * <p>Refactoring Rationale: the baseline validated a password field on this screen and this operation
+     * has no equivalent refusal, which is a deliberate absence rather than a dropped branch. The baseline
+     * tested it blank at {@code app/cbl/COUSR01C.cbl} line 136 and answered "Password can NOT be empty..."
+     * at line 138, homing the cursor on {@code PASSWDL} at line 140, because the credential was a column
+     * of the record it was about to write. Here the credential is not this service's to hold: the row
+     * carries no password column at all and the pool owns the secret, so there is no field to submit, none
+     * to validate and none to refuse. The branch has no target analogue and its absence is recorded here
+     * so a reader comparing the two validation chains does not read it as an omission.
+     *
+     * <p>Alternatives Considered: reading first to see whether the identifier is free, then writing. That
+     * is rejected on both fidelity and correctness. The baseline did not do it -- this program issues no
+     * read at all and exactly one write, keyed on the identifier, detecting a collision purely from the
+     * store's own duplicate response -- and a preflight read would open a window between the check and
+     * the write in which a concurrent request could take the identifier, so the check would pass and the
+     * write would still collide. Writing and letting the primary key decide has no such window, because
+     * the constraint is evaluated in the same statement that inserts.
      *
      * <p>Assumptions: the success sentence the reference composed -- "User " then the identifier then
      * " has been added ..." across {@code app/cbl/COUSR01C.cbl} lines 255 to 258, the literal on line 257
@@ -237,12 +334,29 @@ public class UserController {
     /**
      * Reads the whole of one user row.
      *
-     * <p>Purpose: this is the load arm the reference update and delete screens share, at
-     * {@code app/cbl/COUSR02C.cbl} line 143 and its counterpart in {@code app/cbl/COUSR03C.cbl}.
+     * <p>Purpose: this is the load arm the baseline's update and delete screens each performed for
+     * themselves, entered at {@code app/cbl/COUSR02C.cbl} line 143 and at {@code app/cbl/COUSR03C.cbl}
+     * line 142.
+     *
+     * <p>Refactoring Rationale: ONE operation serves both the update view and the delete view, where the
+     * baseline had two. Each program read the record independently -- {@code app/cbl/COUSR02C.cbl} issues
+     * its read at line 322 from its own {@code READ-USER-SEC-FILE}, and {@code app/cbl/COUSR03C.cbl}
+     * issues an identical one at line 269 from a paragraph of the same name at line 267 -- because each
+     * was a separate transaction that had to fill its own screen. The two reads returned the same row
+     * from the same file by the same key, and the only thing that differed was the screen painted
+     * afterwards, which is now the browser client's concern. Publishing two endpoints would therefore
+     * have split one read across two paths distinguished by nothing the server does, and a caller could
+     * not have said which to use except by naming the screen it intended to draw next.
      *
      * @param userId the identifier of the row to read; must not be blank and at most eight characters
      * @return HTTP 200 carrying the stored row, including the subject reference the list projection
      *     omits; never {@code null}
+     * @throws ClientInputException if the identifier is blank, carrying the sentence the baseline wrote
+     *     at {@code app/cbl/COUSR02C.cbl} line 148, which the shared advice renders as 400
+     * @throws NoSuchElementException if no row carries the identifier, carrying the baseline's
+     *     "User ID NOT found..." from {@code app/cbl/COUSR03C.cbl} line 289, rendered as 404
+     * @throws IllegalStateException if the store could not be read, carrying the baseline's
+     *     "Unable to lookup User..." from {@code app/cbl/COUSR03C.cbl} line 296
      */
     @GetMapping(path = SINGLE_USER_SUBPATH)
     public UserResponse getUser(
@@ -266,14 +380,33 @@ public class UserController {
      * statements of the same fact.
      *
      * <p>Assumptions: a body matching the stored row in every field is refused with 400. That is the
-     * reference's own behaviour -- its else branch at {@code app/cbl/COUSR02C.cbl} line 237 writes
-     * {@code 'Please modify to update ...'} in RED at lines 239 to 241, and the colour is what marks it a
-     * rejection rather than advice, since the same field is written neutral at line 338 and green at line
-     * 371 in the same program. The comparison itself is the service's, because it needs the stored row.
+     * baseline's own behaviour -- its modified test at {@code app/cbl/COUSR02C.cbl} line 236 takes the else
+     * arm at line 238 and writes {@code 'Please modify to update ...'} in RED at lines 239 to 241, and the
+     * colour is what marks it a rejection rather than advice, since the same field is written neutral at
+     * line 338 and green at line 371 in the same program. The comparison itself is the service's, because
+     * it needs the stored row. This is dirty detection and not concurrency control: the refusal is that
+     * the request asks for no change, so nothing here compares a version, and a caller whose values simply
+     * lost a race is not what this status reports.
+     *
+     * <p>Refactoring Rationale: navigating away does NOT save. The baseline's back key wrote the row on
+     * its way out -- {@code app/cbl/COUSR02C.cbl} line 111 selects it and line 112 performs the update
+     * before line 119 returns to the previous screen -- so leaving the screen committed whatever had been
+     * typed, whether or not the operator meant to keep it. That behaviour is not reproduced. Navigation
+     * here is the browser client's route change and reaches no handler at all, so the only way to change a
+     * row is to call this operation deliberately. The divergence is documented rather than silently made:
+     * a mutation that happens because the operator left a screen cannot be expressed over HTTP without
+     * inventing a request the client never sent.
      *
      * @param userId the identifier of the row to change; must not be blank and at most eight characters
      * @param request the validated values the row is to hold; must not be {@code null}
      * @return HTTP 200 carrying the row as stored after the change; never {@code null}
+     * @throws ClientInputException if the identifier is blank, if a submitted field is blank, if the user
+     *     type is outside the two the column admits, or if the body asks for no change at all, each
+     *     carrying the baseline's own sentence and rendered as 400
+     * @throws NoSuchElementException if no row carries the identifier, carrying the baseline's
+     *     "User ID NOT found..." from {@code app/cbl/COUSR02C.cbl} lines 342 and 343, rendered as 404
+     * @throws IllegalStateException if the change could not be written, carrying the baseline's
+     *     "Unable to Update User..." from {@code app/cbl/COUSR02C.cbl} lines 386 and 387
      */
     @PutMapping(path = SINGLE_USER_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public UserResponse updateUser(
@@ -330,6 +463,30 @@ public class UserController {
      * " has been deleted ..." across lines 318 to 321, the literal on line 320 -- is not returned, both
      * for the reason the create operation records and because this status carries no body at all.
      *
+     * <p>Refactoring Rationale: when this operation fails, the sentence it reports is the baseline's
+     * "Unable to Update User..." -- said of a DELETE -- and it is carried across unchanged. The baseline
+     * writes exactly that at {@code app/cbl/COUSR03C.cbl} line 332 on a failed delete, and the wording is
+     * not this program's own: the literal's home is the update program, at {@code app/cbl/COUSR02C.cbl}
+     * lines 386 and 387, and this program was plainly cloned from that one -- the two carry their eight
+     * {@code COPY} statements on byte-identical lines 49, 60, 62, 63, 64, 65, 67 and 68. The mismatched
+     * verb travelled with the copy. It is documented here rather than smoothed over, because message text
+     * is observable output under transformation rule T8 and the baseline is the specification for it.
+     *
+     * <p>Trade-offs: preserving that wording means a human reading a failed deletion is told an update
+     * could not be performed, which is the wrong verb and is worse for that reader than a corrected
+     * sentence would be. What preservation buys is that any client asserting on the exact string -- the
+     * only kind of assertion available, since these sentences are the contract's error vocabulary --
+     * continues to match, and that the target introduces no observable difference the baseline can be
+     * diffed against. The reader's confusion is recoverable from this note; a silently reworded external
+     * interface is not recoverable at all.
+     *
+     * <p>Assumptions: the baseline's unrecognised-key prompt has no counterpart here and none is invented.
+     * Its else arm moves the shared invalid-key sentence at {@code app/cbl/COUSR03C.cbl} line 128 -- the
+     * one place in this whole domain that consumes the shared message book -- and it answers a keystroke
+     * the terminal could not interpret. Over HTTP there is no keystroke to misread: a request either
+     * addresses a method this path publishes or is refused by the framework before any handler runs, so
+     * the condition the sentence described cannot arise and nothing here can raise it.
+     *
      * @param userId the identifier of the row to delete; must not be blank and at most eight characters
      * @param confirmed explicit confirmation that the row named in the path is to be destroyed; must be
      *     present and {@code true}
@@ -337,6 +494,10 @@ public class UserController {
      * @throws ClientInputException if the confirmation is absent or not affirmative on a direct
      *     in-process call, which the shared advice renders as 400 carrying a single entry keyed to the
      *     confirmation, and nothing is deleted
+     * @throws NoSuchElementException if no row carries the identifier, carrying the baseline's
+     *     "User ID NOT found..." from {@code app/cbl/COUSR03C.cbl} line 325, rendered as 404
+     * @throws IllegalStateException if the row could not be deleted, carrying the baseline's line 332
+     *     sentence discussed above
      */
     @DeleteMapping(path = SINGLE_USER_SUBPATH)
     public ResponseEntity<Void> deleteUser(
@@ -396,6 +557,23 @@ public class UserController {
      * <p>Assumptions: no field entry accompanies the body. The contract declares this status with a
      * message and no field array, and the identifier is not malformed -- it is unavailable, which is a
      * statement about the collection rather than about the value the caller sent.
+     *
+     * <p>Assumptions: there is exactly ONE duplicate outcome to render, not two. The baseline tests two
+     * distinct store responses for it -- a duplicate key at {@code app/cbl/COUSR01C.cbl} line 260 and a
+     * duplicate record at line 261 -- but the two fall through to a single shared body at lines 262 to 266
+     * and produce one sentence, one highlighted field and one screen. Modelling them as two refusals here
+     * would invent a distinction the baseline never exposed and would oblige this contract to say which of
+     * the two a caller received, which the baseline's own operator could not tell either.
+     *
+     * <p>Trade-offs: the store's own diagnostic codes are not carried into this body. The baseline printed
+     * them to the operator console on every unexpected response -- {@code app/cbl/COUSR00C.cbl} lines 608,
+     * 642 and 676, {@code app/cbl/COUSR02C.cbl} lines 347 and 384, {@code app/cbl/COUSR03C.cbl} lines 294
+     * and 330 -- and that detail is genuinely useful when diagnosing a failure, so dropping it from the
+     * response costs something real. It is dropped because a console is read by an operator inside the
+     * system boundary whereas this body is read by whoever called, and a response code naming the store's
+     * internal condition tells an unauthenticated-until-now caller how the store is built and which of its
+     * constraints it just met. The diagnostic is kept where the console kept it, in this service's log,
+     * where the correlation identifier on both sides joins the two records.
      *
      * @param failure the conflict the service raised; its sentence is the contract's literal and its
      *     class is logged

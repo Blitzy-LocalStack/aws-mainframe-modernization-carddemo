@@ -16,6 +16,7 @@ import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.account.mapper.AccountContextMapper;
+import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CardXrefMapper;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
@@ -187,11 +188,11 @@ class AccountContextContractTest {
     /**
      * Builds the read path over substituted repositories.
      *
-     * <p>Assumptions: the two mapper collaborators the service gained for the human view are substituted
-     * with mocks here rather than built for real, because every case in this class asserts the MACHINE
-     * contract -- the three monetary strings a neighbouring context reads -- and never touches the human
-     * view. Constructing a real customer mapper would additionally require the protected-identifier port,
-     * which is a dependency this class's subject does not use.</p>
+     * <p>Assumptions: the three mapper collaborators the service gained for the human view are
+     * substituted with mocks here rather than built for real, because every case in this class asserts
+     * the MACHINE contract -- the three monetary strings a neighbouring context reads -- and never
+     * touches the human view. Constructing a real customer mapper would additionally require the
+     * protected-identifier port, which is a dependency this class's subject does not use.</p>
      *
      * @param crossReferences the cross-reference repository substitute
      * @param accounts the account repository substitute
@@ -202,7 +203,7 @@ class AccountContextContractTest {
             AccountRepository accounts,
             CustomerRepository customers) {
         return new AccountViewService(accounts, customers, crossReferences, this.mapper,
-                mock(CustomerMapper.class), mock(CardXrefMapper.class));
+                mock(AccountMapper.class), mock(CustomerMapper.class), mock(CardXrefMapper.class));
     }
 
     /**

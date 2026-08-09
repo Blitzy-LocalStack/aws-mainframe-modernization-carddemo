@@ -189,13 +189,25 @@ where each is stated, under the same four category names.
 **Target contract.** The batch chain will be one state machine,
 `carddemo-daily-batch`, started by a managed scheduler whose schedule expression
 is a per-environment infrastructure parameter rather than a value fixed by this
-document. Each state that does real work will run a container task through the
+document. Each state that does real work runs a container task through the
 **synchronous run-task integration**, so the state does not complete until the
-task does, and per-step arguments will arrive as **container overrides** — the
-direct analogue of a JCL `PARM=` value and of a `DD DSN=` resolved at submission.
-`infra/modules/step-functions-batch/main.tf` is absent, so the table and diagram
-in this section specify what that resource graph must implement; they do not
-describe a deployed state machine.
+task does, and per-step arguments arrive as **container overrides** — the direct
+analogue of a JCL `PARM=` value and of a `DD DSN=` resolved at submission. Each
+task-invoking state passes `--job=` and `--business-date=` as its `Command`
+override and the dataset bucket name as an environment entry, exactly as the
+table below specifies.
+
+`infra/modules/step-functions-batch/main.tf` is authored and declares all eleven
+states, and both environment roots instantiate it. The table and diagram in this
+section therefore describe the authored resource graph; they still do not describe
+a *deployed* state machine, because applying the package to a live account is an
+operator action outside this repository's scope.
+
+*Refactoring Rationale:* this paragraph said the module's `main.tf` was absent and
+that the table specified what a future resource graph must implement. Both halves
+were overtaken when the module landed. The distinction worth keeping is the other
+one — authored versus deployed — so the correction narrows the caveat to that
+rather than dropping it.
 
 | # | State | Replaces | Mechanism |
 |---|---|---|---|
@@ -552,11 +564,25 @@ grep -rn -A3 'DEFINE GENERATIONDATAGROUP' app/jcl
 
 The authored `infra/modules/s3-datasets` contract declares prefixes, versioning
 and lifecycle configuration for **ten** families, and publishes the effective
-logical count through `generation_retention_by_family`. Assumptions: **a design
+logical count through `noncurrent_version_retention`, and the ten families
+themselves through `dataset_prefixes` and `dataset_uris`. Assumptions: **a design
 that declared six would silently omit four cleanup contracts**. The reject stream
 is the fourth of those four and the most consequential to lose, since it is the
-audit trail of every transaction the chain declined to post. The missing
-environment roots have not yet wired this output into batch task overrides.
+audit trail of every transaction the chain declined to post.
+
+Both environment roots instantiate the module, and each passes its
+`bucket_name` into `step-functions-batch`, which sets it on every task-invoking
+state as the `CARDDEMO_DATASET_BUCKET` environment override. The per-family
+prefixes are NOT passed as overrides: each task composes its own prefix from that
+bucket name and the family it is writing, so a family added to the module needs no
+change at the orchestration boundary.
+
+*Refactoring Rationale:* this paragraph named an output, `generation_retention_by_family`,
+that the module does not declare — its retention output is `noncurrent_version_retention` —
+and reported the environment roots as "missing". Both roots exist and both wire the
+bucket. The prefix-versus-bucket distinction is stated explicitly because the
+original sentence read as though a wiring were outstanding when the design does not
+call for one.
 
 ### Relative generation references
 
@@ -607,9 +633,12 @@ Bucket versioning and lifecycle remain necessary, but for a **different layer**:
 they protect and expire repeated writes of the same object key. Terraform's
 `newer_noncurrent_versions` counts versions of one key; it cannot count distinct
 current keys beneath `gen=0001/`, `gen=0002/` and so on. The shared
-`generation_retention_by_family` value keeps the writer's logical-prefix count and
+`noncurrent_version_retention` value keeps the writer's logical-prefix count and
 the lifecycle's same-key revision count under one configuration authority without
-claiming they are the same mechanism.
+claiming they are the same mechanism. *Refactoring Rationale:* this sentence named
+the value `generation_retention_by_family`, which the module does not declare; the
+output it does declare is `noncurrent_version_retention`, and the naming error was
+the same one corrected earlier in this document.
 
 Trade-offs: retention is enforced when a writer stages a generation rather than
 as an autonomous catalog service. That keeps the operation adjacent to the write

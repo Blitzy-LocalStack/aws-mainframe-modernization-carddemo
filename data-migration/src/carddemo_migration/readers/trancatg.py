@@ -2,12 +2,11 @@
 
 Purpose
 -------
-Turn the transaction category reference extract into decoded records the Aurora loaders
-and the verification passes can consume, one record at a time, from either of the two forms the
-baseline ships: the
-line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield the same
-decoded shape, so a caller can swap corpora and compare the two without adapting to a second
-contract.
+Turn the transaction category reference extract into decoded records the Aurora loaders and the
+verification passes can consume, one record at a time, from either of the two forms the baseline
+ships: the line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield
+the same decoded shape, so a caller can swap corpora and compare the two without adapting to a
+second contract.
 
 This module follows the contract ``carddemo_migration.readers.account`` established and differs
 from it only in which record descriptor it names. Where the reasoning behind a step is identical
@@ -16,35 +15,90 @@ drift apart and then one of them is wrong; where this record differs, the differ
 here at the point it matters.
 
 What this module reads
----------------------
+----------------------
 The record is ``TRAN-CAT-RECORD`` as declared in ``app/cpy/CVTRA04Y.cpy``, and its byte geometry is
-resolved exclusively through ``TRANCAT_LAYOUT`` in ``carddemo_migration.copybook.layouts``.
-The two shipped corpora are ``app/data/ASCII/trancatg.txt`` and
-``app/data/EBCDIC/AWS.M2.CARDDEMO.TRANCATG.PS``, eighteen records each. Both are
-REFERENCE-only inputs, opened read-only.
+resolved exclusively through ``TRANCAT_LAYOUT`` in ``carddemo_migration.copybook.layouts``. The two
+shipped corpora are ``app/data/ASCII/trancatg.txt`` and
+``app/data/EBCDIC/AWS.M2.CARDDEMO.TRANCATG.PS``, eighteen records each. Both are REFERENCE-only
+inputs, opened read-only and never rewritten, re-encoded or normalised in place.
 
-Assumptions: this seed is one of the three whose line terminators are ragged -- all
-eighteen of its rows end in a carriage return and a separator, where the account, card,
-customer, cross-reference and disclosure-group seeds use the separator alone. Terminator
-handling is therefore left entirely to the shared text iterator, which strips at most
-one carriage return and one separator per row in one place.
+The key group name collides with an unrelated record's, at a different width
+----------------------------------------------------------------------------
+Assumptions: ``app/cpy/CVTRA04Y.cpy`` line 5 and ``app/cpy/CVTRA01Y.cpy`` line 5 both declare a
+group literally named ``TRAN-CAT-KEY``, and the two are unrelated. Here it spans SIX bytes over
+``TRAN-TYPE-CD`` and ``TRAN-CAT-CD``; in the category-BALANCE record it spans SEVENTEEN over
+``TRANCAT-ACCT-ID``, ``TRANCAT-TYPE-CD`` and ``TRANCAT-CD``. Selecting a descriptor by that group
+name would therefore pick the wrong geometry from either side of the pair, and the failure is
+silent rather than loud: this record's 50-byte description begins at offset 6, so reading it under
+the balance record's key would displace it by ELEVEN bytes and still yield a full-width record of
+plausible characters. Descriptors are resolved per RECORD name for exactly this reason, and the
+key width below is read from the descriptor rather than written here.
 
-Assumptions: this record's key is COMPOSITE -- a two-character type code followed by a
-four-digit category code, six characters in total -- and the type half is a foreign key
-into the transaction-type reference, which the target declares ``ON DELETE RESTRICT`` to
-preserve the baseline's Db2 semantic. The key width is read from the descriptor rather
-than written here, so a caller cannot slice five characters of it and collide with a
-sibling category of the same type.
+Alternatives Considered: a shared composite-key helper, keyed on the group name and used by both
+readers, was evaluated and rejected. The name match is a coincidence between two records that
+share no field, no width and no purpose, so a helper spanning them would couple two independent
+layouts: a change made to suit one would silently mis-decode the other, in the one place where
+neither reader's own tests would look. This module therefore shares NO key-handling code with
+``carddemo_migration.readers.tcatbal``, which states the reciprocal half of the same finding.
+
+This record has no second implementation to be checked against
+--------------------------------------------------------------
+Assumptions: ``CVTRA04Y`` is one of the THREE base masters the parity oracle's codec does not
+register, so unlike most readers in this subpackage this one has no independently written Python
+implementation of the same geometry to disagree with it. The oracle's
+``tests/helpers/record_codec.py`` transcribes eight copybooks -- ``CVACT01Y``, ``CVTRA06Y``,
+``CVTRA02Y``, ``CVACT03Y``, ``CVTRA01Y``, ``CVACT02Y``, ``CVCUS01Y`` and ``CVTRA05Y`` -- and this
+record's is not among them; the other two absentees are ``CVTRA03Y`` and ``CSUSR01Y``. That file
+is REFERENCE-only, so the gap is recorded here rather than closed by adding a layout to it.
+
+Assumptions: what replaces the missing vector is an exact division. The EBCDIC extract is 1080
+bytes and the declared record length is 60, so it holds ``1080 / 60 = 18`` records with remainder
+ZERO -- a remainder of anything else would mean the declared width is wrong -- and the ASCII seed
+independently agrees at eighteen rows. That arithmetic is the whole of the independent
+corroboration available here, which is why the geometry is imported from the descriptor rather
+than restated: a transcription error in this record cannot surface as a decode failure, only as
+wrong reference data in the table other rows point at.
+
+Assumptions: do not read the oracle's ELEVEN registry keys as covering the eleven base masters.
+They are the eight transcribed copybooks above plus three DERIVED layouts -- the statement view,
+the reject stream and the interest transaction -- so the two counts coincide by accident.
+Equating them is exactly how the three absent masters come to look covered, and this record is
+one of the three.
+
+Uniform line terminators here, ragged in the siblings, so the rule is per row
+-----------------------------------------------------------------------------
+Assumptions: this seed is the data point that settles why terminator handling cannot be chosen per
+FILE. Measured rather than assumed: ALL eighteen of its rows end in a carriage return and a
+separator, the final row included, which is what its byte count states exactly --
+``18 x (60 + 2) = 1116``. Its two nearest siblings are ragged where this one is uniform:
+``tcatbal.txt`` carries the pair on 49 of 50 rows and ``trantype.txt`` on 6 of 7, each ending in a
+bare separator (``49 x 52 + 1 x 51 = 2599`` and ``6 x 62 + 1 x 61 = 433``). No single whole-file
+newline mode is correct across the three -- one chosen to suit this file would strip a real
+character from the last row of the other two, and one chosen to suit them would leave a carriage
+return inside this file's pad on every row. The rule must therefore be per ROW: strip at most one
+carriage return and one separator, testing the pair BEFORE either single character. That rule is
+stated once in the shared text iterator, so no terminator handling appears in this module at all.
+
+Assumptions: this record is the CHILD side of the reference-data foreign key. Its two-character
+``TRAN-TYPE-CD`` points at the transaction-type reference, and the target declares that constraint
+``ON DELETE RESTRICT`` to preserve the baseline's Db2 ``XTRNTYCAT`` semantic -- which is why
+deleting a type that categories still reference surfaces as a refusal to the caller rather than as
+a database error. The eighteen rows this reader decodes are the ones the reference schema's seed
+migration loads. No constraint is built or enforced here, because a reader decodes one record and
+knows nothing of another table's rows; the obligation this inheritance places on THIS module is
+narrower and absolute -- decode that two-character code faithfully, because a code taken from the
+wrong offset would not fail here and would orphan or misparent rows one table away.
 
 Decoded shape
 -------------
 A decoded record is a ``dict`` keyed by the field name exactly as the copybook spells it, in
 declaration order, which is the record's byte order. A character field maps to its characters at
-full declared width, untrimmed. An unsigned display field maps to its characters too,
-once they are proven to be the digits its picture clause requires, so the leading zeroes
-in the four-digit category code survive -- which matters here because those zeroes are
-half of the composite key.
-The trailing pad is absent; see :data:`DROPPED_FIELD_NAMES`.
+full declared width, untrimmed -- a trailing blank inside the description is data and is not
+stripped here. An unsigned display field maps to its characters too, once they are proven to be
+the digits its picture clause requires, so the leading zeroes in the four-digit category code
+survive; that matters here specifically, because those zeroes are half of the composite key and
+``0001`` and ``1`` are not the same key. The trailing pad is absent; see
+:data:`DROPPED_FIELD_NAMES`.
 
 That shape is deliberately the one ``carddemo_migration.copybook.ebcdic_codec.decode_record``
 publishes, minus the pad, which is what makes the two encodings comparable rather than merely
@@ -52,12 +106,14 @@ similar.
 
 Transaction-category exposure control
 -------------------------------------
-None of this record's three data fields is marked sensitive, and that is a deliberate
-classification. The type code, the category code and the description are closed-domain
-reference values shared across every account and every transaction, so none designates
-anybody. The rendering helpers below are still published and still route through the
-shared masking functions, so marking a field sensitive in the layout would redact it
-here with no change to this module.
+Assumptions: NO field of this record is marked sensitive, and that is a deliberate
+classification rather than an omission. The type code, the category code and the description are
+closed-domain reference values shared across every account and every transaction, so none of them
+designates a person and none reveals anything about a particular cardholder. This reader therefore
+suppresses nothing and publishes no ``SUPPRESSED_FIELD_NAMES``, because every field it decodes has
+a destination. The rendering helpers below are still published and still route through the shared
+masking functions, so marking a field sensitive in the layout would redact it here with no change
+to this module.
 
 Design decisions (WHY)
 ----------------------
@@ -76,11 +132,16 @@ Trade-offs:
     that this reader behaves identically on the committed seed and on a production extract many
     orders larger, so the one proven against the seed is the one that runs.
 Assumptions:
-    **There is no binary floating-point value anywhere in this module.** This record declares no
-    signed display field, so the prohibition costs nothing to honour here, but it is stated rather
-    than left implicit: the identifiers this record carries exceed the range a binary float
-    represents exactly, so routing one through a float would corrupt the very identifier the
-    target table joins on. Identifiers stay character strings end to end.
+    **This record declares NO money field, and there is no binary floating-point value anywhere in
+    this module.** The absence is stated outright because almost every sibling reader has a money
+    path and a reader of this one will go looking for it: ``CVTRA04Y`` declares no ``PIC S9(n)V99``
+    and no signed display field of any kind, so this module publishes no
+    :class:`decimal.Decimal`, imports no signed codec and has no money arithmetic to get wrong.
+    The package-wide prohibition on ``float`` in a money path is therefore honoured here trivially
+    rather than carefully, and it is named only so that its absence reads as the uniform rule
+    holding rather than as this record having been exempted from it. Note the contrast with the
+    identically-key-named category-BALANCE record, which does carry a money field: the two are
+    easy to conflate, and only one of them has an amount to preserve.
 Trade-offs:
     **Standard library plus ``carddemo_migration.copybook``, and nothing else.** No database
     driver, no AWS SDK and no character-set package is imported here, so this reader imports and
@@ -96,10 +157,22 @@ from typing import Final
 
 # WHY : Assumptions: these imports are absolute and rooted at the distribution package rather
 #   than relative, and the record descriptor named below is the ONLY statement of this record's
-#   geometry anywhere in the package. A relative import is how the single-sourcing guarantee gets
-#   broken quietly: a module moved between `readers/` and `loaders/` keeps importing successfully
-#   but against a different sibling, and this project's ruff configuration bans relative imports
-#   outright for that reason.
+#   geometry anywhere in the package. That is the Python analogue of compiling every COBOL program
+#   against a single `cobc -I app/cpy` include path, and the reference suite's own guide states the
+#   same rule for its COBOL unit tests: never duplicate a layout, keep it single-sourced. A
+#   relative import is how the guarantee gets broken quietly: a module moved between `readers/` and
+#   `loaders/` keeps importing successfully but against a different sibling, and this project's
+#   ruff configuration bans relative imports outright for that reason.
+# WHY : Assumptions: the descriptor is selected by NAME, and a record length could not select it
+#   even if this module wanted to. `TRANCAT_LAYOUT` and its sibling `TRANTYPE_LAYOUT` are BOTH 60
+#   bytes -- transaction CATEGORY from `CVTRA04Y` and transaction TYPE from `CVTRA03Y` -- so a
+#   length-keyed lookup matches both and picks whichever it met first. Picking the wrong one is
+#   silent rather than loud: this record leads with a SIX-byte composite key where that one leads
+#   with a two-byte key, so its description begins at offset 6 against that record's 2. Every row
+#   would decode to the declared width with its description shifted by four bytes, and no width
+#   check anywhere could report it. `TCATBAL_LAYOUT` is the third confusable name and the one a
+#   matching key-group name would reach; it is 50 bytes, so length separates it from this record
+#   even though the group name does not.
 from carddemo_migration.copybook.ebcdic_codec import decode_record, iter_ebcdic_records
 from carddemo_migration.copybook.layouts import (
     TRANCAT_LAYOUT,
@@ -138,9 +211,15 @@ DecodedTransactionCategory = dict[str, str]
 # WHY : Assumptions: the trailing pad is identified by NAME and not by position, and the
 #   convention was measured rather than assumed: across all fourteen registered layouts every
 #   record declares exactly one pad, named either `FILLER` or, where the copybook qualified it,
-#   with that word as its final hyphenated component -- which is exactly this record's case for
-#   the security file and is why a positional rule would have had to special-case it. Testing the
-#   name keeps this module free of any byte position of its own.
+#   with that word as its final hyphenated component. THIS record's pad is the unqualified form --
+#   `CVTRA04Y` line 9 declares a bare `FILLER PIC X(04)` -- so the suffix arm below never fires
+#   here; it is retained because the identical rule is applied by every sibling reader and one of
+#   them does face a qualified pad, and a rule that differed per reader is one a maintainer would
+#   have to re-check per reader.
+# WHY : Trade-offs: matching on the name rather than on the offset keeps this module free of any
+#   byte position of its own, which a positional rule would reintroduce for no gain -- the pad is
+#   already the last declared field, so a position test would restate offset 56 here and give the
+#   descriptor a second place to drift from.
 _PAD_FIELD_NAME: Final[str] = "FILLER"
 _PAD_NAME_SUFFIX: Final[str] = f"-{_PAD_FIELD_NAME}"
 
@@ -488,7 +567,10 @@ def decode_ascii_transaction_category(
     #   fit. Truncation would silently discard real data and padding would invent it, and either
     #   way the row would still decode to well-formed characters, so a wrong-width record would
     #   load under a misread key with nothing reporting it. The accepted cost is that a genuinely
-    #   malformed source stops the load instead of loading partially.
+    #   malformed source stops the load instead of loading partially, and for THIS record that
+    #   trade is settled by the absence noted in the module docstring: with no reference Python
+    #   implementation of this layout to compare a decoded row against, failing loudly on a width
+    #   that cannot be right is the only signal available at all.
     if len(record) != TRANCAT_LAYOUT.reclen:
         raise RecordLengthError(
             f"record {number} of {TRANCAT_LAYOUT.name} is {len(record)} characters against a"
@@ -552,10 +634,20 @@ def iter_ascii_transaction_categories(
     #   here is exactly the drift this dependency edge exists to prevent, and it would be
     #   invisible: two readers stripping terminators slightly differently both return well-formed
     #   records.
-    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- right-padding it
-    #   with blanks -- is inherited deliberately. Every row of this dataset's seed reaches
-    #   the declared width once its carriage return and separator are stripped, so the
-    #   tolerance does not engage; overriding it would fork the contract for one reader.
+    # WHY : Assumptions: the per-ROW terminator rule that iterator applies is a requirement here
+    #   rather than a defensive habit, and this seed is the measurement that proves it. All eighteen
+    #   of its rows carry a carriage return and a separator, the last row included -- `18 x 62 =
+    #   1116` bytes exactly -- whereas `tcatbal.txt` carries the pair on 49 of 50 rows and
+    #   `trantype.txt` on 6 of 7, each ending bare. A whole-file mode chosen to suit this corpus
+    #   would strip a real character from the final row of those two, and one chosen to suit them
+    #   would leave a carriage return inside this record's pad on every row. Testing the pair before
+    #   either single character is what makes both cases come out right from one implementation.
+    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- right-padding it with blanks
+    #   -- is inherited deliberately rather than overridden. Measured rather than assumed: every row
+    #   of THIS seed already reaches the full 60 characters once the per-row strip has run, so the
+    #   tolerance never engages here at all. It exists because one shipped seed conversion lost its
+    #   trailing pad entirely, and padding on the right cannot move a field that is present.
+    #   Overriding it for this reader would fork the text-mode contract for one record.
     records = iter_ascii_text_records(source, TRANCAT_LAYOUT.reclen)
 
     for number, record in enumerate(records, start=1):
@@ -721,12 +813,19 @@ def iter_ebcdic_transaction_categories(
         display codec.
     """
     # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
-    #   terminator is looked for, honoured, stripped or padded on this path. A fixed-length
-    #   blocked dataset carries no terminators, so a byte that happens to equal a newline is field
-    #   data -- a low-order digit, a packed nibble pair or a pad byte -- and splitting on it would
-    #   produce pieces of wildly differing lengths, most cut through the middle of a field. The
-    #   correctness test for this dataset is that its size divides by the declared record length
-    #   with no remainder, which the delegated iterator checks before it yields the first record.
+    #   terminator is looked for, honoured, stripped or padded on this path. Measured rather than
+    #   assumed: the shipped extract contains no separator byte and no carriage return at all, so a
+    #   byte that happened to equal either would be field data -- a low-order digit or a pad byte --
+    #   and splitting on it would produce pieces of wildly differing lengths, most cut through the
+    #   middle of a field. Carrying the text path's terminator logic here would consume a DATA byte
+    #   as a separator.
+    # WHY : Assumptions: the correctness test for this dataset is that its size divides by the
+    #   declared record length with no remainder -- 1080 bytes over a 60-byte record is 18 records
+    #   remainder ZERO -- and the delegated iterator checks exactly that before it yields the first
+    #   record. For this layout that division carries more weight than it does for most siblings: it
+    #   is the substitute for the reference Python vector this record does not have, as the module
+    #   docstring records, so it is the one independent check standing between a transcription error
+    #   and a silently wrong reference table that every posted transaction's category points at.
     # WHY : Assumptions: the text form's tolerances must never reach here. Right-padding a short
     #   piece or stripping a trailing byte would turn a genuine length failure into a plausible
     #   record, which is why this path reaches a different entry point of the layouts module and
@@ -773,6 +872,18 @@ def read_ebcdic_transaction_categories(path: pathlib.Path) -> Iterator[DecodedTr
         or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
         display codec.
     """
+    # WHY : Assumptions: the caller supplies an EXPLICIT file and this function never globs the
+    #   directory to find one, and the hazard is concrete rather than theoretical:
+    #   `app/data/EBCDIC/` holds a ZERO-BYTE `.gitkeep` alongside the datasets, and it also holds
+    #   extracts whose names differ from one another by a single character. A pattern match would
+    #   sweep the placeholder in, or read a dataset twice -- and a doubled image still divides by 60
+    #   with remainder zero, so the exact-division check that stands in for this record's missing
+    #   reference vector would pass on thirty-six records where there are eighteen.
+    # WHY : Assumptions: a zero-byte file is a dataset with NO records and is not an error, so
+    #   nothing here treats emptiness as a failure. The delegated iterator yields nothing for it and
+    #   this generator ends immediately, which is the correct reading of an extract that ran and
+    #   selected no rows -- and it is also what keeps the `.gitkeep` above from being reported as a
+    #   corrupt dataset if a caller ever does name it.
     # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
     #   BEFORE yielding a first record, so a truncated dataset fails up front instead of part way

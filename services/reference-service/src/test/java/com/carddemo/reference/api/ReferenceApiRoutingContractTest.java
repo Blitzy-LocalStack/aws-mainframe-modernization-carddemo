@@ -48,7 +48,7 @@ class ReferenceApiRoutingContractTest {
             TransactionCategoryController.class,
             DisclosureGroupController.class,
             AddressLookupController.class,
-            DateEvaluationController.class,
+            DateConversionController.class,
             ReferenceMaintenanceController.class);
 
     /** The number of operations the contract declares, stated so a silent removal is caught. */

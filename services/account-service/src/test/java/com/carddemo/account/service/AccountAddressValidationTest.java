@@ -13,7 +13,7 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
-import com.carddemo.account.mapper.AccountContextMapper;
+import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.CardXrefRepository;
@@ -22,7 +22,9 @@ import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.validation.FieldValidationFlag;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -148,10 +150,23 @@ class AccountAddressValidationTest {
             when(this.accounts.saveAndFlush(any(Account.class)))
                     .thenAnswer(call -> call.getArgument(0));
 
+            // WHY : Refactoring Rationale: the ACCOUNT mapper is supplied where the narrower context
+            //       mapper used to be, because the service now applies the account half of a submission
+            //       as well as the customer half and assembles its response through that mapper. Before
+            //       the change the account region -- the status, the five amounts, the three dates and
+            //       the group -- was edited and then discarded unapplied, so this fixture could not have
+            //       observed an account-side effect at all.
+            // WHY : Assumptions: the time source is FIXED rather than the system clock, so the
+            //       date-of-birth range edit the service performs has a pinned boundary. A live clock
+            //       would make the fixture's 1906 date of birth acceptable today and would keep it
+            //       acceptable, but it would also make any future boundary case here depend on the day
+            //       the suite runs.
             this.service = new AccountUpdateService(this.accounts, this.customers,
-                    this.crossReferences, new AccountContextMapper(),
+                    this.crossReferences, new AccountMapper(),
                     new CustomerMapper(Fixture::cipherFor),
-                    new AddressValidationService(this.lookup));
+                    new AddressValidationService(this.lookup),
+                    Clock.fixed(LocalDate.of(2022, 7, 18).atStartOfDay(ZoneOffset.UTC).toInstant(),
+                            ZoneOffset.UTC));
         }
 
         /**
@@ -270,21 +285,26 @@ class AccountAddressValidationTest {
     /**
      * Confirms an omitted state is not looked up, so the caller is told the right thing.
      *
-     * <p>Assumptions: the state IS mandatory on this path -- the mapper refuses an absent state code --
-     * so this is not a test that an omitted state is accepted. It is a test of WHICH refusal the caller
-     * receives. The three validators are total: they pad a blank value to width and then look it up, so
-     * editing an unsupplied field would report a blank state as a state outside the allow-list. The
-     * caller would then be told to correct a value it never sent, instead of being told it forgot to send
-     * one. Guarding the edit on the field being supplied leaves the required-field contract with the
-     * mapper that owns it.
+     * <p>Assumptions: the state IS mandatory on this path -- the letters-only edit the service performs
+     * at {@code app/cbl/COACTUPC.cbl} lines 1592 to 1598 refuses an absent one -- so this is not a test
+     * that an omitted state is accepted. It is a test of WHICH refusal the caller receives. The
+     * allow-list validator is total: it pads a blank value to width and then looks it up, so consulting
+     * it for an unsupplied field would report a blank state as a state outside the allow-list. The
+     * service guards it on the letters-only edit having passed, which is the guard the reference applies
+     * at line 1599, so an omission never reaches the allow-list at all.
      *
-     * <p>Refactoring Rationale: the discriminator is the refusal's STATE and its absence sentence, where
-     * it was previously the exception type -- the mapper's required-field refusal used to be a bare
-     * argument exception and was identified by NOT being a client-input one. Both refusals are now
-     * client-input refusals, because the mapper's was answered as HTTP 500 while it is plainly a caller's
-     * omission. The blank state is a stronger discriminator than the type ever was: the allow-list
-     * refusal reports a value that was supplied and rejected, so it can only carry the not-acceptable
-     * state, and no future convergence of the two types can blur that.
+     * <p>Refactoring Rationale: the expected sentence is now the REFERENCE's, composed from the label at
+     * line 1592 and the suffix at line 1915, where it was previously the customer mapper's own prose. It
+     * changed because the service now performs the reference's edit driver before the mapper is asked to
+     * apply anything, so the mapper's arrival check is a backstop for a direct caller rather than the
+     * refusal a user sees. The sentence a user reads is therefore carried across character for character
+     * instead of being written afresh.
+     *
+     * <p>Refactoring Rationale: BOTH omitted properties are now named, where only the state used to be.
+     * The mapper reported the first omission it met and stopped; the driver runs every edit and
+     * accumulates, so the omitted postal code is reported by the digits-only edit at lines 1605 to 1611
+     * as well. The aggregate sentence still belongs to the first failure, because the reference gates
+     * every write to its single message line on that line still being clear.
      */
     @Test
     @DisplayName("an omitted state is not looked up, so the refusal names the absence and not the value")
@@ -294,15 +314,15 @@ class AccountAddressValidationTest {
 
         assertThatThrownBy(() -> fixture.update(request(null, null, null)))
                 .isInstanceOf(ClientInputException.class)
-                .hasMessageContaining("no value was supplied")
+                .hasMessage("State must be supplied.")
                 .satisfies(refusal -> {
                     ClientInputException refused = (ClientInputException) refusal;
                     assertThat(refused.state())
                             .as("an omission is the blank state, not the rejected-value one")
                             .isEqualTo(FieldValidationFlag.BLANK);
                     assertThat(refused.fields())
-                            .as("keyed by the request property, so a form can mark the control")
-                            .containsExactly("stateCode");
+                            .as("keyed by the request properties, so a form can mark both controls")
+                            .containsExactly("stateCode", "zipCode");
                 });
         assertThat(fixture.lookup.calls).noneMatch(call -> call.startsWith("stateCodeExists"));
     }
@@ -320,8 +340,16 @@ class AccountAddressValidationTest {
                 .isInstanceOf(ClientInputException.class)
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.type(
                         ClientInputException.class))
+                // WHY : Refactoring Rationale: the identity is a dotted path beneath the telephone
+                //       field rather than the flat request property, because the whole number is now
+                //       edited -- the area code, the prefix and the line number, which are the three
+                //       sub-paragraphs at app/cbl/COACTUPC.cbl lines 2246, 2316 and 2370 -- and the
+                //       collaborator derives all three identities from one telephone identity to
+                //       reproduce the reference's single three-marker group. Passing three flat
+                //       identities instead would have left the prefix and the line number unedited,
+                //       which is how a non-numeric prefix used to reach the column.
                 .extracting(ClientInputException::fields)
-                .isEqualTo(List.of("phone1AreaCode"));
+                .isEqualTo(List.of("phone1.areaCode"));
     }
 
     /**

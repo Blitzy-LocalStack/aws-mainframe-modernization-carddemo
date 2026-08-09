@@ -381,7 +381,7 @@ public class AuthorizationRequestListener {
      * swallowed, so the queue redelivers it and the dead-letter queue receives it after the configured
      * receive count. Swallowing it would delete a request no one had answered. An amount outside the
      * record's own domain propagates the same way and for the same reason, which
-     * {@link #requireAmountWithinRecordDomain} argues.</p>
+     * {@link #requireDeclaredContract(AuthRequest)} argues.</p>
      *
      * @param message the received message, whose payload is the delimited request and whose headers
      *     carry the reply destination, expiry and correlation identifier; must not be {@code null}

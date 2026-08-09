@@ -1745,7 +1745,7 @@ assert {
     "authorization-service/PendingAuthController.java",
     "card-service/CardController.java",
     "reference-service/AddressLookupController.java",
-    "reference-service/DateEvaluationController.java",
+    "reference-service/DateConversionController.java",
     "reference-service/DisclosureGroupController.java",
     "reference-service/ReferenceMaintenanceController.java",
     "reference-service/TransactionCategoryController.java",

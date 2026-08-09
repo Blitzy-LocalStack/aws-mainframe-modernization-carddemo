@@ -7,6 +7,7 @@ import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.codec.InquiryRequestCodec.InquiryRequest;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
+import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import java.time.Clock;
 import java.util.HashMap;
@@ -28,59 +29,199 @@ import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 /**
- * The asynchronous account-inquiry entry point, replacing the queue-driven transaction that answered it.
+ * Answers the asynchronous account-inquiry exchange, replacing the queue-driven transaction that served it.
  *
  * <h2>Purpose</h2>
- * <p>This class is the migrated form of {@code app/app-vsam-mq/cbl/COACCT01.cbl} (620 lines), a
- * queue-triggered CICS transaction that reads a fixed one-thousand-character request, performs one keyed read
- * of the account master, and puts a labelled fixed-width reply on a configured reply queue. That file is
- * REFERENCE-ONLY: it is read as the specification for this class and is never modified.</p>
+ * <p>This class is the migrated form of {@code app/app-vsam-mq/cbl/COACCT01.cbl}, a 620-line queue-triggered
+ * CICS transaction that reads a fixed one-thousand-character request, performs one keyed read of the account
+ * master and puts a labelled fixed-width reply on a reply queue. That program is REFERENCE-ONLY: it is read
+ * as the specification for this class and is never modified. The framing throughout is deliberate -- the
+ * baseline does X, the Java implements Y, and every divergence is named here and registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
- * <p>The reference program's shape maps as follows. Its {@code 1000-CONTROL} opens three queues and then
- * loops {@code PERFORM 4000-MAIN-PROCESS UNTIL NO-MORE-MSGS} (physical lines 214 to 217); the loop, the queue
- * handles and the five-second bounded wait all become listener-container properties, so this class holds only
- * the body of one iteration. Its {@code 4000-PROCESS-REQUEST-REPLY} (physical lines 336 to 458) becomes
- * {@link #onRequest(Message)}.</p>
+ * <p>Paragraph-to-method traceability, cited by PHYSICAL line in that file because it is legacy
+ * sequence-numbered and its column-one sequence numbers are not line numbers:</p>
+ * <ul>
+ *   <li>{@code 4000-MAIN-PROCESS} at physical line 325, whose {@code EXEC CICS SYNCPOINT} verb sits at
+ *       physical line 327, together with {@code 3000-GET-REQUEST} at physical line 334, become
+ *       {@link #onRequest(Message)} plus the container properties on its annotation.</li>
+ *   <li>{@code 4000-PROCESS-REQUEST-REPLY} at physical line 390 becomes
+ *       {@link #replyFor(InquiryRequest)}.</li>
+ *   <li>{@code 4100-PUT-REPLY} at physical line 462 becomes
+ *       {@link #publishReply(String, String, String, String)}.</li>
+ *   <li>{@code 9000-ERROR} at physical line 501 becomes {@link #publishError(String)}, reached on the
+ *       failure path through {@link #reportFailure(RuntimeException, String)}.</li>
+ * </ul>
  *
- * <h2>Delivery discipline: no outbox, and that is a deliberate difference</h2>
- * <p>Assumptions: this consumer needs NO transactional outbox, unlike the pending-authorization consumer, and
- * the reason is in the reference programs rather than in a preference. COACCT01 gets and puts inside one unit
- * of work -- physical line 296 computes {@code MQGMO-OPTIONS} as {@code MQGMO-SYNCPOINT} and physical line 379
- * computes {@code MQPMO-OPTIONS} as {@code MQPMO-SYNCPOINT} -- so there is no window in which its read is
- * committed and its reply is lost. That is the opposite of
- * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}, which uses the NO-SYNCPOINT forms at lines 389
- * and 753 and therefore does have such a window, which is why that flow needed an outbox. Copying the outbox
- * here would add durable machinery to close a window that does not exist.</p>
+ * <p>The baseline's driver is not reproduced as code. Its {@code 1000-CONTROL} opens three queues -- input at
+ * physical line 222, output at physical line 255 and error at physical line 289 -- and then loops, performing
+ * {@code 3000-GET-REQUEST} at physical line 214 and {@code 4000-MAIN-PROCESS UNTIL NO-MORE-MSGS} at physical
+ * lines 215 and 216. Those queue handles and that loop are the listener container's job in the target, so
+ * this class holds only the body of one iteration.</p>
  *
- * <p>Assumptions: the target discipline is therefore delete-on-success plus the queue's visibility timeout.
- * The listener returns normally only after the reply has been sent, so the framework deletes the request only
- * then; if the send fails, the exception propagates, the request becomes visible again, and a repeated failure
- * carries it to the dead-letter queue at the configured receive count. Nothing is acknowledged for a request
- * that was not answered.</p>
+ * <h2>Delivery discipline: NO transactional outbox, and the absence is the decision</h2>
+ * <p>Assumptions: this consumer needs no transactional outbox, and the reason is in the reference programs
+ * rather than in a preference. Every message-queue option in {@code COACCT01.cbl} is a SYNCPOINT option:
+ * {@code grep -n SYNCPOINT} over that file returns exactly four hits, at physical lines 327, 347, 475 and
+ * 512, and {@code grep -c NO-SYNCPOINT} over it returns ZERO. Physical line 347 computes the get options as
+ * {@code MQGMO-SYNCPOINT}, physical line 475 computes the put options as {@code MQPMO-SYNCPOINT}, and the
+ * datastore read sits between them -- the {@code EXEC CICS READ} at physical lines 396 to 403 runs inside the
+ * unit of work the {@code EXEC CICS SYNCPOINT} at physical line 327 opens. Get, read and put are therefore
+ * ONE unit of work, so there is no window in which the read is committed and the reply is lost, and there is
+ * nothing for an outbox to close.</p>
+ *
+ * <p>Assumptions: the pending-authorization consumer is the exact opposite and must not be read as the same
+ * discipline. {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} computes its get options as
+ * {@code MQGMO-NO-SYNCPOINT} at physical line 389 and its put options as {@code MQPMO-NO-SYNCPOINT} at
+ * physical line 753, so it publishes its reply OUTSIDE the commit and does have a lost-reply window -- which
+ * is why that flow needs an outbox and this one does not. Getting the two backwards in either direction is
+ * the failure mode this paragraph exists to prevent: adding an outbox here would add durable machinery to
+ * close a window that does not exist, and removing it there would drop machinery that flow cannot do
+ * without.</p>
+ *
+ * <p>Refactoring Rationale: the target acknowledgement model is consequently delete-on-success plus the
+ * queue's own visibility timeout, and it replaces the syncpoint bracket at physical lines 347 and 475 rather
+ * than emulating it. {@link #onRequest(Message)} returns normally only after the reply has been sent, so the
+ * framework deletes the request only then; if the read or the send fails the exception propagates, the
+ * request becomes visible again, and repeated failure carries it to the dead-letter queue at the configured
+ * receive count. Nothing is ever acknowledged for a request that was not answered, which is the property the
+ * baseline's single unit of work provided.</p>
+ *
+ * <h2>Statelessness</h2>
+ * <p>Assumptions: this bean holds no cross-message state, and the baseline asks for exactly that.
+ * {@code PROGRAM-ID. COACCT01 IS INITIAL.} at physical line 2 forces every invocation to start from a fresh
+ * {@code WORKING-STORAGE}, so no value may survive from one message to the next. Every field on this class
+ * is either an injected collaborator, a configured name, or a queue-address cache whose entries are stable
+ * for the life of a queue; nothing that varies per message is held in a field.</p>
+ *
+ * <p>Refactoring Rationale: the CICS pseudo-conversational session structure is decomposed rather than
+ * ported. {@code app/cpy/COCOM01Y.cpy} declares the 160-byte {@code CARDDEMO-COMMAREA} at physical lines 19
+ * to 44 in five {@code 05} groups, and its parts go four different ways: navigation becomes client-side
+ * router history; identity -- {@code CDEMO-USER-ID PIC X(08)} at physical line 25 and
+ * {@code CDEMO-USER-TYPE PIC X(01)} at physical line 26 with its {@code 'A'} and {@code 'U'} conditions at
+ * physical lines 27 and 28 -- becomes validated token claims on the synchronous routes; selection context
+ * becomes request parameters; and the re-entry discriminator at physical lines 29 to 31, whose
+ * {@code 88 CDEMO-PGM-ENTER VALUE 0.} and {@code 88 CDEMO-PGM-REENTER VALUE 1.} distinguish a first turn
+ * from a later one, is REMOVED outright. A one-shot message handler has no turn to remember, so there is no
+ * session state, no sticky session and no server-side session store anywhere in this flow.</p>
  *
  * <h2>Why a business outcome is a reply and an infrastructure fault is an exception</h2>
- * <p>Trade-offs: the two are separated deliberately, and conflating them is the failure mode this class is
- * written to avoid. A request naming an account that does not exist, or naming the wrong function, is a
- * BUSINESS outcome: the reference program answers it with an {@code INVALID REQUEST PARAMETERS} sentence and
- * consumes the message, so this class publishes the same sentence and returns normally. Raising instead would
- * redeliver a request whose answer will never change, four more times, and then dead-letter it. Conversely a
- * database or queue failure is an INFRASTRUCTURE fault whose retry may well succeed, so it propagates. The
- * reference program's own equivalent of that distinction is its {@code WHEN OTHER} branch at physical lines
- * 437 to 447, which writes to the error queue and terminates the task rather than replying.</p>
+ * <p>Trade-offs: the two are separated deliberately, and conflating them is the other failure mode this
+ * class is written to avoid. A request naming an account that does not exist, or naming the wrong function,
+ * is a BUSINESS outcome: {@code 4000-PROCESS-REQUEST-REPLY} answers it with an
+ * {@code INVALID REQUEST PARAMETERS} sentence and consumes the message -- at physical lines 428 to 435 for a
+ * read that found nothing and at physical lines 448 to 456 for a request that never qualified -- so this
+ * class publishes the same sentence and returns normally. Raising instead would redeliver a request whose
+ * answer can never change and then dead-letter one the baseline answered. An unexpected read failure is an
+ * INFRASTRUCTURE fault whose retry may succeed, and the baseline treats it differently too: its
+ * {@code WHEN OTHER} branch at physical lines 437 to 445 performs {@code 9000-ERROR} and then
+ * {@code 8000-TERMINATION}, reporting to the error sink and ending the task rather than replying. This class
+ * does the same and then propagates.</p>
  *
- * <h2>What this class does not do</h2>
- * <p>Assumptions: the reply is published to the CONFIGURED reply queue, never to a destination named by the
- * incoming message. The reference program saves the request's reply-to queue into {@code SAVE-REPLY2Q} at
- * physical line 341 and then does not use it: {@code 4100-PUT-REPLY} puts to {@code OUTPUT-QUEUE-HANDLE},
- * which was opened from the statically assigned {@code REPLY-QUEUE-NAME} at physical line 210. Honouring the
- * message's own reply-to would be both unfaithful and a queue-injection vector, since a request could then
- * direct an account's balance to a queue of the sender's choosing.</p>
+ * <h2>Queue topology and endpoints</h2>
+ * <p>Assumptions: all three destinations arrive from configuration and none is written into this class, and
+ * that is what the baseline itself does. {@code 01 QUEUE-INFO.} at physical line 92 declares four queue-name
+ * fields at physical lines 93 to 96 -- the queue manager, the input queue, the reply queue and the error
+ * queue -- and every one of them is {@code PIC X(48) VALUE SPACES}, filled at run time. The two places the
+ * baseline does assign a name by literal, at physical lines 198 and 294, produce dotted uppercase names that
+ * are not legal queue names in the target service at all, so no name from the baseline could be carried
+ * across as written even if hard-coding one were acceptable.</p>
  *
- * <p>Parameters, return values and raised exceptions are documented per method. This class holds no mutable
- * state beyond a queue-URL cache whose entries are stable for the life of a queue.</p>
+ * <p>Alternatives Considered: first-in-first-out queues, as the pending-authorization flow uses. Rejected
+ * because this exchange has no ordering requirement: each inquiry is an independent keyed read whose reply is
+ * matched by correlation rather than by position, and nothing in {@code COACCT01.cbl} sequences one request
+ * against another -- its counter at physical line 375 is incremented and never compared. The authorization
+ * flow needs ordering per card because authorizations against one card must apply in order; imposing the same
+ * here would serialise independent inquiries behind one another and cap throughput to no purpose. These are
+ * standard queues, each with a dead-letter queue at a maximum receive count of five, provisioned by
+ * {@code infra/modules/sqs}.</p>
+ *
+ * <h2>Money</h2>
+ * <p>Alternatives Considered: rendering the reply's five monetary fields in this class with a decimal
+ * format. Rejected on both exactness and width. {@code app/cpy/CVACT01Y.cpy} declares them
+ * {@code PIC S9(10)V99} DISPLAY at physical lines 7, 8, 9, 13 and 14, so on the wire each is twelve
+ * characters with the sign overpunched into the last digit and no decimal point present; a conventional
+ * rendering would be the wrong shape AND the wrong width, and a consumer decoding by the copybook would read
+ * the following label as part of the number. {@code tests/README.md} records at physical lines 273 and 274
+ * that the EBCDIC sign option is required precisely because the default misreads that overpunch and silently
+ * corrupts negative balances, which is the same data this reply carries. Every amount therefore reaches the
+ * wire through {@link AccountInquiryReplyMapper}, which encodes it with the shared zoned-decimal codec from
+ * exact scaled values; no IEEE-754 binary floating point appears anywhere in this path, and this class
+ * performs no monetary arithmetic at all, so no rounding or operation-ordering decision arises in it.</p>
+ *
+ * <h2>Resilience</h2>
+ * <p>Alternatives Considered: a retry annotation on the handler, or a circuit breaker in front of the
+ * repository. Both rejected, and no resilience library is added. The durable retry tier for this flow is the
+ * queue itself -- redelivery after the visibility timeout, bounded by a dead-letter queue at five receives --
+ * which survives a task restart in a way an in-process retry does not, and which is the only tier that can
+ * honour the delete-on-success contract above. An in-process retry would also hold the message invisible for
+ * the whole of its own backoff, shrinking the window the queue has to hand the request to a healthy task. The
+ * framework's core retry support does exist and was checked rather than assumed -- it is enabled with
+ * {@code @EnableResilientMethods} and bounded by {@code maxRetries}, where total attempts are one plus that
+ * value, and it is NOT the older {@code @EnableRetry} with {@code maxAttempts} -- but it is deliberately
+ * unused here. A breaker is omitted for the same structural reason: the only dependency on this path is the
+ * cluster this service already fails fast against, and a breaker would add a failure mode without removing
+ * one.</p>
+ *
+ * <h2>Parity</h2>
+ * <p>Assumptions: there is no executable parity oracle for this program and none is claimed.
+ * {@code tests/README.md} states at physical lines 83 to 85 that the online CICS programs cannot run
+ * end-to-end without a CICS runtime and that only their extractable validation logic is unit-tested, and its
+ * business-rules section governs the posting, interest and category-balance programs rather than this one.
+ * Parity here rests on the transcribed logic and on the copybook contract, both cited line by line above and
+ * on each method below.</p>
  */
 @Service
 public class InquiryMessageListener {
+
+    /**
+     * The attribute carrying the requester's correlation identifier on both the request and the reply.
+     *
+     * <p>Assumptions: this is the target form of the 24-byte {@code SAVE-CORELID} declared at
+     * {@code app/app-vsam-mq/cbl/COACCT01.cbl} physical line 55, which exists solely to hold the inbound
+     * correlation identifier across the turn. It is published so a test and a producer can assert the
+     * descriptor mapping against one constant rather than against a repeated literal.</p>
+     */
+    public static final String ATTRIBUTE_CORRELATION_ID = "correlationId";
+
+    /**
+     * The attribute carrying the request's own message identifier onto the reply.
+     *
+     * <p>Assumptions: the baseline captures the inbound message identifier at physical line 364, saves it
+     * into {@code SAVE-MSGID} at physical line 372 and restores it onto the reply descriptor at physical
+     * line 469. A message identifier is assigned by the queue service in the target and cannot be set on a
+     * send, so the captured value travels as this attribute instead -- the same value reaching the requester
+     * by the only route available.</p>
+     */
+    public static final String ATTRIBUTE_MESSAGE_ID = "messageId";
+
+    /**
+     * The attribute naming the destination a request asks to be answered on.
+     *
+     * <p>Assumptions: this is the target form of the reply-to field the baseline captures at physical line
+     * 366, the file's only occurrence of that descriptor field, and saves at physical line 371. How far the
+     * request's preference is honoured is decided in {@link #resolveReplyDestination(String)} and explained
+     * there rather than here.</p>
+     */
+    public static final String ATTRIBUTE_REPLY_TO_QUEUE_URL = "replyToQueueUrl";
+
+    /**
+     * The attribute declaring the payload's media type on everything this class publishes.
+     */
+    public static final String ATTRIBUTE_CONTENT_TYPE = "contentType";
+
+    /**
+     * The media type every payload this class publishes is declared as.
+     *
+     * <p>Assumptions: the baseline declares its payload format as a string on every put -- physical line 471
+     * for the reply and physical line 508 for the error report -- and with a string format the FIELD ORDER
+     * and the delimiter positions ARE the contract, because a consumer locates each value by offset. The
+     * target declaration of that indicator is this media type, and it is the same one the authorization and
+     * date-inquiry replies carry, so one reader can recognise all of them. A structured envelope may be
+     * offered additively to new consumers, but never as a replacement: reshaping this payload would break an
+     * existing consumer silently rather than loudly.</p>
+     */
+    public static final String CONTENT_TYPE = "text/csv";
 
     /**
      * The logger for this consumer.
@@ -93,23 +234,66 @@ public class InquiryMessageListener {
     private static final String MDC_CORRELATION_ID = "correlationId";
 
     /**
-     * The message attribute carrying the requester's correlation identifier.
+     * The paragraph name reported when an unexpected read failure is routed to the error sink.
      */
-    private static final String ATTRIBUTE_CORRELATION_ID = "correlationId";
+    private static final String PARAGRAPH_PROCESS_REQUEST_REPLY = "4000-PROCESS-REQUEST-REPLY";
 
     /**
-     * The attribute name declaring the payload's media type on the reply.
+     * The verbatim return message the baseline reports for an unexpected read failure.
      *
-     * <p>Assumptions: the reference program sets {@code MQFMT-STRING} on every put, at physical line 375. The
-     * target equivalent is an explicit content-type attribute, because the payload is a fixed-width text
-     * block read by offset and a consumer must not treat it as a structured document.</p>
+     * <p>Assumptions: this is the literal moved into the diagnostic's return-message field at physical lines
+     * 442 and 443, carried across character for character. It is 28 characters and that field is
+     * {@code PIC X(25)}, so the baseline's own buffer holds only the leading 25 -- a truncation this class
+     * reproduces rather than widens, because widening it would shift every following field to an offset no
+     * existing reader of that sink expects.</p>
      */
-    private static final String ATTRIBUTE_CONTENT_TYPE = "contentType";
+    private static final String DIAGNOSTIC_READ_FAILED = "ERROR WHILE READING ACCTFILE";
 
     /**
-     * The media type the fixed-width reply is published as.
+     * The width of the diagnostic's paragraph-name field.
      */
-    private static final String CONTENT_TYPE_FIXED_WIDTH = "text/plain";
+    private static final int DIAGNOSTIC_PARAGRAPH_WIDTH = 25;
+
+    /**
+     * The width of the diagnostic's return-message field.
+     */
+    private static final int DIAGNOSTIC_MESSAGE_WIDTH = 25;
+
+    /**
+     * The width of each two-character gap between the diagnostic's fields.
+     */
+    private static final int DIAGNOSTIC_GAP_WIDTH = 2;
+
+    /**
+     * The width of the diagnostic's condition-code field.
+     */
+    private static final int DIAGNOSTIC_CONDITION_CODE_WIDTH = 2;
+
+    /**
+     * The width of the diagnostic's reason-code field.
+     */
+    private static final int DIAGNOSTIC_REASON_CODE_WIDTH = 5;
+
+    /**
+     * The width of the diagnostic's queue-name field.
+     */
+    private static final int DIAGNOSTIC_QUEUE_NAME_WIDTH = 48;
+
+    /**
+     * The combined width of the diagnostic's positional prefix.
+     *
+     * <p>Assumptions: this is SUMMED from the field widths above rather than written as a number, so the
+     * prefix length and the fields that make it up cannot drift apart. The widths themselves are those of the
+     * diagnostic group declared at physical lines 58 to 67, whose nine members are a 25-character paragraph
+     * name, a gap, a 25-character return message, a gap, a 2-digit condition code, a gap, a 5-digit reason
+     * code, a gap and a 48-character queue name.</p>
+     */
+    private static final int DIAGNOSTIC_PREFIX_LENGTH =
+            DIAGNOSTIC_PARAGRAPH_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_MESSAGE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_CONDITION_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_REASON_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_QUEUE_NAME_WIDTH;
 
     /**
      * The account master rows this consumer reads.
@@ -118,6 +302,14 @@ public class InquiryMessageListener {
 
     /**
      * The renderer for all three reply forms.
+     *
+     * <p>Alternatives Considered: rendering the reply through {@code mapper/AccountMapper.java}, the mapper
+     * this context already uses elsewhere. Rejected because that class renders the synchronous response
+     * shapes, whereas this reply is the labelled fixed-width block {@code WS-ACCT-RESPONSE} declared at
+     * physical lines 130 to 169 and moved to the reply field at physical line 426, whose eleven labels and
+     * eleven values are a wire layout rather than a document. The dedicated mapper carries that layout and
+     * asserts its own length, and it routes every amount through the shared codecs, so no codec is declared
+     * anywhere in this service.</p>
      */
     private final AccountInquiryReplyMapper replies;
 
@@ -142,12 +334,13 @@ public class InquiryMessageListener {
     private final Clock clock;
 
     /**
-     * Resolved queue names, cached by name.
+     * Resolved queue addresses, cached by configured name.
      *
-     * <p>Assumptions: a queue's address is stable for the life of the queue, and this service is configured to
-     * FAIL rather than create a queue that does not exist, so a cached entry cannot become a pointer to a
-     * queue this system did not provision. Resolving per message instead would add an API call to every reply
-     * for a value that never changes.</p>
+     * <p>Assumptions: a queue's address is stable for the life of the queue, and this service is configured
+     * to FAIL rather than create a queue that does not exist, so a cached entry cannot become a pointer to a
+     * queue this system did not provision. Resolving per message instead would add a service call to every
+     * reply for a value that never changes. The map is concurrent because the container dispatches messages
+     * on several threads at once.</p>
      */
     private final Map<String, String> queueUrls = new ConcurrentHashMap<>();
 
@@ -162,7 +355,7 @@ public class InquiryMessageListener {
      * @param clock the clock the expiry check reads; must not be {@code null}
      * @throws NullPointerException if any reference argument is {@code null}
      * @throws IllegalArgumentException if either queue name is blank, because a consumer that cannot address
-     *     its reply queue would take requests off the queue and answer none of them
+     *     its reply queue would take requests off the request queue and answer none of them
      */
     public InquiryMessageListener(AccountRepository accounts,
             AccountInquiryReplyMapper replies,
@@ -170,6 +363,13 @@ public class InquiryMessageListener {
             @Value("${carddemo.account.inquiry.reply-queue}") String replyQueue,
             @Value("${carddemo.account.inquiry.error-queue}") String errorQueue,
             Clock clock) {
+
+        // WHY : Assumptions: every collaborator arrives through the CONSTRUCTOR rather than through field
+        //   injection or a static lookup, which is how the baseline's linkage is replaced. COACCT01 reaches
+        //   its dependencies by static CALL -- 'MQGET' at physical lines 352 to 355 and 'MQPUT' at physical
+        //   lines 479 to 486 -- against values held in shared WORKING-STORAGE. Constructor injection makes
+        //   the same collaborators substitutable, so this handler is testable without a queue or a database,
+        //   and it makes every one of them non-null for the life of the bean.
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.replies = Objects.requireNonNull(replies, "replies must not be null");
         this.sqs = Objects.requireNonNull(sqs, "sqs must not be null");
@@ -181,8 +381,14 @@ public class InquiryMessageListener {
     /**
      * Validates a configured queue name.
      *
+     * <p>Assumptions: a blank name is refused at construction rather than at first use. The baseline opens
+     * all three of its queues before it gets a single message -- input at physical line 222, output at
+     * physical line 255, error at physical line 289 -- and terminates the task if any open fails, so a
+     * misconfigured destination stops the program before it can consume anything. Deferring the check would
+     * let this consumer start, take requests off the request queue and fail to answer every one of them.</p>
+     *
      * @param value the configured value
-     * @param property the property name, so a refusal names what to set
+     * @param property the property name, so a refusal names exactly what to set
      * @return the trimmed name, never {@code null}
      * @throws NullPointerException if {@code value} is {@code null}
      * @throws IllegalArgumentException if the value is blank
@@ -200,21 +406,55 @@ public class InquiryMessageListener {
     /**
      * Answers one account-inquiry request.
      *
+     * <p>Purpose: this is the body of one iteration of the baseline's driver loop. It carries
+     * {@code 3000-GET-REQUEST} at physical line 334, whose success branch at physical line 363 captures the
+     * descriptor and hands the payload on at physical line 374, and it runs inside the unit of work
+     * {@code 4000-MAIN-PROCESS} opens with its {@code EXEC CICS SYNCPOINT} verb at physical line 327.</p>
+     *
+     * <p>Assumptions: the polling contract on the annotation is the baseline's own, not a chosen default. The
+     * wait is five seconds because physical line 337 moves 5000 into the get's wait interval, in
+     * milliseconds, under the program's own comment on physical line 336 recording that as five seconds. The
+     * loop is bounded by queue emptiness alone: physical lines 214 to 216 perform the get and then repeat
+     * until the no-more-messages condition, which physical lines 377 and 378 set when the get reports that no
+     * message is available, and the counter incremented at physical line 375 is never compared against a
+     * ceiling. A bounded long-poll of the same wait with a message-per-poll ceiling reproduces that shape
+     * without changing throughput. The five-hundred-message ceiling that DOES exist in this system belongs to
+     * the authorization consumer, at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} physical line 40, and is not this program's
+     * discipline.</p>
+     *
+     * <p>Assumptions: no container-factory name is named on the annotation because
+     * {@code config/SqsConfig.java} declares none, so the framework's own default factory applies. Naming a
+     * factory that does not exist fails at context refresh rather than at compilation, so the coupling is
+     * stated here as the reason for an absent attribute rather than left to be rediscovered.</p>
+     *
      * <p>Assumptions: the transaction is {@code REQUIRES_NEW} so each message is its own unit of work, which
-     * is the target form of the {@code EXEC CICS SYNCPOINT} the reference program issues at the top of every
-     * loop iteration, at physical lines 290 to 293. Sharing a transaction across messages would let one
-     * message's failure roll back another's work.</p>
+     * is the target form of the syncpoint at physical line 327 being issued at the top of EVERY iteration.
+     * Sharing a transaction across messages would let one message's failure roll back another's work. It is
+     * read-only because this exchange only reads -- the keyed read at physical lines 396 to 403 is the whole
+     * of its datastore access -- so there is no write whose commit could fail after a reply had already been
+     * sent.</p>
      *
-     * <p>Assumptions: a request whose expiry has passed is DROPPED, not answered. Answering would publish a
-     * balance to a requester that has already stopped waiting, leaving an account's financial position sitting
-     * on a reply queue for nobody. The rule is the shared one in {@link MessageExpiry}, so all three consumers
-     * in this system honour a requester's expiry identically.</p>
+     * <p>Assumptions: a request whose expiry has passed is DROPPED, not answered. Answering would publish an
+     * account's financial position to a requester that has already stopped waiting, leaving it sitting on a
+     * reply queue for nobody. The rule is the shared one in {@link MessageExpiry}, so every consumer in this
+     * system honours a requester's expiry identically rather than each inventing a tolerance.</p>
      *
-     * @param message the received message, whose payload is the fixed-width request and whose attributes carry
-     *     the correlation identifier and the optional expiry; must not be {@code null}
-     * @throws com.carddemo.common.codec.InquiryRequestCodec.InquiryRequest never; structural decoding of this
-     *     layout cannot fail for a non-null payload, which is why a malformed request still receives the
-     *     reference program's own invalid-parameters reply rather than being dead-lettered
+     * <p>Trade-offs: an unexpected failure is reported to the error sink BEFORE it propagates, in that order,
+     * because the baseline performs {@code 9000-ERROR} at physical line 444 and only then
+     * {@code 8000-TERMINATION} at physical line 445. Reversing the order would lose the report whenever the
+     * propagation itself ended the invocation. What this accepts is one extra publish attempt on a failing
+     * path; {@link #reportFailure(RuntimeException, String, String)} makes that attempt unable to replace the
+     * original fault.</p>
+     *
+     * @param message the received message, whose payload is the fixed-width request and whose attributes
+     *     carry the correlation identifier, the message identifier, the requested reply destination and the
+     *     optional expiry; must not be {@code null}
+     * @throws NullPointerException if {@code message} is {@code null}, which is a caller fault rather than a
+     *     wire condition
+     * @throws RuntimeException if the read or the publish fails, propagating so the request is redelivered
+     *     instead of being acknowledged unanswered; the concrete types are the data-access exceptions the
+     *     repository raises and the queue-client exceptions the send raises
      */
     @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue}",
             maxConcurrentMessages = "${carddemo.account.inquiry.max-concurrent-messages:10}",
@@ -223,7 +463,19 @@ public class InquiryMessageListener {
     @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
     public void onRequest(Message<String> message) {
         Objects.requireNonNull(message, "message must not be null");
+
+        // WHY : Assumptions: all three descriptor values are read ONCE, up front, exactly as the baseline
+        //   copies them out of the descriptor the moment the get succeeds -- the message identifier at
+        //   physical line 364, the correlation identifier at physical line 365 and the reply-to queue at
+        //   physical line 366 -- and are then held for the rest of the exchange, as the baseline holds them:
+        //   the correlation identifier into SAVE-CORELID at physical line 370, the reply-to queue into
+        //   SAVE-REPLY2Q at physical line 371 and the message identifier into SAVE-MSGID at physical line
+        //   372, all before any processing that could overwrite the descriptor. Reading them later would be
+        //   reading them after the work rather than before it, and those three save areas exist in the
+        //   baseline precisely to make that impossible.
         String correlationId = correlationId(message);
+        String messageId = attribute(message, ATTRIBUTE_MESSAGE_ID);
+        String requestedReplyTo = attribute(message, ATTRIBUTE_REPLY_TO_QUEUE_URL);
 
         // WHY : Assumptions: the LOGGING context carries the sanitised rendering while the reply carries the
         //   value verbatim. The two are deliberately different renderings of one identity: a log record must
@@ -243,7 +495,11 @@ public class InquiryMessageListener {
             }
 
             InquiryRequest request = InquiryRequestCodec.decode(message.getPayload());
-            publishReply(replyFor(request), correlationId);
+            publishReply(replyFor(request), resolveReplyDestination(requestedReplyTo),
+                    messageId, correlationId);
+        } catch (RuntimeException failure) {
+            reportFailure(failure, messageId, correlationId);
+            throw failure;
         } finally {
             MDC.remove(MDC_CORRELATION_ID);
         }
@@ -252,14 +508,28 @@ public class InquiryMessageListener {
     /**
      * Chooses and renders the reply for one decoded request.
      *
-     * <p>Assumptions: the guard is the reference program's own, transcribed rather than reinterpreted.
-     * {@code IF WS-FUNC = 'INQA' AND WS-KEY > ZEROES} at physical line 342 admits a request only when both
-     * hold, and its {@code ELSE} at physical lines 448 to 457 answers everything else with the sentence that
-     * names both the key and the function. Splitting the guard into two separate refusals would produce two
-     * messages where the baseline produces one.</p>
+     * <p>Purpose: transcribes {@code 4000-PROCESS-REQUEST-REPLY} at physical line 390, whose three outcomes
+     * are the keyed read succeeding at physical lines 407 to 427, the read finding nothing at physical lines
+     * 428 to 435, and the request never qualifying at physical lines 448 to 456.</p>
+     *
+     * <p>Assumptions: the guard is the baseline's own, transcribed rather than reinterpreted.
+     * {@code IF WS-FUNC = 'INQA' AND WS-KEY > ZEROES} at physical line 393 admits a request only when BOTH
+     * hold, and its {@code ELSE} answers everything else with the one sentence that names the key and the
+     * function together. Splitting the guard into two separate refusals would produce two different messages
+     * where the baseline produces one, and a requester comparing against the baseline's text would stop
+     * recognising it.</p>
+     *
+     * <p>Assumptions: the function code and the key are read through the shared codec's own queries rather
+     * than by inspecting substrings here. The layout -- a four-character function, an eleven-digit key and
+     * 985 characters of filler, declared at physical lines 109 to 112 -- is single-sourced in
+     * {@link InquiryRequestCodec} so that this class and any future producer cannot disagree about an
+     * offset.</p>
      *
      * @param request the decoded request; must not be {@code null}
-     * @return the framed reply body, never {@code null}
+     * @return the framed reply body, exactly the message length, never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the keyed read fails unexpectedly, which is the
+     *     target form of the baseline's {@code WHEN OTHER} branch at physical lines 437 to 445 and propagates
+     *     rather than becoming a reply
      */
     private String replyFor(InquiryRequest request) {
         if (!request.isFunction(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY) || !request.hasUsableKey()) {
@@ -269,8 +539,8 @@ public class InquiryMessageListener {
 
         Optional<Account> account = this.accounts.findById(request.keyValue());
         if (account.isEmpty()) {
-            // WHY : Assumptions: this is answered rather than raised. The reference program's NOTFND branch at
-            //   physical lines 428 to 436 replies and consumes the message, so raising here would redeliver a
+            // WHY : Assumptions: this is ANSWERED rather than raised. The baseline's not-found branch at
+            //   physical lines 428 to 435 replies and consumes the message, so raising here would redeliver a
             //   request whose answer cannot change and then dead-letter a request the baseline answered.
             LOG.info("event=account.inquiry.not-found accountId={}", request.keyValue());
             return this.replies.frame(this.replies.accountNotFound(request.key()));
@@ -281,71 +551,311 @@ public class InquiryMessageListener {
     }
 
     /**
-     * Publishes a reply to the configured reply queue.
+     * Chooses the destination one reply is addressed to.
      *
-     * <p>Assumptions: the correlation identifier is echoed VERBATIM, matching the reference program's
-     * {@code MOVE SAVE-CORELID TO MQMD-CORRELID} at physical line 374. It is the requester's own value and it
-     * is how the requester matches an answer to a request, so altering it -- including sanitising it -- would
-     * make the reply unmatchable.</p>
+     * <p>Purpose: applies the reply-to descriptor mapping. The baseline captures the request's reply-to queue
+     * at physical line 366 -- the file's only occurrence of that descriptor field -- and saves it at physical
+     * line 371, and this method decides what that captured preference is allowed to reach.</p>
+     *
+     * <p>Assumptions: the requested route is treated as ROUTING DATA, not as authority, and is honoured only
+     * when it matches this context's own reply destination exactly. That is the contract recorded in
+     * {@code docs/architecture/messaging-contracts.md}, and it is enforced independently of this class:
+     * {@code infra/modules/ecs-service} grants this task role a send action on the exact reply and error
+     * queue identifiers alone and assembles none from an inbound attribute, so a send anywhere else would be
+     * refused at run time in any case. The authored topology exposes one shared inquiry-reply queue, so the
+     * permitted set here is a single address.</p>
+     *
+     * <p>Trade-offs: a value that does not match falls back to the configured destination rather than
+     * failing, and the substitution is logged. Failing would dead-letter a request the baseline answered,
+     * because the baseline reaches its destination through a handle opened once from the configured
+     * reply-queue name -- assigned at physical line 198, opened at physical lines 255 and 261, and used at
+     * physical line 480 -- and therefore answers a request whose reply-to field names anything at all.
+     * Honouring an arbitrary address instead would make this consumer a confused deputy, able to direct an
+     * account's financial position to a queue of the sender's choosing.</p>
+     *
+     * @param requestedReplyTo the destination the request names, or {@code null} when it names none
+     * @return the destination to publish the reply to, never {@code null}
+     * @throws software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException if the configured
+     *     destination cannot be resolved, which is a deployment fault rather than a request fault
+     */
+    private String resolveReplyDestination(String requestedReplyTo) {
+        String permitted = queueUrl(this.replyQueue);
+        if (permitted.equals(requestedReplyTo)) {
+            return permitted;
+        }
+
+        if (requestedReplyTo != null && !requestedReplyTo.isBlank()) {
+            // WHY : Assumptions: the rejected value is NOT logged. It came off the wire, so logging it would
+            //   place an unvalidated address into a log line, and the substitution is the only fact an
+            //   operator needs -- the permitted address is already known from configuration.
+            LOG.warn("event=account.inquiry.reply-destination-substituted reason=not-permitted");
+        }
+        return permitted;
+    }
+
+    /**
+     * Publishes one reply, echoing both identifiers the request carried.
+     *
+     * <p>Purpose: transcribes {@code 4100-PUT-REPLY} at physical line 462, whose put at physical lines 479 to
+     * 486 addresses the reply destination through the handle named at physical line 480, immediately after it
+     * restores the saved identifiers at physical lines 469 and 470 and declares the payload format at
+     * physical line 471.</p>
+     *
+     * <p>Assumptions: the correlation identifier is echoed VERBATIM, matching
+     * {@code MOVE SAVE-CORELID TO MQMD-CORRELID} at physical line 470 -- the definitive proof that this is a
+     * request-and-reply exchange rather than a one-way notification. It is the requester's own opaque value
+     * and it is how the requester pairs an answer with a request, so altering it in any way, including
+     * sanitising it, would make the reply unpairable. The message identifier the baseline restores at
+     * physical line 469 is echoed for the same reason, as an attribute, because the queue service assigns the
+     * reply its own identifier and one cannot be supplied on a send.</p>
+     *
+     * <p>Assumptions: an identifier the request did not carry is simply not attached rather than being
+     * replaced by a value this class invents. A substituted identifier would let a requester pair a reply
+     * against something it never sent, which is worse than an unpaired reply because it cannot be detected
+     * downstream.</p>
+     *
+     * <p>Assumptions: the body arrives already framed to the message length, matching the baseline's own
+     * discipline of moving whichever reply it built into a one-thousand-character field and then putting a
+     * literal length of 1000 at physical line 468 regardless of how much of it carries data.</p>
      *
      * @param body the framed reply body; must not be {@code null}
-     * @param correlationId the requester's correlation identifier, possibly empty when none was supplied
+     * @param destination the resolved reply destination; must not be {@code null}
+     * @param messageId the request's message identifier to echo, or {@code null} to attach none
+     * @param correlationId the request's correlation identifier to echo, possibly empty when none was
+     *     supplied
      * @throws software.amazon.awssdk.core.exception.SdkException if the send fails, which propagates so the
      *     request becomes visible again rather than being acknowledged unanswered
      */
-    private void publishReply(String body, String correlationId) {
+    private void publishReply(String body, String destination, String messageId, String correlationId) {
+        send(destination, body, replyAttributes(messageId, correlationId));
+    }
+
+    /**
+     * Publishes a diagnostic to the configured error sink.
+     *
+     * <p>Purpose: transcribes {@code 9000-ERROR} at physical line 501, which moves its diagnostic block into
+     * the buffer at physical lines 505 and 506, sets the buffer length at physical line 507, declares the
+     * payload format at physical line 508 and puts to the error handle at physical line 517.</p>
+     *
+     * <p>Assumptions: this is exposed rather than kept private because the error sink is an operator-facing
+     * channel in the baseline too -- the error queue is opened first, at physical line 289, before any other
+     * queue and before any message is read, so a diagnostic can be reported even when nothing else in the
+     * exchange has started. It is deliberately NOT reached from the reply path: a business outcome is a
+     * reply, not an error report.</p>
+     *
+     * <p>Assumptions: the diagnostic text is composed by the caller and must name no value that came off the
+     * wire, for the same reason the reply path logs a length rather than a value. The failure path composes
+     * its own text through {@link #reportFailure(RuntimeException, String, String)}, which renders a failure
+     * as its chain of types and carries no message text at all.</p>
+     *
+     * @param diagnostic the diagnostic text, no longer than the message length; must not be {@code null}
+     * @throws NullPointerException if {@code diagnostic} is {@code null}
+     * @throws IllegalArgumentException if the text is longer than the message length, which is a defect in
+     *     the caller's own formatting rather than a wire condition and must not be silently truncated
+     * @throws software.amazon.awssdk.core.exception.SdkException if the send fails
+     */
+    public void publishError(String diagnostic) {
+        Objects.requireNonNull(diagnostic, "diagnostic must not be null");
+        send(queueUrl(this.errorQueue), this.replies.frame(diagnostic), replyAttributes(null, null));
+    }
+
+    /**
+     * Reports an unexpected failure to the error sink without letting the report replace it.
+     *
+     * <p>Purpose: this is the target form of the baseline's {@code WHEN OTHER} branch at physical lines 437 to
+     * 445, which fills the diagnostic fields at physical lines 439 to 443, performs {@code 9000-ERROR} at
+     * physical line 444 and only then performs {@code 8000-TERMINATION} at physical line 445. The caller
+     * propagates afterwards, which is this flow's form of that termination.</p>
+     *
+     * <p>Assumptions: a failure in the REPORT is attached to the original failure rather than thrown, so an
+     * unreachable error sink can never disguise the fault an operator is actually looking for. This matters
+     * concretely here: when the queue client is what failed, the report will fail for the same reason, and
+     * without this guard the second failure would replace the first on its way out.</p>
+     *
+     * <p>Assumptions: the report's failure is attached only when it is a DIFFERENT object from the original.
+     * Attaching a throwable to itself is rejected outright by the platform, so a client that answers both
+     * sends with one exception instance -- which a client is free to do, and which the send path here makes
+     * reachable because a single unreachable queue fails the reply and the report identically -- would turn a
+     * queue outage into an unrelated argument failure and lose the outage entirely. The guard is an identity
+     * comparison rather than an equality one because it is object identity the platform refuses.</p>
+     *
+     * <p>Assumptions: both identifiers are attached to the report, and that is faithful rather than an
+     * addition. The baseline's error paragraph never touches the descriptor's identifier fields, so the
+     * descriptor it puts with is still the one the get populated at physical lines 352 to 355 -- meaning the
+     * inbound identifiers travel with the report by inheritance. Attaching them explicitly reproduces that
+     * outcome on a transport where nothing is inherited between sends.</p>
+     *
+     * <p>Assumptions: the failure is rendered as its chain of TYPES with no message text, by the shared
+     * digest. A driver's or parser's own message is the one part of a failure into which a request value can
+     * be interpolated, and this buffer is published onto a queue, so the type chain answers what failed
+     * without opening that channel.</p>
+     *
+     * @param failure the failure to report; must not be {@code null}
+     * @param messageId the request's message identifier to echo, or {@code null} to attach none
+     * @param correlationId the request's correlation identifier to echo, possibly empty when none was
+     *     supplied
+     */
+    private void reportFailure(RuntimeException failure, String messageId, String correlationId) {
+        String digest = ThrowableDigest.of(failure);
+        LOG.error("event=account.inquiry.error-sink paragraph={} failure={}",
+                PARAGRAPH_PROCESS_REQUEST_REPLY, digest);
+
+        try {
+            send(queueUrl(this.errorQueue),
+                    this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY,
+                            DIAGNOSTIC_READ_FAILED, this.errorQueue, digest)),
+                    replyAttributes(messageId, correlationId));
+        } catch (RuntimeException reportingFailure) {
+            if (reportingFailure != failure) {
+                failure.addSuppressed(reportingFailure);
+            }
+        }
+    }
+
+    /**
+     * Composes the diagnostic buffer in the positional shape the baseline reports failures through.
+     *
+     * <p>Assumptions: the field widths and the two-character gaps between them are those of the diagnostic
+     * group declared at physical lines 58 to 67, so a reader of the error sink can locate every value at the
+     * offsets that group establishes. Each field is left-justified, space-padded and truncated at its
+     * declared width, which is what a group move into a fixed picture does -- and it is why the 28-character
+     * return message carried in {@link #DIAGNOSTIC_READ_FAILED} arrives as its leading 25 characters.</p>
+     *
+     * <p>Alternatives Considered: omitting the condition-code and reason-code intervals, which hold
+     * queue-manager values that have no counterpart in the target and are therefore unfillable. Rejected
+     * because omitting them shortens the prefix by nine characters and shifts the queue name behind them to
+     * an offset no reader of that sink expects. They are preserved and left blank instead, which keeps every
+     * other field where the baseline puts it and states the absence in the buffer itself.</p>
+     *
+     * <p>Trade-offs: the failure detail is appended AFTER the positional prefix, in space the baseline leaves
+     * blank, and it is truncated to what remains of the message length. Folding it into the 25-character
+     * return-message field instead would have displaced the baseline's own literal, so the choice is between
+     * losing the literal and using blank space; the blank space costs nothing a reader relies on.</p>
+     *
+     * @param paragraph the reporting paragraph's name, or {@code null} to leave the field blank
+     * @param returnMessage the baseline's verbatim return message for this failure, or {@code null} to leave
+     *     the field blank
+     * @param queueName the configured queue name the failure concerns, or {@code null} to leave the field
+     *     blank
+     * @param detail the failure rendering appended after the positional prefix, or {@code null} to append
+     *     nothing
+     * @return the composed buffer, no longer than the message length, never {@code null}
+     */
+    private static String errorDiagnostic(String paragraph, String returnMessage, String queueName,
+            String detail) {
+
+        String prefix = fixed(paragraph, DIAGNOSTIC_PARAGRAPH_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + fixed(returnMessage, DIAGNOSTIC_MESSAGE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + blanks(DIAGNOSTIC_CONDITION_CODE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + blanks(DIAGNOSTIC_REASON_CODE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + fixed(queueName, DIAGNOSTIC_QUEUE_NAME_WIDTH);
+
+        // WHY : Assumptions: the appended detail is bounded by what the message length leaves after the
+        //   positional prefix, and an absent detail appends nothing. The shared framing helper REFUSES an
+        //   over-long body rather than truncating it, which is the right default for a reply a consumer
+        //   decodes by offset but the wrong one here: a long failure rendering would then turn a report about
+        //   one fault into a second, unrelated fault on the reporting path.
+        String tail = detail == null ? "" : detail;
+        int room = InquiryRequestCodec.MESSAGE_LENGTH - DIAGNOSTIC_PREFIX_LENGTH;
+        return prefix + fixed(tail, Math.min(tail.length(), room));
+    }
+
+    /**
+     * Renders a value at exactly one fixed width.
+     *
+     * <p>Assumptions: an absent value renders as blanks and an over-long one is truncated on the right, which
+     * is what a move into a fixed alphanumeric picture does. Reproducing those two behaviours in one place is
+     * what keeps every field of the diagnostic buffer at the offset the baseline's group establishes.</p>
+     *
+     * @param value the value, or {@code null} to render blanks
+     * @param width the declared field width, which must not be negative
+     * @return the value padded or truncated to the width, never {@code null}
+     * @throws IndexOutOfBoundsException if {@code width} is negative, which can only mean a field-width
+     *     constant has been given a nonsensical value rather than a caller passing wire content
+     */
+    private static String fixed(String value, int width) {
+        String text = value == null ? "" : value;
+        return text.length() >= width ? text.substring(0, width) : text + blanks(width - text.length());
+    }
+
+    /**
+     * Renders one run of blanks.
+     *
+     * @param width the number of blanks, which must not be negative
+     * @return the blanks, never {@code null}
+     * @throws IllegalArgumentException if {@code width} is negative
+     */
+    private static String blanks(int width) {
+        return " ".repeat(width);
+    }
+
+    /**
+     * Assembles the attributes every payload this class publishes carries.
+     *
+     * <p>Assumptions: the media type is always attached and the two identifiers only when the request carried
+     * them, which is the descriptor mapping stated once so the reply and the error report cannot drift into
+     * declaring themselves differently.</p>
+     *
+     * @param messageId the message identifier to echo, or {@code null} to attach none
+     * @param correlationId the correlation identifier to echo, or {@code null} or empty to attach none
+     * @return the attributes, never {@code null}
+     */
+    private static Map<String, MessageAttributeValue> replyAttributes(String messageId,
+            String correlationId) {
+
         Map<String, MessageAttributeValue> attributes = new HashMap<>();
-        attributes.put(ATTRIBUTE_CONTENT_TYPE, stringAttribute(CONTENT_TYPE_FIXED_WIDTH));
-        if (!correlationId.isEmpty()) {
+        attributes.put(ATTRIBUTE_CONTENT_TYPE, stringAttribute(CONTENT_TYPE));
+        if (messageId != null && !messageId.isEmpty()) {
+            attributes.put(ATTRIBUTE_MESSAGE_ID, stringAttribute(messageId));
+        }
+        if (correlationId != null && !correlationId.isEmpty()) {
             attributes.put(ATTRIBUTE_CORRELATION_ID, stringAttribute(correlationId));
         }
+        return attributes;
+    }
 
+    /**
+     * Publishes one payload to one destination.
+     *
+     * <p>Assumptions: both publishing paths funnel through here so that neither can acquire a different
+     * failure behaviour by accident. Nothing is caught: a send failure must reach the caller, because the
+     * whole delivery guarantee of this flow is that a request is acknowledged only after its answer has been
+     * sent.</p>
+     *
+     * @param destination the resolved destination; must not be {@code null}
+     * @param body the framed payload; must not be {@code null}
+     * @param attributes the message attributes; must not be {@code null}
+     * @throws software.amazon.awssdk.core.exception.SdkException if the send fails
+     */
+    private void send(String destination, String body, Map<String, MessageAttributeValue> attributes) {
         this.sqs.sendMessage(SendMessageRequest.builder()
-                .queueUrl(queueUrl(this.replyQueue))
+                .queueUrl(destination)
                 .messageBody(body)
                 .messageAttributes(attributes)
                 .build());
     }
 
     /**
-     * Publishes a diagnostic to the configured error queue.
-     *
-     * <p>Assumptions: this is the target form of the reference program's {@code 9000-ERROR} paragraph at
-     * physical lines 405 to 425, which puts a fixed-width diagnostic block on a separate error queue. It is
-     * exposed so an operator-facing failure can be reported on the same channel the baseline used, and it is
-     * deliberately NOT called from the reply path: a business outcome is a reply, not an error report.</p>
-     *
-     * <p>Assumptions: the diagnostic text is composed by the caller and must name no value that came off the
-     * wire, for the same reason the reply path logs lengths rather than contents.</p>
-     *
-     * @param diagnostic the diagnostic text; must not be {@code null}
-     * @throws NullPointerException if {@code diagnostic} is {@code null}
-     */
-    public void publishError(String diagnostic) {
-        Objects.requireNonNull(diagnostic, "diagnostic must not be null");
-        this.sqs.sendMessage(SendMessageRequest.builder()
-                .queueUrl(queueUrl(this.errorQueue))
-                .messageBody(this.replies.frame(diagnostic))
-                .messageAttributes(Map.of(ATTRIBUTE_CONTENT_TYPE, stringAttribute(CONTENT_TYPE_FIXED_WIDTH)))
-                .build());
-    }
-
-    /**
      * Reports the requester's correlation identifier, or an empty string when none was supplied.
      *
-     * <p>Assumptions: an ABSENT correlation identifier is accepted rather than refused, because the reference
-     * program accepts one -- it initialises {@code MQ-CORRELID} to spaces at physical line 288 and echoes
-     * whatever the descriptor carried, including nothing. A NON-CANONICAL one is also accepted and is echoed
-     * unchanged, because it is the requester's own value and this consumer's reply is useless to it otherwise;
-     * what protects this service is that the value never reaches a log unsanitised.</p>
+     * <p>Assumptions: an ABSENT correlation identifier is accepted rather than refused, because the baseline
+     * accepts one -- it clears the field to spaces at physical line 338 and echoes whatever the descriptor
+     * carried, including nothing. A NON-CANONICAL one is also accepted and echoed unchanged, because it is
+     * the requester's own value and this consumer's reply is useless to it otherwise; what protects this
+     * service is that the value never reaches a log unsanitised.</p>
      *
      * <p>Alternatives Considered: refusing a non-canonical identifier, as the pending-authorization consumer
-     * does. Rejected for this flow because that consumer's identifier participates in a durable outbox row and
-     * a deduplication decision, so an unusable value there corrupts stored state; here it is echoed and
-     * forgotten within one message.</p>
+     * does. Rejected for this flow because that consumer's identifier participates in a durable outbox row
+     * and a deduplication decision, so an unusable value there corrupts stored state; here it is echoed once
+     * and forgotten within one message.</p>
      *
      * @param message the received message; must not be {@code null}
      * @return the correlation identifier, or an empty string, never {@code null}
+     * @throws NullPointerException if {@code message} is {@code null}
      */
     private static String correlationId(Message<String> message) {
         String candidate = attribute(message, ATTRIBUTE_CORRELATION_ID);
@@ -353,11 +863,17 @@ public class InquiryMessageListener {
     }
 
     /**
-     * Reads a message attribute as text.
+     * Reads one message attribute as text.
+     *
+     * <p>Assumptions: a non-textual value reports as absent rather than being coerced. Every attribute this
+     * flow reads is declared as a string by the producer contract, so a value of another type is a producer
+     * defect, and treating it as absent lets the exchange continue on the baseline's own terms rather than
+     * dead-lettering a request over an attribute.</p>
      *
      * @param message the received message; must not be {@code null}
      * @param name the attribute name; must not be {@code null}
      * @return the attribute value, or {@code null} when absent or not textual
+     * @throws NullPointerException if {@code message} is {@code null}
      */
     private static String attribute(Message<String> message, String name) {
         Object value = message.getHeaders().get(name);
@@ -365,13 +881,13 @@ public class InquiryMessageListener {
     }
 
     /**
-     * Resolves a queue name to its address, caching the result.
+     * Resolves a configured queue name to its address, caching the result.
      *
      * @param name the configured queue name; must not be {@code null}
      * @return the queue address, never {@code null}
      * @throws software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException if the queue is absent,
-     *     which propagates rather than being defaulted because a consumer that cannot address its reply queue
-     *     must not acknowledge a request it cannot answer
+     *     which propagates rather than being defaulted because a consumer that cannot address its reply
+     *     queue must not acknowledge a request it cannot answer
      */
     private String queueUrl(String name) {
         return this.queueUrls.computeIfAbsent(name, queueName -> this.sqs

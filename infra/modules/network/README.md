@@ -154,17 +154,27 @@ create a second owner for an internal boundary.
    shared gateway to reduce the largest fixed network cost. Rejected because a
    zone loss would remove egress from every zone, and a differently shaped dev
    network would not validate prod.
-3. **Exactly three security groups are created.** The managed-boundary group is
-   attached to the VPC Link, ALB, and interface endpoint ENIs; separate rules
-   distinguish self-referenced listener TLS, application-to-endpoint TLS, and
-   ALB-to-application forwarding. Alternatives Considered: attaching
-   endpoint ENIs to the application group. Rejected because a self-referenced
-   443 rule would also permit task-to-task TLS.
-4. **The ALB group is also the VPC Link group.** Assumptions: its
-   self-referenced 443 rule is edge-to-listener only; a separate rule carries
-   listener-to-application traffic on `app_container_port`. Reusing that
-   managed-boundary identity also keeps the topology at the AAP's three groups
-   without attaching the broader application identity to the edge.
+3. **Four security groups are created and three are published.** `alb`, `app`
+   and `data` are published for the sibling modules that attach to them;
+   `vpc_endpoints` is attached by this module alone to the interface-endpoint
+   ENIs and is therefore internal. An interface endpoint must carry a group, so
+   the application-to-endpoint flow has to terminate somewhere. Alternatives
+   Considered: reusing the application group, which needs a self-referencing 443
+   rule that would also permit task-to-task TLS; or reusing the ALB group, which
+   needs an application-to-ALB 443 rule that would let every task reach the edge
+   listener group. Both widen a flow beyond the three this topology allows.
+   Trade-offs: one more group to reason about, accepted in exchange for a rule
+   set in which each permitted flow has exactly one source and one destination.
+4. **The application group's egress is enumerated, not implicit.** Only the two
+   named destinations are reachable — Aurora on `database_port` and the endpoint
+   group on 443. An earlier revision also carried an egress rule to `0.0.0.0/0`
+   on 443, which was a fourth flow beyond the three this topology allows; it was
+   removed. Trade-offs: any future outbound dependency has to arrive as a named
+   rule visible in a plan diff rather than being absorbed by an allow-all
+   default. There is no `0.0.0.0/0` ingress rule on any group. The edge-to-ALB
+   rule is not authored here either: the VPC Link carries its own group, which
+   `api-gateway-http` creates and uses to open this module's ALB group, so
+   declaring it here would close a cycle between the two modules.
 5. **No subnet auto-assigns a public address.** The NAT gateways allocate their
    own Elastic IPs and the ALB is internal. Enabling auto-assignment would only
    create an unintended public-address path.
@@ -261,20 +271,24 @@ defines the wider network boundary.
 | [aws_security_group.alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_security_group.app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_security_group.data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
+| [aws_security_group.vpc_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_subnet.isolated_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
 | [aws_subnet.private_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
 | [aws_subnet.public](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
 | [aws_vpc.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc) | resource |
 | [aws_vpc_endpoint.interface](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint) | resource |
 | [aws_vpc_endpoint.s3](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint) | resource |
+| [aws_vpc_endpoint_route_table_association.isolated_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint_route_table_association) | resource |
+| [aws_vpc_endpoint_route_table_association.private_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint_route_table_association) | resource |
 | [aws_vpc_security_group_egress_rule.alb_to_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
-| [aws_vpc_security_group_egress_rule.app_https](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.alb_to_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.app_to_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.app_to_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_availability_zones.available](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/availability_zones) | data source |
+| [aws_iam_policy_document.flow_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.flow_logs_assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 
 ### Inputs
@@ -297,7 +311,7 @@ defines the wider network boundary.
 
 | Name | Description |
 |------|-------------|
-| <a name="output_alb_security_group_id"></a> [alb\_security\_group\_id](#output\_alb\_security\_group\_id) | Identifier of the managed-boundary security group shared by the API Gateway VPC Link, internal ALB and interface endpoint ENIs; its rules separate listener, endpoint and ALB-to-application flows by source group and port. |
+| <a name="output_alb_security_group_id"></a> [alb\_security\_group\_id](#output\_alb\_security\_group\_id) | Identifier of the internal ALB's listener security group, attached by the alb module and opened on 443 by the api-gateway-http module from the VPC Link's own group; this module gives it only egress to the application group on app\_container\_port. |
 | <a name="output_app_container_port"></a> [app\_container\_port](#output\_app\_container\_port) | Application listener port enforced by the ALB-to-application security-group rules; pass this output to every ecs-service container and target group. |
 | <a name="output_app_security_group_id"></a> [app\_security\_group\_id](#output\_app\_security\_group\_id) | Identifier of the application-tier security group attached to ECS service and batch-task interfaces; it admits ALB traffic and permits only the declared dependency flows. |
 | <a name="output_availability_zones"></a> [availability\_zones](#output\_availability\_zones) | Ordered availability-zone names used by all three subnet tiers. Every subnet-id list below follows this same order. |

@@ -101,19 +101,27 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > [§2](#2-directory-layout) marks each item and [§5.2](#52-subcommands-and-their-arguments)
 > marks each subcommand. `python -m carddemo_migration.cli --help` and every
 > registered subcommand run against this checkout; an unregistered one is refused as
-> a usage error rather than failing part-way through. A source-record cutover must
-> not be claimed from this checkout, because loading and verifying records is
-> precisely what it does not yet do.
+> a usage error rather than failing part-way through.
+>
+> Assumptions: a source-record cutover from this checkout is now a matter of
+> CREDENTIALS AND A CLUSTER rather than of missing code. The load and the three
+> verification passes are implemented and tested, and `load-dataset` refuses two
+> records deliberately — `CUSTOMER` and `CARD`, whose tables declare ciphertext
+> columns as `NOT NULL` under a key the owning services hold and this package does
+> not, as [§5.2](#52-subcommands-and-their-arguments) records. A cutover claim must
+> therefore still account for those two, and for the fact that nothing here has been
+> exercised against a provisioned Aurora cluster.
 >
 > Refactoring Rationale: this note previously listed the packed and EBCDIC codecs as
-> undelivered after both had landed, and a delivery inventory that overstates what is
+> undelivered after both had landed, and later listed the readers, the loader and the
+> verification passes the same way. A delivery inventory that overstates what is
 > missing is as misleading as one that overstates what is present — an integrator
-> reading it would have written a second copy of a codec that already exists, or
-> concluded that a decode path it could see in the tree was not meant to be used. The
-> inventory is now measured rather than remembered: `src/carddemo_migration/` holds
-> **twelve** modules and `ruff check . --show-files` lists **nineteen** governed files,
-> and [`pyproject.toml`](pyproject.toml) states the same two numbers so a disagreement
-> between the two files is visible.
+> reading it would have written a second copy of something that already exists, or
+> concluded that a path they could see in the tree was not meant to be used. The
+> inventory is measured rather than remembered: `src/carddemo_migration/` holds
+> **thirty-one** modules and `ruff check . --show-files` lists **forty-nine** governed
+> files, and [`pyproject.toml`](pyproject.toml) states the same two numbers so a
+> disagreement between the two files is visible.
 >
 > Assumptions: an unimplemented subcommand is left OUT of the parser rather than
 > registered and made to fail. A registered command that cannot work would be
@@ -153,37 +161,73 @@ data-migration/
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
 │   ├── credentials.py            delivered -- applies each generated credential to its role
 │   ├── role_credentials.py       delivered -- SCRAM verifier derivation and role bootstrap
-│   ├── cli.py                    delivered -- the four registered subcommands in section 5
+│   ├── cli.py                    delivered -- the eight registered subcommands in section 5
 │   ├── copybook/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
 │   │   ├── zoned.py              delivered -- sign-overpunch decode and encode
 │   │   ├── packed.py             delivered -- COMP-3 and COMP decode and encode
 │   │   └── ebcdic_codec.py       delivered -- cp037 decode, applied PER FIELD
-│   ├── readers/                  contracted -- one reader per record layout
+│   ├── readers/
+│   │   ├── __init__.py           delivered -- makes the subpackage a regular package
+│   │   ├── factory.py            delivered -- one layout descriptor, twelve bound readers
+│   │   ├── account.py            delivered -- CVACT01Y, 300 bytes
+│   │   ├── card.py               delivered -- CVACT02Y, 150 bytes; SUPPRESSES the CVV
+│   │   ├── customer.py           delivered -- CVCUS01Y, 500 bytes
+│   │   ├── xref.py               delivered -- CVACT03Y, 50 bytes
+│   │   ├── transaction.py        delivered -- CVTRA05Y, 350 bytes
+│   │   ├── dalytran.py           delivered -- CVTRA06Y, 350 bytes
+│   │   ├── tcatbal.py            delivered -- CVTRA01Y, 50 bytes
+│   │   ├── discgrp.py            delivered -- CVTRA02Y, 50 bytes
+│   │   ├── trantype.py           delivered -- CVTRA03Y, 60 bytes
+│   │   ├── trancatg.py           delivered -- CVTRA04Y, 60 bytes
+│   │   ├── usrsec.py             delivered -- CSUSR01Y, 80 bytes; EBCDIC form only
+│   │   └── export_record.py      delivered -- CVEXPORT, 500 bytes; NO text form
 │   ├── loaders/
+│   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── s3_stage.py           delivered -- generation staging and LIMIT/SCRATCH retention
-│   │   └── aurora.py             contracted -- bulk COPY into one owning schema
-│   └── verify/                   contracted -- row_counts.py, checksum.py, money_parity.py
+│   │   └── aurora.py             delivered -- bulk COPY into one owning schema
+│   └── verify/
+│       ├── __init__.py           delivered -- makes the subpackage a regular package
+│       ├── row_counts.py         delivered -- pass 1, exact COUNT(*) against source records
+│       ├── checksum.py           delivered -- pass 2, sha256 over canonical field bytes
+│       └── money_parity.py       delivered -- pass 3, exact Decimal totals per column
 └── tests/
+    ├── conftest.py                     delivered -- corpora, record builders, client doubles
+    ├── test_aurora_loader.py           delivered -- targets, COPY shape, atomicity, privacy
+    ├── test_authorization_disclosure.py
+    │                                   delivered -- the authorization allow-list
     ├── test_cli.py                     delivered
     ├── test_config_name_contract.py    delivered
+    ├── test_corpus_disclosure.py       delivered -- the corpus allow-list, fail-closed
     ├── test_database_trust.py          delivered
     ├── test_docstring_gate.py          delivered -- Rule 1 presence gate, all visibilities
     ├── test_ebcdic_code_page_allow_list.py
     │                                   delivered -- the measured code-page allow-list
     ├── test_ebcdic_codec.py            delivered
     ├── test_packed.py                  delivered
+    ├── test_readers.py                 delivered -- all twelve readers at declared geometry
     ├── test_reporting_views.py         delivered
     ├── test_s3_stage.py                delivered
-    └── conftest.py, test_readers.py, test_loaders.py, test_verify.py
-                                        contracted
+    ├── test_seed_user_subjects.py      delivered
+    ├── test_verification.py            delivered -- the three passes and their two queries
+    └── test_zoned.py                   delivered
 ```
 
-Assumptions: a contracted path above is written as a plain name rather than a link,
-because [the documentation standard](../docs/CODE_DOCUMENTATION_STANDARD.md) requires
-that a path to a file which does not exist yet is never published as a link — a link
-that resolves to nothing is a defect a reader finds by clicking.
+Assumptions: every path above is now delivered, so none is written as a plain name. The
+convention that produced the earlier mixture still stands: a contracted path is written as
+a plain name rather than a link, because
+[the documentation standard](../docs/CODE_DOCUMENTATION_STANDARD.md) requires that a path
+to a file which does not exist yet is never published as a link — a link that resolves to
+nothing is a defect a reader finds by clicking.
+
+Refactoring Rationale: this tree is re-measured rather than amended, with
+`find data-migration -name '*.py' -o -name '*.sql'`, because an amended inventory drifts in
+exactly one direction — an author adding a file remembers to add its row, and an author who
+promotes a directory from contracted to delivered edits the one row they were looking at.
+Three test modules that already existed were absent from the previous revision of this
+tree, and `conftest.py` was marked contracted while being the file every other test module
+imports its corpora from.
 
 `src` itself is a layout container and is deliberately **not** a package. The
 distribution is discovered through `where = ["src"]` in
@@ -321,6 +365,45 @@ carddemo-migrate <subcommand> [options]
 | `verify-checksum` | **registered** | Verification pass 2 — per-record digest of the loaded rows against the source image, for one dataset. No field value is printed | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
 | `verify-money-parity` | **registered** | Verification pass 3 — exact money totals from the source bytes against the database's own `SUM` of each column they load into, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
 | `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure. Needs a dataset-to-source manifest this distribution does not carry, so it is not registered | none | none |
+
+Refactoring Rationale: the four rows above were `contracted` for exactly as long as
+`readers/`, `loaders/aurora.py` and `verify/` were absent, and two of them were spelled
+`verify-checksums` and `verify-money-totals` before the modules landed. They are spelled
+`verify-checksum` and `verify-money-parity` as delivered, one-for-one with the modules
+that back them — `verify/checksum.py` and `verify/money_parity.py` — because a command
+whose name does not match its implementation is one indirection an operator reading a
+traceback has to resolve for no benefit.
+
+Assumptions: all four take `--dataset`, `--source` and `--encoding`, and none takes an
+optional `--dataset` meaning "every dataset". A pass over every dataset would have to
+resolve each extract's PATH from somewhere, and this distribution holds no
+dataset-to-path mapping — the seed trees are an input an operator names, not a location
+this package knows. Requiring the pair is what keeps the command honest about needing to
+be told where the bytes are. It is also why they share one option set: they are four
+questions about the same pairing of an extract and a table, so a caller who has just
+loaded a dataset verifies it by changing only the verb.
+
+Assumptions: `--dataset` here is the record-layout identifier `list-datasets` reports,
+which is the same meaning it carries on `decode-record` and `stage-dataset`. It is
+emphatically **not** `decode-record`'s `--record`, which is a one-based ORDINAL within an
+extract; an earlier draft of these four commands spelled the selector `--record` and so
+gave one flag two unrelated meanings, which the "change only the verb" path above would
+have run straight into.
+
+> **Cipher boundary — two records cannot be loaded from here.** `load-dataset` refuses
+> `CUSTOMER` and `CARD` by name, with the reason in the message. `account.customers`
+> declares `ssn_encrypted` and `govt_issued_id_encrypted`, and `card.cards` declares
+> `cvv_encrypted`, as `BYTEA NOT NULL` holding ciphertext produced by the owning
+> service's cipher under a key this package does not hold. Both records have readers and
+> both decode correctly; what is absent is any way for this package to produce the
+> ciphertext those columns require.
+>
+> Alternatives Considered: loading the plaintext into the `*_encrypted` columns, which
+> would succeed. It is rejected because it succeeds — the load would report a clean
+> result and the row-count and checksum passes would agree, while every national
+> identifier in the database sat in cleartext in a column whose name asserted otherwise.
+> A refusal that names the reason is the only outcome that cannot be mistaken for a
+> completed load.
 
 Assumptions: `list-datasets` prints the five properties
 [`layouts.py`](src/carddemo_migration/copybook/layouts.py) holds authoritatively, and
@@ -492,10 +575,29 @@ Four obligations follow, and each is enforced somewhere rather than merely advis
   value; and the same prohibition applies to a shell that sets it — `env`, `set -x` and a
   crash dump each disclose it in full. Redaction tags themselves are safe to log, which is
   the entire point of deriving them.
-- **Entropy.** Supply **at least 32 bytes (256 bits)** of cryptographically random data,
-  which matches the output width of the hash it keys; a shorter key reduces the work of
-  confirming a guessed plaintext, and a human-chosen string reduces it further.
-  `openssl rand -base64 32` produces a conforming value.
+- **Entropy, and it is now ENFORCED rather than advised.** Supply **at least 32 bytes
+  (256 bits)** of cryptographically random data, **encoded as canonical standard base64**.
+  Thirty-two is the output width of the hash it keys, which is the point below which the
+  key rather than the hash bounds the work of confirming a guessed plaintext; a
+  human-chosen string reduces that work much further still. `layouts.py` refuses, with a
+  message naming this variable and the generation command but never the value: a value that
+  is not valid standard base64 (which covers a passphrase and the URL-safe alphabet), a
+  non-canonical base64 spelling, material decoding to fewer than 32 bytes, and material
+  that is a single repeated byte. Generate a conforming value with either of:
+
+  ```bash
+  openssl rand -base64 32
+  python3 -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+  ```
+
+  Two limits of that enforcement are stated so neither is assumed away. Leaving the
+  variable **empty or whitespace-only** is treated as leaving it unset and takes the
+  32-byte process-scoped fallback, because a deployment that references the variable
+  conditionally renders it empty and the fallback is the safe outcome there. And a
+  **hexadecimal** key is *accepted*: 64 hexadecimal characters are also valid base64 and
+  decode to 48 bytes, so the value is used as base64 of bytes you did not intend — harmless,
+  because the result is longer than the floor and no more guessable, but it is why exactly
+  one encoding is documented here.
 - **Rotation invalidates comparability, so rotate deliberately.** The tag is a function of
   the key, so a rotated key re-derives every tag: a verification pass that compares a
   rendering produced before rotation against one produced after will report differences
@@ -710,15 +812,13 @@ ASCII form deliberately, because in the EBCDIC form the `DEFAULT` group prices `
 identically to group `A000000000` and a fallback fixture built from it could not
 discriminate a fallback from a direct hit at all.
 
-Trade-offs: a per-dataset `--encoding {ascii,ebcdic}` selector is **contracted for
-`load-dataset` but not yet reachable**, because that subcommand is itself contracted rather
-than registered — see the inventory in [§5.2](#52-subcommands-and-their-arguments), which
-marks it `contracted`, and [§5.1](#51-invocation) which states that naming a contracted
-subcommand is refused as a usage error. When it is authored, the
-selector is what will let an operator deliberately load the ASCII twin of a dataset that
-ships both, so the capability is designed in rather than designed out; what the fact above
-buys in the meantime is that this package has ONE default and it is the authoritative one,
-so no accident can select the other. Note that
+Trade-offs: the per-dataset `--encoding {ascii,ebcdic}` selector is **required** on
+`load-dataset` and on all three `verify-*` passes — see the inventory in
+[§5.2](#52-subcommands-and-their-arguments). It is what lets an operator deliberately load
+the ASCII twin of a dataset that ships both, and requiring it rather than defaulting it is
+what stops the twin being selected by accident: with no default there is no accident
+available, and with a sniffed encoding an all-ASCII EBCDIC extract would be read as text
+and decode to plausible wrong values. Note that
 neither divergence is a codec defect: the per-field cp037 path re-encodes all 626
 EBCDIC seed records byte-identically, so both differences are genuinely present in the
 shipped files.
@@ -1002,23 +1102,68 @@ document.**
 
 ### 8.2 Sensitive fields in diagnostic output
 
-The layout descriptors flag the fields that must never appear whole in output:
-primary account number, card verification value, embossed and cardholder names,
-national identifier, government-issued identifier, date of birth, telephone numbers
-and the electronic-funds account identifier. Assumptions: a verification failure has
-to show *where* two records differ in order to be actionable, and it must do that
-without emitting a complete cardholder identity or payment number — so the masking is
-field-aware rather than all-or-nothing, and it is keyed by `CARDDEMO_MASK_HMAC_KEY` —
-which is itself secret key material and is handled as such
+**Disclosure is decided by an allowlist, so silence means withhold.** Refactoring
+Rationale: this section used to describe a *list of flagged fields* — account number, card
+verification value, names, national identifier, government-issued identifier, date of
+birth, telephone numbers, electronic-funds account identifier — and that description was
+accurate about the mechanism and wrong about its consequence. Flagging one field at a time
+makes an unflagged field disclosable, so a field transcribed with a plain factory was
+printed verbatim. Measured across the twenty records that are not IMS authorization
+segments, **116 distinct field names** were disclosable that way, including every account
+balance, credit limit and cycle total, every transaction amount, the transaction-category
+balance, every merchant name, city, postal code and identifier, the customer credit score
+and the free-text transaction description.
+
+`layouts.py` now inverts that. Two allowlists — one for the authorization segments and one
+for the rest of the corpus — name every field a diagnostic may render, and every other
+field of every record is withheld. A field admitted by name is one of: a date or a time, a
+code from a small closed domain, a count or a sequence rather than a money value, an
+**account** identifier the published REST contracts already render in full, or the trailing
+pad. Four consequences are worth knowing before reading a diagnostic:
+
+- an account identifier is rendered and a **customer** identifier is not, following the
+  contracts and the authorization allowlist's own asymmetry;
+- an account's open, expiration and reissue dates are rendered and a **card expiry** date is
+  not, because the latter is a credential rather than a lifecycle fact;
+- a state and a country code are rendered and a **postal code** is not, because ten
+  characters of postal code narrow a household where a two-character state does not;
+- the three pure reference records — disclosure group, transaction type, transaction
+  category — are rendered **in full**, rate and description included, because every byte of
+  them is seeded configuration linked to no customer.
+
+The policy is enforced twice rather than documented once. `layouts.py` **refuses to import**
+if any record it declares leaves a field disclosable that no allowlist names, and
+`tests/test_corpus_disclosure.py` re-runs that audit over the fully imported module and
+asserts the rendered output field by field.
+
+Assumptions: a verification failure has to show *where* two records differ in order to be
+actionable, and it must do that without emitting a complete cardholder identity or payment
+number — so the masking is field-aware rather than all-or-nothing, and it is keyed by
+`CARDDEMO_MASK_HMAC_KEY` — which is itself secret key material and is handled as such
 ([§5.7.1](#571-carddemo_mask_hmac_key-is-key-material-not-a-name)) — so the same value
 masks consistently wherever that key is supplied, and consistently within one run only
 where it is not.
-The ETL's own output follows the same discipline the reference codec already models.
+
+**The partial reveal covers card numbers only.** Four field names — `CARD-NUM`,
+`XREF-CARD-NUM`, `TRAN-CARD-NUM`, `DALYTRAN-CARD-NUM` — render as asterisks followed by
+their real trailing four digits; every other withheld field renders a keyed tag carrying no
+part of its value. Refactoring Rationale: `CUST-SSN` was in that set and is removed. "Quoted
+by its last four" describes a practice for a card number and not a safe disclosure for a
+nine-digit national identifier, whose remaining five digits are the issuing area and group;
+and the ETL never matches on the field, so withholding it costs nothing here. This is a
+deliberate divergence from the reference codec at `tests/helpers/record_codec.py`, which
+still carries five names — that file is the parity oracle and is reference-only, and the
+divergence is safe in this direction only because the oracle compares record *bytes* and
+never a masked rendering.
 
 `decode-record` ([§5.2](#52-subcommands-and-their-arguments)) is the first command to
-print record content, and it applies exactly that discipline: each flagged field goes
-through the layout module's field-aware masking, so a card number shows its trailing
-four digits and every other flagged field shows a keyed tag carrying none of the value.
+print record content, and it applies exactly that discipline. One detail of its output is
+worth knowing: a withheld **character** field shows a keyed tag of the field's own width,
+while a withheld **numeric** field shows the fixed literal `<withheld>`. A decoded number is
+rendered as its value — `194.00` for a twelve-byte zoned balance — so it is not the declared
+width, and the only chunk a tag could be computed from there would be a constant. That tag
+would be equal for two different balances while looking value-derived, so the literal is
+printed instead: it claims nothing, which is the honest rendering.
 
 Alternatives Considered: a `--reveal` flag that printed the cleartext was considered and
 rejected. The command exists to prove a delivery decodes at its declared geometry, and
@@ -1301,17 +1446,31 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-The delivered modules are [`test_cli.py`](tests/test_cli.py),
+All sixteen modules are delivered:
+[`conftest.py`](tests/conftest.py),
+[`test_aurora_loader.py`](tests/test_aurora_loader.py),
+[`test_authorization_disclosure.py`](tests/test_authorization_disclosure.py),
+[`test_cli.py`](tests/test_cli.py),
 [`test_config_name_contract.py`](tests/test_config_name_contract.py),
+[`test_corpus_disclosure.py`](tests/test_corpus_disclosure.py),
 [`test_database_trust.py`](tests/test_database_trust.py),
 [`test_docstring_gate.py`](tests/test_docstring_gate.py),
 [`test_ebcdic_code_page_allow_list.py`](tests/test_ebcdic_code_page_allow_list.py),
 [`test_ebcdic_codec.py`](tests/test_ebcdic_codec.py),
 [`test_packed.py`](tests/test_packed.py),
-[`test_reporting_views.py`](tests/test_reporting_views.py) and
-[`test_s3_stage.py`](tests/test_s3_stage.py) — 225 tests in total. The
-contracted modules are `conftest.py`, `test_zoned.py`, `test_readers.py`,
-`test_loaders.py` and `test_verify.py`.
+[`test_readers.py`](tests/test_readers.py),
+[`test_reporting_views.py`](tests/test_reporting_views.py),
+[`test_s3_stage.py`](tests/test_s3_stage.py),
+[`test_seed_user_subjects.py`](tests/test_seed_user_subjects.py),
+[`test_verification.py`](tests/test_verification.py) and
+[`test_zoned.py`](tests/test_zoned.py) — **741 tests** in total. No test module is
+contracted.
+
+Refactoring Rationale: the count and the module list are re-measured with
+`python -m pytest data-migration/tests -q --collect-only` and
+`ls data-migration/tests/test_*.py` rather than incremented. A remembered total is the one
+number in a README that is always slightly wrong, and here it is load-bearing: the reader
+who checks it is checking whether their own run executed the whole suite.
 
 Assumptions: `test_ebcdic_code_page_allow_list.py` is a separate module from
 `test_ebcdic_codec.py` even though both exercise one source file, because the two ask
@@ -1322,10 +1481,13 @@ one-byte-per-character post-condition that no real page can violate. Keeping tha
 registry manipulation in its own module is what stops a failure there being read as a
 failure of the corpus assertions next door.
 
-Assumptions: `test_cli.py` asserts the ABSENCE of each contracted subcommand as well as
-the presence of each registered one. A test that only checked the ones that work would
-pass equally well if another were added that could not, which is the regression the
-absence assertions exist to catch.
+Assumptions: `test_cli.py` asserts the ABSENCE of the one contracted subcommand as well as
+the presence of each registered one, and it states both sets as literal tuples rather than
+reading them back from the parser. A test that only checked the ones that work would pass
+equally well if another were added that could not, which is the regression the absence
+assertion exists to catch; and a test that read the parser back would have accepted the
+four commands this checkpoint added silently, and would equally have accepted their
+disappearance.
 
 Assumptions: the two codec modules assert their vectors as LITERAL BYTES rather than by
 round-tripping each codec through its own inverse. A round trip agrees with itself
@@ -1509,9 +1671,10 @@ against the source, and a published layer can never contain cardholder data.
 >
 > Assumptions: a subcommand [§5.2](#52-subcommands-and-their-arguments) marks
 > **contracted** is refused by the parser as a usage error (exit `2`), so
-> `docker run ... load-dataset` reports an unrecognised subcommand rather than starting
-> a load it cannot finish. A source-record cutover therefore still cannot be claimed
-> from this image.
+> `docker run ... verify-all` reports an unrecognised subcommand rather than starting a
+> pass it cannot finish. `load-dataset` and the three individual `verify-*` passes are
+> registered and reachable from this image; what they still require is a provisioned
+> cluster and a resolvable credential, neither of which the image carries.
 
 ---
 

@@ -163,9 +163,12 @@
  * omission: only two of the five records carry a description, so a third class holding one helper for
  * two callers would add an indirection whose only content is a two-line loop. The helper pair
  * therefore lives on {@code TransactionTypeMapper}, the mapper of the record whose description the
- * baseline manipulates most, and {@code TransactionCategoryMapper} and {@code DisclosureGroupMapper}
- * call it by qualified name. Trade-offs: that makes those two depend on a sibling rather than on a
- * neutral utility, which is the cost accepted for keeping one implementation of the rule.</p>
+ * baseline manipulates most, and {@code TransactionCategoryMapper} calls it by qualified name.
+ * Trade-offs: that makes the category mapper depend on a sibling rather than on a neutral utility,
+ * which is the cost accepted for keeping one implementation of the rule. The other two mappers call
+ * it not at all: {@code LookupMapper} and {@code DisclosureGroupMapper} convert records that carry no
+ * description, so the trim boundary below never reaches them and every value they publish is
+ * verbatim.</p>
  *
  * <h2>Why the conversion is written rather than generated</h2>
  *
@@ -345,13 +348,23 @@
  * double-precision binary value by most clients, which loses exactness at the one boundary a user
  * actually reads.</p>
  *
- * <p>Assumptions: {@code float}, {@code double}, {@code java.lang.Double} and a bare JSON number are
- * forbidden in the rate path of this package, and the prohibition is stated here explicitly because
- * no mechanical gate catches a breach of it in this module. The layering test's floating-point rule
- * has a subject set confined to the shared money package, so a stray {@code double} introduced in a
- * mapper here would fail no build and would be caught only in review. An unstated prohibition that
- * nothing enforces is one nobody checks, which is the whole reason it is written down rather than
- * assumed.</p>
+ * <p>Assumptions: {@code float}, {@code double}, {@code java.lang.Float}, {@code java.lang.Double}
+ * and a bare JSON number are forbidden in the rate path of this package, and that prohibition is
+ * mechanised rather than left to review. Rule A3 of
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
+ * subjects every production class residing under the analysed root {@code com.carddemo} rather than
+ * the shared money package alone -- its own note records that under the narrower scope a transfer
+ * object, an entity or a mapper could declare such a member and still pass -- and
+ * {@code services/pom.xml} runs that class against this module's compiled classes through Surefire's
+ * {@code dependenciesToScan}. A stray {@code double} introduced in a mapper here therefore fails the
+ * build. Refactoring Rationale: an earlier revision of this paragraph stated the opposite, that the
+ * rule's subject set stopped at the money package and that a breach here rested on review. That was
+ * the more damaging direction to be wrong in: a reader who trusted it would take the prohibition for
+ * a convention and could introduce the member believing only a reviewer stood in the way, and the
+ * sibling charter of {@code com.carddemo.reference.dto} already described the gate correctly, so the
+ * two files disagreed. The prohibition is still written out in full here, because a rule whose
+ * enforcement lives two modules away is one a reader has to be told about before the failure explains
+ * it to them.</p>
  *
  * <p>Assumptions: no mapper in this package performs arithmetic and none applies a rounding mode. The
  * rate is an operand of the interest computation at {@code app/cbl/CBACT04C.cbl} L464 to L465, whose

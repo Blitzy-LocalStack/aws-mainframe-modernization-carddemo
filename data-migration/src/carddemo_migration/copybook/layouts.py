@@ -2211,6 +2211,263 @@ class RecordSpec:
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed diagnostic disclosure.
+# ---------------------------------------------------------------------------
+# Refactoring Rationale: sensitivity used to be declared ONE FIELD AT A TIME, by reaching
+#   for sensitive_text, sensitive_uint or sensitive_binary at a declaration site, and a
+#   per-field opt-in makes SILENCE MEAN DISCLOSE. A field transcribed with a plain factory --
+#   the ordinary case -- was returned verbatim by mask_field and echoed in full by every
+#   codec diagnostic. Measured across the twenty records that are not authorization segments,
+#   116 distinct field names were disclosable that way: every balance, credit limit and cycle
+#   total on the account master, every transaction and daily-transaction amount, the
+#   transaction-category balance, every merchant name, city, postal code and identifier, the
+#   customer credit score, the free-text transaction description, and the postal codes of
+#   both the account and the customer master. The two authorization segments had already been
+#   closed against an allowlist further down this module; the other twenty had not, so the
+#   corpus failed OPEN everywhere except the one place somebody had remembered to close it.
+# Assumptions: the allowlist below is that same mechanism generalised to the rest of the
+#   corpus, and it admits a field for exactly one of the five reasons the authorization
+#   allowlist already established: the field is a date or a time; it is a code drawn from a
+#   small closed domain; it is a count or a sequence rather than a money value; it is an
+#   ACCOUNT identifier, which the published REST contracts render in full in their own paths
+#   and bodies; or it is the trailing pad, which carries no value at all. A field that is
+#   none of those five is withheld, so a field added to any record later is withheld until
+#   somebody deliberately names it here.
+# Assumptions: four classifications read as inconsistent one at a time and are
+#   deliberate read together, so each is stated here rather than left to be rediscovered.
+#   (1) An account identifier is disclosed and a CUSTOMER identifier is withheld. The
+#   asymmetry is the authorization allowlist's own -- PA-ACCT-ID is named there and
+#   PA-CUST-ID is not -- and it follows the published contracts: an account identifier
+#   travels in a request path, whereas a customer identifier is only ever reached through one
+#   and is the join key to the record holding name, address, national identifier and date of
+#   birth. (2) A card expiry date is withheld although it IS a date, because it is a card
+#   credential rather than a lifecycle fact -- it is the value a card-not-present
+#   authorization asks for alongside the number -- and PA-CARD-EXPIRY-DATE is withheld in the
+#   detail segment for that same reason. The account open, expiration and reissue dates stay
+#   disclosed, because none of them authenticates anything and the account expiration date is
+#   the value the posting reject-103 boundary turns on. (3) A postal code is withheld while a
+#   state code and a country code are disclosed, because the three differ in identifying
+#   power rather than in kind: a two-character state has fifty-odd values and a
+#   three-character country a few hundred, while a postal code narrows a household. (4) The
+#   three pure reference records -- the disclosure group, the transaction type and the
+#   transaction category -- are disclosed in FULL, interest rate and description included,
+#   because every byte of them is seeded configuration shared by every account in a group and
+#   none of it is linked to a customer; withholding the rate would make the DEFAULT-group
+#   fallback diagnostic, which is the one thing that record exists to explain, unreadable.
+# Trade-offs: withholding a record's KEY costs real operational ground, and the cost is
+#   accepted with it stated. A masked customer master, daily transaction, posted transaction
+#   or statement-view record no longer names the row an operator would look up, so a failure
+#   has to be localised by the keyed tag -- which is stable for one value under one key, so
+#   two renderings can still be compared field by field and a diff still shows WHICH field
+#   differs -- and then reproduced against the source dataset. The alternative was disclosing
+#   a card-linked transaction identifier and a customer identifier in every diagnostic, which
+#   is the disclosure this closure exists to end.
+# Alternatives Considered: (a) keeping the per-field factories and adding the four dozen
+#   missing sensitive markers, rejected because the failure mode of forgetting one is silent
+#   disclosure rather than a visible refusal, which is precisely how the corpus reached 116
+#   disclosable names; (b) a record-level withhold-everything flag, rejected because it would
+#   also withhold the reject reason code and its verbatim description -- the two values the
+#   posting reject stream exists to carry -- along with the dates and status codes needed to
+#   localise a load failure at all; (c) a name-pattern rule, for instance withholding every
+#   name ending in -AMT or containing MERCHANT, rejected because a pattern is a guess about
+#   names rather than a decision about fields, and the four asymmetries above are exactly the
+#   cases no pattern expresses.
+# Assumptions: like the authorization policy it generalises, this whole regime is a
+#   target-only addition -- a copybook declares widths and usages and has no notion of a
+#   field whose content may not be logged -- so it is registered as
+#   D-ETL-CORPUS-DIAGNOSTIC-DISCLOSURE in docs/architecture/cobol-to-service-traceability.md,
+#   beside the D-AUTH-DIAGNOSTIC-DISCLOSURE entry it extends, rather than presented as parity
+#   with the baseline.
+_CORPUS_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # Account master and its export projection: the account key, the status code, the
+        # three lifecycle dates and the disclosure-group code. The five money fields, both
+        # cycle totals and the postal code are withheld.
+        "ACCT-ID",
+        "ACCT-ACTIVE-STATUS",
+        "ACCT-OPEN-DATE",
+        "ACCT-EXPIRAION-DATE",
+        "ACCT-REISSUE-DATE",
+        "ACCT-GROUP-ID",
+        "EXP-ACCT-ID",
+        "EXP-ACCT-ACTIVE-STATUS",
+        "EXP-ACCT-OPEN-DATE",
+        "EXP-ACCT-EXPIRAION-DATE",
+        "EXP-ACCT-REISSUE-DATE",
+        "EXP-ACCT-GROUP-ID",
+        # Card master and its export projection: the account key it hangs from and the status
+        # code. The number, the verification value, the embossed name and the expiry date are
+        # all withheld.
+        "CARD-ACCT-ID",
+        "CARD-ACTIVE-STATUS",
+        "EXP-CARD-ACCT-ID",
+        "EXP-CARD-ACTIVE-STATUS",
+        # Customer master and its export projection: the two closed-domain address codes and
+        # the primary-holder indicator. The identifier, the postal code and the credit score
+        # join the twelve already-withheld identity fields.
+        "CUST-ADDR-STATE-CD",
+        "CUST-ADDR-COUNTRY-CD",
+        "CUST-PRI-CARD-HOLDER-IND",
+        "EXP-CUST-ADDR-STATE-CD",
+        "EXP-CUST-ADDR-COUNTRY-CD",
+        "EXP-CUST-PRI-CARD-HOLDER-IND",
+        # Card cross-reference and its export projection: the account key only. The card
+        # number was already withheld and the customer identifier now is.
+        "XREF-ACCT-ID",
+        "EXP-XREF-ACCT-ID",
+        # The four transaction shapes -- daily, posted, statement view and export projection
+        # -- each disclose the type code, the category code, the source and the two
+        # timestamps. Each withholds its identifier, its description, its amount and all four
+        # merchant fields. The reject stream inherits the daily shape.
+        "DALYTRAN-TYPE-CD",
+        "DALYTRAN-CAT-CD",
+        "DALYTRAN-SOURCE",
+        "DALYTRAN-ORIG-TS",
+        "DALYTRAN-PROC-TS",
+        "TRAN-TYPE-CD",
+        "TRAN-CAT-CD",
+        "TRAN-SOURCE",
+        "TRAN-ORIG-TS",
+        "TRAN-PROC-TS",
+        "TRNX-TYPE-CD",
+        "TRNX-CAT-CD",
+        "TRNX-SOURCE",
+        "TRNX-ORIG-TS",
+        "TRNX-PROC-TS",
+        "EXP-TRAN-TYPE-CD",
+        "EXP-TRAN-CAT-CD",
+        "EXP-TRAN-SOURCE",
+        "EXP-TRAN-ORIG-TS",
+        "EXP-TRAN-PROC-TS",
+        # The reject stream's two-field trailer: a reason code from the closed domain
+        # {100, 101, 102, 103} and the verbatim message text that accompanies it. These are
+        # the two values the stream exists to carry, so withholding them would leave a reject
+        # diagnostic saying only that a record was rejected.
+        "WS-VALIDATION-FAIL-REASON",
+        "WS-VALIDATION-FAIL-REASON-DESC",
+        # The three pure reference records, disclosed in full for the reason recorded above.
+        "DIS-ACCT-GROUP-ID",
+        "DIS-TRAN-TYPE-CD",
+        "DIS-TRAN-CAT-CD",
+        "DIS-INT-RATE",
+        "TRAN-CAT-TYPE-DESC",
+        "TRAN-TYPE",
+        "TRAN-TYPE-DESC",
+        # The transaction-category balance record: its three key components. The balance
+        # itself is withheld, which is the only field of that record that is not a key.
+        "TRANCAT-ACCT-ID",
+        "TRANCAT-TYPE-CD",
+        "TRANCAT-CD",
+        # The security-user record: the eight-character user identifier, which the published
+        # sign-on contract renders in full, the A-or-U type code and the named trailing pad.
+        # The two name fields and the stored password remain withheld.
+        "SEC-USR-ID",
+        "SEC-USR-TYPE",
+        "SEC-USR-FILLER",
+        # The export header: a record-type code, the run timestamp, the sequence number,
+        # which is a count rather than a money value, and two organisational codes. The
+        # 460-byte payload area is opaque and the constructor already requires it to be
+        # withheld.
+        "EXPORT-REC-TYPE",
+        "EXPORT-TIMESTAMP",
+        "EXPORT-SEQUENCE-NUM",
+        "EXPORT-BRANCH-ID",
+        "EXPORT-REGION-CODE",
+        # Every record closes with a trailing pad, which carries no value at all.
+        "FILLER",
+    }
+)
+
+
+def _close_disclosure(
+    fields: tuple[FieldSpec, ...],
+    disclosable: frozenset[str],
+) -> tuple[FieldSpec, ...]:
+    """Mark every field sensitive unless an allowlist names it as disclosable.
+
+    Purpose
+    -------
+    Apply one fail-closed disclosure policy to one record's field tuple, so that the
+    sensitivity of that record is decided by a LIST rather than by remembering to reach
+    for a sensitive factory at each declaration site.
+
+    Assumptions: only the ``sensitive`` flag is ever changed, and geometry is carried
+    through untouched by :meth:`FieldSpec.with_flags`, so applying this function cannot
+    move a field, resize one, or alter a storage regime. That is what lets it run between
+    the field declarations and :meth:`RecordSpec.validate_geometry`, leaving every
+    record-length sum to be checked exactly as before.
+
+    Trade-offs: ``normalize_ts`` is read off each field and written straight back rather
+    than being defaulted, because several records DO declare a wall-clock stamp and a
+    function that quietly cleared the flag would make every comparison against those
+    records non-deterministic -- a failure that would surface as an unstable diff far from
+    this line. Reading and restoring costs nothing and removes that trap.
+
+    Assumptions: the function is idempotent, so applying it twice to the same tuple, or
+    applying it to a tuple a narrower policy has already closed, changes nothing. That is
+    what makes the import-time audit at the end of this module safe to run over records
+    that were closed at their own declaration sites.
+
+    Parameters
+    ----------
+    fields : tuple of FieldSpec
+        The record's field descriptors exactly as transcribed from its copybook.
+    disclosable : frozenset of str
+        The names this record's policy admits. Every other name is withheld.
+
+    Returns
+    -------
+    tuple of FieldSpec
+        The same descriptors in the same order, each either unchanged because its name is
+        disclosable or marked sensitive because it is not.
+
+    Raises
+    ------
+    LayoutError
+        Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes
+        the validating constructor.
+    """
+    return tuple(
+        field if field.name in disclosable else field.with_flags(field.normalize_ts, True)
+        for field in fields
+    )
+
+
+def _closed(fields: tuple[FieldSpec, ...]) -> tuple[FieldSpec, ...]:
+    """Apply the corpus disclosure policy to one record's field tuple.
+
+    Purpose
+    -------
+    Name the corpus policy at each declaration site in one short token, so that a reader
+    scanning the twenty record declarations below can see at a glance which of them are
+    closed and a declaration that is NOT closed is visible as an absence rather than
+    hidden in a factory choice one field at a time.
+
+    Assumptions: the two authorization segments use
+    :func:`_close_authorization_disclosure` instead, against their own narrower allowlist,
+    because that allowlist is read out of this file by a Java parity test and must stay a
+    literal of exactly those names. Both policies are enforced together by the import-time
+    audit at the end of this module, so neither can be skipped for a new record.
+
+    Parameters
+    ----------
+    fields : tuple of FieldSpec
+        The record's field descriptors exactly as transcribed from its copybook.
+
+    Returns
+    -------
+    tuple of FieldSpec
+        The same descriptors, each either disclosable by name or marked sensitive.
+
+    Raises
+    ------
+    LayoutError
+        Never in practice, for the reason given on :func:`_close_disclosure`.
+    """
+    return _close_disclosure(fields, _CORPUS_DISCLOSABLE_FIELDS)
+
+
+# ---------------------------------------------------------------------------
 # The eleven base masters, transcribed field for field from their copybooks.
 # ---------------------------------------------------------------------------
 # Trade-offs: FILLER is declared as a real field in every layout below rather than
@@ -2258,13 +2515,15 @@ SECUSER_LAYOUT: Final[RecordSpec] = RecordSpec(
     80,
     8,
     0,
-    (
-        text("SEC-USR-ID", 0, 8),  # CSUSR01Y L18 PIC X(08)
-        sensitive_text("SEC-USR-FNAME", 8, 20),  # CSUSR01Y L19 PIC X(20)
-        sensitive_text("SEC-USR-LNAME", 28, 20),  # CSUSR01Y L20 PIC X(20)
-        sensitive_text("SEC-USR-PWD", 48, 8),  # CSUSR01Y L21 PIC X(08)
-        text("SEC-USR-TYPE", 56, 1),  # CSUSR01Y L22 PIC X(01) 'A' or 'U'
-        text("SEC-USR-FILLER", 57, 23),  # CSUSR01Y L23 PIC X(23) named trailing pad
+    _closed(
+        (
+            text("SEC-USR-ID", 0, 8),  # CSUSR01Y L18 PIC X(08)
+            sensitive_text("SEC-USR-FNAME", 8, 20),  # CSUSR01Y L19 PIC X(20)
+            sensitive_text("SEC-USR-LNAME", 28, 20),  # CSUSR01Y L20 PIC X(20)
+            sensitive_text("SEC-USR-PWD", 48, 8),  # CSUSR01Y L21 PIC X(08)
+            text("SEC-USR-TYPE", 56, 1),  # CSUSR01Y L22 PIC X(01) 'A' or 'U'
+            text("SEC-USR-FILLER", 57, 23),  # CSUSR01Y L23 PIC X(23) named trailing pad
+        )
     ),
 ).validate_geometry()
 _ACCOUNT_MASTER_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
@@ -2420,14 +2679,16 @@ CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     150,
     16,
     0,
-    (
-        sensitive_text("CARD-NUM", 0, 16),  # CVACT02Y L5 PIC X(16) primary account number
-        sensitive_uint("CARD-ACCT-ID", 16, 11),  # CVACT02Y L6 PIC 9(11) alternate key
-        sensitive_uint("CARD-CVV-CD", 27, 3),  # CVACT02Y L7 PIC 9(03) verification value
-        sensitive_text("CARD-EMBOSSED-NAME", 30, 50),  # CVACT02Y L8 PIC X(50)
-        text("CARD-EXPIRAION-DATE", 80, 10),  # CVACT02Y L9 PIC X(10) misspelt
-        text("CARD-ACTIVE-STATUS", 90, 1),  # CVACT02Y L10 PIC X(01)
-        text("FILLER", 91, 59),  # CVACT02Y L11 PIC X(59) trailing pad
+    _closed(
+        (
+            sensitive_text("CARD-NUM", 0, 16),  # CVACT02Y L5 PIC X(16) primary account number
+            sensitive_uint("CARD-ACCT-ID", 16, 11),  # CVACT02Y L6 PIC 9(11) alternate key
+            sensitive_uint("CARD-CVV-CD", 27, 3),  # CVACT02Y L7 PIC 9(03) verification value
+            sensitive_text("CARD-EMBOSSED-NAME", 30, 50),  # CVACT02Y L8 PIC X(50)
+            text("CARD-EXPIRAION-DATE", 80, 10),  # CVACT02Y L9 PIC X(10) misspelt
+            text("CARD-ACTIVE-STATUS", 90, 1),  # CVACT02Y L10 PIC X(01)
+            text("FILLER", 91, 59),  # CVACT02Y L11 PIC X(59) trailing pad
+        )
     ),
     (AlternateKeySpec("CARD-ACCT-ID", 16, 11),),
 ).validate_geometry()
@@ -2446,26 +2707,28 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     500,
     9,
     0,
-    (
-        sensitive_uint("CUST-ID", 0, 9),  # CVCUS01Y L5 PIC 9(09)
-        sensitive_text("CUST-FIRST-NAME", 9, 25),  # CVCUS01Y L6 PIC X(25)
-        sensitive_text("CUST-MIDDLE-NAME", 34, 25),  # CVCUS01Y L7 PIC X(25)
-        sensitive_text("CUST-LAST-NAME", 59, 25),  # CVCUS01Y L8 PIC X(25)
-        sensitive_text("CUST-ADDR-LINE-1", 84, 50),  # CVCUS01Y L9 PIC X(50)
-        sensitive_text("CUST-ADDR-LINE-2", 134, 50),  # CVCUS01Y L10 PIC X(50)
-        sensitive_text("CUST-ADDR-LINE-3", 184, 50),  # CVCUS01Y L11 PIC X(50)
-        text("CUST-ADDR-STATE-CD", 234, 2),  # CVCUS01Y L12 PIC X(02)
-        text("CUST-ADDR-COUNTRY-CD", 236, 3),  # CVCUS01Y L13 PIC X(03)
-        text("CUST-ADDR-ZIP", 239, 10),  # CVCUS01Y L14 PIC X(10)
-        sensitive_text("CUST-PHONE-NUM-1", 249, 15),  # CVCUS01Y L15 PIC X(15)
-        sensitive_text("CUST-PHONE-NUM-2", 264, 15),  # CVCUS01Y L16 PIC X(15)
-        sensitive_uint("CUST-SSN", 279, 9),  # CVCUS01Y L17 PIC 9(09) encrypted at rest
-        sensitive_text("CUST-GOVT-ISSUED-ID", 288, 20),  # CVCUS01Y L18 PIC X(20) encrypted
-        sensitive_text("CUST-DOB-YYYY-MM-DD", 308, 10),  # CVCUS01Y L19 PIC X(10)
-        sensitive_text("CUST-EFT-ACCOUNT-ID", 318, 10),  # CVCUS01Y L20 PIC X(10)
-        text("CUST-PRI-CARD-HOLDER-IND", 328, 1),  # CVCUS01Y L21 PIC X(01)
-        sensitive_uint("CUST-FICO-CREDIT-SCORE", 329, 3),  # CVCUS01Y L22 PIC 9(03)
-        text("FILLER", 332, 168),  # CVCUS01Y L23 PIC X(168) trailing pad
+    _closed(
+        (
+            sensitive_uint("CUST-ID", 0, 9),  # CVCUS01Y L5 PIC 9(09)
+            sensitive_text("CUST-FIRST-NAME", 9, 25),  # CVCUS01Y L6 PIC X(25)
+            sensitive_text("CUST-MIDDLE-NAME", 34, 25),  # CVCUS01Y L7 PIC X(25)
+            sensitive_text("CUST-LAST-NAME", 59, 25),  # CVCUS01Y L8 PIC X(25)
+            sensitive_text("CUST-ADDR-LINE-1", 84, 50),  # CVCUS01Y L9 PIC X(50)
+            sensitive_text("CUST-ADDR-LINE-2", 134, 50),  # CVCUS01Y L10 PIC X(50)
+            sensitive_text("CUST-ADDR-LINE-3", 184, 50),  # CVCUS01Y L11 PIC X(50)
+            text("CUST-ADDR-STATE-CD", 234, 2),  # CVCUS01Y L12 PIC X(02)
+            text("CUST-ADDR-COUNTRY-CD", 236, 3),  # CVCUS01Y L13 PIC X(03)
+            text("CUST-ADDR-ZIP", 239, 10),  # CVCUS01Y L14 PIC X(10)
+            sensitive_text("CUST-PHONE-NUM-1", 249, 15),  # CVCUS01Y L15 PIC X(15)
+            sensitive_text("CUST-PHONE-NUM-2", 264, 15),  # CVCUS01Y L16 PIC X(15)
+            sensitive_uint("CUST-SSN", 279, 9),  # CVCUS01Y L17 PIC 9(09) encrypted at rest
+            sensitive_text("CUST-GOVT-ISSUED-ID", 288, 20),  # CVCUS01Y L18 PIC X(20) encrypted
+            sensitive_text("CUST-DOB-YYYY-MM-DD", 308, 10),  # CVCUS01Y L19 PIC X(10)
+            sensitive_text("CUST-EFT-ACCOUNT-ID", 318, 10),  # CVCUS01Y L20 PIC X(10)
+            text("CUST-PRI-CARD-HOLDER-IND", 328, 1),  # CVCUS01Y L21 PIC X(01)
+            sensitive_uint("CUST-FICO-CREDIT-SCORE", 329, 3),  # CVCUS01Y L22 PIC 9(03)
+            text("FILLER", 332, 168),  # CVCUS01Y L23 PIC X(168) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2513,21 +2776,23 @@ DALYTRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
     350,
     16,
     0,
-    (
-        text("DALYTRAN-ID", 0, 16),  # CVTRA06Y L5 PIC X(16)
-        text("DALYTRAN-TYPE-CD", 16, 2),  # CVTRA06Y L6 PIC X(02)
-        uint("DALYTRAN-CAT-CD", 18, 4),  # CVTRA06Y L7 PIC 9(04)
-        text("DALYTRAN-SOURCE", 22, 10),  # CVTRA06Y L8 PIC X(10)
-        text("DALYTRAN-DESC", 32, 100),  # CVTRA06Y L9 PIC X(100)
-        sensitive_signed_zoned("DALYTRAN-AMT", 132, 9, 2),  # CVTRA06Y L10 PIC S9(09)V99
-        uint("DALYTRAN-MERCHANT-ID", 143, 9),  # CVTRA06Y L11 PIC 9(09)
-        text("DALYTRAN-MERCHANT-NAME", 152, 50),  # CVTRA06Y L12 PIC X(50)
-        text("DALYTRAN-MERCHANT-CITY", 202, 50),  # CVTRA06Y L13 PIC X(50)
-        text("DALYTRAN-MERCHANT-ZIP", 252, 10),  # CVTRA06Y L14 PIC X(10)
-        sensitive_text("DALYTRAN-CARD-NUM", 262, 16),  # CVTRA06Y L15 PIC X(16)
-        text("DALYTRAN-ORIG-TS", 278, 26),  # CVTRA06Y L16 PIC X(26) deterministic
-        normalized_timestamp("DALYTRAN-PROC-TS", 304, 26),  # CVTRA06Y L17 PIC X(26) wall clock
-        text("FILLER", 330, 20),  # CVTRA06Y L18 PIC X(20) trailing pad
+    _closed(
+        (
+            text("DALYTRAN-ID", 0, 16),  # CVTRA06Y L5 PIC X(16)
+            text("DALYTRAN-TYPE-CD", 16, 2),  # CVTRA06Y L6 PIC X(02)
+            uint("DALYTRAN-CAT-CD", 18, 4),  # CVTRA06Y L7 PIC 9(04)
+            text("DALYTRAN-SOURCE", 22, 10),  # CVTRA06Y L8 PIC X(10)
+            text("DALYTRAN-DESC", 32, 100),  # CVTRA06Y L9 PIC X(100)
+            sensitive_signed_zoned("DALYTRAN-AMT", 132, 9, 2),  # CVTRA06Y L10 PIC S9(09)V99
+            uint("DALYTRAN-MERCHANT-ID", 143, 9),  # CVTRA06Y L11 PIC 9(09)
+            text("DALYTRAN-MERCHANT-NAME", 152, 50),  # CVTRA06Y L12 PIC X(50)
+            text("DALYTRAN-MERCHANT-CITY", 202, 50),  # CVTRA06Y L13 PIC X(50)
+            text("DALYTRAN-MERCHANT-ZIP", 252, 10),  # CVTRA06Y L14 PIC X(10)
+            sensitive_text("DALYTRAN-CARD-NUM", 262, 16),  # CVTRA06Y L15 PIC X(16)
+            text("DALYTRAN-ORIG-TS", 278, 26),  # CVTRA06Y L16 PIC X(26) deterministic
+            normalized_timestamp("DALYTRAN-PROC-TS", 304, 26),  # CVTRA06Y L17 PIC X(26) wall clock
+            text("FILLER", 330, 20),  # CVTRA06Y L18 PIC X(20) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2547,21 +2812,23 @@ TRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
     350,
     16,
     0,
-    (
-        text("TRAN-ID", 0, 16),  # CVTRA05Y L5 PIC X(16)
-        text("TRAN-TYPE-CD", 16, 2),  # CVTRA05Y L6 PIC X(02)
-        uint("TRAN-CAT-CD", 18, 4),  # CVTRA05Y L7 PIC 9(04)
-        text("TRAN-SOURCE", 22, 10),  # CVTRA05Y L8 PIC X(10)
-        text("TRAN-DESC", 32, 100),  # CVTRA05Y L9 PIC X(100)
-        sensitive_signed_zoned("TRAN-AMT", 132, 9, 2),  # CVTRA05Y L10 PIC S9(09)V99
-        uint("TRAN-MERCHANT-ID", 143, 9),  # CVTRA05Y L11 PIC 9(09)
-        text("TRAN-MERCHANT-NAME", 152, 50),  # CVTRA05Y L12 PIC X(50)
-        text("TRAN-MERCHANT-CITY", 202, 50),  # CVTRA05Y L13 PIC X(50)
-        text("TRAN-MERCHANT-ZIP", 252, 10),  # CVTRA05Y L14 PIC X(10)
-        sensitive_text("TRAN-CARD-NUM", 262, 16),  # CVTRA05Y L15 PIC X(16) at 262
-        text("TRAN-ORIG-TS", 278, 26),  # CVTRA05Y L16 PIC X(26) deterministic
-        normalized_timestamp("TRAN-PROC-TS", 304, 26),  # CVTRA05Y L17 PIC X(26) at 304
-        text("FILLER", 330, 20),  # CVTRA05Y L18 PIC X(20) trailing pad
+    _closed(
+        (
+            text("TRAN-ID", 0, 16),  # CVTRA05Y L5 PIC X(16)
+            text("TRAN-TYPE-CD", 16, 2),  # CVTRA05Y L6 PIC X(02)
+            uint("TRAN-CAT-CD", 18, 4),  # CVTRA05Y L7 PIC 9(04)
+            text("TRAN-SOURCE", 22, 10),  # CVTRA05Y L8 PIC X(10)
+            text("TRAN-DESC", 32, 100),  # CVTRA05Y L9 PIC X(100)
+            sensitive_signed_zoned("TRAN-AMT", 132, 9, 2),  # CVTRA05Y L10 PIC S9(09)V99
+            uint("TRAN-MERCHANT-ID", 143, 9),  # CVTRA05Y L11 PIC 9(09)
+            text("TRAN-MERCHANT-NAME", 152, 50),  # CVTRA05Y L12 PIC X(50)
+            text("TRAN-MERCHANT-CITY", 202, 50),  # CVTRA05Y L13 PIC X(50)
+            text("TRAN-MERCHANT-ZIP", 252, 10),  # CVTRA05Y L14 PIC X(10)
+            sensitive_text("TRAN-CARD-NUM", 262, 16),  # CVTRA05Y L15 PIC X(16) at 262
+            text("TRAN-ORIG-TS", 278, 26),  # CVTRA05Y L16 PIC X(26) deterministic
+            normalized_timestamp("TRAN-PROC-TS", 304, 26),  # CVTRA05Y L17 PIC X(26) at 304
+            text("FILLER", 330, 20),  # CVTRA05Y L18 PIC X(20) trailing pad
+        )
     ),
     (AlternateKeySpec("TRAN-PROC-TS", 304, 26),),
 ).validate_geometry()
@@ -2583,12 +2850,14 @@ DISGROUP_LAYOUT: Final[RecordSpec] = RecordSpec(
     50,
     16,
     0,
-    (
-        text("DIS-ACCT-GROUP-ID", 0, 10),  # CVTRA02Y L6 PIC X(10), in the L5 key group
-        text("DIS-TRAN-TYPE-CD", 10, 2),  # CVTRA02Y L7 PIC X(02), in the L5 key group
-        uint("DIS-TRAN-CAT-CD", 12, 4),  # CVTRA02Y L8 PIC 9(04), in the L5 key group
-        signed_zoned("DIS-INT-RATE", 16, 4, 2),  # CVTRA02Y L9 PIC S9(04)V99
-        text("FILLER", 22, 28),  # CVTRA02Y L10 PIC X(28) trailing pad
+    _closed(
+        (
+            text("DIS-ACCT-GROUP-ID", 0, 10),  # CVTRA02Y L6 PIC X(10), in the L5 key group
+            text("DIS-TRAN-TYPE-CD", 10, 2),  # CVTRA02Y L7 PIC X(02), in the L5 key group
+            uint("DIS-TRAN-CAT-CD", 12, 4),  # CVTRA02Y L8 PIC 9(04), in the L5 key group
+            signed_zoned("DIS-INT-RATE", 16, 4, 2),  # CVTRA02Y L9 PIC S9(04)V99
+            text("FILLER", 22, 28),  # CVTRA02Y L10 PIC X(28) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2607,11 +2876,13 @@ TRANCAT_LAYOUT: Final[RecordSpec] = RecordSpec(
     60,
     6,
     0,
-    (
-        text("TRAN-TYPE-CD", 0, 2),  # CVTRA04Y L6 PIC X(02), in the L5 key group
-        uint("TRAN-CAT-CD", 2, 4),  # CVTRA04Y L7 PIC 9(04), in the L5 key group
-        text("TRAN-CAT-TYPE-DESC", 6, 50),  # CVTRA04Y L8 PIC X(50)
-        text("FILLER", 56, 4),  # CVTRA04Y L9 PIC X(04) trailing pad
+    _closed(
+        (
+            text("TRAN-TYPE-CD", 0, 2),  # CVTRA04Y L6 PIC X(02), in the L5 key group
+            uint("TRAN-CAT-CD", 2, 4),  # CVTRA04Y L7 PIC 9(04), in the L5 key group
+            text("TRAN-CAT-TYPE-DESC", 6, 50),  # CVTRA04Y L8 PIC X(50)
+            text("FILLER", 56, 4),  # CVTRA04Y L9 PIC X(04) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2632,10 +2903,12 @@ TRANTYPE_LAYOUT: Final[RecordSpec] = RecordSpec(
     60,
     2,
     0,
-    (
-        text("TRAN-TYPE", 0, 2),  # CVTRA03Y L5 PIC X(02)
-        text("TRAN-TYPE-DESC", 2, 50),  # CVTRA03Y L6 PIC X(50)
-        text("FILLER", 52, 8),  # CVTRA03Y L7 PIC X(08) trailing pad
+    _closed(
+        (
+            text("TRAN-TYPE", 0, 2),  # CVTRA03Y L5 PIC X(02)
+            text("TRAN-TYPE-DESC", 2, 50),  # CVTRA03Y L6 PIC X(50)
+            text("FILLER", 52, 8),  # CVTRA03Y L7 PIC X(08) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2686,21 +2959,24 @@ TRNX_LAYOUT: Final[RecordSpec] = RecordSpec(
     350,
     32,
     0,
-    (
-        sensitive_text("TRNX-CARD-NUM", 0, 16),  # COSTM01 L22 PIC X(16), in the L21 key group
-        text("TRNX-ID", 16, 16),  # COSTM01 L23 PIC X(16), in the L21 key group
-        text("TRNX-TYPE-CD", 32, 2),  # COSTM01 L25 PIC X(02)
-        uint("TRNX-CAT-CD", 34, 4),  # COSTM01 L26 PIC 9(04)
-        text("TRNX-SOURCE", 38, 10),  # COSTM01 L27 PIC X(10)
-        text("TRNX-DESC", 48, 100),  # COSTM01 L28 PIC X(100)
-        sensitive_signed_zoned("TRNX-AMT", 148, 9, 2),  # COSTM01 L29 PIC S9(09)V99 at 148, not 132
-        uint("TRNX-MERCHANT-ID", 159, 9),  # COSTM01 L30 PIC 9(09)
-        text("TRNX-MERCHANT-NAME", 168, 50),  # COSTM01 L31 PIC X(50)
-        text("TRNX-MERCHANT-CITY", 218, 50),  # COSTM01 L32 PIC X(50)
-        text("TRNX-MERCHANT-ZIP", 268, 10),  # COSTM01 L33 PIC X(10)
-        text("TRNX-ORIG-TS", 278, 26),  # COSTM01 L34 PIC X(26) deterministic
-        normalized_timestamp("TRNX-PROC-TS", 304, 26),  # COSTM01 L35 PIC X(26) wall clock
-        text("FILLER", 330, 20),  # COSTM01 L36 PIC X(20) trailing pad
+    _closed(
+        (
+            sensitive_text("TRNX-CARD-NUM", 0, 16),  # COSTM01 L22 PIC X(16), in the L21 key group
+            text("TRNX-ID", 16, 16),  # COSTM01 L23 PIC X(16), in the L21 key group
+            text("TRNX-TYPE-CD", 32, 2),  # COSTM01 L25 PIC X(02)
+            uint("TRNX-CAT-CD", 34, 4),  # COSTM01 L26 PIC 9(04)
+            text("TRNX-SOURCE", 38, 10),  # COSTM01 L27 PIC X(10)
+            text("TRNX-DESC", 48, 100),  # COSTM01 L28 PIC X(100)
+            # COSTM01 L29 PIC S9(09)V99 at 148, not 132
+            sensitive_signed_zoned("TRNX-AMT", 148, 9, 2),
+            uint("TRNX-MERCHANT-ID", 159, 9),  # COSTM01 L30 PIC 9(09)
+            text("TRNX-MERCHANT-NAME", 168, 50),  # COSTM01 L31 PIC X(50)
+            text("TRNX-MERCHANT-CITY", 218, 50),  # COSTM01 L32 PIC X(50)
+            text("TRNX-MERCHANT-ZIP", 268, 10),  # COSTM01 L33 PIC X(10)
+            text("TRNX-ORIG-TS", 278, 26),  # COSTM01 L34 PIC X(26) deterministic
+            normalized_timestamp("TRNX-PROC-TS", 304, 26),  # COSTM01 L35 PIC X(26) wall clock
+            text("FILLER", 330, 20),  # COSTM01 L36 PIC X(20) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -2717,9 +2993,11 @@ TRNX_LAYOUT: Final[RecordSpec] = RecordSpec(
 REJECT_LAYOUT: Final[RecordSpec] = DALYTRAN_LAYOUT.extend_with(
     "REJECT",
     430,
-    (
-        uint("WS-VALIDATION-FAIL-REASON", 350, 4),  # CBTRN02C L181 PIC 9(04)
-        text("WS-VALIDATION-FAIL-REASON-DESC", 354, 76),  # CBTRN02C L182 PIC X(76)
+    _closed(
+        (
+            uint("WS-VALIDATION-FAIL-REASON", 350, 4),  # CBTRN02C L181 PIC 9(04)
+            text("WS-VALIDATION-FAIL-REASON-DESC", 354, 76),  # CBTRN02C L182 PIC X(76)
+        )
     ),
 )
 
@@ -2731,6 +3009,14 @@ REJECT_LAYOUT: Final[RecordSpec] = DALYTRAN_LAYOUT.extend_with(
 #   run-generated originating stamp would therefore make every interest comparison
 #   non-deterministic. This layout flips that one flag and changes nothing else, which is
 #   why it is derived rather than transcribed.
+# Assumptions: the trailing False is the ``sensitive`` flag, and it agrees with the
+#   corpus disclosure policy rather than overriding it -- TRAN-ORIG-TS is named in
+#   _CORPUS_DISCLOSABLE_FIELDS, so the base record already carries it disclosable and this
+#   derivation only flips the timestamp flag. Nothing here needs to remember that: because
+#   with_field_flags writes both flags at once, a name that was NOT admitted by the policy
+#   would be re-opened by this line, and the import-time audit at the end of this module is
+#   what refuses that -- it walks the finished records rather than the declarations, so a
+#   disclosure re-opened by a derivation is caught in the same way as one never closed.
 INTTRAN_LAYOUT: Final[RecordSpec] = TRAN_LAYOUT.with_field_flags(
     "INTTRAN", "TRAN-ORIG-TS", True, False
 )
@@ -3277,30 +3563,32 @@ EXPORT_HEADER_LAYOUT: Final[RecordSpec] = RecordSpec(
     500,
     EXPORT_KEY_LENGTH,
     EXPORT_KEY_OFFSET,
-    (
-        text("EXPORT-REC-TYPE", 0, RECORD_TYPE_LENGTH),  # CVEXPORT L10 PIC X(1)
-        normalized_timestamp("EXPORT-TIMESTAMP", 1, 26),  # CVEXPORT L11 PIC X(26) run clock
-        binary("EXPORT-SEQUENCE-NUM", 27, 9, 0, signed=False),  # CVEXPORT L16 PIC 9(9) COMP
-        text("EXPORT-BRANCH-ID", 31, 4),  # CVEXPORT L17 PIC X(4)
-        text("EXPORT-REGION-CODE", 35, 5),  # CVEXPORT L18 PIC X(5)
-        # Refactoring Rationale: this area is declared OPAQUE and not text, and the
-        #   change closes a silent data-integrity and disclosure defect rather than tidying
-        #   a label. The copybook writes PIC X(460) at CVEXPORT L19, so text was the literal
-        #   reading -- but the same 460 bytes are redefined by the five branch overlays
-        #   below, which between them declare a primary account number at L92, a card
-        #   verification value as 9(03) COMP at L96, a national identifier at L36, a
-        #   government-issued identifier at L37, three COMP-3 amounts at L41, L50 and L52 and
-        #   seven COMP identifiers. Declared text, the whole area went through cp037 on the
-        #   generic record path and came back as a 460-character string: the record kept its
-        #   declared width, every later offset stayed valid, nothing raised, and payment data
-        #   had crossed the one transcoding boundary in the repository. Declared opaque, the
-        #   area leaves as raw bytes, is refused by the character entry point outright, and
-        #   is marked sensitive so a failure reports its geometry and never its bytes.
-        #   Alternatives Considered: leaving it text and relying on callers to use the
-        #   payload constants instead of the generic decoder -- rejected, because a default
-        #   that is safe only when nobody takes the obvious path is not a safe default. The
-        #   interior is reached through export_branch and decode_export_record.
-        opaque("EXPORT-RECORD-DATA", 40, EXPORT_BRANCH_LENGTH),  # CVEXPORT L19 PIC X(460)
+    _closed(
+        (
+            text("EXPORT-REC-TYPE", 0, RECORD_TYPE_LENGTH),  # CVEXPORT L10 PIC X(1)
+            normalized_timestamp("EXPORT-TIMESTAMP", 1, 26),  # CVEXPORT L11 PIC X(26) run clock
+            binary("EXPORT-SEQUENCE-NUM", 27, 9, 0, signed=False),  # CVEXPORT L16 PIC 9(9) COMP
+            text("EXPORT-BRANCH-ID", 31, 4),  # CVEXPORT L17 PIC X(4)
+            text("EXPORT-REGION-CODE", 35, 5),  # CVEXPORT L18 PIC X(5)
+            # Refactoring Rationale: this area is declared OPAQUE and not text, and the
+            #   change closes a silent data-integrity and disclosure defect rather than tidying
+            #   a label. The copybook writes PIC X(460) at CVEXPORT L19, so text was the literal
+            #   reading -- but the same 460 bytes are redefined by the five branch overlays
+            #   below, which between them declare a primary account number at L92, a card
+            #   verification value as 9(03) COMP at L96, a national identifier at L36, a
+            #   government-issued identifier at L37, three COMP-3 amounts at L41, L50 and L52 and
+            #   seven COMP identifiers. Declared text, the whole area went through cp037 on the
+            #   generic record path and came back as a 460-character string: the record kept its
+            #   declared width, every later offset stayed valid, nothing raised, and payment data
+            #   had crossed the one transcoding boundary in the repository. Declared opaque, the
+            #   area leaves as raw bytes, is refused by the character entry point outright, and
+            #   is marked sensitive so a failure reports its geometry and never its bytes.
+            #   Alternatives Considered: leaving it text and relying on callers to use the
+            #   payload constants instead of the generic decoder -- rejected, because a default
+            #   that is safe only when nobody takes the obvious path is not a safe default. The
+            #   interior is reached through export_branch and decode_export_record.
+            opaque("EXPORT-RECORD-DATA", 40, EXPORT_BRANCH_LENGTH),  # CVEXPORT L19 PIC X(460)
+        )
     ),
 ).validate_geometry()
 
@@ -3329,23 +3617,26 @@ EXPORT_CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     EXPORT_BRANCH_LENGTH,
     4,
     0,
-    (
-        sensitive_binary("EXP-CUST-ID", 0, 9, 0, signed=False),  # CVEXPORT L25 PIC 9(09) COMP
-        sensitive_text("EXP-CUST-FIRST-NAME", 4, 25),  # CVEXPORT L26 PIC X(25)
-        sensitive_text("EXP-CUST-MIDDLE-NAME", 29, 25),  # CVEXPORT L27 PIC X(25)
-        sensitive_text("EXP-CUST-LAST-NAME", 54, 25),  # CVEXPORT L28 PIC X(25)
-        sensitive_text("EXP-CUST-ADDR-LINES", 79, 150),  # CVEXPORT L29 OCCURS 3 x X(50)
-        text("EXP-CUST-ADDR-STATE-CD", 229, 2),  # CVEXPORT L31 PIC X(02)
-        text("EXP-CUST-ADDR-COUNTRY-CD", 231, 3),  # CVEXPORT L32 PIC X(03)
-        text("EXP-CUST-ADDR-ZIP", 234, 10),  # CVEXPORT L33 PIC X(10)
-        sensitive_text("EXP-CUST-PHONE-NUMS", 244, 30),  # CVEXPORT L34 OCCURS 2 x X(15)
-        sensitive_uint("EXP-CUST-SSN", 274, 9),  # CVEXPORT L36 PIC 9(09) display
-        sensitive_text("EXP-CUST-GOVT-ISSUED-ID", 283, 20),  # CVEXPORT L37 PIC X(20)
-        sensitive_text("EXP-CUST-DOB-YYYY-MM-DD", 303, 10),  # CVEXPORT L38 PIC X(10)
-        sensitive_text("EXP-CUST-EFT-ACCOUNT-ID", 313, 10),  # CVEXPORT L39 PIC X(10)
-        text("EXP-CUST-PRI-CARD-HOLDER-IND", 323, 1),  # CVEXPORT L40 PIC X(01)
-        sensitive_packed("EXP-CUST-FICO-CREDIT-SCORE", 324, 3, 0, signed=False),  # L41 9(03) COMP-3
-        text("FILLER", 326, 134),  # CVEXPORT L42 PIC X(134) trailing pad
+    _closed(
+        (
+            sensitive_binary("EXP-CUST-ID", 0, 9, 0, signed=False),  # CVEXPORT L25 PIC 9(09) COMP
+            sensitive_text("EXP-CUST-FIRST-NAME", 4, 25),  # CVEXPORT L26 PIC X(25)
+            sensitive_text("EXP-CUST-MIDDLE-NAME", 29, 25),  # CVEXPORT L27 PIC X(25)
+            sensitive_text("EXP-CUST-LAST-NAME", 54, 25),  # CVEXPORT L28 PIC X(25)
+            sensitive_text("EXP-CUST-ADDR-LINES", 79, 150),  # CVEXPORT L29 OCCURS 3 x X(50)
+            text("EXP-CUST-ADDR-STATE-CD", 229, 2),  # CVEXPORT L31 PIC X(02)
+            text("EXP-CUST-ADDR-COUNTRY-CD", 231, 3),  # CVEXPORT L32 PIC X(03)
+            text("EXP-CUST-ADDR-ZIP", 234, 10),  # CVEXPORT L33 PIC X(10)
+            sensitive_text("EXP-CUST-PHONE-NUMS", 244, 30),  # CVEXPORT L34 OCCURS 2 x X(15)
+            sensitive_uint("EXP-CUST-SSN", 274, 9),  # CVEXPORT L36 PIC 9(09) display
+            sensitive_text("EXP-CUST-GOVT-ISSUED-ID", 283, 20),  # CVEXPORT L37 PIC X(20)
+            sensitive_text("EXP-CUST-DOB-YYYY-MM-DD", 303, 10),  # CVEXPORT L38 PIC X(10)
+            sensitive_text("EXP-CUST-EFT-ACCOUNT-ID", 313, 10),  # CVEXPORT L39 PIC X(10)
+            text("EXP-CUST-PRI-CARD-HOLDER-IND", 323, 1),  # CVEXPORT L40 PIC X(01)
+            # L41 9(03) COMP-3
+            sensitive_packed("EXP-CUST-FICO-CREDIT-SCORE", 324, 3, 0, signed=False),
+            text("FILLER", 326, 134),  # CVEXPORT L42 PIC X(134) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3391,21 +3682,23 @@ EXPORT_TRANSACTION_LAYOUT: Final[RecordSpec] = RecordSpec(
     EXPORT_BRANCH_LENGTH,
     16,
     0,
-    (
-        text("EXP-TRAN-ID", 0, 16),  # CVEXPORT L66 PIC X(16)
-        text("EXP-TRAN-TYPE-CD", 16, 2),  # CVEXPORT L67 PIC X(02)
-        uint("EXP-TRAN-CAT-CD", 18, 4),  # CVEXPORT L68 PIC 9(04)
-        text("EXP-TRAN-SOURCE", 22, 10),  # CVEXPORT L69 PIC X(10)
-        text("EXP-TRAN-DESC", 32, 100),  # CVEXPORT L70 PIC X(100)
-        sensitive_packed("EXP-TRAN-AMT", 132, 9, 2, signed=True),  # L71 S9(09)V99 COMP-3 = 6
-        binary("EXP-TRAN-MERCHANT-ID", 138, 9, 0, signed=False),  # L72 9(09) COMP = 4
-        text("EXP-TRAN-MERCHANT-NAME", 142, 50),  # CVEXPORT L73 PIC X(50)
-        text("EXP-TRAN-MERCHANT-CITY", 192, 50),  # CVEXPORT L74 PIC X(50)
-        text("EXP-TRAN-MERCHANT-ZIP", 242, 10),  # CVEXPORT L75 PIC X(10)
-        sensitive_text("EXP-TRAN-CARD-NUM", 252, 16),  # CVEXPORT L76 PIC X(16)
-        text("EXP-TRAN-ORIG-TS", 268, 26),  # CVEXPORT L77 PIC X(26) deterministic
-        normalized_timestamp("EXP-TRAN-PROC-TS", 294, 26),  # CVEXPORT L78 PIC X(26) clock
-        text("FILLER", 320, 140),  # CVEXPORT L79 PIC X(140) trailing pad
+    _closed(
+        (
+            text("EXP-TRAN-ID", 0, 16),  # CVEXPORT L66 PIC X(16)
+            text("EXP-TRAN-TYPE-CD", 16, 2),  # CVEXPORT L67 PIC X(02)
+            uint("EXP-TRAN-CAT-CD", 18, 4),  # CVEXPORT L68 PIC 9(04)
+            text("EXP-TRAN-SOURCE", 22, 10),  # CVEXPORT L69 PIC X(10)
+            text("EXP-TRAN-DESC", 32, 100),  # CVEXPORT L70 PIC X(100)
+            sensitive_packed("EXP-TRAN-AMT", 132, 9, 2, signed=True),  # L71 S9(09)V99 COMP-3 = 6
+            binary("EXP-TRAN-MERCHANT-ID", 138, 9, 0, signed=False),  # L72 9(09) COMP = 4
+            text("EXP-TRAN-MERCHANT-NAME", 142, 50),  # CVEXPORT L73 PIC X(50)
+            text("EXP-TRAN-MERCHANT-CITY", 192, 50),  # CVEXPORT L74 PIC X(50)
+            text("EXP-TRAN-MERCHANT-ZIP", 242, 10),  # CVEXPORT L75 PIC X(10)
+            sensitive_text("EXP-TRAN-CARD-NUM", 252, 16),  # CVEXPORT L76 PIC X(16)
+            text("EXP-TRAN-ORIG-TS", 268, 26),  # CVEXPORT L77 PIC X(26) deterministic
+            normalized_timestamp("EXP-TRAN-PROC-TS", 294, 26),  # CVEXPORT L78 PIC X(26) clock
+            text("FILLER", 320, 140),  # CVEXPORT L79 PIC X(140) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3446,14 +3739,16 @@ EXPORT_CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     EXPORT_BRANCH_LENGTH,
     16,
     0,
-    (
-        sensitive_text("EXP-CARD-NUM", 0, 16),  # CVEXPORT L94 PIC X(16)
-        sensitive_binary("EXP-CARD-ACCT-ID", 16, 11, 0, signed=False),  # L95 9(11) COMP = 8
-        sensitive_binary("EXP-CARD-CVV-CD", 24, 3, 0, signed=False),  # L96 9(03) COMP = 2
-        sensitive_text("EXP-CARD-EMBOSSED-NAME", 26, 50),  # CVEXPORT L97 PIC X(50)
-        text("EXP-CARD-EXPIRAION-DATE", 76, 10),  # CVEXPORT L98 PIC X(10) misspelt
-        text("EXP-CARD-ACTIVE-STATUS", 86, 1),  # CVEXPORT L99 PIC X(01)
-        text("FILLER", 87, 373),  # CVEXPORT L100 PIC X(373) trailing pad
+    _closed(
+        (
+            sensitive_text("EXP-CARD-NUM", 0, 16),  # CVEXPORT L94 PIC X(16)
+            sensitive_binary("EXP-CARD-ACCT-ID", 16, 11, 0, signed=False),  # L95 9(11) COMP = 8
+            sensitive_binary("EXP-CARD-CVV-CD", 24, 3, 0, signed=False),  # L96 9(03) COMP = 2
+            sensitive_text("EXP-CARD-EMBOSSED-NAME", 26, 50),  # CVEXPORT L97 PIC X(50)
+            text("EXP-CARD-EXPIRAION-DATE", 76, 10),  # CVEXPORT L98 PIC X(10) misspelt
+            text("EXP-CARD-ACTIVE-STATUS", 86, 1),  # CVEXPORT L99 PIC X(01)
+            text("FILLER", 87, 373),  # CVEXPORT L100 PIC X(373) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3655,6 +3950,17 @@ def _close_authorization_disclosure(
     today and a function that quietly cleared the flag would be wrong the moment one did.
     Reading and restoring costs nothing and removes that trap.
 
+    Refactoring Rationale: the loop that stood here is now :func:`_close_disclosure`, which
+    this function calls with its own allowlist, and the extraction was made because the same
+    fail-closed policy was generalised to the other twenty records under
+    :data:`_CORPUS_DISCLOSABLE_FIELDS`. Two hand-written copies of one three-line loop would
+    have been two places for the ``normalize_ts`` restoration to be forgotten in, and that
+    flag decides whether a comparison against a wall-clock record is deterministic at all.
+    This wrapper is KEPT rather than replaced by a direct call, because the authorization
+    allowlist is narrower than the corpus one and the difference is deliberate: naming the
+    policy at the two declaration sites is what stops the wider list being reached for there
+    by mistake.
+
     Parameters
     ----------
     fields : tuple[FieldSpec, ...]
@@ -3672,12 +3978,7 @@ def _close_authorization_disclosure(
         Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes
         the validating constructor.
     """
-    return tuple(
-        field
-        if field.name in _AUTHORIZATION_DISCLOSABLE_FIELDS
-        else field.with_flags(field.normalize_ts, True)
-        for field in fields
-    )
+    return _close_disclosure(fields, _AUTHORIZATION_DISCLOSABLE_FIELDS)
 
 
 # Assumptions: 100 bytes, and the sum closes only under the packed width rule: an
@@ -3783,24 +4084,168 @@ PENDING_AUTH_DETAIL_LAYOUT: Final[RecordSpec] = RecordSpec(
 
 
 # ---------------------------------------------------------------------------
+# The import-time disclosure audit.
+# ---------------------------------------------------------------------------
+# Refactoring Rationale: this audit did not exist, and without it the two allowlists above
+#   were fail-closed only for the records somebody had remembered to close. That is exactly how
+#   the corpus reached 116 disclosable names while the two authorization segments were tight: a
+#   declaration that simply omits the closure wrapper discloses every field it declares, and
+#   nothing anywhere reports the omission, because a disclosed field decodes and renders
+#   perfectly. The audit converts that silence into a refusal at IMPORT: a record declared in
+#   this module that leaves a field disclosable without either allowlist naming it stops the
+#   package from loading at all.
+# Assumptions: the audit walks the FINISHED records out of this module's own namespace
+#   rather than a hand-kept list of them, and that choice is the whole point. A list would be
+#   one more thing to extend alongside a new declaration, so the guard would have the same
+#   failure mode as the thing it guards. Reading the namespace means a new RecordSpec is
+#   audited because it exists, not because it was registered -- and it also catches a record
+#   that is closed at its declaration and then RE-OPENED by a derivation, because
+#   RecordSpec.with_field_flags writes both diagnostic flags at once.
+# Trade-offs: the check runs at import and raises, rather than being left to the test
+#   suite, and the cost is that one mistake breaks every import of this package instead of one
+#   test. That cost is accepted because the failure it replaces is silent disclosure of payment
+#   and identity data, and because this module already refuses malformed geometry at its
+#   declaration sites for the same reason -- a descriptor that exists is a descriptor that is
+#   consistent. Alternatives Considered: emitting a warning, rejected because a warning on an
+#   import path is read by nobody and the corpus would drift straight back; and asserting the
+#   property only in data-migration/tests, rejected because the property is also relied on by
+#   the Java parity test and by the command-line entry point, neither of which runs the Python
+#   suite.
+# Assumptions: a record declared BELOW this point would escape the import-time call, which
+#   is why _unnamed_disclosures is written as a pure function over a supplied sequence and is
+#   re-run over the fully imported module by data-migration/tests. Two callers of one function
+#   is the reason it takes its records as an argument rather than reading the namespace itself.
+def _declared_layouts() -> tuple[RecordSpec, ...]:
+    """Return every record layout this module declares, in name order.
+
+    Purpose
+    -------
+    Give the disclosure audit its population without a hand-kept list, so that a record
+    added to this module is audited because it exists rather than because somebody
+    remembered to add it somewhere.
+
+    Assumptions: the module namespace is read at call time and not captured, so the
+    function answers with whatever is declared when it is called. The import-time call
+    below therefore sees the twenty-two records declared above it, and a later call from a
+    test sees everything the finished module declares.
+
+    Assumptions: the ordering is by variable name and is deterministic, because the audit's
+    failure message lists what it found and an unordered message cannot be compared against
+    a committed expectation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple of RecordSpec
+        Every :class:`RecordSpec` bound to a module-level name, ordered by that name.
+
+    Raises
+    ------
+    None
+    """
+    return tuple(value for _, value in sorted(globals().items()) if isinstance(value, RecordSpec))
+
+
+def _unnamed_disclosures(specs: Sequence[RecordSpec]) -> tuple[str, ...]:
+    """Return every record-and-field pair left disclosable without an allowlist naming it.
+
+    Purpose
+    -------
+    Express the fail-closed property as something computable: a field is either withheld or
+    it is named by one of the two allowlists, and any third case is a disclosure nobody
+    decided on.
+
+    Assumptions: the two allowlists are checked as a UNION rather than per record, and the
+    looser test is deliberate. Deciding which allowlist applies to which record would
+    duplicate the choice already made at each declaration site, and two copies of that
+    choice could disagree -- at which point the audit would report a disclosure that is
+    correctly closed, or miss one that is not. The union still refuses every field neither
+    policy admits, which is the property being guarded; that the authorization allowlist is
+    additionally asserted name-for-name is the job of the Java parity test and of
+    data-migration/tests, not of this function.
+
+    Trade-offs: the finding is rendered as ``RECORD.FIELD`` and carries no value, no offset
+    and no width. A caller reading the refusal knows exactly which declaration to fix, and
+    the message stays safe to print from an import failure that may be captured anywhere.
+
+    Parameters
+    ----------
+    specs : Sequence of RecordSpec
+        The records to audit, ordinarily :func:`_declared_layouts`.
+
+    Returns
+    -------
+    tuple of str
+        One ``RECORD.FIELD`` entry per unnamed disclosure, in record and then field order.
+        Empty when every record is closed.
+
+    Raises
+    ------
+    None
+    """
+    admitted = _CORPUS_DISCLOSABLE_FIELDS | _AUTHORIZATION_DISCLOSABLE_FIELDS
+    return tuple(
+        f"{spec.name}.{field.name}"
+        for spec in specs
+        for field in spec.fields
+        if not field.sensitive and field.name not in admitted
+    )
+
+
+_UNNAMED_DISCLOSURES: Final[tuple[str, ...]] = _unnamed_disclosures(_declared_layouts())
+if _UNNAMED_DISCLOSURES:
+    raise LayoutError(
+        "every field of every record must be withheld from diagnostics unless an allowlist"
+        " names it as disclosable, but these are disclosable and unnamed:"
+        f" {_UNNAMED_DISCLOSURES}. Either add each name to _CORPUS_DISCLOSABLE_FIELDS with the"
+        " reason it is safe to render, or wrap the record's field tuple in _closed() so the"
+        " policy applies to it"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sensitive-field diagnostics.
 # ---------------------------------------------------------------------------
-# Trade-offs: the five names below reveal their last four characters where every other
+# Trade-offs: the four names below reveal their last four characters where every other
 #   sensitive field is replaced wholesale, and the compromise is deliberate. A primary account
-#   number or a national identifier is routinely quoted by its last four digits in operational
-#   practice, so revealing exactly four keeps a diagnostic actionable -- a reader can tell
-#   WHICH card a mismatch concerns -- while disclosing far too little to reconstruct the value.
-#   Every other sensitive field reveals nothing at all, because a name or a date of birth has
-#   no equivalent partial form that is useful without being identifying. The same five names
-#   carry the same concession in the reference codec at tests/helpers/record_codec.py line
-#   1589.
+#   number is routinely quoted by its last four digits in operational practice, so revealing
+#   exactly four keeps a diagnostic actionable -- a reader can tell WHICH card a mismatch
+#   concerns -- while disclosing far too little to reconstruct the number. Every other
+#   sensitive field reveals nothing at all, because a name or a date of birth has no
+#   equivalent partial form that is useful without being identifying.
+# Refactoring Rationale: CUST-SSN stood in this set and is REMOVED, so the concession now
+#   covers card numbers only. The reasoning that admitted it -- that a national identifier is
+#   "routinely quoted by its last four digits" -- described a practice rather than a safe
+#   disclosure, and the two differ here in a way they do not for a card number. A card number
+#   is sixteen digits of which the last four leave twelve unknown; a nine-digit national
+#   identifier's last four leave five, and the leading five are the issuing area and group,
+#   which are derivable from where and roughly when the holder was issued one. So the same
+#   four characters that identify one card among many come close to completing this value, and
+#   the ETL has no operational need for them at all: it loads the field into an encrypted
+#   column and never matches on it, which is what makes withholding it free here where it
+#   would not be for the card number a browse is keyed on.
+# Assumptions: EXP-CUST-SSN was never in this set, so before this change the corpus
+#   treated the two national-identifier fields differently for no stated reason. Removing
+#   CUST-SSN resolves that inconsistency toward the safer of the two behaviours rather than
+#   adding its twin to the concession.
+# Trade-offs: the four card-number names are a DELIBERATE DIVERGENCE from the reference
+#   codec at tests/helpers/record_codec.py line 1589, which carries the same concession for
+#   five names including CUST-SSN. That file is the parity oracle and is reference-only, so it
+#   is not edited; the divergence is registered as D-ETL-CORPUS-DIAGNOSTIC-DISCLOSURE in
+#   docs/architecture/cobol-to-service-traceability.md alongside the rest of this disclosure
+#   regime. It is safe to diverge in this direction and only this direction: the oracle
+#   compares record BYTES after timestamp normalisation and never compares a masked
+#   rendering, so a narrower mask here cannot change a parity result -- it can only withhold
+#   more from a log line than the oracle's own helper would.
 _LAST4_REVEAL: Final[frozenset[str]] = frozenset(
     {
         "CARD-NUM",
         "XREF-CARD-NUM",
         "TRAN-CARD-NUM",
         "DALYTRAN-CARD-NUM",
-        "CUST-SSN",
     }
 )
 
@@ -3851,6 +4296,184 @@ ENV_MASK_ENVIRONMENT: Final[str] = "CARDDEMO_ENVIRONMENT"
 #   read or reconstruct is not a key, and the construction collapses back to a confirmable digest
 #   of a low-entropy value.
 _PROCESS_MASK_KEY: Final[bytes] = secrets.token_bytes(32)
+
+# Refactoring Rationale: a supplied key is now REQUIRED to be canonical base64 decoding to
+#   at least this many bytes, where any non-empty string was previously accepted and used as
+#   key material by its UTF-8 bytes. That acceptance made the enforcement contradict the
+#   documented contract in the worst possible direction: data-migration/README.md describes the
+#   variable as 32 random bytes, so an operator following the documentation got a strong key
+#   while an operator typing a memorable phrase got a five-byte one, and NOTHING reported the
+#   difference. The consequence is specific rather than theoretical. The tag exists to make a
+#   redacted card number, national identifier or date of birth unconfirmable, and that property
+#   rests entirely on the key being unguessable -- with a guessable key an adversary holding a
+#   candidate value simply computes the same HMAC under the same guessed key and compares, which
+#   is the exact confirmation attack keying was introduced to close. A weak key therefore does
+#   not weaken the tag gradually; it returns it to the unkeyed digest it replaced.
+# Assumptions: 32 bytes is the floor because the construction is HMAC-SHA-256, whose block
+#   is 64 bytes and whose output is 32; a key shorter than the output size is the point below
+#   which the key, rather than the hash, bounds the work an attacker needs. Longer keys are
+#   accepted unchanged -- HMAC folds an over-long key by hashing it, so there is no upper bound
+#   worth imposing and no reason to reject a 64-byte key an operator generated for a different
+#   HMAC.
+# Trade-offs: base64 is required rather than raw bytes or hexadecimal, and exactly one
+#   encoding is accepted. A secret store and an environment variable both carry text, so key
+#   material has to be encoded somehow, and admitting several encodings would mean the same
+#   characters could denote different keys -- "abcd" is four bytes read literally, three read as
+#   base64 and two read as hexadecimal, so a key rotated between two readings of the same string
+#   would silently change every tag. Standard base64 is required and the URL-safe alphabet is
+#   refused for the same reason: one string, one key.
+# Assumptions: what the check canNOT do is detect that an operator MEANT a different
+#   encoding, and the limit is recorded rather than overclaimed. An even-length hexadecimal
+#   string is usually valid standard base64 too -- 64 hexadecimal characters are 64 base64
+#   characters and decode to 48 bytes -- so a hexadecimal key is ACCEPTED and used as base64 of
+#   bytes the operator did not intend. That is harmless in the one way that matters here: the
+#   material is then longer than the floor and no more guessable than the bytes the operator
+#   generated, and it is stable across runs, which are the two properties the tag depends on. No
+#   string can carry its own intended encoding, so no check can close this; documenting exactly
+#   one encoding at the point of configuration is the whole remedy available.
+# Alternatives Considered: accepting a raw
+#   passphrase and stretching it with PBKDF2 or scrypt, which would make a memorable phrase
+#   usable. Rejected because the variable is delivered from a secret store by the deployment
+#   (infra/envs/*/main.tf projects it into the ETL task from Secrets Manager), so no human ever
+#   types it, and a key-derivation function would add a cost parameter to agree on across two
+#   runs in order to solve a problem this deployment does not have.
+# Assumptions: an operator generates a conforming value with
+#   ``python3 -c "import base64,secrets;
+#   print(base64.b64encode(secrets.token_bytes(32)).decode())"``. The command is recorded here
+#   and in data-migration/README.md rather than only in the refusal message, so it is findable
+#   before the first failure as well as after it.
+# Assumptions: the control is target-only -- the baseline has no redaction tag, no masking key
+#   and no diagnostic that renders record content -- so it is registered as
+#   D-ETL-MASK-KEY-STRENGTH in docs/architecture/cobol-to-service-traceability.md rather than
+#   presented as parity, and the operator-facing half of the rule lives in
+#   docs/runbooks/deploy.md because the secret's value is created outside this repository.
+_MASK_HMAC_KEY_MIN_BYTES: Final[int] = 32
+
+
+def _mask_hmac_key() -> bytes:
+    """Return the HMAC key the redaction tag is derived with, refusing weak material.
+
+    Purpose
+    -------
+    Resolve :data:`ENV_MASK_HMAC_KEY` into key bytes, or fall back to the process-scoped
+    random key when the variable is unset, and refuse anything supplied that is not
+    canonical base64 of at least :data:`_MASK_HMAC_KEY_MIN_BYTES` distinct-valued bytes.
+
+    Assumptions: the variable stays OPTIONAL and only its CONTENT is constrained. Leaving
+    it unset is a supported mode -- a single command that prints one diagnostic needs only
+    within-run comparability, which the process key gives it -- so this function must
+    distinguish "no key configured", which is safe, from "a weak key configured", which is
+    not. Conflating the two would either force every command to carry a secret or accept
+    every string an operator supplies, and the whole point is that neither is necessary.
+
+    Assumptions: the value is read on every call rather than captured once, matching the
+    behaviour the callers below document. A command-line entry point parses its own
+    arguments before doing any work, so caching at import would make the variable's effect
+    depend on import order; and because the refusal depends only on configuration and never
+    on data, an invalid key fails on the first masked field of the run, before any value has
+    been rendered.
+
+    Trade-offs: whitespace at the two ends of the value is tolerated and interior
+    whitespace is not. A secret store or a shell here-document commonly appends a newline,
+    and refusing that would reject a correct key for a delivery artefact of the transport;
+    interior whitespace is not in the base64 alphabet and is refused by the decoder, which
+    is right, because it means the value was wrapped or concatenated and is not the key the
+    operator generated.
+
+    Assumptions: a value that is EMPTY, or whitespace only, is treated as unset and takes
+    the process key rather than being refused, and that is a decision rather than an
+    oversight. ``FOO=${BAR}`` renders an unset ``BAR`` as an empty string in every shell and
+    in a container task definition alike, so refusing empty would turn a variable that is
+    documented as optional into one that fails whenever a deployment references it
+    conditionally. The choice is safe in the direction that matters: the fallback is 32
+    cryptographically random bytes, so treating empty as unset can never SELECT weak
+    material -- it can only cost cross-run comparability, which is the documented
+    consequence of not supplying a key at all.
+
+    Trade-offs: the canonicality re-encode is a second check on top of the decoder's own
+    validation, and it is not redundant. ``validate=True`` refuses characters outside the
+    alphabet but accepts a trailing character whose unused low bits are non-zero, so two
+    different strings can decode to the same bytes. Without the re-encode a rotation that
+    changed only those bits would leave every tag identical while the configured value
+    looked different -- a change an operator would reasonably believe had taken effect.
+
+    Trade-offs: material whose bytes are all one value is refused, and that is a
+    STRUCTURAL floor rather than an entropy test. No test on a single sample can establish
+    that key material was randomly generated, so the check refuses only the class that is
+    both unmistakably weak and easy to produce by accident -- 32 NUL bytes, or the result of
+    base64-encoding a repeated character. Alternatives Considered: a compression-ratio or
+    byte-frequency heuristic, rejected because it would refuse some correctly generated keys
+    and still accept most badly chosen ones, which is the worst of both outcomes for a check
+    that stands between an operator and a working command.
+
+    Assumptions: no refusal message contains any part of the supplied value. Each names the
+    variable, states the rule and, where a length is the fault, reports the DECODED length
+    only -- so the message stays actionable in a log that may be aggregated anywhere while
+    disclosing nothing that would narrow a guess at the key.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bytes
+        The decoded supplied key when the variable holds conforming material, otherwise
+        :data:`_PROCESS_MASK_KEY`.
+
+    Raises
+    ------
+    LayoutError
+        If the variable is set but does not hold standard base64, holds a non-canonical
+        encoding, decodes to fewer than :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes
+        to a single repeated byte value.
+    """
+    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "").strip()
+    if not supplied:
+        return _PROCESS_MASK_KEY
+
+    generate = (
+        'python3 -c "import base64,secrets;'
+        " print(base64.b64encode(secrets.token_bytes("
+        f'{_MASK_HMAC_KEY_MIN_BYTES})).decode())"'
+    )
+    try:
+        # Assumptions: binascii.Error, which b64decode raises, is a subclass of ValueError,
+        #   so one except clause covers both it and the TypeError-free string path. Catching
+        #   the base class rather than importing binascii keeps the refusal in one branch.
+        material = base64.b64decode(supplied, validate=True)
+    except ValueError as malformed:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must hold standard base64 key material, but the value"
+            " supplied is not valid standard base64; the URL-safe alphabet and a raw passphrase"
+            f" are both refused deliberately. Generate a key with: {generate}"
+        ) from malformed
+
+    if base64.b64encode(material).decode("ascii") != supplied:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must hold the CANONICAL base64 encoding of its key"
+            " material, but the value supplied re-encodes differently, which means two"
+            " different values would denote the same key and a rotation between them would"
+            f" change no tag. Generate a key with: {generate}"
+        )
+
+    if len(material) < _MASK_HMAC_KEY_MIN_BYTES:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must decode to at least {_MASK_HMAC_KEY_MIN_BYTES} bytes of"
+            f" key material, which is the HMAC-SHA-256 output size, but the value supplied"
+            f" decodes to {len(material)}. Generate a key with: {generate}"
+        )
+
+    if len(set(material)) == 1:
+        raise LayoutError(
+            f"{ENV_MASK_HMAC_KEY} must decode to key material that is not a single repeated"
+            f" byte, but the value supplied decodes to {len(material)} copies of one byte,"
+            " which is guessable and returns the redaction tag to the unkeyed digest it"
+            f" replaced. Generate a key with: {generate}"
+        )
+
+    return material
+
 
 # Refactoring Rationale: the tag is built to FIT the field rather than being written at
 #   one width and then cut down, and this repairs a defect that defeated the whole purpose

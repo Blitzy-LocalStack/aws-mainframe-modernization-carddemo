@@ -13,7 +13,7 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
-import com.carddemo.account.mapper.AccountContextMapper;
+import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.CardXrefRepository;
@@ -21,7 +21,9 @@ import com.carddemo.account.repository.CustomerRepository;
 import com.carddemo.common.error.RecordConflictException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
@@ -362,10 +364,20 @@ class AccountUpdatePreservationTest {
             //       genuinely exercised. A mocked service would return null from every validator and
             //       the preservation assertions below would then pass for the wrong reason -- they
             //       would be measuring a stubbed-out edit chain rather than the real one.
+            // WHY : Refactoring Rationale: the ACCOUNT mapper is supplied where the narrower context
+            //       mapper used to be, because the service now applies the account half of a submission
+            //       as well as the customer half and assembles its response through that mapper. Before
+            //       the change the account region was edited and then discarded unapplied, so no
+            //       account-side preservation could have been observed here at all.
+            // WHY : Assumptions: the time source is FIXED rather than the system clock, so the
+            //       date-of-birth range edit the service performs has a pinned boundary and a case added
+            //       here later cannot start depending on the day the suite runs.
             this.service = new AccountUpdateService(this.accounts, this.customers,
-                    this.crossReferences, new AccountContextMapper(),
+                    this.crossReferences, new AccountMapper(),
                     new CustomerMapper(Fixture::recognisableCiphertext),
-                    new AddressValidationService(new PermissiveLookup()));
+                    new AddressValidationService(new PermissiveLookup()),
+                    Clock.fixed(LocalDate.of(2022, 7, 18).atStartOfDay(ZoneOffset.UTC).toInstant(),
+                            ZoneOffset.UTC));
         }
 
         /**

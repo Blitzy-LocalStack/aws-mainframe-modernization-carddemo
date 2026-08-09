@@ -150,9 +150,11 @@
  * {@code services/transaction-service/src/test/java/com/carddemo/transaction/package-info.java}
  * carries the same paragraph for the same reason at its lines 43 to 62, so the
  * arrangement is the subtree's convention rather than a local preference. The
- * cost is that the inventory reads as present tense unless the
- * target-versus-measurement distinction is declared, which is what the
- * paragraph above is for.
+ * cost was that the inventory read as present tense while part of it was still a
+ * target, which is why the paragraph above declared the distinction explicitly
+ * for as long as it applied. That cost has now been discharged rather than
+ * merely tolerated: every member has landed, so the inventory is a measurement
+ * and is checked against this directory on every build.
  *
  * <p>Assumptions: three kinds of file are excluded from this directory
  * outright, and each exclusion has a mechanical reason rather than a stylistic

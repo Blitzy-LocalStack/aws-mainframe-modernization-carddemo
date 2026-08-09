@@ -1,13 +1,13 @@
-"""Streaming reader for the CardDemo security user file, in both shipped encodings.
+"""Streaming reader for the CardDemo security user file, whose only shipped form is EBCDIC.
 
 Purpose
 -------
-Turn the security user file extract into decoded records the Aurora loaders
-and the verification passes can consume, one record at a time, from either of the two forms the
-baseline ships: the
-line-oriented ASCII seed and the fixed-length EBCDIC dataset. Both entry points yield the same
-decoded shape, so a caller can swap corpora and compare the two without adapting to a second
-contract.
+Turn the security user extract into decoded records the Aurora loaders and the verification
+passes can consume, one record at a time. Unlike every sibling reader this record has exactly
+ONE shipped corpus -- the fixed-length EBCDIC dataset -- so
+:func:`read_ebcdic_security_users` is THE dataset path here and the character entry points
+exist only for text a caller already holds. Every entry point yields the same decoded shape,
+so the two can be compared against each other without adapting to a second contract.
 
 This module follows the contract ``carddemo_migration.readers.account`` established and differs
 from it only in which record descriptor it names. Where the reasoning behind a step is identical
@@ -19,14 +19,39 @@ What this module reads
 ---------------------
 The record is ``SEC-USER-DATA`` as declared in ``app/cpy/CSUSR01Y.cpy``, and its byte geometry is
 resolved exclusively through ``SECUSER_LAYOUT`` in ``carddemo_migration.copybook.layouts``.
-Assumptions: this record ships in ONE encoding only. ``app/data/EBCDIC`` holds
-``AWS.M2.CARDDEMO.USRSEC.PS`` at 800 bytes -- ten records of eighty -- and
-``app/data/ASCII`` holds no counterpart at all, which makes it the only base master
-with no ASCII twin. The ASCII entry points below are still published rather than
-omitted, because a caller legitimately holds converted text -- a fixture, or an extract
-somebody transcoded upstream -- and a reader that refused it would push that caller into
-writing its own record cut. What is NOT done is inventing a seed: nothing here creates
-or converts a file, and ``app/**`` is REFERENCE-only.
+Assumptions: this record ships in ONE encoding only, and the count is exact rather than
+approximate. ``app/data/ASCII`` holds exactly NINE seeds -- the account, card,
+cross-reference, customer, daily-transaction, disclosure-group, category-balance,
+transaction-category and transaction-type extracts -- and none of them is a security-user
+file, which makes this the only base master with no ASCII twin. ``app/data/EBCDIC`` holds
+``AWS.M2.CARDDEMO.USRSEC.PS`` as the single available source. The character entry points are
+still published rather than omitted, because a caller legitimately holds converted text -- a
+fixture, or an extract somebody transcoded upstream -- and a reader that refused it would push
+that caller into writing its own record cut, which is the one thing this package exists to
+prevent. What is NOT done is inventing a seed: nothing here creates or converts a file, no
+entry point defaults to a path, and ``app/**`` is REFERENCE-only.
+
+Assumptions: this record's geometry rests on the copybook plus THREE independent
+corroborations, because it is the one base master with no reference vector to check against.
+``tests/helpers/record_codec.py`` transcribes only eight of the eleven base-master layouts and
+this record is not among them, so there is no known-answer Python implementation to compare
+with. In its place: the six declared fields sum to eighty; ``AWS.M2.CARDDEMO.USRSEC.PS`` is
+800 bytes, which divides by eighty exactly with remainder zero for ten records; and the
+provisioning job's ``DEFINE CLUSTER`` declares ``RECORDSIZE(80,80)`` and ``KEYS(8,0)``,
+independently fixing both the record length and the eight-byte leading key. Note that the
+layout registry's eleven keys are eight base masters plus three DERIVED layouts, which is a
+different eleven from the eleven base-master datasets -- conflating the two is how this record
+comes to look like it has a vector it does not have.
+
+Where these records are going
+-----------------------------
+The target of this reader is ``auth.users``, and that table deliberately declares no password
+column of any kind -- not a plaintext one, not a hash, not a shadow column. Authentication
+moves to a managed identity provider and each row keeps only ``cognito_sub`` as its subject
+reference, so the credential this record carries has no destination to be written to. The
+one-character type this reader does emit is what survives that move: its ``'A'`` and ``'U'``
+values become the ``carddemo-admin`` and ``carddemo-user`` groups, and the target column
+constrains itself to exactly those two values.
 
 Assumptions: the pad on this record is named ``SEC-USR-FILLER`` rather than ``FILLER``,
 which is the one place the corpus qualifies the pad name. The pad rule below tests the
@@ -60,6 +85,15 @@ are NOT treated alike:
   rather than an account identifier -- it is the key an operator uses to locate a record
   -- and the type is a single character from the closed set the baseline defines.
 * Diagnostics never echo record content of any kind, sensitive or otherwise.
+
+The one content contract this reader enforces
+---------------------------------------------
+Every character field is emitted exactly as the bytes decode, with a single exception: the
+one-character type is checked against :data:`USER_TYPE_DOMAIN` and an out-of-domain value is
+refused rather than passed on. This is the record's only closed value domain, and it is the
+only field whose target column carries a matching constraint, so refusing at the read boundary
+turns what would otherwise surface as a constraint violation naming a table into a diagnostic
+naming the record and the field. Both decode paths funnel through the same check.
 
 Design decisions (WHY)
 ----------------------
@@ -118,6 +152,7 @@ __all__ = [
     "SECUSER_LAYOUT",
     "DROPPED_FIELD_NAMES",
     "LOADED_FIELDS",
+    "USER_TYPE_DOMAIN",
     "DecodedSecurityUser",
     "SUPPRESSED_FIELD_NAMES",
     "decode_ascii_security_user",
@@ -184,17 +219,38 @@ def _is_padding_field(field: FieldSpec) -> bool:
     return field.name == _PAD_FIELD_NAME or field.name.endswith(_PAD_NAME_SUFFIX)
 
 
-# WHY : Alternatives Considered: the eight-character password is SUPPRESSED rather than masked,
-#   and suppression is chosen for the same reason the card reader suppresses a verification value.
-#   Masking was available at no cost -- the descriptor already marks the field sensitive and the
-#   shared helper already redacts it to a same-width tag -- and it was rejected because redaction
-#   changes only how a value RENDERS while still carrying the value itself through this module's
-#   return path, where any caller could read it out of the mapping. This particular value has no
-#   legitimate downstream consumer at all: the migration replaces sign-on with a managed identity
-#   provider, the target user table carries only a subject reference, and `app/cpy/CSUSR01Y.cpy`
-#   line 21 stores the password in CLEAR, so what this field holds is every user's actual
-#   credential. The correct handling of a value that must never be reproduced is not to reproduce
-#   it, and the AAP records the field as deliberately not carried forward.
+# WHY : Refactoring Rationale: this field is the one place the migration deliberately DECLINES
+#   parity, and what is being replaced is a security defect rather than merely an old mechanism.
+#   `app/cpy/CSUSR01Y.cpy` line 21 declares the password as eight characters of ordinary display
+#   storage, so every user's credential sits in CLEAR in a data file that the provisioning job
+#   copies verbatim into a VSAM cluster; the baseline sign-on program then authenticated by
+#   comparing the submitted characters against those bytes directly. Both halves of that
+#   mechanism are gone in the target: authentication moves to a managed identity provider, and
+#   `auth.users` declares NO password column of any kind -- not plaintext, not a hash, not a
+#   shadow column -- keeping only `cognito_sub` as a subject reference. So the field is read as a
+#   byte range purely because the record's later fields sit behind it, and it is then discarded.
+#   Carrying it forward would not preserve a behaviour; it would re-create the defect in a new
+#   datastore that has nowhere to put it.
+# WHY : Alternatives Considered: the field is SUPPRESSED rather than masked or protected, and
+#   both alternatives were genuinely available. Masking costs nothing here -- the descriptor
+#   already marks the field sensitive and the shared helper already redacts it to a same-width
+#   tag -- but redaction changes only how a value RENDERS while the value itself still travels
+#   this module's return path, where any caller could read it straight out of the mapping.
+#   Protection was the other option, and it is what the card reader does with its verification
+#   value: that field is decoded into a wrapper whose every rendering route yields a constant
+#   marker, precisely BECAUSE `card.cards.cvv_encrypted` is a column the migration contract
+#   requires populated, and a reader that never decoded it could not populate it. That reasoning
+#   inverts here. This value has no destination column at all, so there is nothing for a wrapper
+#   to carry, and the correct handling of a value that must never be reproduced is not to
+#   reproduce it. The sibling precedent for suppression is therefore the export reader, not the
+#   card reader.
+# WHY : Assumptions: the field is identified by DESCRIPTOR NAME and never by a byte position, and
+#   this is the one exclusion in the package where that choice has a security consequence rather
+#   than a maintenance one. A literal offset and width here would be a second, unsynchronised
+#   statement of the layout's geometry, and if the descriptor ever moved the field the literal
+#   would silently stop matching -- at which point the excluded span would be some other field and
+#   the credential would be emitted under its own key. Naming the field means a geometry change
+#   relocates the exclusion with it.
 # WHY : Trade-offs: what suppression costs is that a password mismatch between two extracts cannot
 #   be diagnosed from this reader's output, because neither the value nor a comparable digest of it
 #   is emitted. That cost is accepted: a reader that could confirm a credential is a reader that
@@ -219,6 +275,85 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in SECUSER_LAYOUT.fields if _is_padding_field(field)
 )
+
+
+# WHY : Assumptions: the type field is resolved through the descriptor BY NAME, so this module
+#   still states no byte position of its own, and an unknown name would fail at import rather
+#   than at the first record. What is declared here is a VALUE domain rather than any part of the
+#   geometry: `app/cpy/CSUSR01Y.cpy` line 22 gives the field one character of display storage and
+#   nothing more, so the two admissible values are a property of the data the baseline writes and
+#   are recorded in the layout module only as a trailing remark. There is no shared constant
+#   upstream to import, which is why the set is stated once here and exported rather than
+#   repeated at each use.
+_USER_TYPE_FIELD: Final[FieldSpec] = SECUSER_LAYOUT.field("SEC-USR-TYPE")
+USER_TYPE_DOMAIN: Final[frozenset[str]] = frozenset({"A", "U"})
+
+
+def _require_declared_user_type(
+    values: DecodedSecurityUser,
+    number: int | None = None,
+) -> DecodedSecurityUser:
+    """Require the decoded user type to be one of the two values the baseline declares.
+
+    Purpose
+    -------
+    Enforce the one closed value domain this record carries, at the boundary where the record is
+    read rather than at the boundary where it is written. Both decode paths funnel through here,
+    so the domain cannot be honoured on one entry point and skipped on another.
+
+    Parameters
+    ----------
+    values : DecodedSecurityUser
+        One fully decoded record, keyed by field name. The type field is always present, because
+        it is neither the trailing pad nor the suppressed field and is therefore always in
+        :data:`LOADED_FIELDS`.
+    number : int | None
+        The one-based record number within the source, so a rejection names the row that failed.
+        ``None`` for the byte-path entry point that decodes a single image and has no ordinal to
+        report, in which case the record is identified by layout alone.
+
+    Returns
+    -------
+    DecodedSecurityUser
+        ``values`` unchanged, once the type is proven to be in :data:`USER_TYPE_DOMAIN`.
+
+    Raises
+    ------
+    LayoutError
+        If the decoded type is not one of the two declared values. The message lists the domain
+        so a caller can see what it should have been.
+    """
+    carried = values[_USER_TYPE_FIELD.name]
+    if carried in USER_TYPE_DOMAIN:
+        return values
+
+    # WHY : Alternatives Considered: an out-of-domain type is REFUSED here rather than passed
+    #   through as an anomaly for a later layer to notice, and the alternative was real -- every
+    #   other character field on this record is emitted verbatim without a content check, so
+    #   passing it through would have been the consistent-looking choice. It was rejected on where
+    #   the failure would then surface. `auth.users` constrains this column to exactly these two
+    #   values, so an out-of-domain byte cannot be loaded either way; the only question is which
+    #   diagnostic the operator gets. Refusing here names the record, the field and its declared
+    #   geometry at the point the bad byte was read. Passing it through instead defers the failure
+    #   to a database constraint violation that names a constraint and a table, identifies no
+    #   source record, and arrives after an unknown number of good rows have already been written.
+    #   This mirrors the export reader's treatment of its own one-character discriminator, which
+    #   refuses an unrecognised value rather than defaulting to a branch, and for the same reason:
+    #   a wrong value here decodes without raising and yields a record that looks entirely normal.
+    # WHY : Trade-offs: the message names the field's declared geometry and the admissible values
+    #   but does NOT quote the offending character, even though that character sits at a known
+    #   offset well clear of the password and could not disclose it. The uniform rule is kept
+    #   because this module publishes one: diagnostics here echo no record content of any kind,
+    #   sensitive or otherwise. A rule with one documented exception invites a second, and the
+    #   field name plus the declared domain already locate the defect precisely.
+    location = f"record {number}" if number is not None else "a record"
+    raise LayoutError(
+        f"{location} of {SECUSER_LAYOUT.name} carries a value outside the declared domain in"
+        f" field {_USER_TYPE_FIELD.describe()}; the baseline declares exactly"
+        f" {tuple(sorted(USER_TYPE_DOMAIN))} for an administrator and an ordinary user, and the"
+        " target user table constrains the column to those same two values, so an out-of-domain"
+        " value is refused here rather than loaded and rejected later"
+    )
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -429,7 +564,8 @@ def decode_ascii_security_user(
         If the record is not the declared width, or holds a character outside the single-byte
         range.
     LayoutError
-        If a declared field's storage regime cannot be decoded from a character record.
+        If a declared field's storage regime cannot be decoded from a character record, or the
+        decoded user type is outside :data:`USER_TYPE_DOMAIN`.
     """
     # WHY : Trade-offs: a record of the WRONG width is rejected here rather than padded or cut to
     #   fit. Truncation would silently discard real data and padding would invent it, and either
@@ -449,7 +585,14 @@ def decode_ascii_security_user(
     #   record's byte order, so the resulting mapping iterates the record left to right. The pad
     #   is excluded by iterating the published field tuple rather than by decoding every field and
     #   filtering afterwards, which also avoids decoding 23 bytes of pad on every record.
-    return {field.name: _decode_text_field_value(checked, field) for field in LOADED_FIELDS}
+    # WHY : Assumptions: the domain check runs on the assembled mapping rather than inside the
+    #   comprehension, so the two decode paths share ONE statement of the rule despite reaching it
+    #   through different per-field codecs. A check written into each codec would be two rules that
+    #   look like one, and the pair would drift.
+    return _require_declared_user_type(
+        {field.name: _decode_text_field_value(checked, field) for field in LOADED_FIELDS},
+        number,
+    )
 
 
 def iter_ascii_security_users(
@@ -479,7 +622,8 @@ def iter_ascii_security_users(
     ------
     LayoutError
         If the source is a byte object, is neither text nor iterable, or produces an element that
-        is not a line, or if a field declares a regime a character record cannot hold.
+        is not a line, or if a field declares a regime a character record cannot hold, or a
+        decoded user type is outside :data:`USER_TYPE_DOMAIN`.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -528,7 +672,8 @@ def read_ascii_security_users(path: pathlib.Path) -> Iterator[DecodedSecurityUse
         If the path cannot be opened or read.
     LayoutError
         If the file produces an element that is not a line, or a field declares a regime a
-        character record cannot hold.
+        character record cannot hold, or a decoded user type is outside
+        :data:`USER_TYPE_DOMAIN`.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -681,7 +826,8 @@ def decode_ebcdic_security_user(
         bytes.
     LayoutError
         If a published field decoded to raw bytes, which means the descriptor has acquired a
-        computational or mixed-regime area.
+        computational or mixed-regime area, or the decoded user type is outside
+        :data:`USER_TYPE_DOMAIN`.
     """
     # WHY : Assumptions: the conversion is DELEGATED per field and never performed on the record
     #   as a whole. That codec decodes each declared span on its own, dispatching on the
@@ -695,10 +841,16 @@ def decode_ebcdic_security_user(
     #   a stronger guarantee than decoding the record and dropping the key afterwards, where the
     #   value would exist for as long as the mapping did.
     image = _require_full_record_image(record)
-    return {
-        field.name: _require_decoded_characters(decode_field(image, field), field)
-        for field in LOADED_FIELDS
-    }
+    # WHY : Assumptions: the same domain check the character path applies is applied here, on the
+    #   assembled mapping, so a value the text path would refuse cannot enter through the byte
+    #   path. No record ordinal is passed because this entry point decodes ONE image and the
+    #   caller holds whatever position it came from; the iterator above it does not renumber.
+    return _require_declared_user_type(
+        {
+            field.name: _require_decoded_characters(decode_field(image, field), field)
+            for field in LOADED_FIELDS
+        }
+    )
 
 
 def iter_ebcdic_security_users(
@@ -736,7 +888,8 @@ def iter_ebcdic_security_users(
         If a span does not decode to exactly one character per byte.
     LayoutError
         If the source is neither a byte image nor readable nor iterable, produces a piece that is
-        not a byte object, or a published field decoded to raw bytes.
+        not a byte object, a published field decoded to raw bytes, or a decoded user type is
+        outside :data:`USER_TYPE_DOMAIN`.
     """
     # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
     #   terminator is looked for, honoured, stripped or padded on this path. A fixed-length
@@ -782,7 +935,8 @@ def read_ebcdic_security_users(path: pathlib.Path) -> Iterator[DecodedSecurityUs
     EbcdicFieldDecodeError
         If a span does not decode to exactly one character per byte.
     LayoutError
-        If a published field decoded to raw bytes.
+        If a published field decoded to raw bytes, or a decoded user type is outside
+        :data:`USER_TYPE_DOMAIN`.
     """
     # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
@@ -822,6 +976,17 @@ def render_masked_security_user_record(record: str) -> str:
         If a field slice comes out the wrong width, which the descriptor's own geometry
         validation makes unreachable.
     """
+    # WHY : Trade-offs: the two name parts are redacted here rather than emitted, and the
+    #   compromise is deliberate in BOTH directions. Emitting them would give an operator the
+    #   clearest possible diff and would also print a person's full name into whatever log the
+    #   diagnostic reaches; withholding them entirely -- dropping the spans, or filling them with
+    #   a constant -- would keep the record's shape but make two differing records look identical
+    #   across the very fields most likely to differ. The shared helper's tag resolves that: it is
+    #   SAME-WIDTH, so offsets stay countable across the rendering, and it is DETERMINISTIC under
+    #   one key, so equal names produce equal tags and unequal names produce unequal ones. That is
+    #   what makes a masked diff still able to say WHICH record and WHICH field differ while
+    #   emitting no part of the identity. A random or constant filler would preserve the width and
+    #   destroy exactly that property, which is the reason the keyed tag is used instead.
     # WHY : Assumptions: the redaction is delegated to the shared helper rather than applied here,
     #   so marking a field sensitive in the layout remains the ONLY change ever needed to redact
     #   it in this rendering. The suppressed field's span is present in this

@@ -396,7 +396,7 @@ than service logic.
 | Program | Type | Source | Target artifact | Notes |
 |---|---|---|---|---|
 | `COACTVWC` | online | [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) | `AccountController` view, `AccountViewService` | Composes customer and cross-reference data |
-| `COACTUPC` | online | [`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) | `AccountController` update, `AccountUpdateService` | The before-image comparison becomes a version column; see [§7.3](#73-structural-divergences-that-are-not-defects) |
+| `COACTUPC` | online | [`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) | `AccountController` update, `AccountUpdateService` | The before-image comparison becomes a version column; see [§7.3](#73-structural-divergences-that-are-not-defects) and [D-UPDATE-CASE-SENSITIVE-COMPARE](#d-update-case-sensitive-compare--the-concurrency-comparison-is-case-sensitive-where-the-baseline-folded-ten-fields) |
 | `CBACT01C` | batch | [`app/cbl/CBACT01C.cbl`](../../app/cbl/CBACT01C.cbl) | `AccountRepository` sequential read | Account master access |
 | `CBACT03C` | batch | [`app/cbl/CBACT03C.cbl`](../../app/cbl/CBACT03C.cbl) | `CardXrefController`, `CardXrefRepository` | Includes the by-account path that replaces `CXACAIX` |
 | `CBCUS01C` | batch | [`app/cbl/CBCUS01C.cbl`](../../app/cbl/CBCUS01C.cbl) | `CustomerController`, `CustomerRepository` | Customer master access |
@@ -1135,14 +1135,27 @@ each produce one registered divergence.
   read the clock this way — every one that paints a screen; the single exception is
   `COBSWAIT`, the retired batch wait utility, which paints none.
 * **Target behaviour.** `ui/src/layout/ScreenHeader.tsx` renders the same two
-  formats in the same two slots and takes the instant as an **optional prop**. The
-  application shell is expected to supply a **server-derived** instant, which is the
-  only value that reproduces the baseline's single-clock property. When the prop is
-  omitted the component reads the **browser's** clock and formats it in the
-  **browser's** zone — two substitutions rather than one, because a client machine
-  can be both skewed and in a different zone from the service.
-* Trade-offs: the divergence is bounded to the omitted case rather than removed,
-  and it is bounded at the one prop that controls it.
+  formats in the same two slots and takes the instant as an **optional prop**. Every
+  one of the four production call sites now supplies it: `ui/src/api/serverClock.ts`
+  derives the instant from the service's own response, `ui/src/hooks/useServerInstant.ts`
+  hands it to a screen, and each screen passes it as `now={paintedAt}`. **The CLOCK
+  substitution is therefore closed** — the displayed instant is the service's, not
+  the browser's, so two operators reading one record across a midnight boundary read
+  the same date.
+* **What remains.** The **ZONE** substitution. The instant is server-derived but is
+  formatted in the **browser's** zone, because the two eight-character slots carry no
+  zone designator and nothing in the response conveys the service's own zone. One
+  substitution remains rather than two, and the divergence is narrowed to it.
+* Trade-offs: the remaining divergence is bounded to formatting rather than to the
+  value, and the fallback path that reads the browser's clock survives in the
+  component for a caller that renders it in isolation — no production caller takes
+  it, and `ui/src/layout/screenHeaderClock.test.tsx` holds all four call sites to
+  supplying the prop, so the fallback cannot silently return.
+* Refactoring Rationale: this entry previously recorded that the shell "is expected
+  to supply" the instant and that omitting it produced two substitutions. The
+  expectation was met by no caller at the time it was written, which is what made the
+  divergence real; it is met by every caller now, so the entry records one
+  substitution rather than two.
 * **Why the difference is accepted.** **There is no region clock left to read.** The
   baseline's single clock was a property of the single region every terminal attached
   to; the target has no region but a horizontally-scaled set of stateless handlers —
@@ -1150,10 +1163,13 @@ each produce one registered divergence.
   [§7.3](#73-structural-divergences-that-are-not-defects) is what makes possible — so
   no one machine's wall clock is the authority any more, and the single-clock
   property can be restored only by having the *service* supply the instant, which is
-  precisely what the prop exists for. The named consequence of omitting it
-  is user-visible and is stated rather than hidden: two operators looking at one
-  record across a midnight boundary can read two different dates in the
-  eight-character date slot. Rendering the slots **blank** until a caller supplies an
+  precisely what the prop exists for and what every production caller now does. The
+  consequence that remains is narrower and is stated rather than hidden: the instant
+  is the service's but its rendering is the browser's, so two operators in different
+  zones can read the same instant as two different local times in the
+  eight-character slots. The slots carry no zone designator, which is the baseline's
+  own shape, so neither operator can tell which zone they are reading. Rendering the
+  slots **blank** until a caller supplies an
   instant was the alternative and was rejected, because the baseline never showed an
   empty date, so a blank slot trades a small documented inaccuracy for a visible
   absence. Everything except the clock and the zone is preserved: the two formats,
@@ -1163,7 +1179,10 @@ each produce one registered divergence.
   instant and assert both formats, so the format contract is asserted independently
   of any clock; the default path is verified by the deliberate **absence** of an
   assertion about it, because a test asserting a wall-clock value would be asserting
-  the test runner's clock rather than the component's behaviour. Like
+  the test runner's clock rather than the component's behaviour.
+  `ui/src/layout/screenHeaderClock.test.tsx` additionally reads each of the four
+  screen sources and asserts that each composes the band AND passes the prop, which
+  is what keeps the closed half of this divergence closed. Like
   [D-1](#d-1--the-exportimport-record-key-declaration) this divergence has **no
   golden master to compare against** — the online programs cannot be run end to end
   without a CICS runtime ([`tests/README.md`](../../tests/README.md) §1.1), so the
@@ -1311,10 +1330,29 @@ else. Owned by
 [`security-and-identity.md`](security-and-identity.md), which holds the wire form, the
 admitted caller set and the key's custody.
 
+**The asymmetric rewrite-rollback discipline collapses into one boundary.**
+[`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) rewrites two records inside
+`9600-WRITE-PROCESSING` at **L3888**, and its two failure paths are not written the same
+way. The account arm at **L4076-L4081** sets the failure state and leaves the paragraph
+with **no rollback**, because at that point nothing had been written. The customer arm at
+**L4095-L4103** is otherwise identical but issues `EXEC CICS SYNCPOINT ROLLBACK` at
+**L4099-L4101**, the verb itself on **L4100**, because by then the account rewrite had
+already succeeded. In the target both arms sit inside the one transaction boundary that
+replaces the commit at **L952-L954**: a failure propagates as an exception, the provider
+discards the unit of work, and no rollback statement is written anywhere in the class.
+Refactoring Rationale: the observable outcome is unchanged — neither baseline arm leaves
+a partial write, and neither does the target — so this is a change of expression rather
+than of behaviour, and it is recorded here because the asymmetry is exactly the shape a
+reader expects to find mirrored and will otherwise go looking for. One boundary also
+removes the hazard the asymmetry carries, which is a third rewrite added to the arm that
+has no rollback statement to extend. Implemented by
+`services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`,
+which carries the same citations at its update method.
+
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **forty-two** are cited **by identifier**, the identifier here being the
+source, and all **forty-three** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1324,7 +1362,7 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-forty-two is a measured count of the `####` headings in this section and not a running
+forty-three is a measured count of the `####` headings in this section and not a running
 tally kept by hand, so a reader adding an entry updates one number here and nothing else.
 Count the `####` headings themselves rather than the ones beginning `D-`: one entry is
 identified `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one.
@@ -2031,6 +2069,129 @@ a register of this size stays true.
 * **Files.** `services/common-lib/src/main/java/com/carddemo/common/codec/CopybookLayout.java`,
   `data-migration/src/carddemo_migration/copybook/layouts.py`,
   `data-migration/src/carddemo_migration/copybook/ebcdic_codec.py`.
+
+#### D-ETL-CORPUS-DIAGNOSTIC-DISCLOSURE — the same allowlist regime now covers all twenty-two records
+
+* **Baseline behaviour.** As for the authorization segments above, no copybook in
+  [`app/cpy`](../../app/cpy) or in the export projection
+  [`CVEXPORT.cpy`](../../app/cpy/CVEXPORT.cpy) classifies anything. There is no baseline
+  disclosure policy to migrate for any record; the question exists only because the target
+  renders record content in diagnostics and in a `decode-record` command that the baseline
+  has no counterpart to.
+* **Target behaviour.** `layouts.py` applies a second allowlist,
+  `_CORPUS_DISCLOSABLE_FIELDS`, to the twenty records that are not authorization segments,
+  and an **import-time audit** refuses to load the module if any record it declares leaves a
+  field disclosable that neither allowlist names. A field is admitted for one of the same
+  five reasons the authorization allowlist established: a date or time, a closed-domain
+  code, a count or sequence rather than a money value, an **account** identifier the
+  published REST contracts already render in full, or the trailing pad.
+* **Refactoring Rationale.** The authorization segments were closed and the other twenty were
+  not, and a per-field opt-in makes silence mean *disclose*. Measured across those twenty,
+  **116 distinct field names** were rendered verbatim by every diagnostic — every account
+  balance, credit limit and cycle total, every transaction and daily-transaction amount, the
+  transaction-category balance, every merchant name, city, postal code and identifier, the
+  customer credit score, the free-text transaction description, and the postal codes of both
+  the account and the customer master. Closing them leaves **65** disclosable names, and the
+  corpus moves from 55 withheld / 184 disclosable fields to **120 withheld / 119 disclosable**
+  across the twenty-two records.
+* **Category.** Documented divergence — diagnostic disclosure policy, additive and
+  target-only.
+* **Why the difference is accepted.** Four classifications look inconsistent read one at a
+  time and are deliberate read together, and each follows a precedent already set one record
+  over. An **account** identifier is rendered and a **customer** identifier is not, which is
+  the authorization allowlist's own asymmetry (`PA-ACCT-ID` named, `PA-CUST-ID` not) and
+  follows the contracts: an account identifier travels in a request path, a customer
+  identifier is the join key to name, address, national identifier and date of birth. A
+  **card expiry** date is withheld although it is a date, matching `PA-CARD-EXPIRY-DATE`,
+  because it is the value a card-not-present authorization asks for alongside the number;
+  account open, expiration and reissue dates stay rendered, and the account expiration date
+  is the value the posting reject-103 boundary turns on. A **postal code** is withheld while
+  a state and a country code are rendered, because the three differ in identifying power
+  rather than in kind. The three pure reference records — disclosure group, transaction type,
+  transaction category — are rendered **in full**, rate and description included, because
+  every byte is seeded configuration shared by a whole group and linked to no customer, and
+  withholding the rate would make the `DEFAULT`-group fallback diagnostic unreadable.
+  Trade-offs: withholding a record's key costs real ground — a masked customer master, daily
+  transaction, posted transaction or statement-view record no longer names the row an
+  operator would look up, so a failure is localised by the keyed tag and then reproduced
+  against the source dataset. The alternative was rendering a card-linked transaction
+  identifier and a customer identifier in every diagnostic.
+* **A narrower partial reveal than the parity oracle's.** The last-four concession now covers
+  the four card-number field names only. `CUST-SSN` was in that set and is removed: "quoted
+  by its last four" is a practice that is safe for a sixteen-digit card number, whose last
+  four leave twelve unknown, and much less so for a nine-digit national identifier, whose
+  leading five are the issuing area and group — and the ETL never matches on the field, so
+  withholding it costs nothing. `tests/helpers/record_codec.py` **L1589** still carries five
+  names including `CUST-SSN`; that file is the parity oracle and is reference-only, so it is
+  not edited. Diverging in this direction cannot change a parity result, because the oracle
+  compares record **bytes** after timestamp normalisation and never compares a masked
+  rendering — a narrower mask can only withhold more from a log line.
+* **One rendering that claims nothing.** In `decode-record`, a withheld **character** field
+  shows a keyed tag of its declared width and a withheld **numeric** field shows the fixed
+  literal `<withheld>`. A decoded number renders as its value — `194.00` for a twelve-byte
+  zoned balance — so it is not the declared width, and the only chunk a tag could be computed
+  from there is a constant, which would render two different balances identically while
+  looking value-derived. That is the "a diff reports no difference where one exists" failure
+  the keyed tag exists to prevent, so the literal is printed instead.
+* **Where it is verified.** Twice, and on output rather than on flags.
+  `layouts.py` refuses to import when the audit finds an unnamed disclosure, naming the
+  record and field; `data-migration/tests/test_corpus_disclosure.py` re-runs the audit over
+  the fully imported module — closing the gap that a record declared below the audit's own
+  call site would otherwise open — and asserts, for every field of every one of the
+  twenty-two records, that a masked rendering reproduces an admitted field exactly and
+  reproduces a withheld field nowhere, using a sentinel unique to each field so a leak is
+  attributable. It additionally asserts that a hand-listed set of prohibited names is
+  withheld wherever declared, that the allowlist names no undeclared field, that the audit
+  reports a synthetic unclosed record, and that neither national-identifier field reveals its
+  trailing characters.
+* **Files.** `data-migration/src/carddemo_migration/copybook/layouts.py`,
+  `data-migration/src/carddemo_migration/cli.py`,
+  `data-migration/tests/test_corpus_disclosure.py`, `data-migration/README.md`.
+
+#### D-ETL-MASK-KEY-STRENGTH — weak masking-key material is refused rather than accepted
+
+* **Baseline behaviour.** None. The baseline has no redaction tag, no masking key and no
+  diagnostic that renders record content, so there is nothing here to preserve or diverge
+  from — the control exists only because the target introduced the tag.
+* **Target behaviour.** `layouts.py` resolves `CARDDEMO_MASK_HMAC_KEY` through a validator
+  that requires **canonical standard base64 decoding to at least 32 bytes** — the
+  HMAC-SHA-256 output size — and refuses a value that is not valid standard base64, a
+  non-canonical spelling of valid material, material below the floor, or material that is a
+  single repeated byte. Every refusal names the variable and the generation command and
+  **never the value**. An unset, empty or whitespace-only variable keeps its documented
+  meaning and takes the 32-byte process-scoped random fallback.
+* **Refactoring Rationale.** Any non-empty string was previously accepted and used by its
+  UTF-8 bytes, so the enforcement contradicted the documented contract in the worst
+  direction: an operator following `data-migration/README.md` got 32 random bytes while an
+  operator typing a memorable phrase got five or six, and nothing reported the difference.
+  The tag exists to make a redacted card number or national identifier unconfirmable, and
+  that property rests entirely on the key being unguessable — with a guessable key an
+  adversary holding a candidate recomputes the same HMAC and compares. A weak key therefore
+  does not weaken the tag gradually; it returns it to the unkeyed digest it replaced.
+* **Category.** Target-only cryptographic control, additive.
+* **Why the shape is what it is.** Trade-offs: exactly one encoding is accepted, because a
+  string that could be read as raw bytes, as base64 or as hexadecimal would denote different
+  keys under different readings and a rotation between two readings of one string would
+  silently change every tag. Two limits are recorded rather than overclaimed. A **hexadecimal**
+  key is *accepted*, because 64 hexadecimal characters are also valid base64 and decode to 48
+  bytes — no string can carry its own intended encoding, and the outcome is harmless because
+  the material is longer than the floor and no more guessable. And the repeated-byte refusal
+  is a **structural** floor, not an entropy test: no test on a single sample can establish
+  that material was randomly generated, so only the class that is unmistakably weak and easy
+  to produce by accident is refused. Alternatives Considered: stretching a passphrase with
+  PBKDF2 or scrypt, rejected because the value is delivered from Secrets Manager by the
+  deployment and no human types it, so a key-derivation function would add a cost parameter
+  to agree on across runs in order to solve a problem this deployment does not have.
+* **Where it is verified.** `data-migration/tests/test_corpus_disclosure.py` asserts the floor
+  equals the hash's own output size, drives seven refusal classes through the resolver, proves
+  the canonicality rule is reachable by flipping an unused trailing bit of otherwise
+  conforming material, asserts no refusal echoes the value and every refusal names the
+  remedy, and proves the enforcement is actually consulted by driving it through
+  `mask_record` rather than through the resolver alone. A companion case asserts the tag is a
+  function of the key — without which every refusal would be theatre.
+* **Files.** `data-migration/src/carddemo_migration/copybook/layouts.py`,
+  `data-migration/tests/test_corpus_disclosure.py`, `data-migration/README.md`,
+  `docs/runbooks/deploy.md`, `infra/envs/dev/variables.tf`, `infra/envs/prod/variables.tf`.
 
 #### D-AUTH-AMOUNT-TOLERANT-READ — the declared-width amount token is emitted and read whole
 
@@ -3020,6 +3181,47 @@ a register of this size stays true.
   unit coverage of the control-break walk, which asserts that a row with no readable account
   produces no accrual and no account update while the surrounding rows still accrue.
 * **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`.
+
+#### D-UPDATE-CASE-SENSITIVE-COMPARE — the concurrency comparison is case-sensitive where the baseline folded ten fields
+
+* **Baseline behaviour.** [`COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) decides whether the
+  record moved under the task in `9700-CHECK-CHANGE-IN-REC` at **L4109**, whose body ends at
+  **L4192**, by comparing each freshly-read field against the before-image captured in an
+  earlier task. Ten of those comparisons are case-folded, and the census over **L4109-L4202**
+  is exact. The lower-casing function occurs **twice**, at **L4139-L4140**, wrapping
+  `ACCT-GROUP-ID` and its before-image counterpart and nothing else — those two are the only
+  occurrences of that function anywhere in the program's 4236 lines. The upper-casing function
+  occurs **eighteen** times over **L4152-L4173**, forming **nine** pairs: the three name
+  fields, the three address lines, the state code, the country code and the government-issued
+  identifier. A concurrent writer who altered only the letter case of one of those ten fields
+  therefore did **not** make the baseline report a change, and the rewrite proceeded over it.
+* **Target behaviour.** The comparison is the row's version member, which advances on any
+  committed write regardless of which bytes that write changed. `AccountUpdateService` refuses
+  a submission whose caller-held revision no longer names the versions the caller read, so a
+  case-only concurrent change is refused — and refused with the baseline's own sentence,
+  declared once for the migration as `ApiError.COACTUPC_RECORD_CHANGED` from **L521-L522** and
+  selected for the stale-version kind by `GlobalExceptionHandler` at 409.
+* **Category.** Documented divergence — concurrency-conflict sensitivity widened by the change
+  of the mechanism that detects the conflict.
+* **Why the difference is accepted.** The difference runs one way only: the target refuses a
+  class of change the baseline admitted and admits none the baseline refused, so no write the
+  baseline would have rejected now succeeds. A version member counts writes rather than
+  comparing values, so there is no place in it for a per-field fold; and the ten folded fields
+  are a group identifier, three names, three address lines, a state code, a country code and a
+  government-issued identifier, every one of which a concurrent writer changing only case did
+  still rewrite. Alternatives Considered: carrying the whole pre-edit record from the client so
+  that the field-by-field comparison and its ten folds could be reproduced byte for byte.
+  Rejected on two grounds — it would reinstate exactly the client-echoed state that the
+  session-structure decomposition removed
+  ([§7.3](#73-structural-divergences-that-are-not-defects)), and it would make the fold ten
+  independent decisions each able to drift from the others, a condition already visible in the
+  baseline itself, where one pair folds down and the other nine fold up.
+* **Where it is verified.** `AccountUpdatePreservationTest` asserts the refusal and its
+  consequence in `aStaleRevisionIsRefusedAndNothingIsWritten`, asserts that an absent
+  precondition is refused in `aBlankRevisionIsRefused`, and asserts the accepting path in
+  `thePublishedRevisionIsAcceptedByTheUpdate`, so both sides of the comparison are covered.
+  The sentence itself is asserted in `common-lib` by `ApiErrorTest`.
+* **Files.** `services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`.
 
 ## 8. Inventory caveats a reader will otherwise contradict
 

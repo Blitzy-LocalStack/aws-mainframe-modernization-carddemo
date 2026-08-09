@@ -316,20 +316,65 @@ class InquiryMessageListenerTest {
         this.listener.onRequest(message(request("INQA", "12345678901"), Map.of()));
 
         assertThat(captureSend().messageAttributes())
-                .containsOnlyKeys("contentType")
-                .extractingByKey("contentType")
-                .satisfies(value -> assertThat(value.stringValue()).isEqualTo("text/plain"));
+                .containsOnlyKeys(InquiryMessageListener.ATTRIBUTE_CONTENT_TYPE)
+                .extractingByKey(InquiryMessageListener.ATTRIBUTE_CONTENT_TYPE)
+                .satisfies(value -> assertThat(value.stringValue()).isEqualTo("text/csv"));
     }
 
     /**
-     * Verifies the reply never goes to a destination the message named.
+     * Verifies the request's message identifier is echoed onto the reply as an attribute.
      *
-     * <p>Assumptions: this is asserted because honouring a message's own reply-to would be both unfaithful --
-     * the reference program saves it and then does not use it -- and a queue-injection vector, since a request
-     * could then direct an account's balance to a queue of the sender's choosing.</p>
+     * <p>Assumptions: the reference program restores the saved message identifier onto the reply descriptor
+     * at physical line 469. A message identifier cannot be set on a send in the target, so the captured value
+     * has to travel as an attribute; asserting it here is what stops that half of the descriptor mapping from
+     * being dropped silently.</p>
      */
     @Test
-    @DisplayName("the reply ignores any destination the message names")
+    @DisplayName("the request's message identifier is echoed onto the reply")
+    void theMessageIdentifierIsEchoed() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"),
+                Map.of(InquiryMessageListener.ATTRIBUTE_MESSAGE_ID, "inbound-message-1")));
+
+        assertThat(captureSend().messageAttributes())
+                .extractingByKey(InquiryMessageListener.ATTRIBUTE_MESSAGE_ID)
+                .satisfies(value -> assertThat(value.stringValue()).isEqualTo("inbound-message-1"));
+    }
+
+    /**
+     * Verifies a requested reply destination that matches this context's own destination is honoured.
+     *
+     * <p>Assumptions: the reference program captures the request's reply-to queue at physical line 366 and
+     * saves it at physical line 371, so the value IS part of the request contract and is read rather than
+     * discarded. What the target adds is that it is honoured only after an exact match against the
+     * environment-owned destination, which is the contract recorded in
+     * {@code docs/architecture/messaging-contracts.md} and the only destination the task role is granted a
+     * send action on.</p>
+     */
+    @Test
+    @DisplayName("a requested reply destination that matches the permitted one is honoured")
+    void aMatchingRequestedDestinationIsHonoured() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"),
+                Map.of(InquiryMessageListener.ATTRIBUTE_REPLY_TO_QUEUE_URL, REPLY_URL)));
+
+        assertThat(captureSend().queueUrl()).isEqualTo(REPLY_URL);
+    }
+
+    /**
+     * Verifies the reply never goes to a destination outside the permitted set.
+     *
+     * <p>Assumptions: the requested route is routing data rather than authority, so a value that does not
+     * match the environment-owned destination exactly is substituted rather than honoured. Honouring an
+     * arbitrary address would make this consumer a confused deputy, able to direct an account's financial
+     * position to a queue of the sender's choosing; the reference program reaches its own destination through
+     * a handle opened once from the configured name, so substituting rather than failing is also what keeps a
+     * request the baseline answered from being dead-lettered.</p>
+     */
+    @Test
+    @DisplayName("the reply ignores a destination outside the permitted set")
     void theReplyIgnoresAMessageSuppliedDestination() {
         when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
 
@@ -341,14 +386,21 @@ class InquiryMessageListenerTest {
     }
 
     /**
-     * Verifies a database failure propagates so the request is not acknowledged unanswered.
+     * Verifies a database failure is reported to the error sink and then propagates, and is never a reply.
      *
      * <p>Assumptions: an infrastructure fault is NOT a business outcome. It propagates, so the request becomes
      * visible again and a retry may succeed -- which is the opposite of the not-found case above, where a retry
-     * could never change the answer.</p>
+     * could never change the answer. The report precedes the propagation because the reference program's
+     * {@code WHEN OTHER} branch performs its error paragraph at physical line 444 and only then terminates at
+     * physical line 445.</p>
+     *
+     * <p>Assumptions: the report's body is asserted to carry the reference program's own verbatim return
+     * message, truncated into its 25-character field exactly as a move into that picture truncates it, and to
+     * carry NO exception message text -- only the failure's type chain. An exception message is the one part
+     * of a failure into which a request value can be interpolated, and this body is published onto a queue.</p>
      */
     @Test
-    @DisplayName("a database failure propagates rather than becoming a reply")
+    @DisplayName("a database failure is reported to the error sink and then propagates")
     void aDatabaseFailurePropagates() {
         when(this.accounts.findById(anyLong()))
                 .thenThrow(new org.springframework.dao.QueryTimeoutException("the read timed out"));
@@ -356,7 +408,35 @@ class InquiryMessageListenerTest {
 
         assertThatThrownBy(() -> this.listener.onRequest(request))
                 .isInstanceOf(org.springframework.dao.QueryTimeoutException.class);
-        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
+
+        SendMessageRequest reported = captureSend();
+        assertThat(reported.queueUrl()).isEqualTo(ERROR_URL);
+        assertThat(reported.messageBody())
+                .hasSize(InquiryRequestCodec.MESSAGE_LENGTH)
+                .startsWith("4000-PROCESS-REQUEST-REPL")
+                .contains("ERROR WHILE READING ACCTF")
+                .contains("QueryTimeoutException")
+                .doesNotContain("the read timed out");
+    }
+
+    /**
+     * Verifies a failure in the error report cannot replace the failure it was reporting.
+     *
+     * <p>Assumptions: a single unreachable queue fails the reply AND the report, and a client is free to
+     * answer both with one exception instance. Attaching a throwable to itself is rejected by the platform, so
+     * without an identity guard that shared instance would surface as an unrelated argument failure and the
+     * outage would be lost. This asserts the original failure is what reaches the caller.</p>
+     */
+    @Test
+    @DisplayName("a shared failure instance from both sends does not replace the original failure")
+    void aSharedFailureInstanceDoesNotReplaceTheOriginal() {
+        SdkClientException shared = SdkClientException.create("the queue is unreachable");
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.sqs.sendMessage(any(SendMessageRequest.class))).thenThrow(shared);
+        Message<String> request = message(request("INQA", "12345678901"), Map.of());
+
+        assertThatThrownBy(() -> this.listener.onRequest(request)).isSameAs(shared);
+        assertThat(shared.getSuppressed()).isEmpty();
     }
 
     /**

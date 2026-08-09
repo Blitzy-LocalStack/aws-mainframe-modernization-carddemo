@@ -263,10 +263,29 @@ public class StatementService {
                         "no cross-reference row for the requested card"));
         requireExpectedAccount(request, xref);
 
-        CustomerView customer = customers.findByCustomerId(xref.getCustomerId())
+        // WHY : Assumptions: the customer lookup is named for the identity it addresses rather than
+        //       for the property, because the member it resolves is the one CustomerView marks as its
+        //       identifier, so the read is a fetch by identity and not a generated predicate. The
+        //       refusal is raised HERE rather than inside the lookup so that it can name the
+        //       identifier it could not resolve: the customer read at app/cbl/CBSTM03A.CBL L379-L386
+        //       carries no WHEN '10' arm and abends at L921, so an absent row is a referential-
+        //       integrity violation that must stop the run, never a statement quietly omitted.
+        CustomerView customer = customers.findById(xref.getCustomerId())
                 .orElseThrow(() -> new NoSuchElementException(
                         "no customer row for customer " + xref.getCustomerId()));
-        AccountView account = accounts.findByAccountId(xref.getAccountId())
+        // WHY : Assumptions: the account lookup is by the projection's own identifier and by nothing
+        //       else, so it is the identity read the Spring Data base implementation supplies rather
+        //       than a property-derived query. app/cbl/CBSTM03B.CBL declares that definition
+        //       ACCESS MODE IS RANDOM at L51 with RECORD KEY IS FD-ACCT-ID at L52, and
+        //       app/cbl/CBSTM03A.CBL supplies the whole 11-digit key at L396-L398, so one identifier
+        //       yields at most one row. The repository records the naming decision at the member.
+        // WHY : Assumptions: an empty result here is a referential-integrity violation rather than a
+        //       benign miss, and it stops the run. The cross-reference read at L353-L362 of
+        //       app/cbl/CBSTM03A.CBL tolerates end-of-file through a WHEN '10' arm while the account
+        //       read at L403-L410 has no such arm, so the baseline abends at L921 instead of
+        //       omitting the statement; raising here reproduces that outcome and names the
+        //       unresolved identifier, which a plain inner join would have discarded in silence.
+        AccountView account = accounts.findById(xref.getAccountId())
                 .orElseThrow(() -> new NoSuchElementException(
                         "no account row for account " + xref.getAccountId()));
 

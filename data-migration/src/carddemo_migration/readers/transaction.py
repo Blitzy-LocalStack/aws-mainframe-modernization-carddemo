@@ -28,6 +28,47 @@ and, at run time, the backup and combined generations the batch chain stages to 
 storage. Both entry points are still published, because a staged generation arrives as
 a fixed-length byte image and a fixture arrives as text.
 
+An absent source is a NORMAL state, not a failure
+-------------------------------------------------
+This is the one reader whose input may legitimately not exist, and it is the property that
+distinguishes it from its eleven siblings. Because no extract ships, the two file-taking entry
+points treat an ABSENT path exactly as they treat an EMPTY one: they yield zero records and
+raise nothing. :data:`HAS_COMMITTED_SEED_DATASET` states the fact and
+:func:`seed_dataset_is_present` is the guard both of them apply, so the policy is a decision
+taken in one named place rather than a by-product of how an iterator happens to behave.
+
+Assumptions: ``data-migration/sql/verify/row_counts.sql`` already encodes the same fact from the
+other end. Its baseline for ``ledger.transactions`` is ``NULL`` rather than zero, on the stated
+grounds that the table is filled by the posting job, so "a correct fresh load cannot read as a
+failure". A reader that raised on the missing input would contradict the verification pass that
+is meant to check it, and the contradiction would surface as a failed migration rather than as
+the disagreement it actually is.
+
+Assumptions: nothing is SYNTHESISED to stand in for the absent extract. The baseline's own
+primer record is available -- ``app/jcl/TRANFILE.jcl`` copies it at L67-L74 -- and emitting it,
+or any zero-filled placeholder, is rejected in :func:`seed_dataset_is_present`. It would insert
+a row the source does not contain, which the row-count and money-total passes would then
+correctly report as a parity failure.
+
+The two-timestamp asymmetry
+---------------------------
+``TRAN-ORIG-TS`` at offset 278 and ``TRAN-PROC-TS`` at offset 304 are the same width and the
+same regime, and they must NOT be treated alike. The originating stamp is deterministic business
+data copied from the input transaction; the processing stamp is written from the run clock by the
+posting program and is the only value in this record that differs between two runs over identical
+data. ``data-migration/README.md`` section 10.1 fixes that as the contract for a checksum, which
+must exclude the second and must not exclude the first.
+
+Which stamp is which is read from the DESCRIPTOR's ``normalize_ts`` mark and is never re-derived
+from a field name written here. The mark is surfaced as
+:data:`NORMALIZED_TIMESTAMP_FIELD_NAMES`, its complement as :data:`DETERMINISTIC_FIELD_NAMES`,
+and :func:`is_normalized_timestamp_field` answers for a single field, so a verification pass
+partitions the record by reading the mark rather than by carrying a list of its own.
+
+A published ``TRAN-PROC-TS`` is also VALIDATED rather than trusted: an unwritten stamp is
+accepted, and a stamp that is neither unwritten nor well formed is refused. See
+:func:`_require_timestamp_shape` for the rule and for why refusing beats blanking.
+
 Assumptions: an INTEREST transaction record decodes identically through this reader.
 ``INTTRAN`` is registered separately in the layouts module to carry DERIVED provenance
 and its own alternate key, and it declares the same copybook, the same 350-byte width
@@ -98,6 +139,7 @@ Trade-offs:
 from __future__ import annotations
 
 import pathlib
+import string
 from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 from typing import Final
@@ -108,6 +150,23 @@ from typing import Final
 #   broken quietly: a module moved between `readers/` and `loaders/` keeps importing successfully
 #   but against a different sibling, and this project's ruff configuration bans relative imports
 #   outright for that reason.
+# WHY : Assumptions: the descriptor is selected by NAME and never by record length, and for this
+#   record that is a correctness requirement rather than a preference. `CVTRA05Y` and `CVTRA06Y`
+#   are byte-for-byte identical in geometry -- same widths, same offsets, the same 350-byte record
+#   length -- and differ only in the prefix on every field name, so `TRAN_LAYOUT` and
+#   `DALYTRAN_LAYOUT` are indistinguishable by width. A length-based lookup would return whichever
+#   of the two was registered first, decode every field to the right characters under the wrong
+#   names, and give a loader a row it would insert into the wrong table with no width check left
+#   to catch it. The layouts module additionally registers `TRNX_LAYOUT`, `REJECT_LAYOUT` and
+#   `INTTRAN_LAYOUT` over related geometry; this module reads `TRAN_LAYOUT` alone.
+# WHY : Assumptions: two offsets in this descriptor are load-bearing beyond the record itself, and
+#   three independent sources agree on both. Summing the copybook field widths puts
+#   `TRAN-CARD-NUM` at zero-based 262 and `TRAN-PROC-TS` at 304; `app/jcl/TRANREPT.jcl` L41-L42
+#   declares them as ONE-based DFSORT positions 263 and 305; and `app/jcl/TRANFILE.jcl` L84 builds
+#   the `TRANSACT.VSAM.AIX` alternate index with a zero-based `KEYS(26 304)`. Those are the two
+#   columns the target replaces with `idx_transactions_card_num` and `idx_transactions_proc_ts`,
+#   so an off-by-one here would break the report's sort and every by-card lookup while still
+#   decoding to plausible digits.
 from carddemo_migration.copybook.ebcdic_codec import decode_record, iter_ebcdic_records
 from carddemo_migration.copybook.layouts import (
     TRAN_LAYOUT,
@@ -122,12 +181,16 @@ from carddemo_migration.copybook.layouts import (
 from carddemo_migration.copybook.zoned import decode_zoned_field
 
 __all__ = [
-    "TRAN_LAYOUT",
+    "DETERMINISTIC_FIELD_NAMES",
     "DROPPED_FIELD_NAMES",
+    "HAS_COMMITTED_SEED_DATASET",
     "LOADED_FIELDS",
+    "NORMALIZED_TIMESTAMP_FIELD_NAMES",
+    "TRAN_LAYOUT",
     "DecodedTransaction",
     "decode_ascii_transaction",
     "decode_ebcdic_transaction",
+    "is_normalized_timestamp_field",
     "iter_ascii_transactions",
     "iter_ebcdic_transactions",
     "read_ascii_transactions",
@@ -135,6 +198,7 @@ __all__ = [
     "record_key",
     "render_masked_transaction_field",
     "render_masked_transaction_record",
+    "seed_dataset_is_present",
 ]
 
 # WHY : Assumptions: the decoded value type is a union of exactly two members because this
@@ -195,6 +259,307 @@ LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
 DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in TRAN_LAYOUT.fields if _is_padding_field(field)
 )
+
+# WHY : Assumptions: WHICH stamp is non-deterministic is read off the DESCRIPTOR's
+#   `normalize_ts` mark and is never re-derived from a field name written here. The asymmetry is
+#   load-bearing rather than incidental: `TRAN-ORIG-TS` is copied from the input transaction and
+#   does not vary between runs, whereas `TRAN-PROC-TS` is stamped from the run clock by the posting
+#   program. A checksum or a golden comparison must leave the second out of its span and must NOT
+#   leave the first out, and `data-migration/README.md` section 10.1 fixes that as the contract:
+#   the pass reads the mark rather than carrying its own list of offsets. Deriving the same fact
+#   twice is how the two come to disagree, and the disagreement would be silent -- a digest that
+#   included the wall-clock stamp differs between two loads of identical data, which reads as a
+#   data defect rather than as the measurement defect it is.
+# WHY : Trade-offs: both sets are PUBLISHED rather than kept private, and the complement is
+#   published as an ORDERED tuple rather than as a set. A digest is computed over an explicit
+#   ordered sequence of field names precisely because a mapping's iteration order is a property of
+#   how it was built, so handing a caller a set would oblige the caller to choose an order -- and
+#   two callers choosing differently would compute two incomparable digests of identical data. The
+#   order here is the descriptor's declaration order, which is the record's byte order. Together
+#   the two names partition the published fields exactly, so a caller can assert the split rather
+#   than trust it.
+NORMALIZED_TIMESTAMP_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    field.name for field in LOADED_FIELDS if field.normalize_ts
+)
+DETERMINISTIC_FIELD_NAMES: Final[tuple[str, ...]] = tuple(
+    field.name for field in LOADED_FIELDS if not field.normalize_ts
+)
+
+# WHY : Assumptions: this record ships NO extract of its own, in either encoding, and the fact is
+#   published rather than left in prose so a caller can branch on it instead of hard-coding the
+#   same conclusion. Measured: `app/data/ASCII/` holds nine seeds and none of them is a transaction
+#   master, and `app/data/EBCDIC/` holds thirteen datasets and none of them is either.
+#   `app/jcl/TRANFILE.jcl` defines the cluster at L49-L54 and then primes it at L67-L74 by copying
+#   `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`, which is a single 350-byte record, so even the baseline job
+#   loads no master data here -- the content is written later by the posting and backup pipeline.
+#   `data-migration/README.md` marks this record separately from the ten that do ship an extract
+#   for exactly this reason.
+HAS_COMMITTED_SEED_DATASET: Final[bool] = False
+
+
+def is_normalized_timestamp_field(field_name: str) -> bool:
+    """Report whether one named field of this record is the wall-clock stamp.
+
+    Purpose
+    -------
+    Answer, for a single field, the question a checksum or a golden comparison has to ask before
+    it includes that field in a compared span: is this value written from the run clock, and
+    therefore expected to differ between two runs over the same data?
+
+    Parameters
+    ----------
+    field_name : str
+        The field name exactly as the copybook spells it.
+
+    Returns
+    -------
+    bool
+        ``True`` when the descriptor marks the field as a run-clock stamp a parity comparison may
+        blank; ``False`` for every field carrying deterministic data, the originating stamp
+        included.
+
+    Raises
+    ------
+    LayoutError
+        If no field of that name is declared by this record. Raised by the descriptor's own
+        lookup.
+    """
+    # WHY : Assumptions: the flag is read off the descriptor for the NAMED field rather than
+    #   tested against the published set, so an unknown or misspelled name RAISES here instead of
+    #   answering `False`. `False` is the answer that means "this field is deterministic", so a
+    #   typo would otherwise place a wall-clock stamp inside a checksummed span, and the digest
+    #   would then differ between two loads of identical data with nothing naming the cause.
+    return TRAN_LAYOUT.field(field_name).normalize_ts
+
+
+def seed_dataset_is_present(path: pathlib.Path) -> bool:
+    """Report whether a named transaction source exists to be read.
+
+    Purpose
+    -------
+    Decide, in one named place, whether there is anything at ``path`` to decode. It is the guard
+    both file-taking entry points apply, so this record's defining property -- that its input may
+    legitimately not exist -- is an explicit decision rather than an accident of how an iterator
+    behaves when handed a missing file.
+
+    Assumptions: an absent source is a NORMAL state for this record and for no sibling. No extract
+    ships in either encoding, so there is nothing under ``app/data`` for a caller to point at and
+    no default path to fall back on; the content is produced by the posting and backup pipeline.
+    ``data-migration/sql/verify/row_counts.sql`` encodes the same fact as a ``NULL`` baseline
+    rather than a count of zero, on the stated grounds that a correct fresh load must not read as
+    a failure. Raising here would make this reader contradict the verification pass written to
+    check it.
+
+    Alternatives Considered: standing in for the absent extract rather than reporting it absent.
+    Two stand-ins were available and both are rejected. The baseline's own primer record is
+    committed and could be emitted, and a zero-filled record of the declared width could be
+    synthesised. Either would put a row into the target that the source does not contain, and the
+    row-count and money-total passes would then correctly report a parity failure -- so the cost of
+    the convenience is a false alarm in the checks that exist to catch real ones.
+
+    Alternatives Considered: reporting absence rather than raising and letting the caller catch.
+    Catching would work, but it makes every caller responsible for knowing which of the twelve
+    readers has an optional input, and a caller that guarded the wrong exception type would turn a
+    normal state into a stopped load. A predicate states the fact once where the fact is known.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        The exact source to test. Nothing is opened, read or decoded here, and no directory is
+        searched: the caller names the file.
+
+    Returns
+    -------
+    bool
+        ``True`` when a readable file exists at ``path``; ``False`` when nothing is there, in
+        which case the caller yields no records and reports no error.
+
+    Raises
+    ------
+    OSError
+        If the path cannot be inspected at all, which is a broken mount or a permission fault
+        rather than an absent dataset, and is therefore left to propagate.
+    """
+    # WHY : Trade-offs: the test is `is_file` and not `exists`, so a DIRECTORY at this path
+    #   reports absent rather than readable. The alternative -- treating any existing entry as a
+    #   source -- would defer the failure to the open, which reports a directory as a permission
+    #   or type error and names neither this record nor the policy that admitted it. A directory
+    #   where a dataset was expected is a caller mistake, and reporting no records for it is the
+    #   same answer this function gives for the case the mistake resembles.
+    # WHY : Assumptions: a ZERO-BYTE file is deliberately NOT filtered out here and is reported
+    #   present. Both iterators already yield nothing for an empty source -- the text one produces
+    #   no line and the fixed-length one divides zero bytes into zero records -- so the empty case
+    #   needs no special handling and gets none. Adding one would put a second, redundant statement
+    #   of "no records" in this module, which is how the two would come to disagree about, for
+    #   instance, a file holding a single stray separator.
+    return path.is_file()
+
+
+# WHY : Assumptions: an unwritten stamp has exactly TWO uniform forms, and this module recognises
+#   the same two the package's timestamp authority does. `copybook.ebcdic_codec.decode_timestamp`
+#   documents both on measured evidence: a processing stamp is blank wherever the posting run that
+#   writes it has not yet run, and the shipped primer record `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT` was
+#   never written at all, so its stamp spans hold low values. Recognising only one of the two would
+#   refuse a form the baseline itself produces, and this record is written by exactly the pipeline
+#   that produces both.
+_BLANK: Final[str] = " "
+_LOW_VALUE: Final[str] = "\x00"
+
+# WHY : Assumptions: these are positions WITHIN one decoded stamp and the characters admitted at
+#   them -- not record geometry, of which this module still states none, and the stamp's own width
+#   is taken from its descriptor rather than written here. The rule admits the union of four
+#   separators at these six positions so that ONE rule covers both dialects CardDemo emits: the
+#   `YYYY-MM-DD HH:MM:SS.ffffff` form the posting program writes, and the
+#   `YYYY-MM-DD-HH.MM.SS.NNNNNN` form the interest program takes from the current date -- and the
+#   interest program writes rows into THIS record, so both dialects genuinely arrive here. Every
+#   other position is a digit. A dialect-specific matcher would have to know which program wrote
+#   the record, which a reader cannot know from the bytes it was handed.
+_TIMESTAMP_SEPARATOR_OFFSETS: Final[frozenset[int]] = frozenset({4, 7, 10, 13, 16, 19})
+_TIMESTAMP_SEPARATOR_CHARACTERS: Final[frozenset[str]] = frozenset("-.: ")
+
+# WHY : Trade-offs: the digit test is this explicit ASCII set rather than the string method that
+#   reads more naturally. That method also answers true for a superscript and for the digit forms
+#   of other scripts, so a mis-decoded span could satisfy it while holding characters no timestamp
+#   column can parse. The accepted cost is one more name; what it buys is that the check means what
+#   it says on BOTH paths, including the byte path, where which characters appear is decided by the
+#   code page rather than by anything a caller controls.
+_TIMESTAMP_DIGITS: Final[frozenset[str]] = frozenset(string.digits)
+
+
+def _is_uniformly(value: str, character: str) -> bool:
+    """Report whether every position of a value holds one given character.
+
+    Purpose
+    -------
+    Recognise one of the two uniform forms an unwritten fixed-width stamp takes, as a single test
+    both forms are checked through, so the two cannot be recognised by slightly different rules.
+
+    Parameters
+    ----------
+    value : str
+        The decoded field characters to test.
+    character : str
+        The single character the whole value must consist of.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value is non-empty and every position equals ``character``; ``False``
+        otherwise, an empty value included.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: an EMPTY value must not read as uniform, which is why the emptiness test
+    #   is here rather than left to the generator. A test over no positions is vacuously true, so
+    #   without this an empty span would be accepted as an unwritten stamp -- and an empty span is
+    #   a field that was sliced wrongly, which is the opposite of a stamp nobody has written yet.
+    return bool(value) and all(position == character for position in value)
+
+
+def _is_timestamp_position(offset: int, character: str) -> bool:
+    """Report whether one position of a stamp holds a character its shape admits there.
+
+    Purpose
+    -------
+    Express the timestamp shape as a per-position rule, so the whole-value test reads as the
+    quantifier it is and the two kinds of position are decided in one named place.
+
+    Parameters
+    ----------
+    offset : int
+        The zero-based position WITHIN the stamp, not within the record.
+    character : str
+        The single character at that position.
+
+    Returns
+    -------
+    bool
+        ``True`` when a separator position holds one of the admitted separators, or a
+        non-separator position holds a digit; ``False`` otherwise.
+
+    Raises
+    ------
+    None
+    """
+    if offset in _TIMESTAMP_SEPARATOR_OFFSETS:
+        return character in _TIMESTAMP_SEPARATOR_CHARACTERS
+    return character in _TIMESTAMP_DIGITS
+
+
+def _require_timestamp_shape(value: str, field: FieldSpec) -> str:
+    """Require a run-clock stamp to be either unwritten or a well-formed timestamp.
+
+    Purpose
+    -------
+    Validate the one field of this record whose value a parity comparison is allowed to blank,
+    BEFORE it is published, so that a corrupt stamp is reported rather than carried into a load
+    and then blanked out of the very comparison that would have caught it.
+
+    Assumptions: an unwritten stamp is a LEGITIMATE value and not a decode failure. COBOL leaves a
+    stamp it has not written in the state the record was initialised to, and this record is the one
+    the posting run writes, so a row staged before that run carries the blank span its input
+    carried. Treating either uniform form as corrupt would refuse records the baseline considers
+    valid.
+
+    Trade-offs: a stamp that is NEITHER unwritten NOR well formed is refused rather than accepted
+    or quietly blanked. Blanking by position would paper over exactly two faults a financial
+    pipeline must surface: a record whose bytes are corrupt, and a reader whose offsets have moved
+    -- and this stamp sits at offset 304, which is the alternate-index key, so a moved offset here
+    still yields plausible characters while breaking the access path the report depends on. The
+    cost accepted is that a genuinely new timestamp dialect fails loudly here instead of passing
+    through, which is the cheaper of the two failures because it names the field.
+
+    Trade-offs: a span holding a MIXTURE of the two unwritten forms falls through to the same
+    refusal, deliberately. Only a uniform span denotes a stamp nobody has written; a mixture is one
+    partly written or partly overwritten, and no writer in this corpus produces one. The package's
+    timestamp authority refuses that case for the same reason, so accepting it here would make the
+    reader and that codec disagree about what an unwritten stamp is.
+
+    Parameters
+    ----------
+    value : str
+        The decoded characters of the stamp, at the field's full declared width.
+    field : FieldSpec
+        The descriptor for the stamp, supplying its declared width for the check and its geometry
+        for the diagnostic. Nothing about the field is taken from anywhere else.
+
+    Returns
+    -------
+    str
+        ``value`` unchanged. Nothing is normalised, blanked or reformatted here: the mark on the
+        descriptor says which field a COMPARISON may blank, and producing that rendering belongs to
+        the comparison, because a reader that blanked on the way through would leave the parity
+        check unable to show what actually differed.
+
+    Raises
+    ------
+    LayoutError
+        If the value is not the field's declared width, or is neither uniformly unwritten nor a
+        well-formed timestamp in either dialect.
+    """
+    if len(value) == field.length:
+        if _is_uniformly(value, _BLANK) or _is_uniformly(value, _LOW_VALUE):
+            return value
+        if all(_is_timestamp_position(offset, character) for offset, character in enumerate(value)):
+            return value
+
+    # WHY : Trade-offs: the refusal names the field's GEOMETRY and the declared width it failed
+    #   against, and quotes NO part of the value -- not the offending character and not its
+    #   position. `LayoutError` is chosen over the two nearer alternatives for reasons that are not
+    #   stylistic: a record-length error would misdescribe a record of exactly the right width whose
+    #   CONTENT is wrong, and the display-numeric codec's error belongs to a numeric regime this
+    #   character field does not declare, so borrowing it would send a reader looking in the wrong
+    #   codec. It is a `ValueError` either way, so a caller guarding that base type still catches
+    #   it.
+    raise LayoutError(
+        f"field {field.describe()} of record {TRAN_LAYOUT.name} holds neither a well-formed"
+        f" {field.length}-character timestamp nor a uniformly unwritten span, so either the stamp"
+        " is corrupt or the field offsets have moved; it is refused rather than accepted or"
+        " blanked, because blanking it would remove the evidence from the comparison that would"
+        " otherwise have reported it"
+    )
 
 
 def _field_containing(offset: int) -> FieldSpec | None:
@@ -316,7 +681,8 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
     ------
     LayoutError
         If the field declares a storage regime that cannot occur in a character record, which is
-        any computational or mixed-regime area.
+        any computational or mixed-regime area, or if a run-clock stamp holds neither an unwritten
+        span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -326,7 +692,15 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str | Decimal:
         display codec.
     """
     if field.kind is Kind.TEXT:
-        return record[field.start : field.end]
+        characters = record[field.start : field.end]
+        # WHY : Assumptions: the stamp check is driven by the descriptor's `normalize_ts` mark, so
+        #   the ORIGINATING stamp -- which the descriptor does not mark -- passes through as
+        #   ordinary business data while the RUN-CLOCK one is validated. Naming a field here
+        #   instead would restate a fact the descriptor already carries, and the two would then be
+        #   free to disagree with the verification pass, which reads the same mark.
+        if field.normalize_ts:
+            return _require_timestamp_shape(characters, field)
+        return characters
 
     if field.kind is Kind.UINT:
         # WHY : Trade-offs: the decimal this returns is DISCARDED and the characters are returned
@@ -429,6 +803,60 @@ def _project_decoded_fields(
     return projected
 
 
+def _require_validated_timestamps(values: DecodedTransaction) -> DecodedTransaction:
+    """Apply the run-clock stamp policy to an already projected record.
+
+    Purpose
+    -------
+    Give the byte path the same stamp validation the character path applies field by field, so a
+    corrupt processing timestamp is refused whichever corpus the record arrived in.
+
+    Parameters
+    ----------
+    values : DecodedTransaction
+        One projected record, keyed by field name, as :func:`_project_decoded_fields` returns it.
+        It is a freshly built mapping, so the marked field is rewritten in place rather than the
+        whole record copied.
+
+    Returns
+    -------
+    DecodedTransaction
+        The same mapping, with every run-clock stamp proven to be either unwritten or well formed.
+        No value is altered: the policy validates and returns, it does not normalise.
+
+    Raises
+    ------
+    LayoutError
+        If a marked stamp decoded to a non-character value, or holds neither an unwritten span nor
+        a well-formed timestamp.
+    """
+    # WHY : Alternatives Considered: this is a separate pass over the MARKED fields rather than a
+    #   branch inside the projection loop, and it iterates the published mark rather than every
+    #   field. The projection has one job -- drop the pad and refuse an unpublishable value -- and a
+    #   second condition inside it would run on all thirteen fields to reach the one that needs it.
+    #   Both paths still call ONE policy function, which is what makes it impossible for the two
+    #   encodings to enforce different rules; splitting the POLICY rather than the call site is the
+    #   drift this arrangement exists to avoid.
+    for name in NORMALIZED_TIMESTAMP_FIELD_NAMES:
+        field = TRAN_LAYOUT.field(name)
+        value = values[name]
+
+        # WHY : Trade-offs: a marked field that did not decode to characters is REFUSED rather
+        #   than skipped. A skip would be justified by this record declaring its stamps as
+        #   character data today, which it does -- but the moment a descriptor edit made that
+        #   false, a skip would silently stop validating the one field a comparison is allowed to
+        #   blank, and an unvalidated stamp is exactly what the blanking would then hide. The
+        #   package's timestamp codec refuses a non-character stamp for the same reason.
+        if not isinstance(value, str):
+            raise LayoutError(
+                f"field {field.describe()} of record {TRAN_LAYOUT.name} is marked as a"
+                " run-clock stamp but decoded to a value that is not characters, so its"
+                " descriptor no longer declares the character regime a timestamp is written in"
+            )
+        values[name] = _require_timestamp_shape(value, field)
+    return values
+
+
 def record_key(record: str) -> str:
     """Return the primary key of one character record, sliced by the descriptor.
 
@@ -500,7 +928,8 @@ def decode_ascii_transaction(
         If the record is not the declared width, or holds a character outside the single-byte
         range.
     LayoutError
-        If a declared field's storage regime cannot be decoded from a character record.
+        If a declared field's storage regime cannot be decoded from a character record, or a
+        run-clock stamp holds neither an unwritten span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -557,7 +986,8 @@ def iter_ascii_transactions(
     ------
     LayoutError
         If the source is a byte object, is neither text nor iterable, or produces an element that
-        is not a line, or if a field declares a regime a character record cannot hold.
+        is not a line, if a field declares a regime a character record cannot hold, or if a
+        run-clock stamp holds neither an unwritten span nor a well-formed timestamp.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -599,22 +1029,25 @@ def read_ascii_transactions(path: pathlib.Path) -> Iterator[DecodedTransaction]:
     Parameters
     ----------
     path : pathlib.Path
-        The exact seed file to read. The caller names the file; this function never searches a
-        directory for it.
+        The exact source file to read. The caller names the file; this function never searches a
+        directory for it. The file need not exist: see the return description.
 
     Returns
     -------
     Iterator[DecodedTransaction]
-        Each record in order, in the published decoded shape. A zero-byte file yields nothing and
-        is not an error.
+        Each record in order, in the published decoded shape. An ABSENT path and a zero-byte file
+        both yield nothing, and neither is an error -- this record ships no extract, so having
+        nothing to read is a normal state rather than a fault.
 
     Raises
     ------
     OSError
-        If the path cannot be opened or read.
+        If the path exists but cannot be inspected, opened or read. An absent path is reported as
+        no records instead.
     LayoutError
-        If the file produces an element that is not a line, or a field declares a regime a
-        character record cannot hold.
+        If the file produces an element that is not a line, a field declares a regime a character
+        record cannot hold, or a run-clock stamp holds neither an unwritten span nor a well-formed
+        timestamp.
     RecordLengthError
         If a line is longer than the declared record width, or a record holds a character outside
         the single-byte range.
@@ -644,6 +1077,16 @@ def read_ascii_transactions(path: pathlib.Path) -> Iterator[DecodedTransaction]:
     #   interpreter translate and split on a carriage return as well, moving terminator policy out
     #   of the module that owns it -- which matters for this corpus specifically, because three of
     #   the nine ASCII seeds carry carriage returns on some rows and not others.
+    # WHY : Assumptions: the absence check comes BEFORE the open and is the reason this reader
+    #   differs from its eleven siblings, none of which needs one because each has a committed
+    #   extract to point at. Opening a missing file raises, and for this record a missing file is
+    #   the expected state before the posting pipeline has produced any output, so the raise would
+    #   report a correct pipeline state as a failed load. The check is stated here rather than left
+    #   to the caller so that both encodings answer identically; see `seed_dataset_is_present` for
+    #   why a stand-in record is not emitted instead.
+    if not seed_dataset_is_present(path):
+        return
+
     with path.open("r", encoding="latin-1", newline="\n") as handle:
         yield from iter_ascii_transactions(handle)
 
@@ -684,7 +1127,8 @@ def decode_ebcdic_transaction(
         bytes.
     LayoutError
         If a published field decoded to raw bytes, which means the descriptor has acquired a
-        computational or mixed-regime area.
+        computational or mixed-regime area, or if a run-clock stamp holds neither an unwritten span
+        nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -699,7 +1143,13 @@ def decode_ebcdic_transaction(
     #   low-value padding is ever handed to a character decoder. Decoding a whole record through a
     #   code page is the single most likely mistake on this path and the most damaging: it
     #   succeeds, preserves the declared width, and yields a record that looks almost right.
-    return _project_decoded_fields(decode_record(record, TRAN_LAYOUT))
+    # WHY : Assumptions: the stamp policy is applied on this path too, through the same function
+    #   the character path calls. The record codec deliberately returns a stamp exactly as decoded
+    #   rather than validating its shape, so without this step the byte path would publish a
+    #   corrupt processing timestamp that the character path refuses -- and the two corpora would
+    #   then disagree about the validity of one record while agreeing on its every other field.
+    decoded = _project_decoded_fields(decode_record(record, TRAN_LAYOUT))
+    return _require_validated_timestamps(decoded)
 
 
 def iter_ebcdic_transactions(
@@ -737,7 +1187,8 @@ def iter_ebcdic_transactions(
         If a span does not decode to exactly one character per byte.
     LayoutError
         If the source is neither a byte image nor readable nor iterable, produces a piece that is
-        not a byte object, or a published field decoded to raw bytes.
+        not a byte object, a published field decoded to raw bytes, or a run-clock stamp holds
+        neither an unwritten span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -773,24 +1224,27 @@ def read_ebcdic_transactions(path: pathlib.Path) -> Iterator[DecodedTransaction]
     ----------
     path : pathlib.Path
         The exact dataset file to read. The caller names the file; this function never searches a
-        directory for it.
+        directory for it. The file need not exist: see the return description.
 
     Returns
     -------
     Iterator[DecodedTransaction]
-        Each record in order, in the published decoded shape. A zero-byte file yields nothing and
-        is not an error.
+        Each record in order, in the published decoded shape. An ABSENT path and a zero-byte file
+        both yield nothing, and neither is an error -- this record ships no extract in either
+        encoding, so having nothing to read is a normal state rather than a fault.
 
     Raises
     ------
     OSError
-        If the path cannot be inspected or opened.
+        If the path exists but cannot be inspected or opened. An absent path is reported as no
+        records instead.
     EbcdicRecordLengthError
         If the file size does not divide into whole records of the declared length.
     EbcdicFieldDecodeError
         If a span does not decode to exactly one character per byte.
     LayoutError
-        If a published field decoded to raw bytes.
+        If a published field decoded to raw bytes, or a run-clock stamp holds neither an unwritten
+        span nor a well-formed timestamp.
     ZonedSpanWidthError
         If an unsigned display field's declared span is not available, or the descriptor's display
         geometry is internally inconsistent. Raised by the display codec.
@@ -804,6 +1258,14 @@ def read_ebcdic_transactions(path: pathlib.Path) -> Iterator[DecodedTransaction]
     #   BEFORE yielding a first record, so a truncated dataset fails up front instead of part way
     #   through a load, and it owns the open, the forward-only read and the close. Opening the file
     #   here would duplicate that lifecycle for no gain.
+    # WHY : Assumptions: the same absence check the character path applies is applied here, through
+    #   the same predicate, so the two encodings agree that a missing source yields no records. The
+    #   codec would otherwise raise on the open it performs, and this record legitimately has no
+    #   committed dataset in EITHER encoding -- so leaving the check on one path only would make the
+    #   answer depend on which entry point a caller happened to choose.
+    if not seed_dataset_is_present(path):
+        return
+
     yield from iter_ebcdic_transactions(pathlib.PurePath(path))
 
 
