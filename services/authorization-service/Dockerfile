@@ -3,14 +3,34 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   Builds the non-root container image for the CardDemo pending-authorization
-#   context: the migrated form of the queue-driven task
-#   app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl together with the three online
-#   programs COPAUS0C, COPAUS1C and COPAUS2C that view and mark what it records.
+#   bounded context, packaging the executable archive this module's POM produces
+#   into a runnable ECS Fargate task.
+#
+# Source of truth:
+#   services/authorization-service/pom.xml declares the artifact this image
+#   ships. The behaviour that artifact re-expresses comes from the eight COBOL
+#   programs of the decoupled authorization extension, cited here by path
+#   because they are the specification for what is built:
+#     app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl   summary list
+#     app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl   detail view
+#     app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl   mark fraud
+#     app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl   queue consumer
+#     app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl   expiry purge
+#     app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL   segment load
+#     app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL   segment unload
+#     app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL   GSAM unload
+#   Those eight are REFERENCE-ONLY. No COPY instruction below names app/,
+#   tests/, scripts/ or samples/, so no baseline file enters a layer and none is
+#   modified. They nevertheless remain IN the build context on purpose:
+#   .dockerignore:L66-L73 records the decision to retain them so that a reader
+#   running this build can verify a cited path from inside the same context.
 #
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
+#   This image REQUIRES no command argument: the process is a long-running HTTP
+#   listener, not a job, so it takes no per-run token of the kind the batch
+#   image accepts. Any argument that is supplied is forwarded verbatim, because
+#   the entry point is the shared listener-material script whose final line
+#   replaces itself with the JVM and passes "$@" through.
 #   Runtime configuration arrives entirely through environment variables that the
 #   ECS task definition supplies. The values this service cannot start without,
 #   because their placeholders declare no fallback, are:
@@ -29,8 +49,46 @@
 #   unreachable JWT issuer, or a Flyway checksum mismatch aborts the start before
 #   the listener binds, so the task never reports healthy.
 #
+# Deployment lineage:
+#   This image replaces a load library, not a server. The baseline's deployable
+#   unit was a member of AWS.M2.CARDDEMO.LOADLIB, named at
+#   app/csd/CARDDEMO.CSD:L491 and loaded into a CICS region whose extension
+#   resources are declared in
+#   app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd. The deployable unit here
+#   is this image in Amazon ECR.
+#
+# Concurrency, and why it improves on the baseline:
+#   The baseline funnelled this feature through ONE CICS DB2 thread:
+#   CRDDEMO2.csd:L72 declares THREADLIMIT(1) THREADWAIT(YES) on DB2ENTRY
+#   AWS01PLN, so a second authorization waited for the first to finish. This
+#   image inherits no such ceiling. The ECS service runs several identical tasks
+#   behind an internal load balancer, and the context keeps no server-side
+#   session state -- the CICS communication area decomposed into signed token
+#   claims, request-path parameters and client-side routing -- so an added task
+#   is immediately useful. That statelessness is also why this image declares no
+#   volume and needs neither session affinity nor a shared filesystem.
+#
+# Boundaries -- what this file deliberately does NOT do:
+#   Building it is a VALIDATION-only build. It proves the definition parses, the
+#   pins resolve and the archive assembles; it publishes nothing and it is not
+#   the test gate (see the packaging step for where the suite runs). Publication
+#   belongs to .github/workflows/deploy.yml, which pushes to Amazon ECR after
+#   assuming a deployment role through short-lived OIDC federation. No
+#   long-lived registry credential exists in this repository, in this file or in
+#   any layer it produces, and no endpoint, queue URL, ARN or account identifier
+#   is baked in: every runtime value arrives from Parameter Store or Secrets
+#   Manager through the environment variables named above.
+#
 # Governing convention:
-#   docs/CODE_DOCUMENTATION_STANDARD.md
+#   docs/CODE_DOCUMENTATION_STANDARD.md, whose Dockerfile section requires a
+#   header plus a justification on the base-image pin and on layer ordering.
+#   That obligation is the XML/HCL-style analogue defined by that standard and
+#   by the migration plan; it is NOT claimed from the project explainability
+#   rule, whose format clause names Javadoc, JSDoc, Python docstrings and C# XML
+#   comments and is silent on Dockerfiles. The rule's inline-comment clauses do
+#   apply in full, so every justification below carries one of exactly four
+#   labels: Alternatives Considered, Refactoring Rationale, Assumptions,
+#   Trade-offs.
 #
 # WHAT: From the repository root, build this image with:
 #       docker build --file services/authorization-service/Dockerfile \
@@ -42,6 +100,16 @@
 #       repository-root-relative and all of them fail if the context is narrowed.
 # =============================================================================
 
+# WHY : Trade-offs: both stages are pinned to an exact version AND a digest,
+#       never to a floating or `latest` tag. What is given up is automatic pickup
+#       of a newer patch level, which now costs an edit here that a reviewer
+#       sees. What is bought is that one commit builds one runtime. This
+#       repository already holds itself to that standard for its Python test
+#       dependencies, calling exact pinning "a hard financial-grade requirement,
+#       because a floating dependency could silently break the byte-deterministic
+#       golden comparisons" (tests/README.md:L177-L187). The exposure is the same
+#       here for a stronger reason: this context posts money, so an unpinned JVM
+#       is an unpinned decimal and rounding implementation.
 # WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
 #       Corretto vendor and Java 21 major version, so a class-file level or
 #       vendor-specific behavior cannot first appear after the jar is shipped.
@@ -107,14 +175,32 @@ RUN awk ' \
     && mvn -B -ntp -f pom.xml -pl common-lib,authorization-service -am \
        dependency:go-offline
 
+# WHY : Trade-offs: this is the CLOSING half of the layer-ordering decision opened
+#       at the POM copies above, and it is placed here so the ordering is legible
+#       from both ends rather than only from the top. Sources are copied AFTER
+#       dependency resolution, which is what confines an ordinary code change to
+#       the two layers below and leaves the resolved dependency layer intact. The
+#       compromise is that these two directories are the widest thing this stage
+#       copies, so any edit under either invalidates everything after this line;
+#       the alternative of copying sources alongside the POMs would additionally
+#       invalidate the dependency resolution, turning every one-line change into a
+#       full re-resolve.
+# WHY : Assumptions: both source trees are required because this module compiles
+#       against the shared kernel from source rather than resolving a published
+#       artifact for it, which is the same assumption that makes the repository
+#       root, and not services/, the correct build context.
 COPY services/common-lib/src ./common-lib/src
 COPY services/authorization-service/src ./authorization-service/src
 
 # WHY : Trade-offs: tests are skipped while packaging because the suite gate is
 #       the repository-root reactor build `mvn -f services/pom.xml clean verify`,
-#       whose Surefire and Failsafe executions cover all ten modules. This stage
-#       sees only common-lib and authorization-service, so running tests here would report a
-#       narrower result under a name that reads like the full one.
+#       whose Surefire and Failsafe executions cover every module in that reactor.
+#       This stage selects only common-lib and this module, so running tests here
+#       would report a narrower result under a name that reads like the full one.
+#       No count is written here deliberately: a figure in the file that CONFIGURES
+#       a gate goes stale the moment a module is added, and a reader reconciling it
+#       against a build log cannot then tell whether the gate or the comment is
+#       wrong. The reactor command above is the authority and cannot go stale.
 # WHY : Assumptions: Checkstyle stays bound to `validate` and therefore still runs
 #       inside this stage, before `package`, even under -DskipTests. It is the one
 #       gate this image build keeps, because a missing Javadoc is a defect in the
@@ -122,10 +208,26 @@ COPY services/authorization-service/src ./authorization-service/src
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,authorization-service -am \
     clean package -DskipTests
 
-# WHY : Assumptions: the publisher provides no Alpine variant of this Corretto
-#       image; `21-alpine` does not resolve and would fail the build. 21.0.12 is
-#       the highest published 21.x tag and headless is selected because an HTTP
-#       service needs no AWT or graphics stack.
+# WHY : Assumptions: THIS TAG IS NOT SIMPLIFIABLE, and the reason is a property
+#       of the publisher's registry rather than a preference. The ECR Public
+#       amazoncorretto repository publishes ONLY `-al2` and `-al2023` operating
+#       system families, each carrying a `headful`, `headless`, `generic` or
+#       `jdk` suffix. It publishes NO Alpine variant at all. An earlier draft of
+#       the migration plan named `21-alpine`, reading it as the obvious smaller
+#       base; that tag does not exist, so it is not a smaller alternative but a
+#       reference that fails to resolve and would have failed every image build.
+#       A reader shortening this to `21-alpine`, `:21` or `:latest` therefore
+#       breaks the build rather than relaxing it. Verified against the registry
+#       tag listing, not inferred from documentation.
+# WHY : Assumptions: 21.0.12 is the highest published 21.x patch level in that
+#       family. Note that it does not sort last as a string - `21.0.9` compares
+#       greater than `21.0.12` lexically - so a version check written as a text
+#       comparison will wrongly report this pin as behind.
+# WHY : Assumptions: the `headless` suffix, not `headful` or `jdk`. This process
+#       serves HTTP and renders nothing, so it needs no AWT, X11 or font stack,
+#       and it runs a packaged archive rather than compiling, so it needs no
+#       compiler either. Headless is both the smaller image and the accurate
+#       description of what the process uses.
 # WHY : Refactoring Rationale: the reference is digest-pinned rather than left on
 #       the bare tag because this tag has already moved at least once - the
 #       registry index for `21.0.12-al2023-headless` and a copy cached earlier on
@@ -154,10 +256,24 @@ RUN printf '%s\n' 'carddemo:x:10001:' >> /etc/group \
 #       fixed identity may modify.
 WORKDIR /app
 
-# WHY : Assumptions: authorization-service-1.0.0-SNAPSHOT.jar is the artifact this module's POM
-#       produces and the Boot repackage goal makes it self-contained, so copying
-#       that one file excludes sources, build caches, reports and every reactor
-#       target directory from the shipped image.
+# WHY : Trade-offs: THIS single COPY is what earns the two-stage structure, so
+#       the trade is worth stating where it is paid. A one-stage image would be
+#       simpler to read and would keep Maven, the JDK's compiler and the whole
+#       resolved dependency cache available inside the shipped result for
+#       debugging. That is given up deliberately, because those bytes are pulled
+#       by the ECS agent on every task placement and on every scale-out event:
+#       the mechanism is image pull bytes translating directly into task start
+#       latency, and into how long a scale-out lags the load that triggered it.
+#       What is kept is a runtime layer holding no build tooling at all, which
+#       also removes a compiler and a package resolver from the running task's
+#       attack surface.
+# WHY : Assumptions: the archive is named for this module's artifactId and the
+#       version it inherits from the parent, and the Boot repackage goal has made
+#       it self-contained. Copying exactly that one file is therefore sufficient,
+#       and it leaves sources, build caches, test reports and every reactor
+#       target directory behind in the discarded stage. A renamed artifactId or
+#       an overridden finalName would break this path at build time rather than
+#       silently ship an empty image.
 COPY --from=build --chown=10001:10001 \
     /build/services/authorization-service/target/authorization-service-1.0.0-SNAPSHOT.jar \
     /app/app.jar
@@ -194,32 +310,52 @@ RUN chmod 0555 /usr/local/bin/carddemo-entrypoint.sh
 #       metadata while the numeric records keep behavior deterministic.
 USER carddemo:carddemo
 
-# WHY : Assumptions: this is the only service image whose process does real work
-#       with no request arriving - it consumes a FIFO queue and drains a
-#       transactional outbox on a schedule. The health probe below is therefore
-#       load-bearing rather than ceremonial: a task whose listener has stopped
-#       while its HTTP listener still answers is exactly the failure the probe's
-#       datasource-aware response can surface, and it is the failure mode that
-#       would otherwise be silent because no caller is waiting on a reply.
+# WHY : Assumptions: this container does work that ARRIVES ON NO HTTP REQUEST - it
+#       consumes an ordered authorization queue and drains a transactional outbox -
+#       which is what makes the probe below load-bearing rather than ceremonial. The
+#       failure it exists to catch is a task whose QUEUE consumption has stopped
+#       while its HTTP connector still answers normally: no caller is waiting on a
+#       reply, so nothing else in the system reports it, and the work simply stops
+#       being done. The probe's datasource-aware response is what surfaces that.
+#       Refactoring Rationale: this note previously called that property unique to
+#       this image, which was measurably wrong - account-service, reference-service
+#       and batch-service also declare queue listeners. The claim is narrowed to
+#       what is true and load-bearing here, because a reader who believed the
+#       uniqueness would conclude the sibling images needed no equivalent probe.
 # WHY : Assumptions: no message payload is ever written to an image layer. The
 #       eighteen-field authorization request carries a sixteen-digit primary
 #       account number, so the package charter forbids logging a payload
 #       verbatim; an image that cached one for debugging would defeat that
 #       discipline permanently, since layers outlive the container.
+# WHY : Assumptions: /actuator/health has TWO independent out-of-process consumers,
+#       and that is why the path is not a free choice here. This HEALTHCHECK is one;
+#       the internal load balancer's target group is the other, and it decides
+#       whether the task is in service at all. Both resolve through
+#       spring-boot-starter-actuator, declared in this module's POM, so dropping
+#       that dependency does not degrade one probe - it breaks both at once, and the
+#       presenting symptom is a deployment that rolls itself back with no
+#       application error in the logs because every probe simply received a 404.
 # WHY : Assumptions: the pinned headless runtime contains /usr/bin/curl - verified
 #       inside this exact digest, which also confirms wget is absent - so the probe
 #       needs no package installation and fails explicitly on a non-success status.
+#       That verification is why no package is installed here: had curl been absent,
+#       this instruction would have been a check that could never pass, which leaves
+#       a task permanently unhealthy and is worse than declaring no check at all.
 # WHY : Assumptions: the probe speaks HTTPS, not HTTP. server.ssl.enabled is true
 #       in the base profile, so the connector is TLS and a plaintext request would
 #       fail the check on every healthy task - a probe that always fails is worse
 #       than none, because it makes a working deployment look broken.
 # WHY : Trade-offs: --insecure is accepted for this one request. The certificate is
-#       supplied by the deployment and its subject names the service, never
-#       127.0.0.1, so verification could not succeed from inside the container
-#       regardless of how correct the certificate is. What is given up is identity
-#       checking on a loopback call inside the container's own network namespace,
-#       where there is no other party to impersonate; what is kept is that the
-#       encrypted listener is the one actually proven to answer.
+#       the self-signed leaf the entry point mints for THIS task, so its subject is
+#       the task's own name and never the loopback address this probe dials;
+#       verification therefore could not succeed from inside the container however
+#       correct the certificate is. Measured rather than assumed: the same request
+#       without --insecure fails with curl exit 60, "no alternative certificate
+#       subject name matches target ipv4 address 127.0.0.1". What is given up is
+#       identity checking on a loopback call inside the container's own network
+#       namespace, where there is no second party to impersonate; what is kept is
+#       that the ENCRYPTED listener is the one proven to answer, which a plaintext
+#       probe would not establish.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure", \
          "--max-time", "4", "--output", "/dev/null", \
@@ -242,9 +378,21 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 #       only one of them ever reads, and it puts the key on a volume a second
 #       process can open. Generating it in the same process tree keeps the key
 #       reachable only by the JVM's own user.
-# WHY : Alternatives Considered: adding -Xmx or -XX container flags was rejected.
-#       Java 21 reads the cgroup memory limit and sizes the heap from it, so a
-#       hard-coded ceiling would silently override the task definition's memory
-#       and have to be edited in two places whenever that changes. JAVA_OPTS is
-#       honoured by the script for a deployment that must override something.
+# WHY : Assumptions: heap sizing is delegated to the JVM's own container
+#       awareness. Java 21 reads the cgroup memory limit the task definition
+#       imposes and derives the heap from it, so this image states no size at
+#       all. That is a dependency on runtime behavior worth naming, because it is
+#       the reason an apparently missing setting is not an omission.
+# WHY : Alternatives Considered: baking a -Xmx or -XX ceiling into the image was
+#       rejected. A hard-coded ceiling overrides the cgroup limit rather than
+#       tracking it, so the task definition's memory and the image would both
+#       have to be edited together to change one number, and the failure mode of
+#       editing only one is a container that either wastes its allocation or is
+#       killed for exceeding a limit the JVM never saw.
+# WHY : Trade-offs: tuning therefore arrives through the JAVA_OPTS environment
+#       variable, which the entry point word-splits ahead of -jar. The compromise
+#       accepted is that an operator can pass a flag this file never reviewed;
+#       what it buys is that changing a JVM flag is a task-definition edit rather
+#       than an image rebuild, retag and redeploy, so no image is respun to move
+#       one flag.
 ENTRYPOINT ["/usr/local/bin/carddemo-entrypoint.sh"]

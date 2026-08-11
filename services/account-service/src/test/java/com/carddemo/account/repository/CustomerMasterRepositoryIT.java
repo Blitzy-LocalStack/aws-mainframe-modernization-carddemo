@@ -69,7 +69,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  */
 @Testcontainers
 // WHY : Refactoring Rationale: BOTH remote config-data locations are DISABLED for this context, because
-//       otherwise it cannot start. application.yml L390 and L391 declare
+//       otherwise it cannot start. application.yml L401 and L402 declare
 //       `optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:local}/account/` and
 //       `optional:aws-secretsmanager:/carddemo/${CARDDEMO_ENVIRONMENT:local}/account/`, and LOADING either
 //       one builds an AWS client while configuration is still in progress. The static region this module's
@@ -170,7 +170,7 @@ class CustomerMasterRepositoryIT {
      *     user name and credential to as deferred suppliers; must not be {@code null}
      */
     // WHY : Assumptions: the Flyway pair is registered beside the datasource triple because
-    //       application.yml L892 and L893 bind spring.flyway.user and spring.flyway.password to
+    //       application.yml L914 and L915 bind spring.flyway.user and spring.flyway.password to
     //       placeholders with no fallback, and Boot consults those keys precisely when no
     //       connection-details bean supplies them -- which is this module's case, since the artifact that
     //       would contribute one is deliberately absent from its POM. The package charter records the

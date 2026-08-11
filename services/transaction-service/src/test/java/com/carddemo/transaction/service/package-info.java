@@ -48,24 +48,31 @@
  * gate for it would attribute the obligation to a sentence that does not carry
  * it.
  *
- * <h2>The closed inventory: six files here, five of them tests</h2>
+ * <h2>The closed inventory: seven files here, six of them tests</h2>
  *
- * <p>This directory holds exactly six Java files and no subdirectory. Five are
- * test classes and the sixth is this charter. Each line count below was
+ * <p>This directory holds exactly seven Java files and no subdirectory. Six are
+ * test classes and the seventh is this charter. Each line count below was
  * counted in the file itself rather than carried over from a summary, and
  * each transaction identifier and screen name is quoted from the transaction
  * inventory in the repository root {@code README.md}:
  *
  * <pre>
- * this directory: 6 java files = 5 tests + 1 charter
+ * this directory: 7 java files = 6 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: the marker line above was added because "exactly six
- * Java files" was a closed-set claim that nothing checked, and a sixth test
+ * Java files" was a closed-set claim that nothing checked, and a further test
  * authored without an entry below would have made it silently false. The line and
  * the class names under it are compared with this directory on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
  * so the inventory cannot drift from the directory without failing.</p>
+ *
+ * <p>Refactoring Rationale: the three figures were raised from six, five and one
+ * when {@code BillPaymentServiceTest} landed beside the five classes already
+ * enumerated. The marker is a MEASUREMENT of the directory, so a new member
+ * obliges this line to move rather than obliging the member to justify itself; the
+ * check named above reported the stale claim as a failed assertion on the file
+ * count, which is the drift it exists to catch working as intended.</p>
  *
  * <ul>
  *   <li>{@code TransactionViewServiceTest} pins
@@ -99,9 +106,30 @@
  *       class it exercises, because the property is an ORDER -- the reference
  *       settles the account identifier before it reaches its confirmation
  *       evaluation, so a submission deficient in both is answered for the
- *       identifier and not the confirmation. A name of the form
- *       {@code BillPaymentServiceTest} would have promised whole-class coverage
- *       that this file does not carry.</li>
+ *       identifier and not the confirmation. Its name deliberately does not
+ *       promise whole-class coverage, which is the obligation the entry below
+ *       takes on instead.</li>
+ *   <li>{@code BillPaymentServiceTest} pins the same
+ *       {@code app/cbl/COBIL00C.cbl} whole, transaction {@code CB00}, the only
+ *       balance-affecting write this context migrates. It holds the properties
+ *       that survive the write rather than the order that precedes it: the eight
+ *       hardcoded literals of lines 220 to 229 against the two live data moves at
+ *       lines 224 and 225, the write-then-compute-then-update sequence of lines
+ *       233 to 235 against the nightly posting job's opposite order, the
+ *       subtraction FORM of line 234 as distinct from its result, the
+ *       pre-payment balance that is also the amount paid, the single instant
+ *       lines 231 and 232 move to both timestamp members with its
+ *       zero-microsecond rendering, the maximum-key derivation of lines 212 to
+ *       217 that is a probe and not a page, and the read-for-update lock of line
+ *       351 that -- unlike the detail screen's at line 275 of
+ *       {@code app/cbl/COTRN01C.cbl} -- is consumed by a real rewrite at line 379
+ *       and so is load-bearing.
+ *       Assumptions: it does not duplicate the entry above. That class holds an
+ *       evaluation ORDER and needs only enough of a converter to reach it; this
+ *       one holds what is WRITTEN, which is why it keeps the converter real and
+ *       reads the composed row back off the write. A failure in one
+ *       therefore localises differently from a failure in the other, which is the
+ *       same division the two paged-browse entries above draw.</li>
  * </ul>
  *
  * <p>Assumptions: that list is a measurement of the directory as well as the
@@ -155,10 +183,12 @@
  * <h2>The four units under test, and no interface standing for any of them</h2>
  *
  * <p>Every test class here exercises one annotated service class of the
- * production package of the same name, and between them the five cover four:
+ * production package of the same name, and between them the six cover four:
  * {@code TransactionViewService}, {@code TransactionListService},
- * {@code TransactionAddService} and {@code BillPaymentService}. Five classes
- * cover four units because the paged browse is covered by two. None of the
+ * {@code TransactionAddService} and {@code BillPaymentService}. Six classes
+ * cover four units because the paged browse is covered by two and the payment
+ * screen by two -- one for the order in which it evaluates a submission, one for
+ * what it writes once it has. None of the
  * four has an interface declared for it, so a test instantiates the class
  * itself rather than a stand-in for it, and a reader looking for the code
  * under test has one place to look.
@@ -184,9 +214,9 @@
  *
  * <p>Trade-offs: this package has NO shared abstract base class, no
  * {@code AbstractServiceTest}, no test fixture builder or object mother, no
- * helper or utility class, and no context configuration class. The five tests
+ * helper or utility class, and no context configuration class. The six tests
  * deliberately share nothing. The compromise accepted is that the annotation
- * and mock declarations repeat across five files. What that buys is twofold.
+ * and mock declarations repeat across six files. What that buys is twofold.
  * Each file stays readable on its own, so a maintainer debugging one screen
  * never has to read a second file to learn what the setup did. And the
  * directory carries no internal compile dependency, so a change made for one
@@ -243,8 +273,8 @@
  * <p>Assumptions: this directory has NO dependency on a sibling test package.
  * Nothing here is declared in, extends, or reads a type from the {@code api},
  * {@code repository}, {@code mapper} or {@code architecture} test packages, and
- * nothing in those packages is a precondition for running these five classes.
- * The five are runnable as a selection on their own. Introducing such a
+ * nothing in those packages is a precondition for running these six classes.
+ * The six are runnable as a selection on their own. Introducing such a
  * dependency would couple two kinds of test whose whole reason for sitting in
  * separate packages is that they fail for different reasons and are read by
  * different people.
@@ -341,7 +371,7 @@
  * {@code services/transaction-service/src/test}.
  *
  * <p>Assumptions: the oracle is reference material. It is never modified, never
- * re-pinned and never replaced, and the five tests in this package are strictly
+ * re-pinned and never replaced, and the six tests in this package are strictly
  * additive to it. Nothing here reaches into its helpers, meaning none of
  * {@code tests/helpers/cobol_runner.py},
  * {@code tests/helpers/golden_compare.py},
@@ -385,14 +415,14 @@
  * {@code src/test/resources/fixtures/} directory. Neither reaches
  * {@code src/test/java}, and that file's own header records the refusal
  * directly, on the ground that {@code includeTestSourceDirectory} is set true
- * in {@code services/pom.xml} precisely so that tests ARE audited. All six
+ * in {@code services/pom.xml} precisely so that tests ARE audited. All seven
  * files in this directory are therefore swept in full, and no reader should
  * assume test code is exempt.
  *
  * <p>Assumptions: two checks bear on this file and both must pass. The
  * file-set check {@code JavadocPackage} requires a charter to EXIST in any
  * directory holding an audited compilation unit, which is why this file is
- * authored before the five test classes rather than after them -- without it
+ * authored before the six test classes rather than after them -- without it
  * they could not clear the {@code validate} phase. The syntax-tree check
  * {@code MissingJavadocPackage} requires that charter to CARRY Javadoc. A
  * charter reduced to a bare package statement satisfies the first and fails the

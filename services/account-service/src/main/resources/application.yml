@@ -21,61 +21,58 @@
 #   cross-reference record), from which this module's three tables are derived.
 #
 #   State at this checkpoint, stated once here rather than repeated at every
-#   key that names one of them.
-#
-#   Present in this module today:
+#   key that names one of them. Every artifact each key below depends on now
+#   exists, so nothing in this file is anticipatory and no key is a placeholder
+#   for a component that has yet to be written:
 #     - AccountApplication.java, the Spring Boot entry point, so the keys below
 #       are read by a context that actually starts.
 #     - config/SecurityConfig.java, which binds five of the keys declared
 #       below: spring.security.oauth2.resourceserver.jwt.issuer-uri, the three
 #       carddemo.security.jwt.* keys, and the two carddemo.security.cognito.*
-#       group names. Those keys are therefore NOT anticipatory: an absent value
-#       fails this module's context refresh today.
+#       group names. An absent value fails this module's context refresh.
+#     - db/migration/V1__account.sql, the single Flyway migration this module
+#       owns, creating account.accounts, account.customers and account.card_xref
+#       and the idx_card_xref_account_id index, and creating no schema.
+#     - domain/{Account,Customer,CardXref}.java, the three entities that
+#       migration is checked against at startup; see ddl-auto below.
+#     - openapi/account-api.yaml, the hand-authored OpenAPI 3.1 contract of
+#       record, and the three controllers under api/ that answer its operations.
+#     - service/InquiryMessageListener.java, the SQS consumer that replaces
+#       COACCT01's MQGET/MQPUT pair. It binds request-queue through its
+#       @SqsListener annotation and reply-queue and error-queue through
+#       constructor @Value parameters that carry no default and refuse a blank.
 #     - service/AddressValidationService.java, which reads no property at all -
 #       its allow-lists come from app/cpy/CSLKPCDY.cpy by way of
-#       reference-service, not from configuration - which is why no key below
-#       names it.
+#       reference-service, not from configuration - together with
+#       service/RestReferenceAddressLookup.java, the @Component that satisfies
+#       its nested ReferenceAddressLookup port.
 #
-#   Contracted at later indexes of the same plan and NOT present today. Nothing
-#   below is to be read as a claim that any of these is being served, applied
-#   or compared:
-#     - db/migration/V1__account.sql, the single Flyway migration this module
-#       owns, creating accounts, customers and card_xref. Flyway does not fail
-#       on a location that resolves to nothing, so the service starts and
-#       reports zero migrations applied; the configured location below is the
-#       contract that migration will land at.
-#     - openapi/account-api.yaml, the hand-authored OpenAPI 3.1 contract of
-#       record, together with the api, service, repository, domain, dto and
-#       mapper classes a generated document would be derived from. Until they
-#       land the springdoc keys below publish an empty document.
-#     - service/InquiryMessageListener.java, the SQS consumer that replaces
-#       COACCT01's MQGET/MQPUT pair. The spring.cloud.aws keys below are
-#       nevertheless live rather than anticipatory, for the reason recorded on
-#       spring.cloud.aws.region: declaring the SQS starter in
-#       services/account-service/pom.xml puts its auto-configuration on the
-#       classpath, so the client bean is built as the context is constructed
-#       whether or not a listener exists to use it.
-#     - An adapter implementing service/AddressValidationService's nested
-#       ReferenceAddressLookup port. This one is called out separately because it
-#       is the reason a context refresh does NOT complete at this checkpoint, and
-#       a reader who runs the jar meets it rather than reading about it.
-#       AddressValidationService is annotated @Service and takes that port through
-#       its constructor; its own Javadoc records that the three allow-list tables
-#       are owned by reference-service and read across the service boundary, so
-#       the port is the seam and an adapter is the only place transport belongs.
-#       No adapter exists yet, so the context fails with
-#       UnsatisfiedDependencyException naming ReferenceAddressLookup, AFTER every
-#       setting in this file has been applied -- which was verified by running the
-#       jar: the pool below opens its connections with verified TLS, Flyway runs
-#       and reports zero migrations, and the failure arrives at bean wiring.
-#       Nothing in this file is implicated and nothing in it can resolve it; it is
-#       recorded here because the alternative is a reader concluding the
-#       configuration is at fault.
+# Refactoring Rationale: this section previously described five of the artifacts
+#   above as contracted but absent, and singled the port adapter out as the
+#   reason a context refresh did NOT complete, on the ground that a reader
+#   running the jar would meet an UnsatisfiedDependencyException rather than
+#   read about it. All of that is now obsolete and it is corrected here rather
+#   than left standing, because a header that under-reports what a module
+#   contains causes exactly the misreading it was written to prevent: a reader
+#   would size the deployment's required-variable list from the shorter list,
+#   and would take the springdoc keys to be publishing an empty document and the
+#   Flyway location to be resolving to nothing. Both are now false.
 #
 #   Every key below is declared now, deliberately: these are the decisions a
 #   module author needs settled BEFORE writing the first class, and a schema
 #   search path or a migration location retrofitted afterwards is exactly how a
 #   service ends up applying another context's migration into its own schema.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
+#   docstring construct, so this header block is the module-entry-point
+#   equivalent, and every non-obvious key below carries an adjacent rationale
+#   naming at least one of Alternatives Considered, Refactoring Rationale,
+#   Assumptions or Trade-offs, as the project's single user-specified rule
+#   requires. Assumptions: no linter in this project reads this file --
+#   config/checkstyle/checkstyle.xml narrows itself to fileExtensions="java" at
+#   its L216, and that standard records the same limit for YAML -- so the
+#   obligation rests on the written standard and on review. No comment in this
+#   file claims a gate enforces something it does not.
 #
 # Parameters:
 #   Environment variables this configuration consumes. They are listed by name
@@ -95,6 +92,10 @@
 #   SPRING_DATASOURCE_PASSWORD
 #     String. The credential for that role, injected from the managed
 #     credential store named in the notes on spring.datasource below.
+#   SPRING_FLYWAY_USER
+#   SPRING_FLYWAY_PASSWORD
+#     Strings. The migration role and its credential, kept separate from the
+#     runtime pair above so the table OWNER is not the role that reads them.
 #   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     String. The user-pool issuer whose tokens this resource server validates.
 #   CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
@@ -104,6 +105,16 @@
 #   CARDDEMO_COGNITO_USER_GROUP_NAME
 #     Strings. Optional overrides of the two group names. Both default to the
 #     names infra/modules/cognito fixes, so a local run needs neither.
+#   CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID
+#     String. The managed key ALIAS - not key material - that the customer
+#     national and government-issued identifier columns are encrypted under.
+#   CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY
+#   CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY
+#     Strings. KEY MATERIAL, one symmetric secret per calling service, verified
+#     by config/InternalApiSecurityConfig.java. Neither carries a default.
+#   CARDDEMO_REFERENCE_CONTEXT_BASE_URL
+#     String. In-VPC address of reference-service, which owns the three address
+#     allow-list tables this service validates against.
 #   CARDDEMO_SERVER_TLS_KEYSTORE
 #   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD
 #   CARDDEMO_SERVER_TLS_KEY_ALIAS
@@ -159,15 +170,15 @@
 #   Startup failure modes a reader will actually meet, in the order the context
 #   reaches them.
 #
-#   1. Unresolved placeholder. Nine of the variables above are required, and
-#      they are exactly the nine written as a bare placeholder below: the three
-#      datasource variables, the issuer URI, the expected client id, the two
-#      TLS PEM values, the region, and the three queue names. Any one of them
-#      being unset aborts context refresh with IllegalArgumentException "Could
-#      not resolve placeholder", naming the variable that is missing. That is
-#      the intended outcome and the reason there is no fallback. The remaining
-#      variables are optional overrides Spring binds when present, so an unset
-#      one changes nothing rather than failing startup.
+#   1. Unresolved placeholder. SIXTEEN of the variables above are required, and
+#      they are exactly the sixteen written as a bare placeholder below: the
+#      three datasource variables, the two migration-role variables, the issuer
+#      URI, the expected client id, the customer-identifier key alias, the two
+#      internal-identity signing keys, the three queue names, the reference
+#      context base URL, the listener keystore password, and the region. Any one
+#      of them being unset aborts context refresh with IllegalArgumentException
+#      "Could not resolve placeholder", naming it. The rest are optional
+#      overrides Spring binds when present, so an unset one changes nothing.
 #   2. Rejected claim configuration. config/SecurityConfig.java validates its
 #      own inputs before it builds a decoder: a carddemo.security.jwt.
 #      expected-token-use other than "access", or a blank expected client id,
@@ -190,7 +201,7 @@
 #      context instead of producing a service that rejects every token it is
 #      ever presented.
 #
-# WHY (non-obvious design decisions):
+# WHY : the non-obvious decisions, each anchored to the key that records it in full.
 #   1. Flyway migrates the account schema and is deliberately NOT permitted to
 #      create it: data-migration/sql/V0__schemas_and_roles.sql is the exclusive
 #      authority for schemas, roles and grants, and its completion is a
@@ -701,6 +712,25 @@ spring:
         sslmode: verify-full
         sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
 
+      # Trade-offs: a connection held longer than this logs a warning naming the
+      #   acquiring stack, at the cost of one tracking task per checkout. Left at
+      #   0 the check is off and a leak presents as an undersized pool -
+      #   connection-timeout errors under load with nothing naming the code that
+      #   never returned a connection.
+      #
+      # Assumptions: the value must sit INSIDE the pool's own accepted band, which
+      #   is at least 2000 and no more than max-lifetime above. A value outside it
+      #   is not rejected and does not fail startup - the pool logs
+      #   "leakDetectionThreshold is less than 2000ms or more than maxLifetime,
+      #   disabling it" and runs with the check OFF, which is the worst outcome
+      #   available because the key still reads as though detection were on. That
+      #   was observed here by starting the service with a value above
+      #   max-lifetime, so it is recorded rather than inferred. Sixty seconds is
+      #   chosen inside the band on its own merits: every path in this module that
+      #   takes a connection is either an HTTP request or one inquiry message, and
+      #   neither has any legitimate reason to hold one for a minute.
+      leak-detection-threshold: 60000
+
   # -----------------------------------------------------------------------------
   # Assumptions: (1) this module maps three entities onto three tables in one
   #       schema, so the settings here are about boundaries rather than about
@@ -712,35 +742,27 @@ spring:
     hibernate:
 
       # Alternatives Considered: letting Hibernate generate the schema, with
-      #   ddl-auto set to update or to create. Evaluated and rejected, because
-      #   three characteristics these tables genuinely need cannot be derived from
-      #   a JPA entity, and all three come from the REFERENCE ONLY baseline rather
-      #   than from taste.
+      #   ddl-auto set to update or to create. Rejected because three things these
+      #   tables need cannot be derived from an entity, and all three come from the
+      #   REFERENCE ONLY baseline: the two columns held encrypted as BYTEA and
+      #   returned masked, from app/cpy/CVCUS01Y.cpy, which no attribute expresses;
+      #   idx_card_xref_account_id, replacing the CXACAIX alternate index at
+      #   app/csd/CARDDEMO.CSD:63-74, whose absence would cost latency alone and so
+      #   would fail no test; and the widths and scales that ARE the contract, the
+      #   balance columns being NUMERIC(12,2) per app/cpy/CVACT01Y.cpy PIC S9(10)V99.
       #
-      #   First, two columns are stored encrypted as BYTEA and returned masked -
-      #   the national identifier and the government-issued identifier declared in
-      #   app/cpy/CVCUS01Y.cpy - and an entity attribute cannot express "encrypted
-      #   at rest, masked on the way out"; the migration and the mapper together
-      #   do. Second, card_xref carries idx_card_xref_account_id, the secondary
-      #   index that replaces the CXACAIX alternate index defined at
-      #   app/csd/CARDDEMO.CSD:63-74 and described there as ALTERNATE INDEX TO
-      #   CCXREF VIA ACCOUNT KEY; a generated schema would create the table
-      #   without it and every lookup by account would degrade to a scan that
-      #   still returned the right answer, so nothing would fail and the loss
-      #   would show up only as latency. Third, the fixed widths and decimal
-      #   scales are the contract - the account balance columns are NUMERIC(12,2)
-      #   because app/cpy/CVACT01Y.cpy declares PIC S9(10)V99 - and a generated
-      #   column would be whatever the provider inferred from the Java type.
-      #
-      # Assumptions: `none` rather than `validate` in the base profile. Validation
-      #   is the right setting where a migration has just run and the mappings
-      #   should be checked against it, which is exactly what the test profile
-      #   does; in a deployed task the migration has already been gated, and a
-      #   validation failure there would abort a task that a deployment pipeline
-      #   had already accepted. The migration itself is db/migration/V1__account.sql,
-      #   authored at a later index of the same plan, so today this key describes
-      #   which component will own the DDL rather than DDL that has been applied.
-      ddl-auto: none
+      # Alternatives Considered: `none`, which also emits no DDL and was the
+      #   previous setting here. Rejected because it additionally validates
+      #   NOTHING: the three entities and V1__account.sql are required to agree
+      #   column for column, and under `none` a member naming a column the
+      #   migration does not declare starts cleanly and fails later on the first
+      #   query that touches it. `validate` turns that agreement into a startup
+      #   assertion instead, which is why Flyway is ordered before the
+      #   EntityManagerFactory: the migration has just run, so what is checked is
+      #   the schema this task will actually use. A failure here means the entity
+      #   or the migration is wrong and one of them is to be corrected; it is
+      #   never to be answered by weakening this key back to `none`.
+      ddl-auto: validate
 
     # Trade-offs: Spring Boot leaves this true by default, which binds the
     #   EntityManager - and with it a pooled connection - from the moment the
@@ -922,6 +944,17 @@ spring:
     #   entry from breaking the first.
       - "SET ROLE carddemo_account_owner;"
 
+    # Assumptions: stated rather than inherited, for the same reason the springdoc
+    #   keys below are. It is the engine's own default, so the line changes nothing
+    #   today; it is here because it is the guard that makes the history table
+    #   meaningful, and a default silently reversed by an upgrade would leave an
+    #   ALREADY-APPLIED V1__account.sql free to be edited without complaint. With
+    #   it on, an edit to an applied migration fails startup on a checksum mismatch
+    #   instead, which is the third of the migration failures recorded in the
+    #   header block above. The remedy for that failure is a new versioned
+    #   migration, never a repair of the applied one.
+    validate-on-migrate: true
+
   security:
     oauth2:
       resourceserver:
@@ -953,6 +986,45 @@ spring:
           #   that does not start, because it looks like it is working.
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
+  # ---------------------------------------------------------------------------
+  # Alternatives Considered: a blanket WRITE_NUMBERS_AS_STRINGS on this mapper,
+  #       which is the obvious way to guarantee that no money value ever reaches a
+  #       client as a JSON number. Rejected because it is indiscriminate: it would
+  #       also stringify page sizes, counts and the credit score, where exactness
+  #       is not at stake, and it would cost every one of those its declared JSON
+  #       type for no gain. Money's string form is instead produced by exactly one
+  #       targeted mechanism, common-lib's MoneyModule, contributed to every
+  #       service by CardDemoCommonAutoConfiguration's carddemoMoneyModule() bean
+  #       under the missing-bean guard beside it -- which is also why this module
+  #       does not register it by name, and why there is no Jackson key here that
+  #       touches number rendering at all.
+  #
+  #       The reason money must never travel as a JSON number: most clients parse
+  #       one into an IEEE-754 double, which cannot represent every two-decimal
+  #       value exactly, so the loss lands on the figure the user reads. The
+  #       baseline never had that exposure to begin with -- the amounts are
+  #       zoned decimal in storage, app/cpy/CVACT01Y.cpy L7 declaring
+  #       ACCT-CURR-BAL as PIC S9(10)V99, and alphanumeric on the wire, every
+  #       money field on both symbolic maps being PIC X(15), as with ACURBALI at
+  #       app/cpy-bms/COACTVW.CPY L102 and app/cpy-bms/COACTUP.CPY L138. Carrying
+  #       the string form forward preserves that rather than introducing a
+  #       floating-point hop the 3270 path never had.
+  # ---------------------------------------------------------------------------
+  jackson:
+    deserialization:
+
+      # Trade-offs: strictness over forward compatibility. An unknown property is
+      #   a client sending a field this contract does not define, which means the
+      #   two disagree; answering 400 says so, while the framework default of
+      #   discarding it silently accepts a request whose author believes it carried
+      #   more than it did. On an update route that rewrites the account master,
+      #   silently dropping a field the caller thought it was setting is the worse
+      #   of the two failures. The baseline had no third option here: a 24x80 map
+      #   has no representation for a field it does not define. The accepted cost
+      #   is that adding a request field becomes a deliberate contract change,
+      #   made in openapi/account-api.yaml and the DTO together.
+      fail-on-unknown-properties: true
+
 
 # -----------------------------------------------------------------------------
 # Trade-offs: (1) the health path is a deployment contract and is documented as
@@ -960,10 +1032,19 @@ spring:
 #       because exposing an endpoint here is what makes it EXIST, and an endpoint
 #       that exists is one more thing reachable from inside the private network.
 #       Whether it answers without a token is a separate decision made in
-#       config/SecurityConfig.java, which opens /actuator/health/** alone and
-#       leaves info and the scrape path behind the filter chain -- so the list
-#       below and that class are two independent narrowings of the same surface,
-#       and neither substitutes for the other.
+#       config/SecurityConfig.java, and exposure here does not settle it. That
+#       class grants /actuator/health/** from ANY address, because the two things
+#       that poll it - the load balancer target group and the container health
+#       check - reach it from off-task and present no token. It grants info and
+#       the scrape path by LOOPBACK RANGE instead, because their only configured
+#       consumer is the task-local collector sidecar, which also presents no
+#       header, so an authority rule there would have stopped the sole consumer
+#       rather than narrowing it. Everything else in the namespace is denied
+#       outright. Verified against this configuration by probing all three: from
+#       127.0.0.1 all three answer 200; from a non-loopback address health still
+#       answers 200 while info and the scrape path answer 401. The list below and
+#       that class are therefore two independent narrowings of one surface, and
+#       neither substitutes for the other.
 # -----------------------------------------------------------------------------
 management:
   endpoints:
@@ -1038,6 +1119,15 @@ management:
       #   reached the port. Widening either is one of the four permitted profile
       #   axes; the base value is the narrow one so that widening is always a
       #   deliberate act.
+      #
+      # Trade-offs: diagnostic richness is what is given up, and knowingly. With
+      #   detail shown, an operator reading the health body alone could tell a
+      #   database outage from an SQS one without opening a log; with it withheld
+      #   they get a single status word and have to go to CloudWatch or the
+      #   authenticated endpoints for the same answer. That cost is accepted
+      #   because the probe only needs a binary verdict to do its job, while the
+      #   detail would be readable by anything that reached the port - and the
+      #   aggregate path is the one route here that answers with no token at all.
       show-details: never
       show-components: never
 
@@ -1058,7 +1148,7 @@ springdoc:
   # Refactoring Rationale: this block previously said that neither the contract nor
   #   the controllers existed at this checkpoint, and that ui/src/api/accounts.ts
   #   was to be written against the contract. All three statements are now wrong in
-  #   different ways. The contract exists at the path named above and declares three
+  #   different ways. The contract exists at the path named above and declares ten
   #   operations; the three controllers that answer them exist under
   #   src/main/java/com/carddemo/account/api; and no browser client exists or will,
   #   because this contract is internal only - its operations require a machine
@@ -1091,12 +1181,25 @@ springdoc:
     #   when it was really a library default moving underneath.
     version: openapi_3_1
 
-  # Assumptions: also the library's default, pinned for the same reason as the
-  #   document path above. This page is a human entry point only - nothing
-  #   automated depends on it - so it is declared and left at one value rather than
-  #   being varied per environment, which would put it outside the four permitted
-  #   axes recorded in the closing block.
   swagger-ui:
+
+    # Alternatives Considered: serving the interactive console, which is the
+    #   library's default and was the previous setting here. Rejected because it
+    #   adds reachable surface without adding authority: the contract of record is
+    #   openapi/account-api.yaml, the generated document at the path above is the
+    #   check on it, and the console is a third rendering that can only agree with
+    #   the second. It is also unusable for its own purpose here - every operation
+    #   this service publishes requires a machine token that
+    #   config/InternalApiSecurityConfig.java demands and the console cannot mint,
+    #   so a "try it out" reaches 401 in every case. Disabling it removes the
+    #   console's bundled static assets from the served surface too, which is where
+    #   this library's advisories have historically landed. The generated document
+    #   itself stays enabled deliberately, because that is what lets CI diff the
+    #   served document against the committed contract and catch drift.
+    enabled: false
+
+    # Assumptions: the library's default, pinned so the disabled state above is
+    #   asserted against a known path rather than one a version bump could move.
     path: /swagger-ui.html
 
   # Trade-offs: sorting the generated document's keys costs a little serialisation

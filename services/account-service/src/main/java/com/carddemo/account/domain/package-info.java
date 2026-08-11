@@ -93,16 +93,24 @@
  * schemas, roles and privileges across this system, so every mapping here assumes the schema
  * already exists by the time the migration runs.</p>
  *
- * <p>Assumptions: nothing in the running system compares an entity in this package against that
- * migration, so their agreement is an obligation on both sides rather than a property either one can
- * assert alone. Hibernate's schema management is switched off, at {@code ddl-auto} in
- * {@code src/main/resources/application.yml} L709, which means it emits no data definition and
- * validates no mapping: every column exists at runtime only because the migration created it, and a
- * member here that named a column the migration does not declare would compile, start and then fail
- * at the first statement that touched it. That is the
+ * <p>Assumptions: every entity in this package is compared against that migration at startup.
+ * {@code ddl-auto} is set to {@code validate} in {@code src/main/resources/application.yml} at its
+ * L765, which means Hibernate emits no data definition of its own but does assert the mapping: the
+ * migration runs first, and a member here that named a column the migration does not declare fails
+ * the context refresh naming that column. Every column still exists at runtime only because the
+ * migration created it -- validation checks the agreement, it does not produce it. That is the
  * concrete reason the copybook citations above are given per field rather than per record -- they
  * are the common specification both sides are checked against, and they are the only thing that can
  * settle a disagreement between an entity and a column.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously recorded {@code ddl-auto: none} and stated
+ * that nothing in the running system compared an entity against the migration, so their agreement
+ * was an obligation neither side could assert. That was accurate while the migration was still
+ * being authored, but it described the weaker of two available settings: under {@code none} a
+ * mismatch surfaced as a runtime failure on the first statement touching the column, which is both
+ * later and harder to attribute than a refusal to start. The setting was changed rather than the
+ * asymmetry documented, because a drift this package cannot detect is one it will eventually
+ * ship.</p>
  *
  * <p>Two of those columns carry no copybook field at all and so cannot be inferred from any layout
  * cited above. {@code accounts} and {@code customers} each carry a version column, present because

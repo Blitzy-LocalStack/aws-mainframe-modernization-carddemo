@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -18,6 +19,9 @@ import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionReject;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.dto.BusinessDate;
+import com.carddemo.batch.dto.DatasetGeneration;
+import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.PostingValidationResult;
 import com.carddemo.batch.dto.RejectReason;
 import com.carddemo.batch.repository.AccountRepository;
@@ -27,11 +31,15 @@ import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.CategoryBalanceService;
+import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.batch.service.PostingValidationService;
 import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import jakarta.persistence.EntityManager;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -128,6 +136,9 @@ class PostTransactionsJobTest {
     /** The category-balance rule. */
     private CategoryBalanceService categoryBalances;
 
+    /** The generation allocator the reject stream is staged through. */
+    private DatasetGenerationService generations;
+
     /** The durable step ledger, stubbed to evaluate its body. */
     private BatchStepLedger ledgerOfSteps;
 
@@ -161,6 +172,7 @@ class PostTransactionsJobTest {
         this.rejects = mock(TransactionRejectRepository.class);
         this.validation = mock(PostingValidationService.class);
         this.categoryBalances = mock(CategoryBalanceService.class);
+        this.generations = mock(DatasetGenerationService.class);
         this.ledgerOfSteps = mock(BatchStepLedger.class);
         EntityManager entityManager = mock(EntityManager.class);
 
@@ -172,12 +184,26 @@ class PostTransactionsJobTest {
             return new BatchStepLedger.StepOutcome(outcome, false);
         });
 
+        // WHY : Assumptions: the allocator is stubbed to return a REAL generation rather than a mock's
+        //       null, because the job reports the allocated number and location after staging and a
+        //       null coordinate would fail every case with a NullPointerException raised from the log
+        //       statement -- a failure about the stub rather than about the behaviour under test.
+        when(this.generations.allocateNewGeneration(any(DatasetFamily.class),
+                any(BusinessDate.class), anyString()))
+                .thenAnswer(call -> new DatasetGeneration(
+                        call.getArgument(0), new BusinessDate(BUSINESS_DATE), 1));
+        when(this.generations.generationsToScratch(any(DatasetFamily.class))).thenReturn(List.of());
+        when(this.generations.datasetUri(any(DatasetGeneration.class)))
+                .thenReturn("s3://carddemo-datasets-test/ledger/dalyrejs/");
+        when(this.generations.stageDataset(any(DatasetGeneration.class), anyString(),
+                any(Path.class))).thenReturn("ledger/dalyrejs/dt=2022-07-18/gen=0001/dalyrejs");
+
         Clock clock = Clock.fixed(
                 LocalDateTime.of(2022, 7, 18, 1, 2, 3).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
 
         PostTransactionsJob configuration = new PostTransactionsJob(this.feed,
                 this.accounts, this.ledger, this.rejects, this.validation, this.categoryBalances,
-                this.ledgerOfSteps, clock, entityManager);
+                this.generations, this.ledgerOfSteps, clock, entityManager);
 
         this.jobRepository = new ResourcelessJobRepository();
         JobParametersValidator validator = new BatchConfig().carddemoJobParametersValidator();
@@ -379,6 +405,102 @@ class PostTransactionsJobTest {
         } catch (Exception refused) {
             return refused;
         }
+    }
+
+    /**
+     * The reject stream is staged into a newly allocated generation even when nothing was rejected.
+     *
+     * <p>Pins {@code app/jcl/POSTTRAN.jcl:34-38}, which declares the reject DD
+     * {@code DISP=(NEW,CATLG,DELETE)} against {@code DALYREJS(+1)} -- so a generation is created on
+     * every run regardless of the reject count. The committed goldens are the corroboration: each of
+     * the five clean scenarios holds a ZERO-BYTE {@code dalyrejs.expected} rather than no file, so a
+     * job that skipped the allocation when the count was zero would leave a downstream reader facing
+     * an absent generation where the reference leaves an empty one.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("allocate and stage the reject generation even on a pass with no rejects")
+    void aCleanPassStillStagesAnEmptyRejectGeneration() throws Exception {
+        stageOneRecord(resolvableRecord(new BigDecimal("100.00")));
+        stageAcceptedDecision(new BigDecimal("100.00"));
+
+        JobExecution execution = run();
+
+        assertThat(execution.getExitStatus().getExitCode())
+                .isNotEqualTo(BatchApplication.EXIT_CODE_COMPLETED_WITH_WARNINGS);
+        verify(this.generations)
+                .allocateNewGeneration(eq(DatasetFamily.DALYREJS), any(BusinessDate.class), anyString());
+        ArgumentCaptor<Path> staged = ArgumentCaptor.forClass(Path.class);
+        verify(this.generations).stageDataset(
+                any(DatasetGeneration.class), anyString(), staged.capture());
+        assertThat(Files.exists(staged.getValue())).isFalse();
+    }
+
+    /**
+     * A rejected record reaches the staged dataset as exactly one 430-byte record with its trailer.
+     *
+     * <p>Pins the fixed-length contract {@code app/jcl/POSTTRAN.jcl:36} states as
+     * {@code DCB=(RECFM=F,LRECL=430,BLKSIZE=0)}, and the trailer layout at
+     * {@code app/cbl/CBTRN02C.cbl:180-182} -- a four-digit zero-padded reason followed by its
+     * 76-character space-padded description. The committed golden
+     * {@code tests/golden/posting/reject_102_overlimit/dalyrejs.expected} is 430 bytes whose trailer
+     * reads {@code 0102OVERLIMIT TRANSACTION}, which is the exact byte sequence asserted here.</p>
+     *
+     * <p>Assumptions: the payload is captured from the staging call rather than read back from the
+     * temporary file, because the job deletes that file on every path -- including success -- so a
+     * read afterwards would find nothing. Capturing during the call is what observes the bytes that
+     * actually left.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("stage exactly one 430-byte reject record carrying the reason trailer")
+    void aRejectedRecordReachesTheDatasetAsOne430ByteRecord() throws Exception {
+        stageOneRecord(resolvableRecord(new BigDecimal("100.00")));
+        stageRejectedDecision(RejectReason.OVER_CREDIT_LIMIT, new BigDecimal("100.00"));
+
+        byte[][] captured = new byte[1][];
+        when(this.generations.stageDataset(
+                any(DatasetGeneration.class), anyString(), any(Path.class)))
+                .thenAnswer(call -> {
+                    captured[0] = Files.readAllBytes(call.<Path>getArgument(2));
+                    return "a/staged/key";
+                });
+
+        run();
+
+        assertThat(captured[0]).hasSize(430);
+        assertThat(new String(captured[0], StandardCharsets.ISO_8859_1).substring(350))
+                .isEqualTo(RejectReason.OVER_CREDIT_LIMIT.trailerField());
+        assertThat(new String(captured[0], StandardCharsets.ISO_8859_1).substring(350, 354))
+                .isEqualTo("0102");
+    }
+
+    /**
+     * The retention rule is applied after staging, scratching whatever aged out of the window.
+     *
+     * <p>Pins {@code app/jcl/DALYREJS.jcl:25-27}, which defines the base with {@code LIMIT(5)} paired
+     * with an explicit {@code SCRATCH} -- so an aged-out generation is deleted rather than merely
+     * uncatalogued. The pairing is what this case observes: a job that allocated and staged but never
+     * scratched would grow the family without bound.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("scratch the generations that aged out of the five-generation window")
+    void agedOutRejectGenerationsAreScratched() throws Exception {
+        stageOneRecord(resolvableRecord(new BigDecimal("100.00")));
+        stageAcceptedDecision(new BigDecimal("100.00"));
+
+        DatasetGeneration agedOut =
+                new DatasetGeneration(DatasetFamily.DALYREJS, new BusinessDate(BUSINESS_DATE), 1);
+        when(this.generations.generationsToScratch(DatasetFamily.DALYREJS))
+                .thenReturn(List.of(agedOut));
+
+        run();
+
+        verify(this.generations).scratchGeneration(agedOut);
     }
 
     /**

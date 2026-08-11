@@ -20,17 +20,22 @@ import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
+import com.carddemo.batch.dto.DatasetGeneration;
+import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DisclosureGroupKey;
 import com.carddemo.batch.dto.InterestRateLookup;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.service.BatchStepLedger;
+import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.batch.service.InterestCalculationService;
 import com.carddemo.common.money.Money;
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -100,6 +105,9 @@ class CalculateInterestJobTest {
     /** The durable step ledger, stubbed to evaluate its body. */
     private BatchStepLedger ledgerOfSteps;
 
+    /** The generation resolver the staged {@code SYSTRAN} output is allocated through. */
+    private DatasetGenerationService generations;
+
     /** The framework's in-memory job repository. */
     private JobRepository jobRepository;
 
@@ -117,11 +125,28 @@ class CalculateInterestJobTest {
         this.categoryBalances = mock(TransactionCategoryBalanceRepository.class);
         this.interest = mock(InterestCalculationService.class);
         this.ledgerOfSteps = mock(BatchStepLedger.class);
+        this.generations = mock(DatasetGenerationService.class);
 
         when(this.ledgerOfSteps.runStep(anyString(), anyString(), any())).thenAnswer(call -> {
             BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(2).get();
             return new BatchStepLedger.StepOutcome(outcome, false);
         });
+
+        // WHY : Assumptions: the generation resolver is stubbed to answer rather than left defaulting,
+        //       because the walk allocates the SYSTRAN coordinate before reading a single row and
+        //       reports the allocated number when it finishes. A default-returning mock would hand the
+        //       job a null generation and every case below would fail on the report rather than on the
+        //       accrual behaviour it is written to pin. Retention is stubbed empty for the same reason
+        //       the sibling GenerationStagingJobsTest does it: no case here is about aged-out
+        //       generations.
+        when(this.generations.allocateNewGeneration(any(DatasetFamily.class), any(BusinessDate.class),
+                anyString())).thenAnswer(call -> new DatasetGeneration(
+                        call.getArgument(0), call.getArgument(1), 1));
+        when(this.generations.generationsToScratch(any(DatasetFamily.class))).thenReturn(List.of());
+        when(this.generations.datasetUri(any(DatasetGeneration.class)))
+                .thenReturn("s3://carddemo-datasets-test/ledger/systran/");
+        when(this.generations.stageDataset(any(DatasetGeneration.class), anyString(), any(Path.class)))
+                .thenReturn("ledger/systran/a/staged/key");
 
         // WHY : Assumptions: the key is built through the SAME factory the job itself calls at
         //       CalculateInterestJob.java:270, so a blank-stripped group id reaches its declared
@@ -135,10 +160,20 @@ class CalculateInterestJobTest {
                 .thenReturn(Money.of(new BigDecimal("2.08")));
         when(this.interest.loadCrossReference(any())).thenReturn(CARD_NUMBER);
 
+        // WHY : Assumptions: the accrual write is stubbed to RETURN the row it would have persisted,
+        //       because the walk appends that row's fixed-width image to the staged generation. A
+        //       default-returning mock would hand the encoder a null and turn every case below into a
+        //       staging failure. The identifier is assembled from the arguments the job actually passes
+        //       -- the raw business-date token and the run-scoped suffix -- so the stub cannot disagree
+        //       with the identifier rule the job is being tested against.
+        when(this.interest.writeInterestTransaction(anyLong(), anyString(), any(), any(), anyLong(),
+                any())).thenAnswer(call -> generatedRow(
+                        call.getArgument(0), call.getArgument(3), call.getArgument(4)));
+
         Clock clock = Clock.fixed(
                 LocalDateTime.of(2022, 7, 18, 1, 2, 3).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-        CalculateInterestJob configuration = new CalculateInterestJob(
-                this.categoryBalances, this.interest, this.ledgerOfSteps, clock);
+        CalculateInterestJob configuration = new CalculateInterestJob(this.categoryBalances,
+                this.interest, this.ledgerOfSteps, this.generations, clock);
 
         this.jobRepository = new ResourcelessJobRepository();
         JobParametersValidator validator = new BatchConfig().carddemoJobParametersValidator();
@@ -303,6 +338,34 @@ class CalculateInterestJobTest {
      */
     private static CardXref crossReference() {
         return new CardXref(CARD_NUMBER, READABLE_ACCOUNT, 1L);
+    }
+
+    /**
+     * Builds the generated interest row the accrual write is stubbed to return.
+     *
+     * <p>Assumptions: the field values are the literals {@code app/cbl/CBACT04C.cbl:482-498} moves --
+     * type {@code 01}, the stored four-character category {@code 0005}, the source {@code System} and the
+     * eleven-digit description -- so the image the walk stages is the reference's own row shape rather
+     * than an arbitrary one the encoder merely accepts.</p>
+     *
+     * @param accountId the account the accrual belongs to, rendered into the description at its declared
+     *     eleven digits
+     * @param businessDate the injected business date, whose RAW token opens the identifier
+     * @param suffix the run-scoped identifier suffix, rendered at its declared six digits
+     * @return the generated row, never {@code null}
+     */
+    private static Transaction generatedRow(long accountId, BusinessDate businessDate, long suffix) {
+        Transaction row = new Transaction(businessDate.token() + String.format("%06d", suffix));
+        row.setTypeCd("01");
+        row.setCategoryCd("0005");
+        row.setSource("System");
+        row.setDescription("Int. for a/c " + String.format("%011d", accountId));
+        row.setAmount(new BigDecimal("2.08"));
+        row.setMerchantId(0L);
+        row.setCardNum(CARD_NUMBER);
+        row.setOrigTs(LocalDateTime.of(2022, 7, 18, 1, 2, 3));
+        row.setProcTs(LocalDateTime.of(2022, 7, 18, 1, 2, 3));
+        return row;
     }
 
     /**

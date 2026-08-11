@@ -67,7 +67,7 @@ import org.springframework.context.annotation.Configuration;
  * detail override the pool's target, which is how the {@code testcontainers-postgresql} dependency
  * declared at {@code services/account-service/pom.xml} L517 to L519 points a repository test at its own
  * container. Re-declaring the bean would withdraw that and would additionally require the verified-TLS
- * driver properties at {@code application.yml} L701 and L702 to be re-applied by hand, where omitting
+ * driver properties at {@code application.yml} L712 and L713 to be re-applied by hand, where omitting
  * one would downgrade an encrypted connection silently. Extending the framework's pool through
  * documented extension points keeps both, and leaves exactly one {@code DataSource} bean in the
  * context.</p>
@@ -175,15 +175,15 @@ public class DataSourceConfig {
     //   is coverage rather than preference, because the three layers that reach this database do not all
     //   read the same setting.
     //   (1) Appending a currentSchema parameter to the connection URL, which is the most common answer.
-    //   Unavailable here: application.yml L540 takes the URL from the environment as an opaque string,
+    //   Unavailable here: application.yml L551 takes the URL from the environment as an opaque string,
     //   so this code cannot inspect or extend it, and requiring whoever sets the variable to remember a
     //   parameter fails silently when forgotten.
-    //   (2) The Hibernate default-schema setting alone, declared at application.yml L773. It governs
+    //   (2) The Hibernate default-schema setting alone, declared at application.yml L795. It governs
     //   mapped entities and is necessary, but it does not reach a hand-written native statement, and it
     //   does not reach the migration runner at all.
-    //   (3) The migration runner's own initialisation statements, declared at application.yml L916.
+    //   (3) The migration runner's own initialisation statements, declared at application.yml L938.
     //   Those run only on the runner's connections, which are not this pool's connections at all -- the
-    //   runner is given its own credential at application.yml L892 and L893, so the framework builds it
+    //   runner is given its own credential at application.yml L914 and L915, so the framework builds it
     //   a separate data source, and the pool statement below never executes there.
     //   Pool initialisation SQL is used because it is the one mechanism that covers every consumer of
     //   the pool uniformly: mapped entities, native statements and anything else that borrows a
@@ -216,7 +216,7 @@ public class DataSourceConfig {
      * <p>The returned post-processor sees each pool as it finishes initialising and takes one of three
      * actions. A pool that declares no initialisation statement is given {@link #SEARCH_PATH_STATEMENT}.
      * A pool that already declares that same statement is accepted unchanged, which is the ordinary case
-     * because {@code application.yml} L669 declares it. A pool that declares some other statement is
+     * because {@code application.yml} L680 declares it. A pool that declares some other statement is
      * refused, and startup stops.</p>
      *
      * @return the post-processor that installs or vets the pin on every pool in this context, never
@@ -269,7 +269,7 @@ public class DataSourceConfig {
     @Bean
     FlywayConfigurationCustomizer accountSchemaFlywayCustomizer() {
         // Assumptions: the three settings below are applied in code even though application.yml already
-        //   declares them at L809, L810 and L834, because a customiser is the only form that cannot be
+        //   declares them at L831, L832 and L856, because a customiser is the only form that cannot be
         //   overridden by a profile. The framework applies the declared properties first and the
         //   customisers afterwards, so this is the last word on all three. The two schema settings do
         //   different jobs and both are stated rather than one being left to follow the other: the first

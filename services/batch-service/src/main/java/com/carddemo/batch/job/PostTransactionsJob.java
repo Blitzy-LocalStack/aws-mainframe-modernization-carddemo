@@ -8,6 +8,9 @@ import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.dto.BusinessDate;
+import com.carddemo.batch.dto.DatasetGeneration;
+import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.PostingValidationResult;
 import com.carddemo.batch.mapper.DailyTransactionMapper;
 import com.carddemo.batch.mapper.TransactionRejectRecordMapper;
@@ -17,11 +20,17 @@ import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.CategoryBalanceService;
+import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.batch.service.PostingValidationService;
 import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.time.TimestampFormatter;
 import jakarta.persistence.EntityManager;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -49,45 +58,83 @@ import org.springframework.transaction.PlatformTransactionManager;
  *
  * <p>Purpose: this job is state four of the nightly chain and re-expresses
  * {@code app/cbl/CBTRN02C.cbl}, driven by {@code app/jcl/POSTTRAN.jcl:23}
- * ({@code EXEC PGM=CBTRN02C}). It walks the daily transaction feed in key order and, for each record,
- * either posts it or writes it to the reject stream. The order of its four decisions is the reference's
- * own: resolve the card, read the account, validate, then post or reject.</p>
+ * ({@code EXEC PGM=CBTRN02C}). It walks the daily transaction feed in key order and, for each
+ * record, either posts it or writes it to the reject stream. The order of its four decisions is the
+ * reference's own: resolve the card, read the account, validate, then post or reject.</p>
  *
- * <p>Assumptions: every business RULE this job applies is delegated. Which conditions a record fails is
- * {@code PostingValidationService}, which reproduces the short-circuit chain at
+ * <p>Assumptions: every business RULE this job applies is delegated. Which conditions a record fails
+ * is {@code PostingValidationService}, which reproduces the short-circuit chain at
  * {@code app/cbl/CBTRN02C.cbl:370-420}; whether a category balance is created or updated is
  * {@code CategoryBalanceService}, which reproduces the two arms at
- * {@code app/cbl/CBTRN02C.cbl:500-539}; how a feed record becomes a posted record is
- * {@code DailyTransactionMapper}; how a rejected record becomes a reject row is
- * {@code TransactionRejectRecordMapper}. What this class owns is the ORDER those rules are applied in and
- * the unit of work they commit within, which is precisely what a JCL step owned.</p>
+ * {@code app/cbl/CBTRN02C.cbl:503-524} and {@code app/cbl/CBTRN02C.cbl:526-542}; how a feed record
+ * becomes a posted record is {@code DailyTransactionMapper}; how a rejected record becomes the
+ * 430-byte stream record and its decomposed row is {@code TransactionRejectRecordMapper}. What this
+ * class owns is the ORDER those rules are applied in and the unit of work they commit within, which
+ * is precisely what a JCL step owned.</p>
  *
  * <h2>The exit-status contract, and why this is the only job that can warn</h2>
  *
  * <p>Assumptions: {@code app/cbl/CBTRN02C.cbl:229} reads {@code IF WS-REJECT-COUNT > 0} and
- * {@code app/cbl/CBTRN02C.cbl:230} reads {@code MOVE 4 TO RETURN-CODE}. That is the only
- * {@code RETURN-CODE} statement in any of the twelve batch programs, so this job is the only one in the
- * package that can emit the warn tier. A reject is a correct outcome rather than a failure: the record is
- * written to the reject stream and the chain continues, which is why the tier is a warn and not a
- * failure. The package charter states the three tiers once and this class does not restate them.</p>
+ * {@code app/cbl/CBTRN02C.cbl:230} reads {@code MOVE 4 TO RETURN-CODE}. The test is STRICTLY greater
+ * than zero, so one reject is enough. That is the only {@code RETURN-CODE} statement in any of the
+ * twelve batch programs, so this job is the only one in the package that can emit the warn tier.</p>
  *
- * <h2>One transaction for the step, not one per record</h2>
+ * <p>Alternatives Considered: two other gradings were available and both are rejected on evidence.
+ * (a) Treating any reject as a STEP FAILURE. That would break the four committed
+ * {@code return_code.expected} golden masters that pin {@code 4} --
+ * {@code tests/golden/posting/reject_100_card_missing}, {@code reject_101_acct_missing},
+ * {@code reject_102_overlimit} and {@code reject_103_expired} -- and, worse, it would halt the
+ * nightly chain on an ordinary business reject, because a card that is absent from the
+ * cross-reference is a normal daily occurrence rather than a malfunction. (b) Reporting {@code 0}
+ * and leaving the rejects to the log. That would make the orchestrator's {@code Choice} predicate on
+ * state four undecidable, since the predicate reads the graded tier and nothing else. The warn tier
+ * exists because {@code app/jcl/TRANBKP.jcl:51} carries {@code COND=(4,LT)} -- a downstream step
+ * written to RUN after a warn -- so collapsing the tier would remove a distinction the reference's
+ * own job stream depends on.</p>
  *
- * <p>Refactoring Rationale: the reference has no transaction at all. Its files are defined
- * {@code RECOVERY(NONE)} with {@code JOURNAL(NO)} in {@code app/csd/CARDDEMO.CSD}, so each write is
- * immediate and unrecoverable and a failure halfway through leaves the masters half-posted with no record
- * of where it stopped. The migrated step commits once, so a failure discards the whole attempt and the
- * durable step ledger plus the orchestrator's redrive re-runs it from a known state. That is strictly
- * safer than the reference rather than a departure from a guarantee it made, and it is what makes the
- * migration plan's requirement that the three-write posting unit of work stay a single commit -- its
- * section 0.4.1.3 -- true for the step as well as for the record.</p>
+ * <h2>One transaction spanning the three writes</h2>
  *
- * <p>Trade-offs: a single transaction over an unbounded feed would accumulate every entity it touched in
- * the persistence context and exhaust the heap, so the feed is read in bounded batches and the context is
- * flushed and cleared between them. The cost is that a batch's changes are written to the database before
- * the step commits, which is invisible to any reader because nothing reads these tables during the batch
- * window -- state one of the chain quiesces online writes and no other state runs concurrently -- and the
- * benefit is that memory is bounded by the batch size rather than by the feed's length.</p>
+ * <p>Alternatives Considered: a saga, and a transactional outbox with compensating reversals. Both
+ * are rejected for the same measurable reason. Each replaces one atomic commit with a sequence of
+ * committed steps plus reversals, which makes intermediate states OBSERVABLE -- a posted transaction
+ * with an unposted balance, or an updated account with no ledger row. The golden masters compare
+ * {@code tranfile.expected}, {@code acctdat.expected} and {@code tcatbal.expected} from the SAME
+ * run, so any such intermediate state that survived to comparison would be flagged as a parity
+ * failure, and correctly so. The migration plan reaches the same conclusion in its sections 0.4.1.3
+ * and 0.4.3, and this class is where that conclusion is executed rather than restated.</p>
+ *
+ * <p>Trade-offs: keeping one ACID commit costs database-per-service purity. The three rows live in
+ * TWO schemas, {@code ledger} and {@code account}, so this module runs under a dedicated role
+ * holding narrowly-scoped cross-schema WRITE grants that
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} declares. That exception is accepted
+ * deliberately, because the alternative changes observable behaviour and the grant does not. It is
+ * asserted, not assumed: {@code PostingUnitOfWorkIT} proves the cross-schema writes commit and roll
+ * back as one.</p>
+ *
+ * <p>Assumptions: the boundary is declared HERE and nowhere else. The tasklet is built with the
+ * caller's {@code PlatformTransactionManager} at {@link #postTransactions}, so the whole pass runs
+ * inside one transaction and {@link #postOneRecord}'s three writes are committed together. The
+ * sibling {@code ..batch.service} package deliberately annotates no method {@code @Transactional}
+ * precisely so that this file remains the single owner of the boundary; a second boundary opened
+ * down there would let a rule commit independently of the writes it informed.</p>
+ *
+ * <h2>Divergence D-6: the reference can post partially, and this cannot</h2>
+ *
+ * <p>Refactoring Rationale: this is the strongest correctness improvement in the file, and it is a
+ * DIVERGENCE rather than a transcription, so it is stated plainly. In the reference,
+ * {@code 2800-UPDATE-ACCOUNT-REC} at {@code app/cbl/CBTRN02C.cbl:554-559} rewrites the account and,
+ * on {@code INVALID KEY}, moves reason {@code 109} into the failure fields and then RETURNS NORMALLY
+ * at {@code :560}. It writes no reject record and it aborts nothing, so control flows straight on to
+ * {@code app/cbl/CBTRN02C.cbl:442}, which writes the transaction anyway. Reason {@code 109} is a
+ * DEAD WRITE: only the validation path at {@code app/cbl/CBTRN02C.cbl:446-465} ever reaches the
+ * reject writer, and {@code :208} clears the reason before the next record. The reference can
+ * therefore leave a category balance updated and a transaction posted while the account update
+ * silently failed -- a state no output file records. The single transaction makes that state
+ * unreachable: a failed account update rolls all three writes back. The divergence is registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which this class does not author.</p>
+ *
+ * @see PostingValidationService for the reject predicates this job counts the outcomes of
+ * @see CategoryBalanceService for the create-versus-update arms this job drives
  */
 @Configuration
 public class PostTransactionsJob {
@@ -95,20 +142,70 @@ public class PostTransactionsJob {
     /**
      * The name this job registers under, which is an orchestration contract rather than a label.
      *
-     * <p>Assumptions: the value is taken from the shared token enumeration rather than spelled, because
-     * {@code BatchApplication} resolves the job to run by matching the process argument against a
-     * registered bean's name. A name that differed by one character would compile and deploy and then
-     * fail inside the state machine with an unresolved-job error.</p>
+     * <p>Assumptions: the value is taken from the shared token enumeration rather than spelled,
+     * because {@code BatchApplication} resolves the job to run by matching the process argument
+     * against a registered bean's name. A name that differed by one character would compile and
+     * deploy and then fail inside the state machine with an unresolved-job error.</p>
      */
     public static final String JOB_NAME = BatchJobName.POST_TRANSACTIONS.token();
 
     /** The step name the durable ledger records this job's progress under. */
     public static final String STEP_NAME = "post-transactions-step";
 
+    /**
+     * The banner the reference writes before opening any file, reproduced verbatim.
+     *
+     * <p>From {@code app/cbl/CBTRN02C.cbl:194}.</p>
+     */
+    public static final String START_BANNER = "START OF EXECUTION OF PROGRAM CBTRN02C";
+
+    /**
+     * The banner the reference writes after grading its return code, reproduced verbatim.
+     *
+     * <p>From {@code app/cbl/CBTRN02C.cbl:232}.</p>
+     */
+    public static final String END_BANNER = "END OF EXECUTION OF PROGRAM CBTRN02C";
+
+    /**
+     * The processed-count label from {@code app/cbl/CBTRN02C.cbl:227}, with ONE space before the
+     * colon.
+     */
+    public static final String PROCESSED_LABEL = "TRANSACTIONS PROCESSED :";
+
+    /**
+     * The rejected-count label from {@code app/cbl/CBTRN02C.cbl:228}, with TWO spaces before the
+     * colon.
+     */
+    public static final String REJECTED_LABEL = "TRANSACTIONS REJECTED  :";
+
+    /**
+     * The object name the reject stream is staged under inside its allocated generation.
+     *
+     * <p>Assumptions: the name carries no generation or date component, because
+     * {@code DatasetGeneration.keyPrefix()} already places the object under its
+     * {@code dt=}/{@code gen=} partition. Encoding either here would duplicate the coordinate and
+     * let the two spellings drift.</p>
+     */
+    public static final String REJECT_DATASET_OBJECT_NAME = "dalyrejs";
+
+    /**
+     * Width of each counter as the reference displays it.
+     *
+     * <p>{@code app/cbl/CBTRN02C.cbl:185-186} declares both counters {@code PIC 9(09)}, and an
+     * unsigned numeric-display item is emitted zero-padded to its full picture width.</p>
+     */
+    public static final int COUNTER_DIGITS = 9;
+
+    /** Renders a label immediately followed by its nine-digit zero-padded counter. */
+    private static final String COUNTER_LINE = "%s%0" + COUNTER_DIGITS + "d";
+
+    /** Prefix of the temporary file the reject stream is accumulated into before staging. */
+    private static final String STAGING_FILE_PREFIX = "carddemo-dalyrejs-";
+
     /** The ordinal a walk of the feed starts strictly above, so the first record is included. */
     private static final long BEFORE_FIRST_ORDINAL = 0L;
 
-    /** The operational log this job reports its record counts through. */
+    /** The operational log this job reports its banners, record counts and staging through. */
     private static final Logger LOG = LoggerFactory.getLogger(PostTransactionsJob.class);
 
     /** The feed the day's transactions are read from. */
@@ -129,6 +226,9 @@ public class PostTransactionsJob {
     /** The rule deciding whether a category balance is created or updated. */
     private final CategoryBalanceService categoryBalances;
 
+    /** The allocator of the reject stream's generation, standing for the {@code (+1)} in the DD. */
+    private final DatasetGenerationService generations;
+
     /** The durable step record that makes a re-run of a completed step a no-op. */
     private final BatchStepLedger ledgerOfSteps;
 
@@ -139,15 +239,17 @@ public class PostTransactionsJob {
     private final EntityManager entityManager;
 
     /**
-     * Builds the job over the rules and repositories it composes.
+     * Builds the job over the rules, repositories and dataset allocator it composes.
      *
      * @param feed the daily transaction feed; must not be {@code null}
      * @param accounts the account master the posted amounts are accumulated into; must not be
      *     {@code null}
      * @param ledger the posted-transaction ledger; must not be {@code null}
-     * @param rejects the reject stream; must not be {@code null}
+     * @param rejects the reject stream's decomposed rows; must not be {@code null}
      * @param validation the posting validation rule; must not be {@code null}
      * @param categoryBalances the category-balance rule; must not be {@code null}
+     * @param generations the generation allocator the reject dataset is staged through; must not be
+     *     {@code null}
      * @param ledgerOfSteps the durable step ledger; must not be {@code null}
      * @param clock the clock the processing stamp is read from; must not be {@code null}
      * @param entityManager the persistence context; must not be {@code null}
@@ -155,17 +257,18 @@ public class PostTransactionsJob {
      */
     // WHY : Refactoring Rationale: a CardXrefRepository parameter stood between the feed and the
     //       account master, and it is withdrawn. This job resolved the card itself, so it held the
-    //       cross-reference; the validation service now owns that read and hands the resolved row back
-    //       with its outcome, which leaves nothing here to read it for. Keeping an unread collaborator
-    //       would say that this job still reaches the cross-reference table, and a reader auditing
-    //       which components touch cardholder data would have to open the body to find that it does
-    //       not. The account master stays, because the accumulated balance is written through it.
+    //       cross-reference; the validation service now owns that read and hands the resolved row
+    //       back with its outcome, which leaves nothing here to read it for. Keeping an unread
+    //       collaborator would say that this job still reaches the cross-reference table, and a
+    //       reader auditing which components touch cardholder data would have to open the body to
+    //       find that it does not. The account master stays, because the accumulated balance is
+    //       written through it.
     @SuppressWarnings("checkstyle:ParameterNumber")
     public PostTransactionsJob(DailyTransactionRepository feed,
             AccountRepository accounts, TransactionRepository ledger,
             TransactionRejectRepository rejects, PostingValidationService validation,
-            CategoryBalanceService categoryBalances, BatchStepLedger ledgerOfSteps, Clock clock,
-            EntityManager entityManager) {
+            CategoryBalanceService categoryBalances, DatasetGenerationService generations,
+            BatchStepLedger ledgerOfSteps, Clock clock, EntityManager entityManager) {
 
         this.feed = Objects.requireNonNull(feed, "feed must not be null");
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
@@ -174,6 +277,7 @@ public class PostTransactionsJob {
         this.validation = Objects.requireNonNull(validation, "validation must not be null");
         this.categoryBalances =
                 Objects.requireNonNull(categoryBalances, "categoryBalances must not be null");
+        this.generations = Objects.requireNonNull(generations, "generations must not be null");
         this.ledgerOfSteps = Objects.requireNonNull(ledgerOfSteps, "ledgerOfSteps must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.entityManager = Objects.requireNonNull(entityManager, "entityManager must not be null");
@@ -183,23 +287,24 @@ public class PostTransactionsJob {
      * Registers the job under the token the orchestrator names it by.
      *
      * @param jobRepository the framework's durable job repository; must not be {@code null}
-     * @param transactionManager the transaction manager the step commits through; must not be
-     *     {@code null}
-     * @param validator the shared parameter validator every job in this module is built with; must not be
-     *     {@code null}
+     * @param transactionManager the transaction manager whose boundary the whole pass, and therefore
+     *     each record's three writes, commits inside; must not be {@code null}
+     * @param validator the shared parameter validator every job in this module is built with; must
+     *     not be {@code null}
      * @return the registered job, never {@code null}
      */
     @Bean
     // WHY : Refactoring Rationale: the factory method is named WITHOUT the "Job" suffix its class
-    //       carries, and the difference is load-bearing rather than cosmetic. A `@Configuration` class
-    //       registered by type takes a bean id from its own decapitalised class name, so a `@Bean`
-    //       method spelled `postTransactionsJob` inside `PostTransactionsJob` claims the identifier the class
-    //       itself already holds -- and Spring refuses the context with a
+    //       carries, and the difference is load-bearing rather than cosmetic. A `@Configuration`
+    //       class registered by type takes a bean id from its own decapitalised class name, so a
+    //       `@Bean` method spelled `postTransactionsJob` inside `PostTransactionsJob` claims the
+    //       identifier the class itself already holds -- and Spring refuses the context with a
     //       BeanDefinitionOverrideException rather than choosing between them. Dropping the suffix
     //       gives the two definitions distinct identifiers.
     // WHY : Assumptions: nothing selects this bean by its identifier. The command contract iterates
-    //       the `Job` beans and compares `getName()` against its argument, and `getName()` comes from
-    //       JOB_NAME below, so the identifier is free to change and the job's published token is not.
+    //       the `Job` beans and compares `getName()` against its argument, and `getName()` comes
+    //       from JOB_NAME below, so the identifier is free to change and the job's published token
+    //       is not.
     public Job postTransactions(JobRepository jobRepository,
             PlatformTransactionManager transactionManager, JobParametersValidator validator) {
 
@@ -212,7 +317,15 @@ public class PostTransactionsJob {
     }
 
     /**
-     * Runs the whole posting pass once, under the durable step record.
+     * Runs the whole posting pass once, under the durable step record, between the two banners.
+     *
+     * <p>Assumptions: the business date is read from the job parameters and used ONLY to partition
+     * the reject stream's generation. {@code app/jcl/POSTTRAN.jcl:23} carries NO {@code PARM=}, so
+     * the reference program receives no date at all and derives no posted field from one --
+     * {@code app/jcl/INTCALC.jcl:22} holds the only {@code PARM=} in the batch chain, and it belongs
+     * to the interest job. The parameter is still required here for run identity and reproducibility,
+     * which is what lets a rerun land in a deterministic generation instead of one keyed off a
+     * clock.</p>
      *
      * @param contribution the framework's handle for reporting this step's exit status; must not be
      *     {@code null}
@@ -221,114 +334,212 @@ public class PostTransactionsJob {
      */
     private RepeatStatus runStep(StepContribution contribution, ChunkContext context) {
         String runId = BatchConfig.runIdOf(context);
+        BusinessDate businessDate = BatchConfig.businessDateOf(context);
 
-        BatchStepLedger.StepOutcome outcome =
-                this.ledgerOfSteps.runStep(runId, STEP_NAME, this::postEveryFeedRecord);
+        LOG.info(START_BANNER);
 
-        // WHY : Assumptions: the exit status is set from the ledger's recorded return code rather than
-        //       from the counters this invocation produced, so a redriven step that the ledger reports as
-        //       already complete reports the tier the ORIGINAL attempt reached. Recomputing it would
-        //       report a clean run for a step that had legitimately warned, and the orchestrator's
-        //       downstream choice reads that tier.
+        BatchStepLedger.StepOutcome outcome = this.ledgerOfSteps.runStep(
+                runId, STEP_NAME, () -> postEveryFeedRecord(runId, businessDate));
+
+        // WHY : Assumptions: the exit status is set from the ledger's recorded return code rather
+        //       than from the counters this invocation produced, so a redriven step that the ledger
+        //       reports as already complete reports the tier the ORIGINAL attempt reached.
+        //       Recomputing it would report a clean run for a step that had legitimately warned, and
+        //       the orchestrator's downstream choice reads that tier.
         if (outcome.returnCode() == BatchReturnCode.SOFT_WARN) {
             contribution.setExitStatus(
                     new ExitStatus(BatchApplication.EXIT_CODE_COMPLETED_WITH_WARNINGS));
         }
 
+        LOG.info(END_BANNER);
         return RepeatStatus.FINISHED;
     }
 
     /**
      * Walks the feed in key order, posting or rejecting each record, and reports the resulting tier.
      *
-     * <p>Assumptions: the walk is keyset-paginated on the feed's ingest ordinal rather than offset-paged.
-     * The migration plan's section 0.7.4 requires it, and the reason is concrete: an offset page recounts
-     * the rows before it on every request, so a row inserted or removed during the walk shifts the window
-     * and a record is skipped or seen twice.</p>
+     * <p>Assumptions: the walk is keyset-paginated on the feed's ingest ordinal rather than
+     * offset-paged. The migration plan's section 0.7.4 requires it, and the reason is concrete: an
+     * offset page recounts the rows before it on every request, so a row inserted or removed during
+     * the walk shifts the window and a record is skipped or seen twice. The ordering key is the
+     * ingest ordinal and never the processing timestamp, which is null on every unposted row and so
+     * cannot order them at all.</p>
      *
+     * @param runId the orchestrator execution the reject generation is allocated against; must not be
+     *     {@code null}
+     * @param businessDate the injected business date the reject generation is partitioned under; must
+     *     not be {@code null}
      * @return the tier the pass reached -- warn when any record was rejected, clean otherwise, never
      *     {@code null}
+     * @throws IllegalStateException if the reject stream cannot be assembled or staged
      */
-    private BatchReturnCode postEveryFeedRecord() {
+    private BatchReturnCode postEveryFeedRecord(String runId, BusinessDate businessDate) {
         long lastOrdinal = BEFORE_FIRST_ORDINAL;
         long processed = 0L;
         long rejected = 0L;
 
-        while (true) {
-            List<DailyTransaction> batch = this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
-                    lastOrdinal, Limit.of(BatchConfig.CHUNK_SIZE));
-            if (batch.isEmpty()) {
-                break;
-            }
+        // WHAT: the reject stream is accumulated into a temporary file for the whole pass and staged
+        //       once at the end, rather than appended to remotely per record.
+        // WHY : Trade-offs: an object store has no append, so a per-record write would either rewrite
+        //       the whole object each time -- quadratic in the reject count -- or leave one object per
+        //       reject, which is not the single fixed-length dataset app/jcl/POSTTRAN.jcl:34-38
+        //       allocates. Buffering on the task's ephemeral disk costs one file and bounds memory by
+        //       a single record, and it is the same route BackupTransactionsJob takes for the same
+        //       reason.
+        Path rejectStream = createRejectStreamFile();
+        try {
+            try (OutputStream sink = Files.newOutputStream(rejectStream)) {
+                while (true) {
+                    List<DailyTransaction> batch =
+                            this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                                    lastOrdinal, Limit.of(BatchConfig.CHUNK_SIZE));
+                    if (batch.isEmpty()) {
+                        break;
+                    }
 
-            for (DailyTransaction feedRecord : batch) {
-                processed++;
-                if (postOneRecord(feedRecord)) {
-                    rejected++;
+                    for (DailyTransaction feedRecord : batch) {
+                        processed++;
+                        if (postOneRecord(feedRecord, sink)) {
+                            rejected++;
+                        }
+                        lastOrdinal = feedRecord.getIngestSeq();
+                    }
+
+                    // WHY : Assumptions: the context is flushed before it is cleared, because
+                    //       clearing detaches every managed entity and a pending change on a detached
+                    //       entity is simply lost. The pair together is what bounds memory to one
+                    //       batch without discarding work.
+                    this.entityManager.flush();
+                    this.entityManager.clear();
                 }
-                lastOrdinal = feedRecord.getIngestSeq();
+            } catch (IOException unwritable) {
+                throw new IllegalStateException(
+                        "could not write the reject stream to " + rejectStream, unwritable);
             }
 
-            // WHY : Assumptions: the context is flushed before it is cleared, because clearing detaches
-            //       every managed entity and a pending change on a detached entity is simply lost. The
-            //       pair together is what bounds memory to one batch without discarding work.
-            this.entityManager.flush();
-            this.entityManager.clear();
+            stageRejectStream(rejectStream, runId, businessDate, rejected);
+        } finally {
+            // WHY : Assumptions: the temporary file is removed on every path, including a failed
+            //       stage, because a batch task's ephemeral disk is finite and a failed step is
+            //       retried. Leaving it would let a sequence of retries fill the volume and turn a
+            //       transient upload failure into a task that can no longer start.
+            deleteQuietly(rejectStream);
         }
 
-        LOG.info("event=batch.posting.completed processed={} rejected={}", processed, rejected);
+        reportCounters(processed, rejected);
 
         // WHY : Assumptions: the tier is decided by whether ANY record was rejected, not by how many,
-        //       matching app/cbl/CBTRN02C.cbl:229 which tests the count against zero rather than against
-        //       a threshold. A threshold would let a run with a few rejects report clean, and the reject
-        //       stream would then be the only place the rejects appeared.
+        //       matching app/cbl/CBTRN02C.cbl:229 which tests the count against zero rather than
+        //       against a threshold. A threshold would let a run with a few rejects report clean, and
+        //       the reject stream would then be the only place the rejects appeared.
         return rejected > 0 ? BatchReturnCode.SOFT_WARN : BatchReturnCode.CLEAN;
     }
 
     /**
-     * Applies the four decisions to one feed record and writes whichever outcome they reach.
+     * Writes the reference's two counter lines, byte for byte.
+     *
+     * <p>Assumptions: the two labels are NOT symmetrical and the asymmetry is deliberate in the
+     * reference. {@code app/cbl/CBTRN02C.cbl:227} spells {@code 'TRANSACTIONS PROCESSED :'} with ONE
+     * space before the colon and {@code app/cbl/CBTRN02C.cbl:228} spells
+     * {@code 'TRANSACTIONS REJECTED  :'} with TWO, because {@code PROCESSED} is one character longer
+     * than {@code REJECTED} and the extra space column-aligns the two colons. Both counters are
+     * {@code PIC 9(09)} at {@code :185-186}, so each value is emitted zero-padded to nine digits.</p>
+     *
+     * <p>Assumptions: the posting golden directories hold {@code acctdat.expected},
+     * {@code dalyrejs.expected}, {@code return_code.expected}, {@code tcatbal.expected} and
+     * {@code tranfile.expected} -- and NO stdout golden -- so these two lines are not byte-compared
+     * by the suite. That absence is explicitly NOT licence to reformat them. They remain a log-parity
+     * obligation under the migration plan's rule T8, which carries user-visible strings across
+     * verbatim, and an operator diffing a Java run against a COBOL run compares them by eye.</p>
+     *
+     * @param processed the number of feed records read, standing for {@code WS-TRANSACTION-COUNT}
+     * @param rejected the number written to the reject stream, standing for {@code WS-REJECT-COUNT}
+     */
+    private static void reportCounters(long processed, long rejected) {
+        LOG.info(String.format(COUNTER_LINE, PROCESSED_LABEL, processed));
+        LOG.info(String.format(COUNTER_LINE, REJECTED_LABEL, rejected));
+    }
+
+    /**
+     * Applies the decisions to one feed record and writes whichever outcome they reach.
+     *
+     * <p>Assumptions: the reject reason this method acts on is whatever the validation rule returned,
+     * and it carries AT MOST ONE reason even when a record fails two conditions. The reference's
+     * over-limit test at {@code app/cbl/CBTRN02C.cbl:407} and expiration test at
+     * {@code app/cbl/CBTRN02C.cbl:414} are sequential and unguarded, both writing the same field, so
+     * a record that is both over limit and past expiry is reported as {@code 103} and its
+     * {@code 102} is overwritten. That precedence is an artefact of STATEMENT ORDER rather than a
+     * designed rule, which is exactly why it is not re-derived here: {@code PostingValidationResult}
+     * owns the resolving factory that encodes it, and duplicating the ordering would create a second
+     * copy that no test fails when the first one changes.</p>
+     *
+     * <p>Assumptions: reason {@code 109} can never appear on this path. It is the dead write
+     * described in this class's divergence note, assigned only inside the account rewrite and never
+     * reachable by the reject writer, and {@code RejectReason.isPersistedToRejectStream()} reports
+     * {@code false} for it alone.</p>
      *
      * @param feedRecord the feed record to post or reject; must not be {@code null}
+     * @param rejectStream the sink the 430-byte reject record is appended to; must not be
+     *     {@code null}
      * @return {@code true} when the record was rejected, {@code false} when it was posted
+     * @throws IOException if the reject record cannot be appended to the stream
+     * @throws IllegalStateException if the validation rule accepted a record without resolving both
+     *     the cross-reference and the account
      */
-    private boolean postOneRecord(DailyTransaction feedRecord) {
+    private boolean postOneRecord(DailyTransaction feedRecord, OutputStream rejectStream)
+            throws IOException {
+
         // WHY : Refactoring Rationale: this method performed its own card read, its own account read
         //       and its own copy of the app/cbl/CBTRN02C.cbl:372 guard between them, then handed both
-        //       records to a validation overload that only decided the outcome. The validation service
-        //       transcribes :370 including that guard and asserts it under test, so the guard existed
-        //       in two places -- one asserted, one executed -- and a rule the reference expresses only
-        //       as a MISSING statement is the last one that should be duplicated, because neither copy
-        //       fails when the other changes. The resolving entry point now returns what its reads
-        //       found, so this method consumes them instead of repeating them and each record is still
-        //       read exactly once per feed row.
+        //       records to a validation overload that only decided the outcome. The validation
+        //       service transcribes :370 including that guard and asserts it under test, so the guard
+        //       existed in two places -- one asserted, one executed -- and a rule the reference
+        //       expresses only as a MISSING statement is the last one that should be duplicated,
+        //       because neither copy fails when the other changes. The resolving entry point now
+        //       returns what its reads found, so this method consumes them instead of repeating them
+        //       and each record is still read exactly once per feed row.
         PostingDecision decision = this.validation.validate(feedRecord);
         PostingValidationResult outcome = decision.outcome();
 
         if (outcome.isRejected()) {
-            this.rejects.save(TransactionRejectRecordMapper.toRejectRow(
-                    DailyTransactionMapper.toRecord(feedRecord), outcome));
+            writeReject(feedRecord, outcome, rejectStream);
             return true;
         }
 
         // WHY : Assumptions: both values are present on the accepted path by construction -- the
-        //       validation rule cannot return accepted without having read an account, which it can only
-        //       do through a resolved cross-reference -- so unwrapping here is an assertion of that
-        //       invariant rather than an unchecked assumption. If it were ever violated the failure would
-        //       be immediate and named, which is what the step should do with a broken invariant.
+        //       validation rule cannot return accepted without having read an account, which it can
+        //       only do through a resolved cross-reference -- so unwrapping here is an assertion of
+        //       that invariant rather than an unchecked assumption. If it were ever violated the
+        //       failure would be immediate and named, which is what the step should do with a broken
+        //       invariant.
         CardXref resolved = decision.crossReference().orElseThrow(() -> new IllegalStateException(
                 "validation accepted a record whose card resolved to no cross-reference"));
         Account posting = decision.account().orElseThrow(() -> new IllegalStateException(
                 "validation accepted a record whose cross-reference resolved to no account"));
 
-        // WHY : Refactoring Rationale: the key was composed here, from the cross-reference's account
-        //       identifier and the record's two codes, and handed to the category service's key-taking
-        //       method. The service publishes a method that composes exactly that key from exactly
-        //       those two objects and documents itself as the entry point this job calls, so the
-        //       composition existed twice and the service's own claim was false. Delegating removes the
-        //       duplicate and makes the claim true. What is bought is that the reason the account
-        //       component comes from the cross-reference rather than from the feed record -- :469 moves
-        //       XREF-ACCT-ID, and app/cpy/CVTRA06Y.cpy declares no account field for a positional
-        //       mistake to draw on -- is recorded once, beside the composition it governs.
+        // WHAT: the three writes of the posting unit of work, in the reference's order.
+        // WHY : Assumptions: the ORDER is category balance, then account, then ledger, transcribing
+        //       app/cbl/CBTRN02C.cbl:440, :441 and :442 in sequence. It is preserved even though a
+        //       single commit makes the order invisible to any reader of the committed state, for two
+        //       reasons that outlive the current implementation. Within one transaction the order
+        //       still fixes the sequence in which row locks are taken, so every posting task in the
+        //       fleet taking them in one order is what keeps two concurrent tasks from deadlocking on
+        //       the same pair; and the order is the property PostingUnitOfWorkIT pins, so a
+        //       transcription that reordered it would be a silent divergence from the paragraph this
+        //       method claims to reproduce.
+        // WHY : Alternatives Considered: reordering to write the ledger first, which reads as more
+        //       natural because the transaction is the thing being posted. Rejected because it buys
+        //       nothing and costs the two properties above.
+        // WHY : Assumptions: NOT-FOUND IS NORMAL on the category-balance read, and this call site
+        //       deliberately carries no absent-row check because of it.
+        //       app/cbl/CBTRN02C.cbl:481 accepts file status '00' OR '23' as success, and '23' is
+        //       record-not-found -- so a missing category row is the ordinary
+        //       first-transaction-of-a-category case rather than an error, and the reference responds
+        //       by CREATING the row at :495-496 instead of failing. A guard here that treated an
+        //       empty result as a failure would reject the first transaction in every new category,
+        //       which is both a parity break and a business-visible one. The service owns the
+        //       decision and the two arms; what this comment records is the caller's obligation not
+        //       to second-guess it.
         this.categoryBalances.accumulatePostedTransaction(feedRecord, resolved);
         applyToAccount(feedRecord, posting);
         postToLedger(feedRecord);
@@ -336,20 +547,69 @@ public class PostTransactionsJob {
     }
 
     /**
+     * Records one rejected feed record, both as a 430-byte stream record and as a decomposed row.
+     *
+     * <p>Assumptions: the stream record's first 350 bytes are the feed record's own image copied
+     * VERBATIM, because {@code app/cbl/CBTRN02C.cbl:447} moves {@code DALYTRAN-RECORD} into
+     * {@code REJECT-TRAN-DATA} as a GROUP move rather than field by field -- so no value is re-encoded
+     * on the way across -- and the trailer at {@code app/cbl/CBTRN02C.cbl:180-182} is a four-digit
+     * zero-padded reason followed by its 76-character space-padded description. The composition is
+     * delegated so the offsets live in one place.</p>
+     *
+     * <p>Assumptions: the two writes are not redundant. The 430-byte record is the dataset the golden
+     * masters compare byte for byte; the decomposed row is what makes a reject queryable. The
+     * repository is append-only by design, which is why the pass's reject tally is the loop's own
+     * counter and never a query against it.</p>
+     *
+     * @param feedRecord the rejected feed record; must not be {@code null}
+     * @param outcome the validation outcome carrying the single reason; must not be {@code null}
+     * @param rejectStream the sink the 430-byte record is appended to; must not be {@code null}
+     * @throws IOException if the record cannot be appended to the stream
+     */
+    private void writeReject(DailyTransaction feedRecord, PostingValidationResult outcome,
+            OutputStream rejectStream) throws IOException {
+
+        byte[] sourceImage = DailyTransactionMapper.toRecord(feedRecord);
+        rejectStream.write(TransactionRejectRecordMapper.toRecord(sourceImage, outcome));
+        this.rejects.save(TransactionRejectRecordMapper.toRejectRow(sourceImage, outcome));
+    }
+
+    /**
      * Accumulates the record's amount into the account's balance and its cycle totals.
      *
      * <p>Assumptions: the sign test is {@code >= 0} and a NEGATIVE amount is ADDED to the debit total
-     * rather than subtracted from it, exactly as {@code app/cbl/CBTRN02C.cbl:543-546} does. The debit
-     * total therefore accumulates negatively, which reads as a defect and is not one: the projection the
-     * over-limit test computes at {@code app/cbl/CBTRN02C.cbl:403-405} is credit MINUS debit, so a
-     * negatively-accumulated debit and a subtracting accumulation would place the projection on opposite
-     * sides of the credit limit. Reproducing the sign convention is what keeps the boundary where the
-     * reference puts it.</p>
+     * rather than subtracted from it, exactly as {@code app/cbl/CBTRN02C.cbl:547-552} does --
+     * {@code :547} adds the amount to the balance, {@code :548} tests it against zero, {@code :549}
+     * adds it to the cycle credit and {@code :551} adds it, still signed, to the cycle debit. Two
+     * consequences look like defects and are not, so neither may be "cleaned up". The debit total
+     * accumulates NEGATIVELY; and a ZERO amount routes to CREDIT, because the test is
+     * {@code >= 0} rather than {@code > 0}. Both are internally consistent with the over-limit
+     * projection at {@code app/cbl/CBTRN02C.cbl:403-405}, which computes cycle credit MINUS cycle
+     * debit, so subtracting a magnitude there while accumulating a magnitude here would place the
+     * projection on the opposite side of the credit limit and move the boundary the golden masters
+     * pin. Reproducing the sign convention is what keeps the boundary where the reference puts it.</p>
+     *
+     * <p>Assumptions: an optimistic-lock loss on this write FAILS THE STEP. The account carries a
+     * {@code @Version} column and this method does not catch the resulting exception, so it
+     * propagates, the single transaction rolls back and the orchestrator's per-state {@code Retry}
+     * re-runs the step from a consistent starting point.</p>
+     *
+     * <p>Alternatives Considered: re-reading the account and reapplying the amount inside the step.
+     * Rejected because the only writer that can win that race is a concurrent ONLINE update, and
+     * silently reapplying on top of it would hide a change a human made and could double-apply this
+     * amount -- the balance would be wrong and nothing would say so. Failing surfaces the collision
+     * to the state machine, which is the component able to re-run the step. The online path's
+     * {@code 409 Conflict} is the interactive analogue of the same ruling.</p>
      *
      * @param feedRecord the record being posted; must not be {@code null}
      * @param posting the account the amount is accumulated into; must not be {@code null}
      */
     private void applyToAccount(DailyTransaction feedRecord, Account posting) {
+        // WHY : Assumptions: every step of the accumulation goes through Money, which fixes scale two
+        //       and HALF_UP rounding. The amounts originate as zoned decimal with a sign overpunch and
+        //       land in NUMERIC(p,2) columns, so a binary floating-point intermediate would introduce
+        //       a representation error that no rounding at the end can undo. The prohibition is
+        //       enforced by the ArchUnit money rule rather than left to review.
         BigDecimal amount = feedRecord.getAmount();
         posting.setCurrBal(Money.of(posting.getCurrBal()).plus(Money.of(amount)).amount());
 
@@ -367,17 +627,148 @@ public class PostTransactionsJob {
     /**
      * Writes the record to the posted ledger under this run's processing stamp.
      *
-     * <p>Assumptions: the stamp is taken from the injected clock rather than from the business date,
-     * because {@code app/cbl/CBTRN02C.cbl:438} writes the DB2-format timestamp of the moment the record
-     * was posted and not the date the run was for. The existing test suite normalises this field before
-     * comparing golden masters precisely because it is the one non-deterministic value the posted record
-     * carries.</p>
+     * <p>Assumptions: the two timestamps on a posted record are handled DIFFERENTLY and conflating
+     * them fails every posting golden. The ORIGINATING stamp is a verbatim 26-byte passthrough --
+     * {@code app/cbl/CBTRN02C.cbl:436} moves {@code DALYTRAN-ORIG-TS} into {@code TRAN-ORIG-TS} with
+     * no reformatting, and the committed golden
+     * {@code tests/golden/posting/happy_path/tranfile.expected} carries
+     * {@code 2022-06-10 19:27:53.000000} at offset 278, space-separated and colon-delimited, straight
+     * from the feed. The PROCESSING stamp is generated: {@code app/cbl/CBTRN02C.cbl:437-438} builds it
+     * and moves it in. This method therefore supplies only the processing instant and copies nothing,
+     * because {@code DailyTransactionMapper} carries the originating value across untouched.</p>
+     *
+     * <p>Trade-offs: the originating stamp is passed through as an opaque value rather than parsed and
+     * re-rendered into a canonical form, which forgoes the chance to normalise a malformed feed value
+     * here. That is the right trade because {@code tests/helpers/golden_compare.py:22-28} documents the
+     * record-mode comparison as byte-exact with the originating stamp preserved VERBATIM and only the
+     * run-generated processing stamp masked in place; no ISO-timestamp regex runs and trailing
+     * whitespace is never stripped. Any re-rendering, however cosmetic, would fail all nine posting
+     * golden trees.</p>
+     *
+     * <p>Assumptions: this method establishes the processing INSTANT and deliberately not its byte
+     * form. The reference renders that field as {@code YYYY-MM-DD-HH.MM.SS.mm0000} -- the layout
+     * declared at {@code app/cbl/CBTRN02C.cbl:159-175} and assembled at
+     * {@code app/cbl/CBTRN02C.cbl:692-705}, with a DASH between day and hour, dots inside the time,
+     * two digits of hundredths and a literal {@code 0000}. That is NOT the shape
+     * {@code TimestampFormatter.format} emits, which is the space-and-colon target form the migration
+     * plan's section 0.5.1.1 describes; the COBOL is authoritative for this field and the two patterns
+     * must never be normalised into each other. The distinction is real but is not this file's to
+     * resolve: the entity stores a {@code LocalDateTime}, so the byte rendering belongs to
+     * {@code TransactionRecordMapper}, which records the same finding independently. What is used here
+     * is {@code TimestampFormatter.normalizeNow}, for the instant only.</p>
      *
      * @param feedRecord the record being posted; must not be {@code null}
      */
     private void postToLedger(DailyTransaction feedRecord) {
-        Transaction posted = DailyTransactionMapper.toPostedTransaction(
-                feedRecord, LocalDateTime.now(this.clock));
+        // WHY : Assumptions: the stamp is read ONCE, here, and handed to the mapper as an argument.
+        //       The mapper refuses a null instant rather than defaulting, precisely so that it never
+        //       reaches for a clock of its own; a second read inside it could return a later instant
+        //       than the one this unit of work believes it posted at. normalizeNow is preferred over a
+        //       raw clock read because it truncates to whole microseconds, which is the resolution the
+        //       26-character target form round-trips, so the persisted value and its rendering cannot
+        //       disagree in a digit the column can hold but the rendering cannot show.
+        // WHY : Trade-offs: this is a genuine clock read, and it is the one place the business path is
+        //       permitted one, because the field it feeds is by definition the moment of posting --
+        //       app/cbl/CBTRN02C.cbl:693 reads FUNCTION CURRENT-DATE for exactly this. The business
+        //       date is NOT substituted for it, even though that would make the field deterministic,
+        //       because it would post a stamp the reference never writes. Determinism is recovered at
+        //       comparison time instead: the golden comparator masks this field in place, and the
+        //       clock is injected so a test can pin it.
+        LocalDateTime postedAt = TimestampFormatter.normalizeNow(this.clock);
+        Transaction posted = DailyTransactionMapper.toPostedTransaction(feedRecord, postedAt);
         this.ledger.save(posted);
+    }
+
+    /**
+     * Creates the temporary file the reject stream is accumulated into.
+     *
+     * @return the newly created empty file, never {@code null}
+     * @throws IllegalStateException if the file cannot be created
+     */
+    private static Path createRejectStreamFile() {
+        try {
+            return Files.createTempFile(STAGING_FILE_PREFIX, ".dat");
+        } catch (IOException unavailable) {
+            throw new IllegalStateException(
+                    "could not create the temporary file the reject stream accumulates into",
+                    unavailable);
+        }
+    }
+
+    /**
+     * Allocates the reject stream's generation, stages the assembled records into it, and ages out
+     * the generations the retention rule no longer keeps.
+     *
+     * <p>Assumptions: the generation is allocated and staged UNCONDITIONALLY, including on a pass with
+     * no rejects at all, and the empty case is not an oversight. {@code app/jcl/POSTTRAN.jcl:34-38}
+     * declares the reject DD {@code DISP=(NEW,CATLG,DELETE)} against
+     * {@code DSN=AWS.M2.CARDDEMO.DALYREJS(+1)}, so the reference creates a new generation on every run
+     * whether or not it writes a record into it. The committed goldens confirm the consequence
+     * directly: {@code dalyrejs.expected} is a ZERO-BYTE file in each of the five clean scenarios --
+     * {@code happy_path}, {@code boundary_exact_limit}, {@code boundary_expiry_equal},
+     * {@code empty_input} and {@code zero_balance} -- and 430 bytes in each of the four reject
+     * scenarios. Skipping the allocation when the count is zero would leave a downstream reader facing
+     * an absent generation where the reference leaves an empty one.</p>
+     *
+     * <p>Assumptions: the allocator MEMOISES per family and run, so this {@code (+1)} request returns
+     * the identical generation if anything else in the same run asks for the reject family again. That
+     * is what makes the reference's habit of naming one generation twice -- writing it under
+     * {@code (+1)} and reading it back under {@code (0)} -- reproducible without allocating twice and
+     * consuming the retention window at double rate.</p>
+     *
+     * <p>Assumptions: the retention rule is applied here rather than centrally.
+     * {@code app/jcl/DALYREJS.jcl:25-27} defines the base with {@code LIMIT(5)} paired with an explicit
+     * {@code SCRATCH}, so an aged-out generation is deleted rather than merely uncatalogued; the
+     * allocator's scratch pair reproduces exactly that pairing.</p>
+     *
+     * @param rejectStream the assembled reject records; must not be {@code null}
+     * @param runId the orchestrator execution the allocation belongs to; must not be {@code null}
+     * @param businessDate the business date the generation is partitioned under; must not be
+     *     {@code null}
+     * @param rejected the number of records the stream holds, reported for operator traceability
+     */
+    private void stageRejectStream(
+            Path rejectStream, String runId, BusinessDate businessDate, long rejected) {
+
+        DatasetGeneration target =
+                this.generations.allocateNewGeneration(DatasetFamily.DALYREJS, businessDate, runId);
+        this.generations.stageDataset(target, REJECT_DATASET_OBJECT_NAME, rejectStream);
+
+        int scratched = 0;
+        for (DatasetGeneration agedOut : this.generations.generationsToScratch(
+                DatasetFamily.DALYREJS)) {
+            scratched += this.generations.scratchGeneration(agedOut);
+        }
+
+        LOG.info("event=batch.posting.rejects-staged generation={} records={} scratchedObjects={}"
+                + " location={}", target.generationNumber(), rejected, scratched,
+                this.generations.datasetUri(target));
+    }
+
+    /**
+     * Removes a temporary file, reporting rather than raising when it cannot be removed.
+     *
+     * <p>Assumptions: a failed deletion is logged and swallowed rather than raised, because it happens
+     * on paths that are already failing and re-raising there would replace the real failure with a
+     * cleanup one. The consequence -- a file left behind -- is bounded by the container's lifetime.</p>
+     *
+     * @param file the file to remove; must not be {@code null}
+     */
+    private static void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException undeletable) {
+            LOG.warn("event=batch.posting.temp-file-retained path={} reason={}",
+                    file, undeletable.getClass().getName());
+        }
+    }
+
+    /**
+     * Reports the generation-dataset families this job stages into, so a reader need not infer them.
+     *
+     * @return the single family this job writes, never {@code null}
+     */
+    public static List<DatasetFamily> stagedFamilies() {
+        return List.of(DatasetFamily.DALYREJS);
     }
 }
