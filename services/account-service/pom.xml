@@ -236,6 +236,38 @@
         </dependency>
 
         <!--
+        WHY : Assumptions: Boot 4 SPLIT the HTTP clients out of the web starter, and
+              this module needs the half that was removed. RestClient itself is an
+              API in spring-web, so RestReferenceAddressLookup COMPILES without
+              this entry; what spring-web does not carry is
+              RestClientAutoConfiguration, which is the only thing that publishes
+              the RestClient.Builder bean that adapter injects. The autoconfiguration
+              lives in org.springframework.boot:spring-boot-restclient, which this
+              starter brings along with its own AutoConfiguration.imports
+              registration.
+        WHY : Refactoring Rationale: the omission was found by starting the built
+              container rather than by any test, and it was not a warning. The
+              context failed outright with no qualifying bean of type
+              RestClient$Builder for parameter 0 of RestReferenceAddressLookup, so
+              the task could never have turned healthy. No test caught it because
+              the unit test for that adapter builds it through its package private
+              seam and passes a builder in, and no test in this module loads the
+              whole context, so the missing bean was invisible to a green suite.
+        WHY : Alternatives Considered: declaring the plain spring-boot-restclient
+              artifact instead of this starter, and constructing a RestClient
+              without a builder inside the adapter. The plain artifact was rejected
+              for consistency, since every other Boot dependency in this file is a
+              starter and the starter adds only the Jackson pairing this module
+              already has. Hand constructing the client was rejected because it
+              would move transport configuration out of the framework's
+              autoconfiguration and duplicate it per adapter.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+
+        <!--
         WHY : Assumptions: supplies the JPA optimistic locking this module
               depends on. The version column on accounts and customers is the
               native expression of the before image comparison COACTUPC

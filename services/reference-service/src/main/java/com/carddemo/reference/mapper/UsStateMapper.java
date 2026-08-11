@@ -16,17 +16,17 @@ import org.springframework.stereotype.Component;
  * <p>Assumptions: every class in this package is written by hand and no code generator is introduced
  * anywhere in it. The package-scope rulings this class applies are settled once in this package's own
  * {@code package-info.java} -- the hand-written charter, the rejection of MapStruct and, on a separate
- * ground, of Lombok, the trim boundary that follows the column type at its L303 to L318, the
- * items-only boundary at its L457 to L462, and the absence of an inbound member on the seeded lookups
- * at its L497 to L500 -- and they are cited here rather than argued again. What this file adds is the
+ * ground, of Lombok, the trim boundary that follows the column type at its L319 to L334, the
+ * items-only boundary at its L473 to L478, and the absence of an inbound member on the seeded lookups
+ * at its L513 to L516 -- and they are cited here rather than argued again. What this file adds is the
  * evidence specific to this one code.</p>
  *
  * <p>Alternatives Considered: this class is a Spring {@code @Component} with instance members and is
  * deliberately not declared {@code final}, rather than the {@code final} class with a private
  * constructor and static members that the charter fixes for the four entity conversions at its own
- * L197 to L223. The static shape was the alternative and was not taken here. The charter already
+ * L213 to L239. The static shape was the alternative and was not taken here. The charter already
  * admits this second shape for {@code DateInquiryReplyMapper} at its L161 to L164, and records at its
- * L222 to L223 that a component is left non-final precisely so that it remains proxyable; both of
+ * L238 to L239 that a component is left non-final precisely so that it remains proxyable; both of
  * those properties are wanted here. This conversion is reached by constructor injection, which is the
  * dependency-injection pattern the Agent Action Plan fixes for this migration in place of the
  * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
@@ -55,7 +55,7 @@ import org.springframework.stereotype.Component;
  * L178.</p>
  *
  * <p>Assumptions: there is no inbound member here, and the absence is a decision rather than
- * something outstanding. The charter records at its L497 to L500 that the three seeded lookup tables
+ * something outstanding. The charter records at its L513 to L516 that the three seeded lookup tables
  * carry none: these rows are seeded reference data, loaded by
  * {@code services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql}, so the
  * DTO package publishes no create and no update shape for them and there would be nothing for an
@@ -104,7 +104,7 @@ public class UsStateMapper {
         //       VALID-US-STATE-CODE carries the admitted literals over that item, every one of them
         //       quoted and compared as two characters. The stored column is CHAR(2) at
         //       V1__reference.sql L438, so a code fills its whole declared width and there is no
-        //       padding to remove; this package's charter settles at its L309 to L314 that a key of
+        //       padding to remove; this package's charter settles at its L325 to L330 that a key of
         //       declared width is never altered in a way that could change its value, in either
         //       direction.
         // WHY : Assumptions: the baseline settles that by contrast rather than by assertion, which is
@@ -152,11 +152,11 @@ public class UsStateMapper {
         String publishedCode = entity.getStateCode();
 
         // WHY : Assumptions: this invokes the canonical constructor of a single-component record
-        //       positionally, which the charter records at its L528 to L529 as the calling convention
+        //       positionally, which the charter records at its L544 to L545 as the calling convention
         //       throughout this package. One naming detail is worth stating because it reads as a
         //       slip and is not: the column is state_cd, this entity's member is stateCode, and the
         //       record component is stateCd. The DTO package owns the published name, and the charter
-        //       settles at its L536 to L542 that this package follows those names rather than
+        //       settles at its L552 to L558 that this package follows those names rather than
         //       renaming either side to make the group look uniform.
         return new UsStateResponse(publishedCode);
     }
@@ -166,7 +166,7 @@ public class UsStateMapper {
      *
      * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
      * indicator of {@code com.carddemo.common.web.PageResponse} are assembled outside this package,
-     * which the charter fixes at its L457 to L462 on the ground that only the layer holding the
+     * which the charter fixes at its L473 to L478 on the ground that only the layer holding the
      * keyset cursor can say whether a further page exists; a mapper is handed rows and knows nothing
      * about the query that produced them. That is the reason this file does not import that envelope,
      * and it holds whatever shape the reply takes.</p>

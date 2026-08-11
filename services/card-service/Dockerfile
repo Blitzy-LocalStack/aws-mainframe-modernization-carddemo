@@ -7,26 +7,109 @@
 #   the batch reader app/cbl/CBACT02C.cbl. The baseline's base VSAM cluster and its
 #   CARDAIX alternate index become one table with a real secondary index.
 #
+# Stages:
+#   build   - resolves the reactor's dependencies, then compiles the unpublished
+#             common-lib sibling and this module from source in one invocation,
+#             producing the repackaged bootable jar under card-service/target.
+#   runtime - carries that one jar plus the shared listener-material entry point,
+#             and nothing else from the build stage: no Maven, no compiler, no
+#             resolved dependency cache and no sources.
+#
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
+#   Build context (REQUIRED): the REPOSITORY ROOT, never services/. The reason is
+#   mechanical rather than stylistic and is spelled out on the first COPY group
+#   below; in short, config/checkstyle is a SIBLING of services/ and Docker cannot
+#   COPY from outside its context.
+#
+#   Build arguments: this image declares NO build argument. Nothing about the
+#   image varies per environment, which is what lets one built artifact serve
+#   every environment.
+#
+#   Command arguments: the entry point takes no argument of its own and forwards
+#   "$@" (config/docker/generate-listener-material.sh:189), so a `docker run`
+#   trailer or an ECS container `command` override reaches the JVM unchanged.
+#   There is no per-run token of the kind the batch image accepts, because this
+#   process is a long-running TLS listener rather than a job.
+#
 #   Runtime configuration arrives entirely through environment variables that the
-#   ECS task definition supplies. The values this service cannot start without,
-#   because their placeholders declare no fallback, are:
+#   ECS task definition supplies from AWS Systems Manager Parameter Store and AWS
+#   Secrets Manager. NONE of them is baked into this image, and no VALUE for any
+#   of them appears anywhere in this file: the names below are the whole contract.
+#
+#   Variables whose application.yml placeholder declares NO fallback, so the
+#   context cannot start without them:
 #     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
+#     - CARDDEMO_SECURITY_CVV_KEY_ID
+#     - CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY
+#   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD also declares no fallback, and is the
+#   one member of that class the deployment does NOT supply: the entry point mints
+#   it per task and exports it before the JVM starts.
+#
+#   Variables that are optional because their placeholder carries a default, and
+#   which are named here so that a reader can tell the two classes apart:
+#     - SPRING_PROFILES_ACTIVE            selects application-dev.yml or -prod.yml
+#     - SERVER_PORT                       overrides the listen port
+#     - MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE   widens or narrows actuator
+#     - CARDDEMO_COGNITO_ADMIN_GROUP_NAME, CARDDEMO_COGNITO_USER_GROUP_NAME
+#     - CARDDEMO_DB_SSL_ROOT_CERT
+#     - CARDDEMO_SERVER_TLS_KEYSTORE, CARDDEMO_SERVER_TLS_KEY_ALIAS
+#     - JAVA_OPTS                         see the ENV instruction below
+#   The task additionally receives AWS_REGION, which this image neither sets nor
+#   defaults. It is named here because no placeholder in application.yml refers to
+#   it and its absence would otherwise look like an oversight: this module ships a
+#   key management client whose region and credentials resolve through the SDK's
+#   own default provider chains rather than through Spring configuration (see the
+#   Javadoc on config/KmsConfig.java), so an unset region surfaces as an SDK
+#   client construction failure with nothing in this file or that one to point at.
 #
 # Return values:
-#   0 (integer): the JVM exited after a requested shutdown.
-#   non-zero (integer): the context failed to start or the JVM terminated
-#     abnormally. ECS reads that status to decide whether to replace the task.
+#   A two-stage image whose final layer runs the executable Spring Boot layered
+#   jar as the non-root identity 10001:10001, listening on 8080 over TLS, and
+#   reporting health at /actuator/health.
+#   Process exit status, which ECS reads to decide whether to replace the task:
+#     0 (integer): the JVM exited after a requested shutdown.
+#     non-zero (integer): the context failed to start or the JVM terminated
+#       abnormally.
 #
 # Exceptions or errors:
-#   An unset variable from the list above, an unreachable datasource, an
-#   unreachable JWT issuer, or a Flyway checksum mismatch aborts the start before
-#   the listener binds, so the task never reports healthy.
+#   These are the concrete ways this build and this container fail. Each is
+#   intentional, so a reader who hits one knows it is the design working.
+#     1. `docker build` fails at Maven `validate` if any Java source in this
+#        module or in common-lib violates the Checkstyle Javadoc gate. That gate
+#        is deliberate and must never be bypassed; see the first COPY group.
+#     2. `docker build` fails at `validate` if config/checkstyle is absent from
+#        the build context, because the ruleset's SuppressionFilter is declared
+#        optional="false" and therefore fail-closed.
+#     3. `docker build` fails at a COPY, before Maven runs at all, if the context
+#        is not the repository root. This is the same root cause as 2 reaching the
+#        build earlier. Every COPY in this file names a repository-root-relative
+#        path, so in a narrowed context all seven fail; BuildKit resolves local
+#        context checksums concurrently and reports whichever it settles on first,
+#        so the terminal message names an arbitrary one of them rather than
+#        reliably naming config/checkstyle. Measured against a services/ context,
+#        all seven are reported: "/config/checkstyle": not found alongside
+#        "/services/pom.xml", the two sibling POMs, both src trees and
+#        "/config/docker/generate-listener-material.sh". A reader who sees only
+#        the last of those should not conclude the ruleset path is fine.
+#     4. The container fails to start if any no-fallback variable listed above is
+#        unset, if SPRING_DATASOURCE_URL is unreachable, if the JWT issuer is
+#        unreachable, or if a Flyway checksum mismatch or a failed migration
+#        aborts the run.
+#     5. The HEALTHCHECK reports unhealthy until the context is fully initialised
+#        and the datasource is reachable, so a task that cannot reach its database
+#        never joins the load balancer rather than serving errors.
+#
+# Provenance:
+#   The baseline loads this context's three online programs from the CICS load
+#   library declared at app/csd/CARDDEMO.CSD:489-491, where
+#   DEFINE LIBRARY(CARDDLIB) names DSNAME01(AWS.M2.CARDDEMO.LOADLIB). This image
+#   is the container-registry equivalent of that library and is an ADDITIONAL
+#   deployment path alongside it: the migration adds a path and removes none. That
+#   CSD, and every file under app/, is REFERENCE ONLY and is never modified; it is
+#   cited here by path and line and in no other way.
 #
 # Governing convention:
 #   docs/CODE_DOCUMENTATION_STANDARD.md
@@ -39,6 +122,11 @@
 #       and the inherited Checkstyle documentation gate reads config/checkstyle,
 #       which sits OUTSIDE the services reactor. Every COPY below is therefore
 #       repository-root-relative and all of them fail if the context is narrowed.
+# WHY : Assumptions: building this image is a VALIDATION exercise. It proves the
+#       two pins resolve, that both modules pass the documentation gate and that
+#       the jar is produced and lands where the entry point looks for it. It
+#       publishes nothing: no registry push, no deployment and no live account are
+#       involved at any point in this file.
 # =============================================================================
 
 # WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
@@ -61,9 +149,55 @@ WORKDIR /build/services
 #       dependency layer. The extra COPY instructions make this file longer, but
 #       they avoid repeating Maven's dependency download, which dominates the
 #       otherwise immutable cost of this build.
+# WHY : Trade-offs: the accepted residue is that dependency:go-offline is not a
+#       guarantee. In a multi-module reactor it can miss a plugin dependency that
+#       only a later lifecycle phase asks for, so the warm-up below is a best
+#       effort rather than a proof of completeness and the `package` step may
+#       still resolve a straggler. The split is kept because the dependency tree,
+#       not the residue, is what dominates a rebuild.
+# WHY : Alternatives Considered: a BuildKit cache mount for ~/.m2, which would
+#       make the warm-up unnecessary by persisting the local repository between
+#       builds. Rejected because it needs a `# syntax=` directive and a builder
+#       that supports cache mounts, whereas the gating workflow invokes plain
+#       `docker build` over each Dockerfile; the image would then build or fail
+#       depending on which builder a runner happened to select. Ordinary layer
+#       caching works on every builder, which is the property that matters here.
 COPY services/pom.xml ./pom.xml
 COPY services/common-lib/pom.xml ./common-lib/pom.xml
 COPY services/card-service/pom.xml ./card-service/pom.xml
+
+# WHY : Assumptions: this is the instruction that forces the build context to be
+#       the repository root, and the mechanism is worth naming exactly because a
+#       narrower context fails in a way that reads like an unrelated problem. The
+#       shared ruleset declares its suppression filter at
+#       config/checkstyle/checkstyle.xml:257-260 with optional="false", which is
+#       FAIL-CLOSED: if suppressions.xml cannot be resolved Checkstyle raises an
+#       error instead of continuing with no suppressions in force. That ruleset is
+#       driven by the checkstyle-documentation-gate execution in
+#       services/pom.xml:849-850, bound to the `validate` phase with
+#       failOnViolation true and violationSeverity warning at :939-940. Because
+#       validate precedes package, an unreachable ruleset stops the build before a
+#       single class is compiled.
+# WHY : Assumptions: the destination is absolute where the three POM paths above
+#       are relative, and the asymmetry is required rather than untidy. config/ is
+#       a SIBLING of services/ in the repository, and the parent POM locates the
+#       ruleset through profiles that test ../config/checkstyle from the
+#       aggregator (services/pom.xml:1247) and ../../config/checkstyle from each
+#       module (:1267). Mirroring that relationship under /build satisfies both at
+#       once; flattening it into the reactor directory would satisfy neither.
+# WHY : Alternatives Considered: a narrower services/ build context, which would
+#       copy less and read more naturally given where this file lives. It does not
+#       actually work: the configLocation the gate resolves still has to reach
+#       config/checkstyle, which sits outside services/, so the narrower context
+#       merely moves the same failure earlier. Passing -Dcheckstyle.skip to make
+#       it work is PROHIBITED here and anywhere else in this file; the correct
+#       resolution is the wider context, which is why it is the documented one.
+# WHY : Alternatives Considered: vendoring a copy of the ruleset into this module,
+#       which would make a services/ context viable. Rejected because the ruleset
+#       is deliberately single-sourced under config/checkstyle for all nine
+#       modules, and a per-module copy is a second place to edit that drifts
+#       silently: this module would then lint under a different ruleset than its
+#       siblings while every build still reported green.
 COPY config/checkstyle /build/config/checkstyle
 
 # WHY : Assumptions: Maven validates every module directory an aggregator declares
@@ -106,18 +240,40 @@ RUN awk ' \
     && mvn -B -ntp -f pom.xml -pl common-lib,card-service -am \
        dependency:go-offline
 
+# WHY : Trade-offs: the sources are copied AFTER the descriptor and ruleset layer
+#       and after the dependency warm-up, which is the entire reason the copies are
+#       split into two groups rather than done as one. A one-line Java edit
+#       invalidates this layer and everything below it while leaving the resolved
+#       dependency layer above it intact. Reversing the order would be shorter to
+#       read and would re-resolve the whole dependency tree on every source edit.
 COPY services/common-lib/src ./common-lib/src
 COPY services/card-service/src ./card-service/src
 
+# WHY : Assumptions: -am ("also make") is what builds the common-lib sibling from
+#       source in this same reactor invocation. That sibling is never published to
+#       a repository, so without -am this stage would try to resolve
+#       com.carddemo:common-lib from ~/.m2, find nothing, and fail; with it, a
+#       clean checkout is sufficient to build this image and no pre-install step
+#       is required of the caller.
 # WHY : Trade-offs: tests are skipped while packaging because the suite gate is
 #       the repository-root reactor build `mvn -f services/pom.xml clean verify`,
-#       whose Surefire and Failsafe executions cover all ten modules. This stage
+#       whose Surefire and Failsafe executions cover all nine modules. This stage
 #       sees only common-lib and card-service, so running tests here would report a
-#       narrower result under a name that reads like the full one.
-# WHY : Assumptions: Checkstyle stays bound to `validate` and therefore still runs
-#       inside this stage, before `package`, even under -DskipTests. It is the one
-#       gate this image build keeps, because a missing Javadoc is a defect in the
-#       sources being compiled here rather than a statement about behavior.
+#       narrower result under a name that reads like the full one. The module's own
+#       CardRepositoryIT could not run here in any case: it starts a real database
+#       through Testcontainers, and there is no container runtime inside this build.
+# WHY : Assumptions: -DskipTests skips TEST EXECUTION only. It does NOT skip the
+#       documentation gate, and the distinction matters because a reader may assume
+#       otherwise: Checkstyle stays bound to `validate`, validate still precedes
+#       package, and a missing or incomplete Javadoc in either module compiled here
+#       still fails this instruction. It is the one gate this image build keeps,
+#       because a missing Javadoc is a defect in the sources being compiled here
+#       rather than a statement about behavior. -Dcheckstyle.skip is prohibited.
+# WHY : Assumptions: -DskipTests is used rather than -Dmaven.test.skip, which would
+#       also skip test COMPILATION. That distinction is load-bearing here: this
+#       module consumes common-lib's test-jar (the shared layering rules), and that
+#       artifact is assembled from compiled test classes, so skipping test
+#       compilation would leave the reactor unable to attach it.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,card-service -am \
     clean package -DskipTests
 
@@ -172,7 +328,70 @@ COPY --from=build --chown=10001:10001 \
 #       health group, over TLS, because the base profile enables server.ssl and
 #       declares one connector. A second port was considered and is not available
 #       without a management port, which would need its own certificate.
+# WHY : Assumptions: 8080 is not a free choice. The security-group design admits
+#       load-balancer-to-application traffic on 8080 and on no other port, and the
+#       load balancer's target group polls the actuator health path there, so the
+#       listener has to be on that port for a task ever to turn healthy. The three
+#       artifacts move together or not at all.
+# WHY : Assumptions: this instruction is METADATA ONLY and enforces nothing at run
+#       time. It documents the contract and feeds tooling that reads image
+#       metadata; it neither opens the port nor binds it. The actual bind comes
+#       from the server port property, which is why SERVER_PORT is listed in the
+#       header as an override that has to be made in all three places at once.
 EXPOSE 8080
+
+# WHY : Assumptions: the heap ceiling is declared as a PERCENTAGE of the memory
+#       the container is actually given, so it scales with whatever the task
+#       definition allocates and never has to be edited alongside it. Java 21 is
+#       container-aware and reads the cgroup limit, but its default share of that
+#       limit is tuned for a host running many processes, not for a task whose
+#       entire allocation belongs to one JVM. Measured inside this exact runtime
+#       digest: MaxRAMPercentage defaults to 25.0, so under a 1 GiB limit the heap
+#       ceiling is 256 MiB and three quarters of the task's paid-for memory is
+#       unavailable to it; at 75.0 the same limit yields 768 MiB.
+# WHY : Refactoring Rationale: an earlier revision of this file rejected "-Xmx or
+#       -XX container flags" as a single category, on the ground that a hard-coded
+#       ceiling would silently override the task definition's memory and have to be
+#       edited in two places. That reasoning is sound for -Xmx and does not
+#       transfer to MaxRAMPercentage, which states a ratio rather than a size and
+#       therefore tracks the task definition instead of contradicting it. Treating
+#       the absolute and the relative form as one category is what left the heap on
+#       a default nobody had chosen, so the two are separated here: -Xmx stays
+#       rejected for the original reason, and the percentage is set explicitly.
+# WHY : Trade-offs: this is a DEFAULT, not a floor. The entry point expands
+#       ${JAVA_OPTS} unquoted and word-splits it
+#       (config/docker/generate-listener-material.sh:189), so a task definition
+#       setting JAVA_OPTS replaces this value wholesale rather than adding to it,
+#       and a deployment that needs another flag must restate the percentage
+#       alongside it. That is accepted because the alternative, merging a
+#       container-set value with an image-set one, needs a wrapper that parses JVM
+#       arguments, and a wrapper that silently reorders or drops a flag is a worse
+#       failure than a variable a reader can see being replaced.
+# WHY : Alternatives Considered: JAVA_TOOL_OPTIONS, which the JVM reads with no
+#       cooperation from the entry point at all. Rejected because EVERY JVM started
+#       in this image would inherit it, including a diagnostic `keytool` or `java
+#       -version` invocation, each of which would then print a "Picked up
+#       JAVA_TOOL_OPTIONS" line onto its output. JAVA_OPTS is read only by the one
+#       process this is meant to configure.
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+
+# WHY : Trade-offs: SPRING_PROFILES_ACTIVE is deliberately NOT set here, and its
+#       absence is the decision rather than an omission. One built image is meant
+#       to run unchanged in every environment, and the ECS task definition selects
+#       the profile at launch. Baking one in would require a separate image per
+#       environment and would make the image's behavior depend on which environment
+#       happened to build it, so the artifact could no longer be promoted between
+#       them. Accepted cost: the image cannot be run correctly with `docker run`
+#       and no environment supplied, which is the right bias because that failure
+#       is immediate and legible whereas a wrong baked-in profile is silent.
+# WHY : Assumptions: the same reasoning covers every other deployment-specific
+#       value, and none of them is present in this image either: no datasource URL,
+#       no database or Flyway credential, no JWT issuer URI, no expected client id,
+#       no key identifier, no signing key and no region. They arrive at run time
+#       from Parameter Store and Secrets Manager through the task definition, which
+#       is what keeps this file free of secrets by construction rather than by
+#       review.
+
 
 # WHY : Refactoring Rationale: the listener key pair and certificate are minted
 #       by THIS TASK at startup rather than injected from Secrets Manager. They
@@ -242,9 +461,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 #       only one of them ever reads, and it puts the key on a volume a second
 #       process can open. Generating it in the same process tree keeps the key
 #       reachable only by the JVM's own user.
-# WHY : Alternatives Considered: adding -Xmx or -XX container flags was rejected.
-#       Java 21 reads the cgroup memory limit and sizes the heap from it, so a
-#       hard-coded ceiling would silently override the task definition's memory
-#       and have to be edited in two places whenever that changes. JAVA_OPTS is
-#       honoured by the script for a deployment that must override something.
+# WHY : Alternatives Considered: passing JVM flags as literal arguments on this
+#       instruction rather than through the JAVA_OPTS variable set above. Rejected
+#       because the entry point is a script that ends in `exec java ${JAVA_OPTS:-}
+#       -jar /app/app.jar "$@"`, so an argument placed here would arrive AFTER
+#       -jar and be handed to the application as a program argument instead of
+#       being interpreted by the JVM. The variable is the only position in this
+#       arrangement where a JVM flag is read as one. -Xmx remains rejected in
+#       either position, for the reason recorded on that ENV instruction.
 ENTRYPOINT ["/usr/local/bin/carddemo-entrypoint.sh"]

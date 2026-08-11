@@ -64,6 +64,12 @@ from carddemo_migration.loaders.protected_columns import (
     ProtectedColumnError,
 )
 
+# WHY : Assumptions: the dataset-to-reader dispatch is imported rather than restated, so the
+#   assertion that a refused layout is readerless reads the same mapping `cli.py` resolves a reader
+#   through. A local list of reader names would keep asserting a layout has no reader after one had
+#   been added, which is precisely the drift that turned the transaction master unloadable.
+from carddemo_migration.readers import DATASET_READERS
+
 # WHY : Assumptions: the composite key's membership is imported from the reader that publishes
 #   it rather than restated here, following the same single-sourcing rule the readers follow for
 #   layouts. Restating the three component names would create a second statement of the key's
@@ -75,15 +81,20 @@ from carddemo_migration.readers.tcatbal import COMPOSITE_KEY_FIELD_NAMES
 if TYPE_CHECKING:
     from conftest import FakeAuroraDatabase
 
-# Assumptions: the ten loadable records are stated literally, in declaration order, so a
+# Assumptions: the eleven loadable records are stated literally, in declaration order, so a
 #   target appearing or disappearing is a visible edit here rather than a silent change in
 #   what a migration run covers. Reading the mapping back would make this assertion true of
 #   any mapping at all, including an empty one.
-# WHY : Refactoring Rationale: this table named FIVE records and now names ten. The five that
+# WHY : Refactoring Rationale: this table named FIVE records and now names eleven. The six that
 #   were missing were the card master, the customer master, the daily-transaction feed, the
-#   category balances and every user of the system -- so `sql/verify/row_counts.sql` listed eleven
-#   dataset baselines against a loader that could satisfy four of them, and the shortfall was
-#   asserted here as if it were a design.
+#   category balances, every user of the system and the transaction master -- so
+#   `sql/verify/row_counts.sql` listed eleven dataset baselines against a loader that could satisfy
+#   four of them, and the shortfall was asserted here as if it were a design. `TRAN` was the last
+#   to be added and was withheld on a different ground from the other five: that the SEED CORPUS
+#   ships no extract for it. That is true of the corpus and not of the record, which has a reader,
+#   a 350-byte layout, a registered verification baseline and a REPRO job at
+#   `app/jcl/TRANFILE.jcl`, so asserting it unloadable pinned "a cutover cannot move the
+#   transaction master" as a contract.
 _LOADABLE_RECORDS = (
     "XREF",
     "TRANTYPE",
@@ -93,24 +104,36 @@ _LOADABLE_RECORDS = (
     "CARD",
     "CUSTOMER",
     "DALYTRAN",
+    "TRAN",
     "TCATBAL",
     "SECUSER",
 )
 
-# Assumptions: the three reference records are the only ones declaring a conflict key, because
-#   they are the only target tables with a SECOND writer -- `V2__seed_reference.sql` seeds all
-#   three. They are named here rather than read off the targets so that giving a master table a
-#   conflict key, which would turn a re-run from a reported duplicate into a silent no-op, is a
-#   visible edit to this table.
-_MERGED_RECORDS = ("TRANTYPE", "TRANCAT", "DISGROUP")
+# Assumptions: these four records declare a conflict key, because their target tables are the only
+#   ones with a SECOND writer. Three are seeded by `V2__seed_reference.sql`. The fourth is the
+#   transaction master, whose second writer is the posting job rather than a migration:
+#   `app/cbl/CBTRN02C.cbl` inserts into `ledger.transactions` from the daily feed, so rows carrying
+#   these keys can already be present when a load is re-run. They are named here rather than read
+#   off the targets so that giving a SINGLE-writer master a conflict key, which would turn a re-run
+#   from a reported duplicate into a silent no-op, is a visible edit to this table.
+_MERGED_RECORDS = ("TRANTYPE", "TRANCAT", "DISGROUP", "TRAN")
 
-# Assumptions: these records are registered and readable and deliberately have NO load target,
-#   and the reason is now the OPPOSITE of a refusal: nothing ships to load. `TRAN` is the
-#   transaction master, which no dataset carries in either encoding and which the posting job
-#   fills from `ledger.daily_transactions`; the other three are layouts the batch chain writes
-#   rather than reads. The message is asserted because "no target" and "no target because there
-#   is no extract" send the next reader to entirely different places.
-_POSTING_FILLED_RECORDS = ("TRAN", "TRNX", "REJECT", "INTTRAN")
+# Assumptions: the subset of merged records whose second writer is the reference seed migration, so
+#   the conflict target can be asserted against that file's own `ON CONFLICT` clause. `TRAN` is
+#   excluded because its second writer ships no such clause -- the posting job inserts through
+#   application code -- so its key is checked against the primary-key constraint in
+#   `V1__ledger.sql` instead.
+_SEED_MERGED_RECORDS = ("TRANTYPE", "TRANCAT", "DISGROUP")
+
+# Assumptions: these records are registered and deliberately have NO load target, and the reason is
+#   the OPPOSITE of a refusal: they are written BY the batch chain and nothing reads them in, so
+#   there is no load direction to declare a target for. `readers/__init__.py` publishes no reader
+#   for any of the three, which is the same fact stated where a caller would meet it.
+# WHY : Refactoring Rationale: `TRAN` was a fourth member here and is REMOVED. It was grouped with
+#   these three on the ground that no extract ships for it, but it is not like them: it has a
+#   reader, a layout, a verification baseline and a REPRO job, and what it lacks is a dataset in the
+#   seed corpus. Keeping it here asserted the corpus's contents as a property of the record.
+_BATCH_WRITTEN_RECORDS = ("TRNX", "REJECT", "INTTRAN")
 
 # Assumptions: the keys a target may declare that no reader publishes, stated here so the
 #   field-provenance assertion can exempt exactly these and nothing else. `cognito_sub` is the
@@ -165,13 +188,17 @@ _REGISTRATION_ROW = re.compile(
 #   deliberately does not declare. Withdrawing an excuse whose obstacle is gone is the point of this
 #   mapping being asserted against the targets: an excuse that outlives its reason is exactly how a
 #   delivered load would come to be reported as impossible.
-_NO_LOAD_TARGET_BY_DESIGN: dict[str, str] = {
-    "ledger.transactions": (
-        "registered against the dataset name '(none)' with a NULL baseline: no seed dataset for"
-        " this table exists in either app/data tree, and it is filled by the posting job rather"
-        " than by any load"
-    ),
-}
+# WHY : Refactoring Rationale: the FIFTH and last entry is now withdrawn too, and the mapping is
+#   deliberately EMPTY rather than deleted. It excused `ledger.transactions` as "registered against
+#   the dataset name '(none)' with a NULL baseline ... filled by the posting job rather than by any
+#   load". Every clause of that was true and the conclusion still did not follow: a NULL baseline
+#   says the seed corpus ships no extract to count, not that no extract can ever be loaded, and
+#   `app/jcl/TRANFILE.jcl` is a REPRO job for exactly this cluster. The excuse therefore described
+#   the corpus while reading as a property of the table, and while it stood the general assertion
+#   above stayed green with the largest table in the system unloadable. The mapping is kept in place
+#   because it is the mechanism by which a future exemption must be stated explicitly and checked
+#   against the verification SQL, and an empty one asserts that no exemption is currently claimed.
+_NO_LOAD_TARGET_BY_DESIGN: dict[str, str] = {}
 
 
 def _datasets_registered_for_verification() -> dict[str, str]:
@@ -226,8 +253,8 @@ def _migration_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in files)
 
 
-def test_the_declared_targets_are_exactly_the_ten_loadable_records() -> None:
-    """Declare a load target for exactly the ten records this module can load.
+def test_the_declared_targets_are_exactly_the_eleven_loadable_records() -> None:
+    """Declare a load target for exactly the eleven records this module can load.
 
     Returns
     -------
@@ -454,14 +481,14 @@ def test_every_target_column_exists_in_a_shipped_migration(record: str) -> None:
         assert re.search(rf"\b{column}\b", ddl), f"column {column} is declared by no migration"
 
 
-@pytest.mark.parametrize("record", _POSTING_FILLED_RECORDS)
-def test_a_record_with_no_shipped_extract_is_refused_with_its_reason(record: str) -> None:
-    """Refuse a load target for a record no dataset carries, and say that is why.
+@pytest.mark.parametrize("record", _BATCH_WRITTEN_RECORDS)
+def test_a_layout_the_batch_chain_writes_is_refused_with_its_reason(record: str) -> None:
+    """Refuse a load target for a layout the batch chain writes, and say that is why.
 
     Parameters
     ----------
     record : str
-        One record registered here that no seed extract carries.
+        One registered layout that the batch chain writes and nothing reads in.
 
     Returns
     -------
@@ -471,23 +498,29 @@ def test_a_record_with_no_shipped_extract_is_refused_with_its_reason(record: str
     Raises
     ------
     AssertionError
-        If the record has a target, or is refused without naming the absent-extract reason.
+        If the layout has a target, or is refused without naming the no-load-direction reason.
     """
-    # WHY : Refactoring Rationale: this test used to run over CUSTOMER and CARD and require the
-    #   refusal to say the word "ciphertext" -- pinning, as a contract, that the customer master
-    #   and the card master had no migration path. Both now load through
-    #   `loaders/protected_columns.py`, so what is pinned here instead is the one refusal that is
-    #   genuinely a design decision: a record for which nothing ships.
+    # WHY : Refactoring Rationale: this test used to run over CUSTOMER, CARD and TRAN as well.
+    #   CUSTOMER and CARD required the refusal to say the word "ciphertext", pinning as a contract
+    #   that the customer and card masters had no migration path; both now load through
+    #   `loaders/protected_columns.py`. TRAN required it to say "no extract", pinning the seed
+    #   corpus's contents as a property of the transaction master; it now loads, and an empty
+    #   extract is a zero-row success. What is pinned here instead is the one refusal that is
+    #   genuinely a design decision: a layout with no load direction at all.
     assert record not in target_names()
+    # WHY : Assumptions: the dispatch mapping is asserted to publish no reader for the layout,
+    #   which is the fact the refusal message states. Without this the message could keep claiming
+    #   a layout is readerless after a reader had been added for it.
+    assert record not in DATASET_READERS
     with pytest.raises(AuroraLoadError) as refused:
         target_for(record)
     message = str(refused.value)
     # WHY : the REASON is asserted, not merely the refusal. "No target" reads as an omission
-    #   someone should fill in; "no extract ships in either encoding, and the posting job fills
-    #   this table from the daily feed" tells the next reader that adding a mapping would be
-    #   loading a table from a dataset that does not exist.
-    assert "no extract" in message
-    assert "ledger.daily_transactions" in message
+    #   someone should fill in; "written BY the batch chain ... so there is no load direction for
+    #   it" tells the next reader that adding a mapping would be loading a table from a layout
+    #   nothing produces as input.
+    assert "written BY the batch" in message
+    assert "no load direction" in message
     assert record in message
 
 
@@ -925,21 +958,37 @@ def test_only_a_table_with_a_second_writer_declares_a_conflict_key(record: str) 
     """
     target = target_for(record)
     assert target.conflict_key, f"{record} loads into a table with two writers and must merge"
-    seed = (
-        _SERVICES_ROOT / "reference-service/src/main/resources/db/migration/V2__seed_reference.sql"
-    ).read_text(encoding="utf-8")
-    # WHY : Assumptions: the conflict target is checked against the SEED MIGRATION's own
-    #   `ON CONFLICT` clause, read from disk, rather than against a key written into this file.
-    #   The two writers must conflict on the same key or they do not compose: if the loader
-    #   conflicted on a subset it would silently skip rows the migration had not written, and if it
-    #   conflicted on a superset PostgreSQL would refuse the statement for want of a matching
-    #   unique index. Comparing against the other writer's clause is the only assertion that
-    #   catches either.
     clause = ", ".join(target.conflict_key)
-    assert f"ON CONFLICT ({clause}) DO NOTHING" in seed, (
-        f"{record} merges on ({clause}), which is not the conflict target"
-        " V2__seed_reference.sql uses for the same table"
-    )
+    if record in _SEED_MERGED_RECORDS:
+        seed = (
+            _SERVICES_ROOT
+            / "reference-service/src/main/resources/db/migration/V2__seed_reference.sql"
+        ).read_text(encoding="utf-8")
+        # WHY : Assumptions: the conflict target is checked against the SEED MIGRATION's own
+        #   `ON CONFLICT` clause, read from disk, rather than against a key written into this file.
+        #   The two writers must conflict on the same key or they do not compose: if the loader
+        #   conflicted on a subset it would silently skip rows the migration had not written, and
+        #   if it conflicted on a superset PostgreSQL would refuse the statement for want of a
+        #   matching unique index. Comparing against the other writer's clause is the only
+        #   assertion that catches either.
+        assert f"ON CONFLICT ({clause}) DO NOTHING" in seed, (
+            f"{record} merges on ({clause}), which is not the conflict target"
+            " V2__seed_reference.sql uses for the same table"
+        )
+    else:
+        # WHY : Assumptions: the transaction master's second writer is the posting job rather than
+        #   a migration, so it ships no `ON CONFLICT` clause to compare against. The equivalent
+        #   check is the PRIMARY KEY constraint in the owning service's migration: a merge can only
+        #   conflict on a key backed by a unique index, and the primary key is the one this table
+        #   declares. Asserting against the shipped DDL rather than against a literal here is what
+        #   keeps the loader's key from drifting away from the index that has to support it.
+        ledger = (
+            _SERVICES_ROOT / "transaction-service/src/main/resources/db/migration/V1__ledger.sql"
+        ).read_text(encoding="utf-8")
+        assert f"PRIMARY KEY ({clause})" in ledger, (
+            f"{record} merges on ({clause}), which V1__ledger.sql does not declare as the primary"
+            " key of the table it loads, so no unique index would support the conflict target"
+        )
     for other in _LOADABLE_RECORDS:
         if other not in _MERGED_RECORDS:
             assert not target_for(other).conflict_key, (
@@ -1043,6 +1092,150 @@ def test_a_merge_into_an_already_seeded_table_reports_every_row_skipped(
     assert "already present" in outcome.describe()
     assert fake_aurora.commits == 1
     assert fake_aurora.rollbacks == 0
+
+
+def _transaction_record(transaction_id: str) -> dict[str, object]:
+    """Build one decoded transaction-master record in the shape its reader publishes.
+
+    Purpose
+    -------
+    Supply a `TRAN` record for the load-path tests without restating a layout. Only the mapped
+    field NAMES appear, taken from the target's own column mapping, and the widths are the
+    copybook's so that the trimming and stamp projections have something real to act on.
+
+    Parameters
+    ----------
+    transaction_id : str
+        The sixteen-character key the row carries, which is what a re-run collides on.
+
+    Returns
+    -------
+    dict[str, object]
+        One record keyed by copybook field name, including the `FILLER` a reader drops, so that a
+        preparation copying the record forward rather than projecting it would be caught.
+
+    Raises
+    ------
+    None
+    """
+    return {
+        "TRAN-ID": transaction_id,
+        "TRAN-TYPE-CD": "01",
+        "TRAN-CAT-CD": "0001",
+        "TRAN-SOURCE": "POS TERM  ",
+        "TRAN-DESC": "Purchase at Abshire-Lowe" + " " * 76,
+        "TRAN-AMT": Decimal("504.77"),
+        "TRAN-MERCHANT-ID": "800000000",
+        "TRAN-MERCHANT-NAME": "Abshire-Lowe" + " " * 38,
+        "TRAN-MERCHANT-CITY": "North Enoshaven" + " " * 35,
+        "TRAN-MERCHANT-ZIP": "72112     ",
+        "TRAN-CARD-NUM": "4859452612877065",
+        "TRAN-ORIG-TS": "2022-07-18 10:30:00.123456",
+        "TRAN-PROC-TS": "2022-07-18 10:30:00.123456",
+        "FILLER": " " * 20,
+    }
+
+
+def test_reloading_the_transaction_master_adds_nothing_and_raises_nothing(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Leave the row count unchanged, and let no duplicate-key error escape, on a second load.
+
+    Purpose
+    -------
+    Pin idempotency on a LEDGER target rather than only on a reference one. The reference tables
+    compose with a migration; this one composes with the posting job, and it is the target where a
+    redriven cutover load actually re-runs, so the second-run behaviour has to be asserted here
+    too and not inferred from the reference case.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the second load reports rows added, fails, or rolls back.
+    """
+    target = target_for("TRAN")
+    records = [_transaction_record("0000000000683580")]
+    # WHY : Assumptions: the first run's merge is arranged to report one row added and the second
+    #   run's to report none, which is what PostgreSQL answers for `ON CONFLICT DO NOTHING` against
+    #   a row already present. Arranging both is what makes the two runs distinguishable; deriving
+    #   the count would make an inserting load and a no-op load report the same number.
+    fake_aurora.arrange_affected_rows("insert into", 1)
+    first = load_records(fake_aurora.connect(**_connection_params()), target, records)
+    assert first.staged == 1
+    assert first.inserted == 1
+    fake_aurora.arrange_affected_rows("insert into", 0)
+    second = load_records(fake_aurora.connect(**_connection_params()), target, records)
+    # WHY : the second run is asserted to COMMIT while adding nothing. A plain COPY would abort on
+    #   `pk_transactions` and surface a duplicate-key error, which on this table would misreport a
+    #   correctly-posted row as a load fault and would break Step Functions redrive outright.
+    assert second.staged == 1
+    assert second.inserted == 0
+    assert second.skipped == 1
+    assert fake_aurora.rollbacks == 0
+    assert fake_aurora.commits == 2
+    # WHY : the table is never cleared between runs. Idempotency achieved by emptying the table
+    #   first would discard rows the posting job had written, and `V0__schemas_and_roles.sql`
+    #   withholds DELETE and TRUNCATE from every role precisely so that cannot be the mechanism.
+    assert fake_aurora.forbidden_statements() == ()
+
+
+def test_an_absent_transaction_extract_loads_zero_rows_and_succeeds(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Commit a zero-row load when the transaction extract yields no records at all.
+
+    Purpose
+    -------
+    Pin the case that made this target look unloadable. The seed corpus ships no `TRANSACT`
+    extract, `readers/transaction.py` treats an absent source as a normal state, and
+    `sql/verify/row_counts.sql` gives the table a NULL baseline -- so an empty stream is the
+    NORMAL outcome of a corpus-only run and has to commit rather than raise.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If an empty stream raises, rolls back, or reports rows it did not load.
+    """
+    target = target_for("TRAN")
+    fake_aurora.arrange_affected_rows("insert into", 0)
+    # WHY : Assumptions: the empty case is exercised through an exhausted GENERATOR rather than an
+    #   empty list, because that is what a reader hands the loader -- `readers/transaction.py`
+    #   yields nothing for an absent or empty source. A list would also pass while proving nothing
+    #   about the streaming path, which is the path a real load takes.
+    outcome = load_records(
+        fake_aurora.connect(**_connection_params()),
+        target,
+        (record for record in ()),
+    )
+    assert outcome.staged == 0
+    assert outcome.inserted == 0
+    assert fake_aurora.commits == 1
+    assert fake_aurora.rollbacks == 0
+    # WHY : no row is written, but the staging table and the merge ARE issued. A load that skipped
+    #   the statements on an empty stream would leave the empty case exercising a different code
+    #   path from every other run, so a fault in the merge would first appear on the day an extract
+    #   finally arrived.
+    assert [row for _, row in fake_aurora.copied_rows] == []
 
 
 def test_a_merge_that_fails_rolls_back_and_names_the_staged_count(

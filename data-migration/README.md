@@ -107,12 +107,14 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 >
 > Assumptions: a source-record cutover from this checkout is now a matter of
 > CREDENTIALS AND A CLUSTER rather than of missing code. The load and the three
-> verification passes are implemented and tested, and `load-dataset` serves all TEN
+> verification passes are implemented and tested, and `load-dataset` serves all ELEVEN
 > loadable records — including `CUSTOMER` and `CARD`, whose tables declare ciphertext
 > columns that this package now produces under the same envelope framing and the same
 > key the owning service reads, as [§5.2](#52-subcommands-and-their-arguments)
-> records. Two things a cutover claim must still account for: the checksum pass
-> serves three of the ten records rather than all ten, for the measured reason in
+> records, and `TRAN`, the transaction master, for which the seed corpus ships no extract
+> and an absent one is a zero-row success rather than a failure. Two things a cutover
+> claim must still account for: the checksum pass
+> serves three of the eleven records rather than all eleven, for the measured reason in
 > [§10](#10-verification), and nothing here has been exercised against a provisioned
 > Aurora cluster.
 >
@@ -1412,22 +1414,22 @@ balance, card number and identity record in the system. The output of both files
 byte-identical across the change — same columns, same eleven and nine rows, same exact
 totals — because the aggregates were moved rather than rewritten.
 
-**Measured coverage today: passes 1 and 3 serve all ten loadable records; pass 2 serves
+**Measured coverage today: passes 1 and 3 serve all eleven loadable records; pass 2 serves
 three of them.** The three are the reference records `TRANTYPE`, `TRANCAT` and
 `DISGROUP`. Pass 2 digests the decoded source against the rows read back, so both sides
 must be constructed identically, and the digest accepts characters, an exact decimal or
 raw bytes only. Every comparable column of those three records is `CHAR`, `VARCHAR` or
-`NUMERIC`, so the two sides agree. Each of the other seven carries at least one
+`NUMERIC`, so the two sides agree. Each of the other eight carries at least one
 `BIGINT`, `DATE`, `SMALLINT`, `TIMESTAMP` or `UUID` comparable column, which the driver
 returns as an `int`, a `date` or a `UUID`; and for an identifier the two sides also
 disagree in representation, because a reader publishes the declared full width with its
-leading zeros where the column holds a number. Extending the pass to all ten is a
+leading zeros where the column holds a number. Extending the pass to all eleven is a
 matter of rendering those columns back into the reader's published shape at the
 read-back boundary.
 
 Assumptions: this is recorded here, in the section that states the requirement, rather
 than left for an operator to meet as a type error mid-cutover. Pass 2 does not report a
-difference for those seven — it fails on a value it cannot digest — so the
+difference for those eight — it fails on a value it cannot digest — so the
 [data-migration runbook](../docs/runbooks/data-migration.md) prescribes it for the three
 it serves and names the gap at its cutover gate. A verification requirement that
 overstates its own reach is the failure mode this whole section exists to prevent, so it

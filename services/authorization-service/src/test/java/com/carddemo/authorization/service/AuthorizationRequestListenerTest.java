@@ -2,9 +2,13 @@ package com.carddemo.authorization.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -30,15 +34,24 @@ import com.carddemo.common.codec.CsvAuthCodec.AuthMessageFormatException;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.money.MoneyModule;
+import io.awspring.cloud.sqs.annotation.SqsListener;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -46,6 +59,9 @@ import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Pins the behaviour surrounding the decision: the reads, the key, the refusals and the reply routing.
@@ -61,6 +77,39 @@ import org.springframework.messaging.support.MessageBuilder;
  * <p>Assumptions: every collaborator is a mock and the clock is fixed, so no container, database or queue
  * is involved and the expected key is an arithmetic consequence of the fixed instant rather than of
  * whenever the test ran.</p>
+ *
+ * <p><b>Divergences owned here.</b> Three of the eight this package registers are asserted by this class,
+ * and the package charter at {@code package-info.java} names it the owner of each. <b>D-D</b> -- a receive
+ * failure sets neither exit flag in the reference program, so its poll cycle continues over a get buffer
+ * the failed receive never refreshed; here a failure is terminal for that delivery and the shape is
+ * structurally unreachable because each delivery carries its own payload. <b>D-F</b> -- the purge program
+ * tests one counter twice, and this class owns the ACCUMULATION half: which counter and which amount each
+ * arm of the decision moves, so that the paired guard in {@code PurgeJobTest} has a state to be wrong
+ * about. <b>D-H</b> -- the wire's fourteen-character money token is parsed through a thirteen-character
+ * receiving item there, and here the whole token is read or the request is refused. Nothing in
+ * {@code app} is edited for any of the three: they are registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which is the house precedent recorded at
+ * {@code tests/README.md} section 1.1 lines 50 to 60 for an unfixable defect in immutable baseline
+ * source.</p>
+ *
+ * <p>Assumptions: NO golden master exists for this path, and three independent structural reasons put one
+ * out of reach rather than merely making one inconvenient. The existing suite states at
+ * {@code tests/README.md} lines 83 to 85 that the online programs cannot run end to end without a
+ * transaction monitor, which the runner does not have; its build step compiles only {@code app/cbl},
+ * whose twelve batch programs are the whole of its runnable inventory -- section 1.1 says ten of the
+ * twelve at that; and this program in particular issues eight {@code COPY CMQ*} statements, at lines 149,
+ * 152, 155, 158, 161, 164, 167 and 170, for which a repository-wide search finds no file at all, so it
+ * cannot be compiled by that harness under any flag. Every expectation in this class is therefore derived
+ * from the source text by citation and not from a recorded run, which is why each non-obvious assertion
+ * carries the line it comes from.</p>
+ *
+ * <p>Assumptions: the user-specified Rule 1 (Explainability) governs this file, and its ruling here is
+ * that the assertion is the WHAT and the reference derivation is the WHY. Its gate is conjunctive -- a
+ * missing docstring fails on its own and a missing decision rationale fails on its own -- so every type,
+ * test, fixture method and private helper below carries a documentation block, and every assertion whose
+ * expected value is not self-evident carries a comment naming the source line that fixes it. The rule is
+ * cited by name and its text is not reproduced; it is read through {@code review_rules}, and the
+ * convention it is applied under is {@code docs/CODE_DOCUMENTATION_STANDARD.md}.</p>
  */
 class AuthorizationRequestListenerTest {
 
@@ -86,6 +135,15 @@ class AuthorizationRequestListenerTest {
 
     /**
      * The one reply destination the listener under test is configured to accept.
+     *
+     * <p>Assumptions: this is a synthetic DESTINATION a requester nominates per message, and not the queue
+     * this consumer reads. The distinction matters because the two are bound in opposite directions: a
+     * reply destination arrives as a message attribute and is checked against an allowlist the deployment
+     * supplies, so a test has to supply one to exercise the check at all, while the REQUEST queue is never
+     * named here -- it is bound from configuration through a property placeholder, which
+     * {@link #theTransportContractIsBoundFromConfigurationAndScopedPerMessage()} asserts. The account
+     * number in this value is the all-zero placeholder and the queue name is a development one, so nothing
+     * here names a real endpoint.</p>
      */
     private static final String ALLOWED_REPLY_QUEUE =
             "https://sqs.us-east-1.amazonaws.com/000000000000/carddemo-pauth-reply-dev.fifo";
@@ -130,6 +188,63 @@ class AuthorizationRequestListenerTest {
      */
     private static final int WINDOW_ADMISSIONS =
             WINDOW_LIMIT + AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET;
+
+    /**
+     * The processing code an acquirer sends for a cash advance rather than a purchase.
+     *
+     * <p>Assumptions: the leading two digits of the six-digit code are the transaction class, so this is
+     * the value that would make a request a cash advance if any part of this flow branched on it. It
+     * exists so the cash-balance case below can show that NOTHING branches on it, which a purchase-coded
+     * request could not show.</p>
+     */
+    private static final String CASH_ADVANCE_PROCESSING_CODE = "010000";
+
+    /**
+     * The committed three-record money-boundary fixture, on the classpath.
+     */
+    private static final String AMOUNT_VARIANTS_FIXTURE = "/fixtures/auth-request-amount-variants.csv";
+
+    /**
+     * The committed single-record canonical request wire, on the classpath.
+     */
+    private static final String CANONICAL_WIRE_FIXTURE = "/fixtures/auth-request-canonical-wire170.csv";
+
+    /**
+     * The committed seven-record decline-reason fixture, on the classpath.
+     */
+    private static final String DECLINED_REASONS_FIXTURE = "/fixtures/auth-reply-declined-reasons.csv";
+
+    /**
+     * The card the two committed request fixtures authorize.
+     *
+     * <p>Assumptions: it differs from {@link #CARD_NUM} because the fixtures are shared with the codec's
+     * own vectors and carry their own synthetic test-range number. A case driving a fixture line therefore
+     * has to stub the cross-reference for THIS card, and one that silently reused the other constant would
+     * exercise the unresolved-card path while appearing to exercise the amount.</p>
+     */
+    private static final String FIXTURE_CARD_NUM = "4000123456789010";
+
+    /**
+     * The widest amount the wire's money picture can express.
+     *
+     * <p>Assumptions: ten integer digits and two decimals, which is
+     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} line 27 at its maximum. It is the one
+     * amount in the committed fixture whose final digit the reference receiver's narrower intermediate
+     * discards, which is why the D-H case below spells it out rather than deriving it.</p>
+     */
+    private static final BigDecimal MAXIMUM_DECLARED_AMOUNT = new BigDecimal("9999999999.99");
+
+    /**
+     * The two response reasons the detail screen's display table holds and this consumer never emits.
+     *
+     * <p>Assumptions: {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl} declares a ten-entry
+     * table at its lines 58 to 67, and these two -- {@code '4400EXCED DAILY LMT'} at line 63 and
+     * {@code '5300LOST CARD'} at line 66 -- are the two entries no branch of the deciding paragraph
+     * selects. The table is a superset by exactly two, and it is NOT wrong: a display table that can
+     * render a reason another producer might one day send is broader than the producer on purpose.</p>
+     */
+    private static final List<String> DISPLAY_ONLY_REASONS = List.of("4400", "5300");
 
     /**
      * The validation engine the payload crossing applies.
@@ -760,6 +875,21 @@ class AuthorizationRequestListenerTest {
      * have asserted. That is an order-dependent failure, which is the hardest kind to attribute: the
      * suite stays green until a case that reads a debug record happens to run after this one.
      *
+     * <p>Trade-offs: enforcement of the deadline moves from the BROKER to the CONSUMER, and that is a real
+     * loss rather than a relabelling. The reference broker discarded an expired message itself -- the
+     * expiry is set by {@code MOVE 50 TO MQMD-EXPIRY} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 750, in TENTHS of a second, so five
+     * seconds -- and the guarantee was therefore uniform and unconditional: no program could act on a stale
+     * request because none was ever handed one, and a consumer that forgot to check could not go wrong. The
+     * target queue has no per-message time to live, so the deadline travels as a message attribute and each
+     * consumer must honour it, which means a future consumer that omitted the check would act on a request
+     * the reference would never have delivered. What is gained is that the deadline becomes inspectable
+     * data rather than broker state: it appears on the message, a drop leaves a record naming why, and both
+     * are assertable -- which is why this case asserts the drop AND the record rather than either alone,
+     * since each half on its own is satisfied by a defect in the other direction. The alternatives,
+     * including keeping a broker that has the feature, are recorded in
+     * {@code docs/adr/ADR-004-messaging.md}.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -1217,12 +1347,11 @@ class AuthorizationRequestListenerTest {
      * otherwise, which keeps each case's own fixture to the one thing it varies.</p>
      */
     private void givenResolvableCard() {
-        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(
-                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
-        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(
-                Optional.of(new AccountContextClient.Account(new BigDecimal("5000.00"),
-                        new BigDecimal("500.00"), new BigDecimal("0.00"))));
-        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(true);
+        // WHY : Refactoring Rationale: the three stubs moved into the card-parameterised overload below and
+        //       this method delegates, because the committed request fixtures carry a different card number
+        //       and two copies of the same three stubs would drift the moment one of the account values
+        //       changed. The no-argument form is kept because most cases have no interest in which card.
+        givenResolvableCard(CARD_NUM);
     }
 
     /**
@@ -1523,5 +1652,1358 @@ class AuthorizationRequestListenerTest {
     void theDefaultWindowIsTheDeclaredLimit() {
         assertEquals(500, AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT,
                 "the default must be the number cbl/COPAUA0C.cbl L40 declares, not the 501 it handles");
+    }
+
+    /**
+     * An amount EQUAL to the available credit is approved, and one cent more is declined.
+     *
+     * <p>Assumptions: the comparison the two halves straddle is
+     * {@code IF WS-TRANSACTION-AMT > WS-AVAILABLE-AMT} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 668, where the STRICT operator sits
+     * on the REFUSAL branch, so equality falls through to the approval. The available amount is the
+     * summary's credit limit minus its credit balance, computed at its lines 666 and 667.</p>
+     *
+     * <p>Assumptions: both directions are asserted in one case because a single direction is satisfied by
+     * an off-by-one in the other. An inclusive comparison on the refusal branch would decline the exact
+     * boundary and still pass a case that only sent one cent over; a comparison that ignored the last
+     * cent would approve one cent over and still pass a case that only sent the boundary.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an amount equal to the available credit is approved and one cent more is declined")
+    void anAmountEqualToTheAvailableCreditIsApprovedAndOneCentMoreIsDeclined() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        // WHY : Assumptions: the boundary value is the summary's own arithmetic and not a number chosen
+        //       for the test -- summaryWithRoom() sets a credit limit of 5000.00 against a credit balance
+        //       of zero, so the available amount IS 5000.00. Writing the boundary as a literal here would
+        //       leave the case passing if the fixture's limit changed underneath it.
+        this.listener.onRequest(messageFor(requestFor(Money.of("5000.00")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> atBoundary = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(atBoundary.capture());
+        assertEquals(AuthorizationDecisionService.RESP_CODE_APPROVED,
+                atBoundary.getValue().getAuthRespCode(),
+                "an amount equal to the available credit falls through the strict comparison at L668");
+        assertEquals(AuthorizationDecisionService.RESP_REASON_APPROVED,
+                atBoundary.getValue().getAuthRespReason());
+
+        clearInvocationsKeepingStubs();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("5000.01"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> oneCentOver = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(oneCentOver.capture());
+        assertEquals(AuthorizationDecisionService.RESP_CODE_DECLINED,
+                oneCentOver.getValue().getAuthRespCode());
+        // WHY : Assumptions: the reason is the insufficient-funds branch at L706 and not the not-found
+        //       branch at L704, because this card, its account and its customer all resolved. Asserting
+        //       the reason rather than only the response code is what separates the two: both decline with
+        //       '05' at L688, and only the reason says which condition selected it.
+        assertEquals(AuthorizationDecisionService.DeclineReason.INSUFFICIENT_FUND.responseReason(),
+                oneCentOver.getValue().getAuthRespReason());
+    }
+
+    /**
+     * An approval carries the WHOLE requested amount, and a decline carries none of it.
+     *
+     * <p>Assumptions: the reference program has no partial authorization at all. Its decline branch moves
+     * literal zero into both the reply's approved amount and its own working total at lines 689 and 690,
+     * and its approval branch moves the REQUEST'S amount into both at lines 694 and 695 -- so the approved
+     * amount is either the requested amount exactly or zero, and no third value is reachable. A consumer
+     * that approved part of a request would be inventing a behaviour this wire cannot express, because the
+     * reply has one amount field and no partial indicator.</p>
+     *
+     * <p>Assumptions: approval is the DEFAULT and not an outcome the paragraph has to reach.
+     * {@code 5000-PROCESS-AUTH} opens with {@code SET APPROVE-AUTH TO TRUE} at line 441 and optimistically
+     * sets the card-found and account-found conditions at lines 445 and 446 before reading anything, so a
+     * request is approved unless some later branch declines it. This case therefore asserts the shape of
+     * the default path, and the sibling cases assert each way out of it.</p>
+     *
+     * <p>Assumptions: the reason is asserted on the approval as well as the amount, because
+     * {@code MOVE '0000' TO PA-RL-AUTH-RESP-REASON} at line 698 runs UNCONDITIONALLY, BEFORE the
+     * {@code IF AUTH-RESP-DECLINED} at line 699 that guards the selection. An approval therefore always
+     * carries {@code '0000'}, and it carries it as a pre-set rather than as a selected value -- which is
+     * easy to miss when reading the paragraph, because the pre-set sits above the branch that appears to
+     * choose every reason.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approval carries the whole requested amount and the unconditional approved reason")
+    void anApprovalCarriesTheWholeRequestedAmountAndNoPartOfIt() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("1234.56")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(0, new BigDecimal("1234.56").compareTo(saved.getValue().getApprovedAmount()),
+                "the approved amount must be the requested amount exactly, as L694 moves it");
+        assertEquals(0, new BigDecimal("1234.56").compareTo(saved.getValue().getTransactionAmount()),
+                "the requested amount must survive onto the row it was decided from");
+        assertEquals(AuthorizationDecisionService.RESP_REASON_APPROVED,
+                saved.getValue().getAuthRespReason());
+
+        // WHY : Assumptions: the reply is read back through the codec rather than string-matched, so this
+        //       asserts the value a requester will DECODE rather than the bytes this producer happened to
+        //       write. The two agree by construction, and asserting the decoded form is what makes the
+        //       assertion survive a change to the edit mask that leaves the value alone.
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        assertEquals(0, new BigDecimal("1234.56").compareTo(
+                CsvAuthCodec.decodeReply(published.getValue().getPayload()).approvedAmount().amount()));
+    }
+
+    /**
+     * The reasons this consumer can emit are exactly eight, and the display table holds two it cannot.
+     *
+     * <p>Assumptions: eight is one approval reason plus seven decline reasons. The approval reason is the
+     * unconditional pre-set at line 698, and the seven come from the eight {@code WHEN} clauses of the
+     * selection at lines 700 to 717 -- eight clauses and seven codes, because the first three conditions
+     * at lines 701, 702 and 703 all fall to the single {@code MOVE '3100'} at line 704.</p>
+     *
+     * <p>Assumptions: the seven decline codes are read from the committed fixture rather than written here,
+     * so the enumeration this consumer publishes and the enumeration the fixtures pin cannot drift apart.
+     * The fixture is one reply record per code, so its own count is the assertion that no code is missing
+     * and none is duplicated.</p>
+     *
+     * <p>Trade-offs: two of the seven decline reasons are reachable through this consumer and five are
+     * not, and the five are declared anyway. That is the reference program's own gap rather than this
+     * migration's -- it declares five decline conditions at its lines 141 to 145 and SETS exactly one of
+     * them -- so the constants exist to keep the published enumeration complete and auditable while no
+     * input selects the other five. The cost accepted is that a reader may take the enumeration for a set
+     * of outcomes all of which occur; the alternative, declaring only what occurs, would silently drop
+     * five values of an externally observable four-character contract.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("this consumer's reason enumeration is exactly eight, and two table entries are display-only")
+    void everyReasonThisConsumerEmitsIsOneOfEightAndTwoTableEntriesAreDisplayOnly() {
+        Set<String> emitted = new LinkedHashSet<>();
+        emitted.add(AuthorizationDecisionService.RESP_REASON_APPROVED);
+        for (AuthorizationDecisionService.DeclineReason reason
+                : AuthorizationDecisionService.DeclineReason.values()) {
+            emitted.add(reason.responseReason());
+        }
+
+        assertEquals(8, emitted.size(),
+                "one approval reason and seven decline reasons, the three not-found conditions counting once");
+        assertThat(emitted).containsExactly("0000", "3100", "4100", "4200", "4300", "5100", "5200", "9000");
+
+        // WHY : Assumptions: the fixture's reason column sits at the same offset in every one of its seven
+        //       records because the reply is a fixed-width frame -- sixteen, fifteen, six, two and four
+        //       characters with one delimiter after each -- so the reason is decoded rather than sliced,
+        //       which keeps this assertion independent of that arithmetic.
+        List<String> fromFixture = new ArrayList<>();
+        for (String record : linesOf(DECLINED_REASONS_FIXTURE)) {
+            fromFixture.add(CsvAuthCodec.decodeReply(record).authRespReason());
+        }
+        assertEquals(7, fromFixture.size(), "one committed reply record per decline reason");
+        assertThat(fromFixture)
+                .as("the fixture must pin every decline reason the enumeration declares, and no other")
+                .containsExactlyInAnyOrderElementsOf(
+                        emitted.stream()
+                                .filter(reason ->
+                                        !AuthorizationDecisionService.RESP_REASON_APPROVED.equals(reason))
+                                .toList());
+
+        // WHY : Assumptions: the detail screen's table is a SUPERSET by exactly two, and neither entry is
+        //       an error to be corrected. COPAUS1C.cbl lines 58 to 67 declare ten entries; eight of them
+        //       are the values asserted above, and the daily-limit entry at line 63 and the lost-card
+        //       entry at line 66 are display-only -- a renderer that can name a reason another producer
+        //       might send is deliberately broader than the producer. Asserting their ABSENCE from this
+        //       consumer's enumeration is what records the split without changing either side.
+        assertThat(emitted).doesNotContainAnyElementsOf(DISPLAY_ONLY_REASONS);
+    }
+
+    /**
+     * All three not-found conditions decline with ONE reason, and that reason outranks insufficient funds.
+     *
+     * <p>Assumptions: the selection at lines 700 to 717 lists the three not-found conditions as three
+     * subjects of its FIRST branch -- {@code CARD-NFOUND-XREF} at line 701,
+     * {@code NFOUND-ACCT-IN-MSTR} at line 702 and {@code NFOUND-CUST-IN-MSTR} at line 703 -- all reaching
+     * the single {@code MOVE '3100'} at line 704. A test that read {@code '3100'} as "card not found"
+     * alone would therefore be asserting a third of the branch, so each of the three is driven here and
+     * named where it is driven.</p>
+     *
+     * <p>Assumptions: the third condition is reached with a decline ALREADY detected, and that is a
+     * property of the reference program rather than a convenience. A missing customer never sets the
+     * decline flag -- nothing between lines 665 and 683 does -- and the selection runs only inside
+     * {@code IF AUTH-RESP-DECLINED} at line 699, so a missing customer with funds available is APPROVED
+     * there and here. The condition becomes observable when some other branch has already declined, and
+     * then it OUTRANKS the funds reason because it sits earlier in the selection: an over-limit request on
+     * an account whose customer is missing answers {@code '3100'} and not {@code '4100'}.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("all three not-found conditions decline with one reason, which outranks insufficient funds")
+    void bothOfTheNotFoundConditionsReachedHereDeclineWithTheSameReason() {
+        String notFound = AuthorizationDecisionService.DeclineReason.NOT_FOUND.responseReason();
+
+        // WHY : Assumptions: condition one, CARD-NFOUND-XREF at L701. The cross-reference resolves
+        //       nothing, so the gated reads at L450 to L457 do not happen and the decline has no account
+        //       to measure against -- which is the bare SET DECLINE-AUTH at L681.
+        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(Optional.empty());
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+        assertEquals(notFound, reasonOfOnlyReply());
+
+        clearInvocationsKeepingStubs();
+
+        // WHY : Assumptions: condition two, NFOUND-ACCT-IN-MSTR at L702. The card resolves and the
+        //       account master does not, which is the outcome L451's read leaves behind. The summary is
+        //       absent too, so the decline again arrives through L681 rather than through the funds test.
+        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(
+                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
+        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(true);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+        assertEquals(notFound, reasonOfOnlyReply());
+
+        clearInvocationsKeepingStubs();
+
+        // WHY : Assumptions: condition three, NFOUND-CUST-IN-MSTR at L703, driven together with an
+        //       over-limit amount because the missing customer alone declines nothing. The account's
+        //       available credit is its limit minus its posted balance -- L674 and L675, the fallback arm
+        //       taken when no summary exists -- so 6000.00 against a 5000.00 limit selects the funds
+        //       branch, and the assertion is that the EARLIER branch wins anyway.
+        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(
+                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(
+                Optional.of(new AccountContextClient.Account(new BigDecimal("5000.00"),
+                        new BigDecimal("500.00"), new BigDecimal("0.00"))));
+        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(false);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("6000.00"), "TXN000000000003"), ALLOWED_REPLY_QUEUE));
+
+        assertEquals(notFound, reasonOfOnlyReply());
+        assertThat(reasonOfOnlyReply())
+                .as("the not-found branch at L704 precedes the funds branch at L706 in one selection")
+                .isNotEqualTo(AuthorizationDecisionService.DeclineReason.INSUFFICIENT_FUND
+                        .responseReason());
+    }
+
+    /**
+     * The widest declared amount reaches the decision whole, and a token missing a cent is refused.
+     *
+     * <p>Refactoring Rationale: this is divergence D-D's sibling D-H, and what was wrong is arithmetic
+     * rather than stylistic. {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} line 27 declares
+     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99}, which is FOURTEEN characters, while the only consumer
+     * of that wire declares {@code WS-TRANSACTION-AMT-AN PIC X(13)} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 63 -- THIRTEEN -- and the
+     * {@code UNSTRING} beginning at line 354 delivers the amount token into it as the ninth receiver at
+     * line 364. An alphanumeric move into a shorter item drops the LAST character, and the
+     * {@code FUNCTION NUMVAL} conversion at lines 376 and 377 then runs on the mutilated text and accepts
+     * one fraction digit as readily as two. The reference consumer therefore acts on a plausible wrong
+     * number with no diagnostic anywhere. Here the whole token is read, and a token that genuinely lost a
+     * cents digit is REFUSED.</p>
+     *
+     * <p>Assumptions: the defect is INVISIBLE whenever the hundredths digit is zero, which is why this
+     * case uses the second of the three committed records and not the first or the third. The first spells
+     * {@code -0000000250.00} and the third {@code +0000000000.00}; both end in a zero, so dropping their
+     * final character leaves a value that converts to the same amount and the truncation cannot be
+     * observed. Only the second, {@code +9999999999.99}, exposes it: truncated to
+     * {@code +9999999999.9} it converts to 9999999999.90 and loses nine cents.</p>
+     *
+     * <p>Assumptions: the refusal follows the house precedent for a malformed monetary record rather than
+     * inventing a policy. {@code tests/fixtures/README.md} lines 145 to 151 record that the existing
+     * readers reject a row whose length is not exactly the record length -- they do not pad it, do not
+     * truncate it and do not drop it -- and give the reason at lines 150 and 151, that a malformed
+     * monetary record must never be silently coerced into a well-formed-looking one. Coercing here would
+     * divide an amount by ten in the cents position, which is precisely that.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the widest declared amount is decoded whole while a token missing a cent is refused")
+    void theMaximumDeclaredAmountIsDecodedWholeWhileAMutilatedOneIsRefused() {
+        String widestRecord = linesOf(AMOUNT_VARIANTS_FIXTURE).get(1);
+        assertThat(widestRecord)
+                .as("record two of the committed fixture is the only one whose final digit is not a zero")
+                .contains("+9999999999.99");
+        givenResolvableCard(FIXTURE_CARD_NUM);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(wireMessage(widestRecord).build());
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        // WHY : Assumptions: the value is asserted in its PLAIN STRING form as well as by comparison,
+        //       because the two failures this guards against are different. A comparison alone would pass
+        //       for a value carried at a different scale, and this amount is also the strongest available
+        //       evidence that nothing on the path routed it through binary floating point: 9999999999.99
+        //       has no exact double representation, so a value that had been through one would arrive as
+        //       9999999999.9899999999906867742538452148437500 and could not print as this.
+        assertEquals("9999999999.99", saved.getValue().getTransactionAmount().toPlainString(),
+                "the fourteenth character the reference receiver discards must survive to the row");
+        assertEquals(0, MAXIMUM_DECLARED_AMOUNT.compareTo(saved.getValue().getTransactionAmount()));
+        // WHY : Assumptions: the accumulation is the declined arm because this amount exceeds the
+        //       summary's available credit, and the amount it accumulates is the REQUEST'S -- L821. So the
+        //       whole token is observable twice over: on the row it was decided from and in the total it
+        //       moved.
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, saved.getValue()
+                .getTransactionAmount());
+
+        clearInvocationsKeepingStubs();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+        // WHY : Assumptions: the mutilated payload is built by removing the token's LAST character, which
+        //       is exactly what a thirteen-character receiving item does to a fourteen-character move. It
+        //       is not the same as the thirteen-character form the codec deliberately accepts: that one
+        //       lost its leading SIGN position and still carries two fraction digits, whereas this one
+        //       lost a cents digit, and the parser requires exactly two.
+        Message<String> mutilated =
+                wireMessage(widestRecord.replace("+9999999999.99", "+9999999999.9")).build();
+
+        assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(mutilated));
+
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+    }
+
+    /**
+     * Every amount this consumer stores, accumulates or publishes is exact at two decimal places.
+     *
+     * <p>Assumptions: this is asserted here rather than inherited, because the architecture rule that bans
+     * binary floating point from the money path is scoped to the shared money package and does not reach
+     * this module. Rule T3 of the migration plan requires exact fixed point at every hop -- scale two with
+     * half-up rounding in the code, and a STRING on the wire so that no consumer parses the value into a
+     * binary double -- and the three hops this consumer owns are the persisted row, the accumulated total
+     * and the published payload, so all three are asserted together.</p>
+     *
+     * <p>Assumptions: the wire hop is asserted as the TEXT of a fixed-width field rather than as a number.
+     * The reply is a delimited character payload -- the reference program composes it with a
+     * {@code STRING} at lines 722 to 731 -- so its amount is fourteen characters of text, and a payload
+     * carrying it as text cannot be routed through a floating-point type by the transport. The width is
+     * the declared one from {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy} line 24.</p>
+     *
+     * <p>Assumptions: the amount chosen has a repeating binary expansion, so a value that had passed
+     * through a double would not print back as itself. A round number would satisfy this case under a
+     * defect it is written to catch.</p>
+     *
+     * <p>Assumptions: the reply's amount is rendered in the reference program's EMITTED mask rather than in
+     * its copybook's declared one, and the difference is recorded here rather than asserted as a divergence
+     * because it belongs to the codec and mapper boundary and not to this consumer. The reply is composed
+     * at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 722 to 731 from
+     * {@code WS-APPROVED-AMT-DIS}, declared {@code PIC -zzzzzzzzz9.99} at its line 66 -- zero-suppressed,
+     * with a blank sign position for a positive value -- whereas
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURLY.cpy} line 24 declares
+     * {@code PA-RL-APPROVED-AMT PIC +9(10).99}, zero-filled with an explicit sign. That field is populated
+     * at lines 689 and 694 and is then never put on the wire at all. Both forms are fourteen characters, so
+     * the sixty-three-character payload and its six delimiters are unaffected and the frame the sibling
+     * reply case asserts holds under either. The committed REQUEST fixtures carry the copybook's zero-filled
+     * form and the committed REPLY fixtures carry the emitted zero-suppressed one, which is what this
+     * consumer publishes -- so the assertion below is on the WIDTH and the digits, and not on the padding
+     * character.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("every stored, accumulated and published amount is exact fixed point at scale two")
+    void everyAmountThisConsumerCarriesIsExactAtTwoDecimalPlaces() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("1000.10")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(Money.SCALE, saved.getValue().getTransactionAmount().scale(),
+                "a stored amount at any other scale would compare equal and render differently");
+        assertEquals(Money.SCALE, saved.getValue().getApprovedAmount().scale());
+        assertEquals("1000.10", saved.getValue().getTransactionAmount().toPlainString());
+
+        ArgumentCaptor<BigDecimal> accumulated = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(this.summaries).addApprovedAuthorization(anyLong(), accumulated.capture());
+        assertEquals(Money.SCALE, accumulated.getValue().scale());
+        assertEquals("1000.10", accumulated.getValue().toPlainString());
+
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        String amountField = published.getValue().getPayload()
+                .split(String.valueOf(CsvAuthCodec.DELIMITER))[CsvAuthCodec.REPLY_AMOUNT_ORDINAL];
+        assertEquals(CsvAuthCodec.MONEY_EDITED_WIDTH, amountField.length(),
+                "the published amount is fourteen characters of TEXT, never a numeric type");
+        assertThat(amountField).endsWith("1000.10");
+
+        // WHY : Assumptions: half-up is the rounding this migration fixes for general money arithmetic,
+        //       and it is asserted rather than assumed because the money type also publishes a SECOND mode
+        //       for one purpose -- the interest accrual reproduces the reference program's truncation. A
+        //       reader finding two modes on one type is owed the statement of which one this path uses.
+        assertEquals(java.math.RoundingMode.HALF_UP, Money.GENERAL_ROUNDING);
+
+        // WHY : Assumptions: the third hop is the HTTP surface this service also publishes, and there money
+        //       leaves as a JSON STRING rather than as a JSON number. A number is parsed into a binary
+        //       double by most clients, so exactness would be lost at the boundary a caller actually reads
+        //       -- which is why the quotation marks are asserted and not only the digits.
+        assertEquals("\"1000.10\"",
+                JsonMapper.builder().addModule(new MoneyModule()).build()
+                        .writeValueAsString(Money.of("1000.10")));
+    }
+
+    /**
+     * An approval accumulates the APPROVED amount and a decline accumulates the REQUESTED amount.
+     *
+     * <p>Refactoring Rationale: this is the accumulation half of divergence D-F, and the asymmetry it
+     * asserts is DESIGN rather than defect, so it is reproduced faithfully. The approval arm of
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} adds one to the approved count at line 814
+     * and the APPROVED amount to the approved total at line 815; the decline arm adds one to the declined
+     * count at line 820 and the TRANSACTION amount to the declined total at line 821. Two different
+     * amounts, one per arm.</p>
+     *
+     * <p>Assumptions: the asymmetry is intentional because a second, independently written program mirrors
+     * it exactly. {@code CBPAUP0C.cbl} reverses an expiring authorization by subtracting the approved
+     * amount at line 289 on its approved branch and the transaction amount at line 292 on its declined
+     * branch, selecting between them on the stored response code at line 287. Two programs agreeing on an
+     * asymmetry is what distinguishes a rule from a slip, and it is why symmetrising the two arms here --
+     * which would look tidier -- would leave the purge unable to reverse what this accumulates.</p>
+     *
+     * <p>Assumptions: the decline is the case where the two amounts genuinely DIFFER, and that is why it
+     * carries the sharper assertion. A declined row records an approved amount of zero, so the amount its
+     * total accumulates appears nowhere on the row it accumulated for; an implementation that read the
+     * amount off the row would accumulate zero and no count would look wrong.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approval accumulates the approved amount and a decline the requested amount")
+    void anApprovalAccumulatesTheApprovedAmountAndADeclineTheRequestedAmount() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("400.40")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> approved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(approved.capture());
+        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, approved.getValue()
+                .getApprovedAmount());
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
+
+        clearInvocationsKeepingStubs();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("7000.00"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> declined = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(declined.capture());
+        assertEquals(0, BigDecimal.ZERO.compareTo(declined.getValue().getApprovedAmount()),
+                "a decline approves nothing, so its approved amount is the literal zero of L689");
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("7000.00"));
+        // WHY : Assumptions: the declined total takes the amount the requester ASKED for, which on a
+        //       decline is not the amount the row records as approved. Asserting the two are different is
+        //       what makes the asymmetry observable rather than merely described.
+        assertThat(new BigDecimal("7000.00"))
+                .as("the amount the declined total accumulates is not the amount the row approved")
+                .isNotEqualByComparingTo(declined.getValue().getApprovedAmount());
+        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+    }
+
+    /**
+     * An account whose authorizations are all declined still carries a declined count and total.
+     *
+     * <p>Refactoring Rationale: this is the STATE that makes divergence D-F observable, and it exists here
+     * so the guard asserted in {@code PurgeJobTest} has a precondition that can be reached.
+     * {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} line 156 reads
+     * {@code IF PA-APPROVED-AUTH-CNT &lt;= 0 AND PA-APPROVED-AUTH-CNT &lt;= 0} -- the approved counter on
+     * both sides of the conjunction, with {@code PA-DECLINED-AUTH-CNT} never tested -- and it guards the
+     * root delete at line 157. An account in exactly this state, no approvals and live declines, therefore
+     * satisfies that guard and has its parent removed from beneath children that have not aged. The target
+     * guards both counters, and this case supplies the state.</p>
+     *
+     * <p>Assumptions: the counters are two-byte binary fields, {@code PA-APPROVED-AUTH-CNT} and
+     * {@code PA-DECLINED-AUTH-CNT} declared {@code PIC S9(04) COMP} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} lines 27 and 28, so they are asserted as
+     * short integers and not as amounts. The two totals beside them are packed decimal at scale two and
+     * are asserted as amounts.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an account with no approvals still accumulates its declined count and total")
+    void aSummaryWithNoApprovalsStillAccumulatesItsDeclinedCounters() {
+        // WHY : Assumptions: the account is given a limit SMALLER than the request so the decline comes
+        //       from the funds branch on a card that fully resolves. Declining by leaving the card
+        //       unresolved would record nothing at all -- the write is guarded by the cross-reference at
+        //       L463 -- so no counter would move and the case would assert nothing.
+        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(
+                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(
+                Optional.of(new AccountContextClient.Account(new BigDecimal("100.00"),
+                        new BigDecimal("50.00"), new BigDecimal("50.00"))));
+        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(true);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthSummary> created = ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).insertSummaryIfAbsent(created.capture());
+        assertEquals(0, created.getValue().getApprovedAuthCount().intValue(),
+                "no approval has happened, which is the half of L156's conjunction that is tested");
+        assertEquals(1, created.getValue().getDeclinedAuthCount().intValue(),
+                "a live decline is the half L156 never tests, and the reason the parent must survive");
+        assertEquals(0, BigDecimal.ZERO.compareTo(created.getValue().getApprovedAuthAmount()));
+        assertEquals(0, new BigDecimal("100.99").compareTo(created.getValue().getDeclinedAuthAmount()));
+        // WHY : Assumptions: a decline reserves nothing, so the credit balance stays where it was. The
+        //       reference decline arm at L819 to L821 moves the count and the declined total and touches
+        //       neither balance, which is what makes a declined authorization free of credit consequence.
+        assertEquals(0, BigDecimal.ZERO.compareTo(created.getValue().getCreditBalance()));
+
+        clearInvocationsKeepingStubs();
+        PendingAuthSummary alreadyDeclining = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
+        alreadyDeclining.refreshLimits(new BigDecimal("100.00"), new BigDecimal("50.00"));
+        alreadyDeclining.recordDeclined(new BigDecimal("100.99"));
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(alreadyDeclining));
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("200.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"));
+        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+    }
+
+    /**
+     * An approval leaves the held cash balance at zero whatever the transaction class says.
+     *
+     * <p>Assumptions: the reference approval arm zeroes the cash balance UNCONDITIONALLY. Its lines 814,
+     * 815 and 817 move the count, the approved total and the credit balance, and line 818 then executes
+     * {@code MOVE 0 TO PA-CASH-BALANCE} with no condition of any kind above it -- not on the processing
+     * code, not on the authorization type, not on the amount. This is carried forward as observable
+     * behaviour rather than as an obviously intended rule: an account holding a cash balance has it reset
+     * by the next purchase authorization it receives.</p>
+     *
+     * <p>Assumptions: the request carries a CASH-ADVANCE processing code precisely so the case can show
+     * that nothing branches on it. A purchase-coded request would leave the cash balance at zero for the
+     * uninteresting reason that nothing had put anything in it, and would pass against an implementation
+     * that credited a cash advance to the cash balance.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approval leaves the cash balance at zero whatever the processing code says")
+    void anApprovalLeavesTheCashBalanceAtZeroWhateverTheProcessingCode() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        this.listener.onRequest(messageFor(
+                requestWithProcessingCode(Money.of("100.99"), CASH_ADVANCE_PROCESSING_CODE),
+                ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthSummary> created = ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).insertSummaryIfAbsent(created.capture());
+        assertEquals(0, BigDecimal.ZERO.compareTo(created.getValue().getCashBalance()),
+                "L818 zeroes the cash balance with no condition above it");
+        // WHY : Assumptions: the credit balance is asserted beside it because the pair is the property.
+        //       The approval reserves the amount against CREDIT -- L817 -- and zeroes CASH, so a value in
+        //       the cash balance and none in the credit balance would be the same amount in the wrong
+        //       member, which asserting either one alone cannot distinguish.
+        assertEquals(0, new BigDecimal("100.99").compareTo(created.getValue().getCreditBalance()));
+        // WHY : Assumptions: the processing code itself is asserted to have reached the row unchanged, so
+        //       this case cannot pass by the code having been normalised away before the decision. The
+        //       field is a six-digit display value, PA-RQ-PROCESSING-CODE at CCPAURQY.cpy L26.
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(CASH_ADVANCE_PROCESSING_CODE, saved.getValue().getProcessingCode());
+    }
+
+    /**
+     * A newly recorded authorization carries no fraud mark and no fraud report date.
+     *
+     * <p>Assumptions: the reference insert clears both fields before writing --
+     * {@code MOVE SPACE TO PA-AUTH-FRAUD PA-FRAUD-RPT-DATE} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 908 and 909, immediately after the
+     * match status is selected at lines 902 to 906. It writes a BLANK and not a null, because a
+     * hierarchical segment has no null: every byte of the segment is written on every insert. The target
+     * writes neither value at all and leaves the two columns unset, which is why the column's own check
+     * constraint admits the absent AND the blank state alongside the two fraud states -- see
+     * {@code CHECK (auth_fraud IN ('F', 'R') OR auth_fraud IS NULL OR auth_fraud = ' ')} at line 703 of
+     * {@code V1__authorization.sql}. A constraint admitting only the two fraud states would have rejected
+     * every row the extract load carries from the reference segment.</p>
+     *
+     * <p>Assumptions: the absence is asserted rather than left implicit because the fraud state is the one
+     * field on this row that a later transition WRITES. A decision that arrived already marked would look
+     * to the fraud report exactly like one an analyst had marked, and no constraint would refuse it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a newly recorded authorization carries no fraud mark and no fraud report date")
+    void theRecordedAuthorizationCarriesNoFraudMarkOfAnyKind() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertNull(saved.getValue().getAuthFraud(),
+                "an originated authorization is unmarked; the two fraud states are later transitions");
+        assertNull(saved.getValue().getFraudReportDate());
+        assertThat(saved.getValue().getAuthFraud())
+                .as("neither fraud state may be present on a row this consumer has just decided")
+                .isNotEqualTo(PendingAuthDetail.FRAUD_REPORTED)
+                .isNotEqualTo(PendingAuthDetail.FRAUD_REMOVED);
+    }
+
+    /**
+     * A delivery that fails ends there, and the delivery after it is decided on its own payload alone.
+     *
+     * <p>Refactoring Rationale: this is divergence D-D, and what was wrong is a missing flag.
+     * {@code 3100-READ-REQUEST-MQ} at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 386
+     * to 434 handles a receive that failed for any reason other than no-message-available at line 418 by
+     * setting an error location at line 419, the critical level at line 420, the subsystem at line 421, a
+     * message at line 426 and the card number as the event key at line 428, and performing the error
+     * paragraph at line 429 -- and then setting NEITHER the no-more-messages condition nor the loop-end
+     * flag. Read on its own that returns to the loop at line 326 with the five-hundred-character get buffer
+     * declared at line 103 UNCHANGED, so the extract at lines 354 and 355 splits the PREVIOUS request again
+     * and an already-committed authorization is decided a second time.</p>
+     *
+     * <p>Assumptions: the corroborating tell is at line 428, which logs {@code PA-CARD-NUM} -- and that
+     * field still holds the previous message's card number, because the receive that failed never
+     * populated a new one. A stale card number in the error record is direct evidence that the buffer
+     * behind it is stale, and it is the reason this reads as a real reprocessing path rather than as a
+     * theoretical one.</p>
+     *
+     * <p>Assumptions: in the target there is no buffer to leave unchanged. Each delivery carries its own
+     * payload into the handler as a parameter, so a failed delivery cannot present a stale one and the
+     * shape is unreachable rather than guarded against. What this case asserts is the pair of consequences
+     * that makes that claim checkable: the failed delivery writes nothing and its exception leaves the
+     * handler, so the transport redelivers it and the redrive policy dead-letters it; and the delivery
+     * after it is decided on its own payload, with the committed one untouched and never decided twice.</p>
+     *
+     * <p>Assumptions: the diagnostic goes to centralized structured logging and NOT to a queue. There is no
+     * error-queue publication anywhere on this path -- the only row this consumer ever writes to the outbox
+     * is a reply -- so the absence of any publication from the failed delivery is asserted, and the
+     * accompanying log record is asserted on the refusal case below where this consumer emits one
+     * itself.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a failed delivery ends there and the next is decided on its own payload alone")
+    void aMessageWhoseHandlingFailedLeavesTheNextMessageUnaffected() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000001"), ALLOWED_REPLY_QUEUE));
+
+        // WHY : Assumptions: the fault is injected at the account-context seam because that is the one
+        //       collaborator of this handler that reaches outside the process, so a failure there is the
+        //       closest available analogue of the infrastructure fault the reference receive path handles.
+        //       The do-form of the stub is used rather than the when-form because the when-form would have
+        //       to CALL the already-stubbed method to record the new answer, which would consume the
+        //       stubbed value and count as an invocation in the assertions below.
+        doThrow(new IllegalStateException("the account context is unreachable"))
+                .when(this.accounts).findCardXref(CARD_NUM);
+
+        assertThrows(IllegalStateException.class, () -> this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE)));
+
+        // WHY : Assumptions: the seam is restored with the do-form for the same reason it was made to fail
+        //       with it. The when-form evaluates its argument, so calling the shared fixture helper here
+        //       would invoke the throwing stub and the fixture itself would raise -- which is what happened
+        //       when this case was first written with the helper, and it failed in the setup rather than in
+        //       the assertion.
+        doReturn(Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)))
+                .when(this.accounts).findCardXref(CARD_NUM);
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000003"), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> recorded = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details, times(2)).save(recorded.capture());
+        assertThat(recorded.getAllValues())
+                .as("the failed delivery must record nothing, and neither committed one may repeat")
+                .extracting(PendingAuthDetail::getTransactionId)
+                .containsExactly("TXN000000000001", "TXN000000000003");
+
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox, times(2)).save(published.capture());
+        assertThat(published.getAllValues())
+                .as("a reply exists for each committed decision and for neither anything else")
+                .extracting(AuthReplyOutbox::getDeduplicationId)
+                .containsExactly("TXN000000000001", "TXN000000000003");
+        assertThat(published.getAllValues())
+                .as("every row this consumer publishes is a reply to the requester's own destination")
+                .extracting(AuthReplyOutbox::getReplyQueueUrl)
+                .containsOnly(ALLOWED_REPLY_QUEUE);
+    }
+
+    /**
+     * A refusal this consumer detects itself is logged as a structured record and published nowhere.
+     *
+     * <p>Assumptions: the two halves together are the behaviour. The reference program routes every fault
+     * to one error paragraph -- {@code PERFORM 9500-LOG-ERROR} appears at FOURTEEN sites in
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}, at lines 282, 316, 429, 500, 512, 547,
+     * 560, 595, 608, 639, 778, 846, 931 and 975 -- and that paragraph writes a log record, so the migrated
+     * equivalent of a fault is a log record and not a message. This consumer therefore publishes nothing
+     * on a refusal, and a reader looking for an error queue should find the absence asserted rather than
+     * merely unmentioned.</p>
+     *
+     * <p>Assumptions: the reference error record is one hundred and twenty-two bytes of fixed fields at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAUERY.cpy} lines 19 to 40, and two of its bytes are
+     * why a structured record with SEPARATE fields is the right target rather than one formatted string.
+     * {@code ERR-LEVEL} at line 25 and {@code ERR-SUBSYSTEM} at line 30 are adjacent single characters, and
+     * the letter {@code 'C'} means the critical level in the first -- {@code ERR-CRITICAL} at line 29 -- and
+     * the transaction monitor in the second -- {@code ERR-CICS} at line 32, against {@code ERR-MQ} of
+     * {@code 'M'} at line 35. One character with two meanings one byte apart cannot survive being flattened
+     * into a single field. Note also that the four-character {@code ERR-LOCATION} at line 24 holds values
+     * such as {@code 'M003'} and {@code 'I004'}: those are LOCATIONS in the program and not error codes,
+     * which is what the structured event name replaces them with.</p>
+     *
+     * <p>Assumptions: the receive-failure site classifies its subsystem as the transaction monitor at line
+     * 421 while the symmetric reply-failure site classifies the same class of fault as the message
+     * transport at line 770, so the two halves of one round trip are attributed to two different
+     * subsystems in a persisted byte. The target reports both as messaging faults; nothing observable turns
+     * on it, because the field is a log dimension rather than a control value, and it is recorded so a
+     * reader comparing the two does not take the difference for a lost behaviour.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a refusal is logged as a structured record and published to no queue at all")
+    void aRefusalIsRecordedInTheLogAndPublishedNowhere() {
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.WARN);
+        try {
+            Message<String> elsewhere = wireMessage(
+                    CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))),
+                    ALLOWED_REPLY_QUEUE + "-not-listed").build();
+
+            assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(elsewhere));
+
+            assertThat(captured.list)
+                    .as("a fault with no record is a fault an operator cannot attribute")
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(recorded -> assertThat(recorded)
+                            .contains("event=auth.request.refused")
+                            .contains("reason=destination-not-allowlisted"));
+            // WHY : Assumptions: the record must not carry the rejected destination, because the value is
+            //       requester-supplied text bound for a log field. The allowlist's SIZE is what an
+            //       operator needs to tell a missing entry from a hostile address, and it is what the
+            //       record carries instead.
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .noneSatisfy(recorded -> assertThat(recorded).contains("-not-listed"));
+            verifyNoInteractions(this.outbox);
+            verifyNoInteractions(this.details);
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+            listenerLogger.setLevel(previousLevel);
+        }
+    }
+
+    /**
+     * The window at its production default admits five hundred and one requests, not five hundred.
+     *
+     * <p>Assumptions: both numbers are correct about different things, and the second is the observable
+     * one. Five hundred is what the reference program DECLARES --
+     * {@code 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 40, which the sibling case above pins
+     * as this consumer's configured default. Five hundred and one is what it PROCESSES, and three
+     * structural facts of that program together produce the extra one. Its initialisation performs a
+     * priming receive BEFORE the loop, at line 246, so the loop begins with a request already in hand. Its
+     * counter is advanced AFTER the request is processed, at line 332, so the count reflects work already
+     * done rather than work about to be done. And the guard is written with a STRICT comparison,
+     * {@code IF WS-MSG-PROCESSED &gt; WS-REQSTS-PROCESS-LIMIT} at line 339, so counts one through five
+     * hundred all take the {@code ELSE} at line 341 and receive another request at line 342. The guard
+     * first holds at five hundred and one -- after that request has been processed and committed -- and
+     * only then is the loop-end flag set at line 340.</p>
+     *
+     * <p>Assumptions: the default is exercised at its real value rather than at a reduced one, because the
+     * OFF-BY-ONE is the property and an implementation that enforced the declared figure would be
+     * indistinguishable from a correct one at any limit if the relationship were not checked against the
+     * configured default itself. The messages are dropped as stale, which is the cheapest path through the
+     * handler that still consumes an admission -- the reservation is taken as the handler's first
+     * statement, matching the counter that advances on the get itself.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the window at its production default admits five hundred and one requests")
+    void theWindowAdmitsTheDeclaredLimitPlusTheComparisonOffsetAtItsDefault() {
+        int declaredLimit = AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT;
+        int allowance = declaredLimit + AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET;
+        AuthorizationRequestListener atDefaultWindow = listenerWithWindow(declaredLimit);
+        // WHY : Assumptions: one message object is built and re-delivered rather than five hundred and one
+        //       being built, because the handler holds no per-message state -- every field of it is final
+        //       -- so an identical delivery is a faithful second delivery. Building each one would spend
+        //       the case's whole runtime in the encoder rather than on the property.
+        Message<String> stale = expiredMessage();
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        Level previousLevel = listenerLogger.getLevel();
+        // WHY : Trade-offs: the logger is quieted for the duration and restored afterwards. Each of the
+        //       five hundred and one drops emits one warn record, and five hundred and one identical
+        //       records in a build report obscure every other record in it; the level is restored in the
+        //       finally block because this logger is a process-wide singleton and a level left behind
+        //       would silence a later case that asserts on a record.
+        listenerLogger.setLevel(Level.ERROR);
+        try {
+            for (int admitted = 0; admitted < declaredLimit; admitted++) {
+                atDefaultWindow.onRequest(stale);
+            }
+
+            assertEquals(List.of(), this.closedWindows,
+                    "the declared limit alone must not close the window, because the guard is strict");
+
+            atDefaultWindow.onRequest(stale);
+        } finally {
+            listenerLogger.setLevel(previousLevel);
+        }
+
+        assertEquals(List.of(allowance), this.closedWindows,
+                "the window closes on the declared limit plus the comparison offset");
+        assertEquals(501, this.closedWindows.get(0).intValue(),
+                "five hundred declared at L40, plus the one request the L339 comparison lets through");
+    }
+
+    /**
+     * The queue, its wait and the unit of work are all bound outside this handler's body.
+     *
+     * <p>Assumptions: the queue NAME is a deployment fact and never a literal here. The reference program
+     * does not name its queue either: it retrieves the trigger data at lines 233 to 236 and moves the
+     * queue name out of it at line 238, so the name arrives from outside the program. The migrated form
+     * arrives from configuration through a property placeholder, which is what this case asserts -- and
+     * the placeholder deliberately carries NO default, so a deployment that has not been told which queue
+     * to read fails to start rather than listening to a name this class invented. Note the reference guard
+     * at line 237 has no {@code ELSE}, so a failed retrieve there leaves the name blank and the program
+     * continues; a startup failure is the target's answer to the same condition.</p>
+     *
+     * <p>Assumptions: the WAIT is five seconds, and the two figures it is derived from differ by a factor
+     * of one hundred in the source with no comment saying so. {@code MOVE 5000 TO WS-WAIT-INTERVAL} at
+     * line 242 feeds the receive's wait at line 393 and is in MILLISECONDS; {@code MOVE 50 TO MQMD-EXPIRY}
+     * at line 750 sets the reply's expiry and is in TENTHS of a second. Both are five seconds. Either
+     * literal lifted as written would be wrong by two orders of magnitude in one direction or the other,
+     * which is why this case asserts that the poll wait and the reply expiry are the SAME five seconds
+     * rather than asserting either number on its own.</p>
+     *
+     * <p>Assumptions: the UNIT OF WORK is one message, expressed as a new transaction per delivery. That
+     * is the reference program's per-message {@code EXEC CICS SYNCPOINT} at lines 334 to 336, and a
+     * transaction shared across a poll batch would let one malformed message roll back its neighbours'
+     * committed decisions. The propagation is asserted structurally because a unit test cannot observe a
+     * commit; the commit and rollback themselves are pinned against a real engine by
+     * {@code AuthorizationDecisionUnitOfWorkRepositoryIT}.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws NoSuchMethodException if the handler method this class is written against is renamed or its
+     *     parameter changes, in which case the contract asserted here no longer exists to assert
+     */
+    @Test
+    @DisplayName("the queue, the five-second wait and the per-message transaction are all bound outside")
+    void theTransportContractIsBoundFromConfigurationAndScopedPerMessage()
+            throws NoSuchMethodException {
+        Method handler = AuthorizationRequestListener.class.getMethod("onRequest", Message.class);
+
+        SqsListener subscription = handler.getAnnotation(SqsListener.class);
+        assertEquals(1, subscription.queueNames().length,
+                "this consumer subscribes to exactly one queue, the pending-authorization request queue");
+        String queueBinding = subscription.queueNames()[0];
+        assertTrue(queueBinding.startsWith("${") && queueBinding.endsWith("}"),
+                "the queue arrives from configuration, as the reference took it from its trigger data");
+        assertThat(queueBinding)
+                .as("a placeholder default would let an unconfigured deployment read an invented queue")
+                .doesNotContain(":");
+
+        assertEquals(AuthorizationRequestListener.DEFAULT_REPLY_EXPIRY_SECONDS,
+                placeholderDefaultOf(subscription.pollTimeoutSeconds()),
+                "the poll wait and the reply expiry are one duration expressed in two source units");
+
+        Transactional unitOfWork = handler.getAnnotation(Transactional.class);
+        assertEquals(Propagation.REQUIRES_NEW, unitOfWork.propagation(),
+                "one message is one unit of work, as the per-message syncpoint at L335 makes it");
+    }
+
+    /**
+     * A drain that runs out of messages ends normally, having handled the ones it received.
+     *
+     * <p>Assumptions: an empty receive after the wait is a NORMAL end and not a fault. The reference
+     * program's receive maps the no-message-available reason to its own loop condition at lines 416 and
+     * 417 -- {@code SET NO-MORE-MSG-AVAILABLE TO TRUE} -- and the loop at line 326 then ends the poll cycle
+     * cleanly, with the messages it did handle already committed one by one at lines 334 to 336. Nothing is
+     * raised, nothing is logged as an error, and the count of handled messages is whatever arrived.</p>
+     *
+     * <p>Assumptions: in the target the poll cycle belongs to the listener container, so "no more messages"
+     * is the absence of a further call rather than a value this handler returns. What is assertable, and
+     * what this case asserts, is the state a drain leaves behind when it stops: every message that DID
+     * arrive is decided and answered, no error record exists, and the window stays open because the
+     * allowance was never reached. An implementation that treated an empty poll as a fault would show up
+     * here as an error record or as a window closed early.</p>
+     *
+     * <p>Assumptions: the absence of an error record is asserted at a level that would have captured one.
+     * The appender is attached at trace, so a record at any level would be visible, and the assertion is
+     * that none of them is at error level rather than that none exists -- the handler legitimately records
+     * one informational event per decision.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a drain that runs out of messages ends normally, silently, and with its window open")
+    void aDrainThatRunsOutOfMessagesEndsNormallyAndSilently() {
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.TRACE);
+        try {
+            givenResolvableCard();
+            when(this.summaries.findByAccountId(ACCOUNT_ID))
+                    .thenReturn(Optional.of(summaryWithRoom()));
+
+            this.listener.onRequest(
+                    messageFor(requestFor(Money.of("100.99"), "TXN000000000001"), ALLOWED_REPLY_QUEUE));
+            this.listener.onRequest(
+                    messageFor(requestFor(Money.of("100.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+
+            verify(this.details, times(2)).save(any(PendingAuthDetail.class));
+            verify(this.outbox, times(2)).save(any(AuthReplyOutbox.class));
+            assertThat(captured.list)
+                    .as("an exhausted queue is not a fault, so nothing may be recorded as an error")
+                    .noneMatch(recorded -> recorded.getLevel() == Level.ERROR);
+            assertEquals(List.of(), this.closedWindows,
+                    "two messages of an allowance of four leave the window open, as a short drain does");
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+            listenerLogger.setLevel(previousLevel);
+        }
+    }
+
+    /**
+     * A request is taken whatever correlation identity it carries, including none.
+     *
+     * <p>Assumptions: the reference receive is NON-SELECTIVE. It moves the no-match constants into both
+     * selection fields before the get -- {@code MQMI-NONE} into the message identifier at line 395 and
+     * {@code MQCI-NONE} into the correlation identifier at line 396 -- so it takes the next available
+     * message and never matches on either. Correlation exists to ROUTE THE REPLY, which it does by echoing
+     * the saved value at line 745, and never to select the request.</p>
+     *
+     * <p>Assumptions: three deliveries with three different identities are driven, one of them carrying
+     * none at all, because selection would be invisible with one. An implementation that filtered on the
+     * attribute would decide a subset, and an implementation that required the attribute would refuse the
+     * third -- and the reference sets its own correlation field to a no-match constant before the read, so
+     * a requester that supplies none is ordinary rather than incomplete.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a request is taken whatever correlation identity it carries, including none")
+    void theRequestIsTakenWhateverCorrelationIdentityItCarries() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(wireMessage(
+                CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"), "TXN000000000001")))
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "CORRELATION-ALPHA-01")
+                .build());
+        this.listener.onRequest(wireMessage(
+                CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"), "TXN000000000002")))
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "CORRELATION-BETA-02")
+                .build());
+        this.listener.onRequest(wireMessage(
+                CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"), "TXN000000000003")))
+                .build());
+
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox, times(3)).save(published.capture());
+        assertThat(published.getAllValues())
+                .as("all three are decided, in the order they were delivered")
+                .extracting(AuthReplyOutbox::getDeduplicationId)
+                .containsExactly("TXN000000000001", "TXN000000000002", "TXN000000000003");
+        // WHY : Assumptions: the echo is exact and per message, which is the routing use the attribute has
+        //       here. The value is carried VERBATIM because the requester pairs the answer to its question
+        //       on the opaque value it sent, and the third row's absent identity is asserted beside the two
+        //       present ones so that "none" is shown to be carried as none rather than as a substitute.
+        assertEquals("CORRELATION-ALPHA-01", published.getAllValues().get(0).getCorrelationId());
+        assertEquals("CORRELATION-BETA-02", published.getAllValues().get(1).getCorrelationId());
+        assertNull(published.getAllValues().get(2).getCorrelationId());
+        assertTrue(MessagingCorrelationId.isCanonical("CORRELATION-ALPHA-01"),
+                "the two identities used here are canonical, so neither is refused for its shape");
+    }
+
+    /**
+     * A failing dependency is called ONCE, and recovery is left to the transport.
+     *
+     * <p>Assumptions: there is no in-process retry on this handler, and the framing matters because the
+     * reference extension DECLARES a retry set and never uses it.
+     * {@code 88 RETRY-CONDITION VALUE 'BA', 'FH', 'TE'.} appears at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 94 and in six of its seven sibling
+     * programs, and a repository-wide search returns exactly those seven hits -- every one the declaration
+     * itself. The condition name is never referenced anywhere. Any retry in the target is therefore a
+     * faithful realisation of declared-but-unimplemented INTENT, and describing it as preserving existing
+     * retry behaviour would be wrong: there is no working retry to preserve. The only implemented retry in
+     * the extension is elsewhere, the schedule-and-retry of {@code COPAUS0C.cbl} lines 1007 to 1016.</p>
+     *
+     * <p>Alternatives Considered: a declarative retry on this handler, drawn from the framework core that
+     * arrives with the platform parent -- and two details of that API are recorded because both are
+     * commonly written the other way round: the attribute is {@code maxRetries}, so the total number of
+     * attempts is one plus its value and defaults to three, and the enabler is
+     * {@code @EnableResilientMethods} rather than the older enabling annotation. It is not applied here
+     * because of WHERE it would sit: the handler's whole body is one transaction, so a second attempt
+     * inside it would run against a unit of work already marked for rollback, and an attempt outside it
+     * would re-decide an authorization whose first attempt may already have committed. Alternatives
+     * Considered: an external resilience library, rejected because it installs a second retry authority for
+     * a capability the platform already has; and a circuit breaker, rejected because the only synchronous
+     * dependency reached from here is inside the private network behind an explicit connect and read
+     * timeout, so a breaker would add a state machine without removing a failure mode. Any {@code includes}
+     * list would also have to stay narrow: the reference set names three infrastructure statuses and
+     * deliberately leaves out the not-found, duplicate, wrong-parentage and end-of-database outcomes at its
+     * lines 87 to 90, because each of those describes the state of the DATA and retrying one would repeat a
+     * read that has already answered.</p>
+     *
+     * <p>Trade-offs: the durable retry tier is therefore the transport rather than the process. The
+     * exception rolls this delivery back, the message becomes visible again after its visibility timeout,
+     * and the redrive policy moves it to the dead-letter queue at the fifth receive -- a depth configured
+     * in {@code infra/modules/sqs} rather than in this service, which is why this case asserts the
+     * PRECONDITION for that recovery, that the failure is not swallowed, and does not assert the depth
+     * itself.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a failing dependency is called once and recovery is left to the transport")
+    void aFailedDependencyIsCalledOnceAndRecoveryIsLeftToTheTransport() {
+        doThrow(new IllegalStateException("the account context is unreachable"))
+                .when(this.accounts).findCardXref(CARD_NUM);
+
+        assertThrows(IllegalStateException.class, () -> this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE)));
+
+        // WHY : Assumptions: exactly one call is the assertion, and it is what distinguishes no retry from
+        //       a retry that happens to have exhausted itself. A handler that retried in process would call
+        //       the seam again inside a transaction already doomed by the first failure.
+        verify(this.accounts, times(1)).findCardXref(CARD_NUM);
+        verify(this.accounts, never()).findAccount(anyLong());
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+    }
+
+    /**
+     * Two authorizations for one card share its ordering group and keep their own duplicate identities.
+     *
+     * <p>Alternatives Considered: a STANDARD queue rather than an ordered one, rejected because it cannot
+     * preserve the order of two authorizations on one card, and the reference system delivered them in the
+     * order they were sent. Alternatives Considered: ONE global ordering group, rejected because it would
+     * serialise authorizations for unrelated cards behind each other and turn a per-card guarantee into a
+     * platform-wide bottleneck. Grouping by the card number keeps order where order is meaningful and
+     * leaves different cards to be handled in parallel. Alternatives Considered: a duplicate identity
+     * derived from the payload rather than from the transaction identifier, rejected because it would make
+     * suppression depend on byte-for-byte equality of a record a requester may legitimately resend with a
+     * different merchant name; the identifier gives content-independent acceptance once per transaction
+     * inside the queue's own deduplication interval.</p>
+     *
+     * <p>Assumptions: both identities are the LITERAL values the technical specification freezes, its
+     * sections 0.4.1.8 and 0.7.6 naming the card number as the group and the transaction identifier as the
+     * duplicate key. A value derived from either -- which an earlier revision of this producer used -- is
+     * computable only by this service, so any other producer publishing for the same card computes a
+     * different group and the ordering guarantee stops holding without anything failing.</p>
+     *
+     * <p>Assumptions: two messages are driven rather than one, because a single message cannot show that
+     * the group is SHARED while the duplicate key is not. Both carry the same card and different
+     * identifiers, which is exactly the pair the guarantee is about.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("two authorizations for one card share its ordering group and keep their own duplicate keys")
+    void theQueueIdentitiesAreTheCardAndTheTransaction() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000001"), ALLOWED_REPLY_QUEUE));
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("200.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox, times(2)).save(published.capture());
+        assertThat(published.getAllValues())
+                .as("both replies belong to one card, so both carry that card as their ordering group")
+                .extracting(AuthReplyOutbox::getOrderGroupId)
+                .containsOnly(CARD_NUM);
+        assertThat(published.getAllValues())
+                .as("two transactions are two distinct answers, so neither may suppress the other")
+                .extracting(AuthReplyOutbox::getDeduplicationId)
+                .containsExactly("TXN000000000001", "TXN000000000002")
+                .doesNotHaveDuplicates();
+    }
+
+    /**
+     * A write that fails leaves NO reply, so no answer can outlive the decision it reports.
+     *
+     * <p>Assumptions: this is the unit-level half of divergence D-D's atomicity claim, and the reference
+     * program's shape is what makes it necessary. Both of its segment writes end the same way:
+     * {@code 8400-UPDATE-SUMMARY} at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 837 to
+     * 847 sets the location {@code 'I003'}, the critical level, the subsystem and the message
+     * {@code 'IMS UPDATE SUMRY FAILED'}, performs the error paragraph at line 846 and falls through; and
+     * {@code 8500-INSERT-AUTH} at lines 920 to 932 does the same with {@code 'I004'} and
+     * {@code 'IMS INSERT DETL FAILED'}, logging at line 931. Each is shaped
+     * {@code IF STATUS-OK CONTINUE ELSE ... END-IF} and neither sets an abort flag.</p>
+     *
+     * <p>Assumptions: combine those two seams with the ORDER of the paragraph that calls them and the
+     * worst case follows. The reply is put at line 461 and the database write is performed at lines 463 to
+     * 465, AFTER it -- so a detail insert that fails leaves the requester holding an approval that no row
+     * accounts for, on an otherwise normal run, with nothing raised. The target inverts the order and puts
+     * both in one unit of work: the reply is written into the outbox in the same transaction as the rows,
+     * so either both commit or neither does, and this case asserts the observable half of that at unit
+     * level -- a failed row write reaches no reply at all. The durable half, that a rollback removes both,
+     * is pinned against a real engine by {@code AuthorizationDecisionUnitOfWorkRepositoryIT}.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a write that fails leaves no reply, so no answer outlives the decision it reports")
+    void aFailedWriteLeavesNoReplyForADecisionThatDidNotCommit() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+        doThrow(new IllegalStateException("the authorization row could not be written"))
+                .when(this.details).save(any(PendingAuthDetail.class));
+
+        assertThrows(IllegalStateException.class, () -> this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE)));
+
+        // WHY : Assumptions: the reply is written AFTER the rows in this handler, which is the inversion of
+        //       the reference order and the reason this assertion holds without a transaction manager. A
+        //       consumer that published first -- as the reference does at L461 -- would leave a row here
+        //       even though the write that justified it failed.
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+    }
+
+    /**
+     * The reply is routed by the request, carries the declared format and expires, and asks for no reply.
+     *
+     * <p>Assumptions: every one of these comes from {@code 7100-SEND-RESPONSE} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 738 to 779. The destination is the
+     * queue the REQUEST named, moved in at line 742 from the value the receive saved at lines 413 and 414.
+     * The correlation identifier is echoed at line 745. The format is declared at line 751 as a string
+     * payload, which is the delimited character record this consumer publishes as its own content type. The
+     * expiry is set at line 750, in tenths of a second, and is the five seconds this consumer carries as an
+     * instant on the row.</p>
+     *
+     * <p>Assumptions: the reply is TERMINAL, and in the target that is structural rather than cleared. The
+     * reference blanks its own reply-to queue and queue manager at lines 747 and 748, so the answer cannot
+     * itself request an answer; here the publication type declares exactly one destination member and no
+     * second one, so there is nothing to blank. The count of destination-valued members is asserted, which
+     * is what would notice a reply-to being added to the publication later.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the reply is routed by the request, declares its format, expires, and asks for no reply")
+    void theReplyIsRoutedByTheRequestAndIsTerminal() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+        Message<String> request = wireMessage(
+                CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))), ALLOWED_REPLY_QUEUE)
+                .setHeader(AuthorizationRequestListener.HEADER_CORRELATION_ID, "CORRELATION-GAMMA-03")
+                .build();
+
+        this.listener.onRequest(request);
+
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        assertEquals(ALLOWED_REPLY_QUEUE, published.getValue().getReplyQueueUrl(),
+                "the destination is the one the request named, as L742 takes it from the request");
+        assertEquals("CORRELATION-GAMMA-03", published.getValue().getCorrelationId(),
+                "the correlation identity is echoed verbatim, as L745 echoes the saved value");
+        assertEquals(AuthReplyOutbox.CONTENT_TYPE_CSV, published.getValue().getContentType());
+        assertEquals(java.time.LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC)
+                        .plusSeconds(AuthorizationRequestListener.DEFAULT_REPLY_EXPIRY_SECONDS),
+                published.getValue().getExpiresAt(),
+                "the deadline is the reference expiry of L750, decoded from tenths into seconds");
+
+        long destinations = java.util.Arrays.stream(OutboxMessage.class.getRecordComponents())
+                .filter(component -> component.getName().endsWith("QueueUrl"))
+                .count();
+        assertEquals(1, destinations,
+                "a publication names where it goes and nowhere to answer it, so the reply is terminal");
+    }
+
+    /**
+     * The committed canonical wire record is decided exactly as it stands on disk.
+     *
+     * <p>Assumptions: the fixture is driven as the PAYLOAD rather than being re-encoded from a decoded
+     * form, so this asserts that the listener decides the bytes a producer actually sends. The codec's own
+     * round-trip proofs live with the codec; what is asserted here is the service boundary, that a
+     * byte-exact committed record is accepted, decided, recorded and answered.</p>
+     *
+     * <p>Assumptions: the wire is one hundred and seventy characters and its eighteen declared field widths
+     * sum to one hundred and fifty-three, the difference being the seventeen delimiters between them. The
+     * frame is asserted from the codec's own constants rather than from literals, because the field ORDER,
+     * COUNT and DELIMITER are the contract on a string-format payload -- there is no field name anywhere on
+     * the wire, so a field inserted, removed or reordered changes the meaning of every field after it with
+     * nothing to notice.</p>
+     *
+     * <p>Assumptions: the recorded row is keyed by the account the CROSS-REFERENCE resolved and not by
+     * anything the request carries, which is {@code MOVE XREF-ACCT-ID TO PA-ACCT-ID} at line 911 -- the
+     * statement that establishes the parent the two-level insert at lines 913 to 919 hangs its child from.
+     * The request has no account field at all, so the linkage can only come from the resolved
+     * cross-reference, and asserting it here is what pins the child to the right parent.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the committed canonical wire is decided as it stands and hangs from the resolved account")
+    void theCommittedCanonicalWireIsDecidedAsItStands() {
+        String canonical = linesOf(CANONICAL_WIRE_FIXTURE).get(0);
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, canonical.length(),
+                "the committed record is the published wire length, terminator excluded");
+        assertEquals(CsvAuthCodec.REQUEST_FIELD_COUNT - 1,
+                canonical.chars().filter(each -> each == CsvAuthCodec.DELIMITER).count(),
+                "eighteen fields are separated by seventeen delimiters, with none after the last");
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH,
+                CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM + CsvAuthCodec.REQUEST_FIELD_COUNT - 1,
+                "the wire is the declared widths plus one delimiter between each pair of fields");
+        givenResolvableCard(FIXTURE_CARD_NUM);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+
+        this.listener.onRequest(wireMessage(canonical).build());
+
+        ArgumentCaptor<PendingAuthDetail> saved = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(saved.capture());
+        assertEquals(FIXTURE_CARD_NUM, saved.getValue().getCardNum());
+        assertEquals(0, new BigDecimal("250.00").compareTo(saved.getValue().getTransactionAmount()));
+        assertEquals(ACCOUNT_ID, saved.getValue().getId().getAccountId(),
+                "the child hangs from the account the cross-reference resolved, as L911 establishes it");
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        assertEquals(CsvAuthCodec.REPLY_WIRE_LENGTH, published.getValue().getPayload().length());
+    }
+
+    /**
+     * Discards every recorded interaction while leaving the fixture's stubbing in place.
+     *
+     * <p>Alternatives Considered: resetting the mocks, which is what the older cases in this class do.
+     * Rejected for the cases that use this helper because a reset discards STUBBING as well as recorded
+     * calls, so the shared fixture's row-count answers have to be re-applied afterwards or the listener's
+     * own consistency check fails the case for a reason unrelated to what it asserts. Clearing invocations
+     * keeps the fixture intact and leaves each case to re-stub only the read it varies.</p>
+     */
+    private void clearInvocationsKeepingStubs() {
+        org.mockito.Mockito.clearInvocations(this.summaries, this.details, this.outbox, this.accounts);
+    }
+
+    /**
+     * Decodes the response reason from the one reply this consumer has published so far.
+     *
+     * <p>Assumptions: the reason is read back through the codec rather than sliced out of the payload by
+     * offset, so a case asserting a reason does not also depend on the frame's field arithmetic -- which is
+     * asserted, once, by the case that owns the wire length.</p>
+     *
+     * @return the four-character response reason the published reply carries, never {@code null}
+     */
+    private String reasonOfOnlyReply() {
+        ArgumentCaptor<AuthReplyOutbox> published = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(published.capture());
+        return CsvAuthCodec.decodeReply(published.getValue().getPayload()).authRespReason();
+    }
+
+    /**
+     * Reads a committed fixture from the classpath as its records.
+     *
+     * <p>Assumptions: the resource is read as bytes and split on the line terminator rather than through a
+     * line-oriented reader, so a file's FINAL terminator does not silently become an extra empty record.
+     * The fixtures are byte-exact artifacts whose lengths are documented per file, and a reader that
+     * invented a record would make a count assertion meaningless.</p>
+     *
+     * @param resource the absolute classpath name of the fixture; must name a committed fixture
+     * @return the fixture's records in file order, never {@code null} and never containing an empty record
+     * @throws IllegalStateException if the classpath holds no such fixture, which means a committed
+     *     resource was moved or renamed rather than that a test input is missing
+     * @throws UncheckedIOException if the fixture cannot be read
+     */
+    private List<String> linesOf(String resource) {
+        try (InputStream bytes = getClass().getResourceAsStream(resource)) {
+            if (bytes == null) {
+                throw new IllegalStateException("the committed fixture " + resource
+                        + " is not on the test classpath");
+            }
+            String content = new String(bytes.readAllBytes(), StandardCharsets.UTF_8);
+            List<String> records = new ArrayList<>();
+            for (String candidate : content.split("\n")) {
+                if (!candidate.isEmpty()) {
+                    records.add(candidate);
+                }
+            }
+            return records;
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("the committed fixture " + resource + " could not be read",
+                    unreadable);
+        }
+    }
+
+    /**
+     * Reads the default out of a property placeholder.
+     *
+     * <p>Assumptions: the placeholder's default is the value an unconfigured deployment runs with, so it is
+     * the value a test asserting a documented default has to read. Parsing it here rather than repeating
+     * the number is what keeps the assertion about the binding rather than about a copy of it.</p>
+     *
+     * @param placeholder a property placeholder of the form {@code ${name:default}}; must carry a default
+     * @return the integer default the placeholder declares
+     * @throws IllegalArgumentException if the placeholder declares no default, because a caller asserting
+     *     one is then asserting against a value that does not exist
+     */
+    private int placeholderDefaultOf(String placeholder) {
+        int separator = placeholder.indexOf(':');
+        if (separator < 0 || !placeholder.endsWith("}")) {
+            throw new IllegalArgumentException("the placeholder " + placeholder
+                    + " declares no default to read");
+        }
+        return Integer.parseInt(
+                placeholder.substring(separator + 1, placeholder.length() - 1).trim());
+    }
+
+    /**
+     * Stubs a cross-reference, an account and a customer that all resolve for the card supplied.
+     *
+     * <p>Assumptions: the card is a parameter because the committed request fixtures carry their own
+     * synthetic card number, which differs from this class's own constant. A case driving a fixture record
+     * against the wrong stub would exercise the unresolved-card path while appearing to exercise whatever
+     * the fixture varies.</p>
+     *
+     * @param cardNum the card number the cross-reference resolves; must not be {@code null}
+     */
+    private void givenResolvableCard(String cardNum) {
+        when(this.accounts.findCardXref(cardNum)).thenReturn(
+                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(
+                Optional.of(new AccountContextClient.Account(new BigDecimal("5000.00"),
+                        new BigDecimal("500.00"), new BigDecimal("0.00"))));
+        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(true);
+    }
+
+    /**
+     * Builds a request whose transaction class is the processing code supplied.
+     *
+     * <p>Assumptions: the processing code is the only field varied, so a case asserting that nothing
+     * branches on it varies nothing else that could account for the outcome.</p>
+     *
+     * @param amount the transaction amount the request carries; must not be {@code null}
+     * @param processingCode the six-digit processing code the request declares; must be digits only
+     * @return the request, never {@code null}
+     */
+    private AuthRequest requestWithProcessingCode(Money amount, String processingCode) {
+        return new AuthRequest("250801", "104530", CARD_NUM, "0100", "1230", "0100", "POS001",
+                processingCode, amount, "5411", "840", "05", "MERCHANT0000001",
+                "TEST MERCHANT NAME 01", "SPRINGFIELD", "IL", "627010000", TRANSACTION_ID);
     }
 }

@@ -30,13 +30,24 @@ Declaring the mapping is what makes this module the anti-corruption layer for th
 direction, and it is where the baseline's three misspellings are corrected.
 
 Refactoring Rationale:
-:data:`TARGETS` declared FIVE records and now declares TEN, and the five that were missing were
+:data:`TARGETS` declared FIVE records and now declares ELEVEN, and the six that were missing were
 not edge cases: they were ``card.cards``, ``account.customers``, ``ledger.daily_transactions``,
-``ledger.transaction_category_balances`` and ``auth.users`` -- the card master, the customer
-master, the daily-transaction feed, the category balances the posting run updates, and every
-user of the system. A migration missing those has migrated the account master and its
-cross-reference and nothing else, so ``sql/verify/row_counts.sql`` listed eleven baselines
-against a loader that could satisfy four of them.
+``ledger.transaction_category_balances``, ``auth.users`` and ``ledger.transactions`` -- the card
+master, the customer master, the daily-transaction feed, the category balances the posting run
+updates, every user of the system, and the transaction master itself. A migration missing those
+has migrated the account master and its cross-reference and nothing else, so
+``sql/verify/row_counts.sql`` listed eleven baselines against a loader that could satisfy four
+of them.
+
+The transaction master was the last to be declared and was withheld on a different ground from
+the other five: not that loading it was refused, but that the SEED CORPUS ships no extract for
+it. That conflated the test corpus with the cutover. ``app/jcl/TRANFILE.jcl`` is a REPRO job like
+its nine siblings and is named as a source of this module for that reason; the corpus merely
+primes the cluster with a single record instead of shipping a full extract. Reading "no seed
+dataset" as "no load target" left the largest table in the system with no migration path at all,
+which ``docs/runbooks/data-migration.md`` needs and AAP 0.9.2's read-then-verify-then-switch
+cutover cannot do without. An absent or empty extract is a normal state and now loads zero rows
+successfully instead of failing.
 
 Two of the five were refused by name, on the stated grounds that their tables declare protected
 ``BYTEA`` columns holding "ciphertext produced by the owning service's own cipher, under a key
@@ -64,15 +75,64 @@ business holding it.
 
 WHY (Trade-offs)
 ----------------
-Only the three REFERENCE targets declare a conflict key and load through a stage-and-merge, and
-the seven master targets deliberately do not. The distinction is whether the table has a second
-writer: ``reference.transaction_types``, ``reference.transaction_categories`` and
+Only the targets whose table has a SECOND WRITER declare a conflict key and load through a
+stage-and-merge; the single-writer masters deliberately do not. Four tables qualify.
+``reference.transaction_types``, ``reference.transaction_categories`` and
 ``reference.disclosure_groups`` are also seeded by ``V2__seed_reference.sql``, so those three
 must compose with a migration that may already have run, and their descriptive columns are
 trimmed here precisely so that the two writers produce byte-identical rows rather than merely
-equal counts. A master table has exactly one writer, and a plain COPY that fails on a second
-run is the more useful behaviour there: it reports that the table was not empty, which is
-information a silent no-op would destroy.
+equal counts. ``ledger.transactions`` is the fourth, and its second writer is the posting job
+rather than a migration: ``app/cbl/CBTRN02C.cbl`` inserts into that master from the daily feed,
+so a cutover load and the first posting run can both have written before a re-run reaches it.
+A master with exactly one writer is different, and a plain COPY that fails on a second run is
+the more useful behaviour there: it reports that the table was not empty, which is information
+a silent no-op would destroy.
+
+Alternatives Considered:
+------------------------
+Emptying each table and reloading it -- the obvious way to make a load repeatable, and the
+closest analogue to what the baseline's ``DELETE CLUSTER`` / ``DEFINE CLUSTER`` pair achieves.
+It is unavailable here for two INDEPENDENT reasons, either of which alone would rule it out.
+
+First, the privilege does not exist. ``sql/V0__schemas_and_roles.sql`` grants each role only
+what its service needs, and ``DELETE`` and ``TRUNCATE`` are withheld from every one of them --
+including the batch role, whose grants are SELECT/INSERT/UPDATE on ``ledger`` and SELECT/UPDATE
+on ``account``. So truncate-then-load does not fail review, it fails at RUNTIME with an
+insufficient-privilege error partway through a cutover, which is the worst moment to discover it.
+
+Second, and independently, three of the target tables are ALREADY POPULATED before this module
+runs. ``reference.transaction_types``, ``reference.transaction_categories`` and
+``reference.disclosure_groups`` are seeded by ``V2__seed_reference.sql`` with 7, 18 and 51 rows,
+and ``ledger.transactions`` receives rows from the posting job. Emptying those would discard
+another writer's committed work, and a bare ``INSERT`` into them raises a duplicate key on a
+perfectly normal deployment. The stage-and-merge path composes with both instead.
+
+The baseline is itself re-run tolerant and this preserves that property rather than inventing
+it: ``app/jcl/ACCTFILE.jcl`` L27 follows its delete with ``IF MAXCC LE 08 THEN SET MAXCC = 0``,
+and ``app/jcl/DEFGDGB.jcl`` carries ``IF LASTCC=12 THEN SET MAXCC=0`` after every one of its six
+defines at L29, L35, L41, L47, L53 and L59. Re-running was a deliberate no-op in the original
+design too.
+
+Refactoring Rationale:
+----------------------
+``IDCAMS BLDINDEX`` is RETIRED, not ported, and this module deliberately builds no index at all.
+The baseline ends three of its ten load jobs with one: ``app/jcl/CARDFILE.jcl`` L110,
+``app/jcl/XREFFILE.jcl`` L100 and ``app/jcl/TRANFILE.jcl`` L109, each closing a four-step tail
+that first defines an alternate index and a path over the cluster it has just loaded. The step
+exists because VSAM builds an alternate index by reading the base cluster AFTER the data is
+there, so the index is a separate artifact that goes stale unless something rebuilds it.
+
+PostgreSQL has no equivalent step because it maintains indexes TRANSACTIONALLY -- an index is
+updated by the same statement that inserts the row, inside the same transaction, so there is
+never a window in which the table is loaded and its indexes are not. A port of ``BLDINDEX``
+would therefore be a statement with nothing to do.
+
+The three access paths are NOT lost, and this module is not where they come from either: they
+are real secondary indexes created by the owning services' own migrations --
+``idx_cards_account_id``, ``idx_card_xref_account_id`` and ``idx_transactions_proc_ts``. Schema
+objects belong to the migration that owns the table, so creating them here would put two
+sources of truth on the same index and leave the loader able to disagree with the schema it
+loads into. That is why no ``CREATE INDEX`` appears anywhere in this file.
 """
 
 from __future__ import annotations
@@ -118,6 +178,23 @@ class AuroraLoadError(RuntimeError):
     -------
     Separate a load failure from a configuration fault, so an operator can tell a database
     that refused from an environment that was never able to try.
+
+    Assumptions: every validation in this module RAISES this (or ``ValueError`` from a target's
+    own ``__post_init__``) and none of them uses ``assert``. The reason is mechanical rather than
+    stylistic: ``python -O`` and ``PYTHONOPTIMIZE`` strip every ``assert`` statement from the
+    compiled bytecode, so an assertion is not a validation -- it is a validation that disappears
+    under exactly the interpreter flag a production container is most likely to set. A dataset
+    whose reader and target disagreed about its shape would then be loaded silently instead of
+    refused. The container image does not currently set that flag, which is precisely why relying
+    on it is unsafe: nothing in this package would fail if it were added.
+
+    Trade-offs: this subclasses a STDLIB error rather than ``Exception`` directly, which is the
+    same choice ``copybook/zoned.py`` makes for its decode errors -- though it picks
+    ``ValueError``, because a bad sign nibble is a bad value, whereas a refused COPY is a failed
+    operation and ``RuntimeError`` is the closer parent here. The trade either way is a broader
+    parent than strictly necessary, accepted so that an existing ``except`` guard in a caller or a
+    test harness keeps catching the failure and introducing this type could not turn a handled
+    error into an unhandled one.
     """
 
 
@@ -480,6 +557,22 @@ class TableTarget:
         str
             The identifier pair, each quoted independently.
         """
+        # WHY : Alternatives Considered: setting the session `search_path` to the target's schema
+        #   and naming the table bare. Rejected because the search path is session state that the
+        #   connecting role's own default can already have set, so an unqualified name could
+        #   resolve to a table in a different schema and the load would report success against
+        #   something it never meant to write. `sql/verify/row_counts.sql` refuses unqualified
+        #   names for exactly this reason, so qualifying here keeps the load and the pass that
+        #   checks it addressing tables the same way. The cost is one prefix per statement.
+        # WHY : Assumptions: BOTH halves go through `config.quote_identifier` rather than being
+        #   interpolated bare, and the schema half is why it is not optional. `V0__schemas_and_roles
+        #   .sql` creates a schema named `authorization`, which is a RESERVED WORD in PostgreSQL:
+        #   written bare it is parsed as the keyword and the statement is a syntax error rather
+        #   than a wrong-table load. No target below names that schema -- this module writes five,
+        #   and `"authorization"` is not one of them -- but the accessor is applied uniformly so
+        #   that no code path here is capable of emitting the bare word, and so that adding a
+        #   target for it later cannot introduce the fault. Quoting the table half costs nothing
+        #   and removes the same class of error for any future table name.
         return f"{quote_identifier(self.schema)}.{quote_identifier(self.table)}"
 
     def copy_statement(self) -> str:
@@ -535,14 +628,31 @@ class TableTarget:
         """
         missing = [field for field in self.columns if field not in record]
         if missing:
-            # WHY : the FIELD NAMES are reported and no value is. A decoded record of any of
-            #   these datasets carries primary account numbers and national identifiers, and a
-            #   diagnostic is retained and readable by every holder of log access.
+            # WHY : Trade-offs: the FIELD NAMES are reported and no value is. A decoded record of
+            #   any of these datasets carries primary account numbers and national identifiers, and
+            #   a diagnostic is retained and readable by every holder of log access. Naming the
+            #   field, its target and its table is enough to locate the disagreement between a
+            #   reader and a target; the value would add nothing to that diagnosis and would put a
+            #   card number or a complete identity in a log line. Field name, offset, length and
+            #   kind are all recoverable from `copybook.layouts` for anyone who needs them, which
+            #   is why this message does not carry them either.
             raise AuroraLoadError(
                 f"a record bound for {self.schema}.{self.table} is missing the mapped field(s)"
                 f" {', '.join(missing)}; the reader and the target disagree about the record's"
                 " shape, so nothing is loaded"
             )
+        # WHY : Trade-offs: the projection is driven by `self.columns`, so a field the mapping does
+        #   not name is DROPPED here rather than being carried into the COPY. `FILLER` is the field
+        #   this matters for: every 350-, 300- and 80-byte record ends in padding that exists only
+        #   to reach the declared record length, and no target maps it. The trade is that
+        #   `copybook.layouts` deliberately RETAINS `FILLER` in its descriptors while this boundary
+        #   discards it -- two statements about the same field that look contradictory and are not.
+        #   Keeping it in the descriptor is what makes the sum-of-widths-equals-reclen invariant
+        #   expressible and machine-checkable, which is how a mis-transcribed offset is caught at
+        #   all; writing it to the database would store blanks in a column no service reads. Note
+        #   that the drop is by ABSENCE FROM THE MAPPING, not by matching the token `FILLER`: the
+        #   security record's padding is NAMED `SEC-USR-FILLER`, so a substring predicate would be
+        #   the fragile way to express this and an exact-token predicate would miss that one.
         return tuple(record[name] for name in self.columns)
 
     def copy_columns(self) -> tuple[str, ...]:
@@ -983,11 +1093,19 @@ def prepare_record(
 _USER_ID_FIELD: Final[str] = "SEC-USR-ID"
 
 # Assumptions: the registered layouts whose absence from `TARGETS` is a design decision rather
-#   than an omission, so `target_for` can say which of the two it is. `TRAN` is the transaction
-#   master, filled by the posting job; the three derived layouts `TRNX`, `REJECT` and `INTTRAN`
-#   are written by the batch chain and are not part of a seed load at all, so a caller naming one
-#   gets the same explanation rather than the misspelling message.
-_POSTING_FILLED_RECORDS: Final[frozenset[str]] = frozenset({"TRAN", "TRNX", "REJECT", "INTTRAN"})
+#   than an omission, so `target_for` can say which of the two it is. All three are written BY the
+#   batch chain rather than read into it: `TRNX` is the combined transaction view, `REJECT` the
+#   posting reject stream and `INTTRAN` the interest transactions the accrual run generates. None
+#   is part of a load in either direction, which is why `readers/__init__.py` publishes no reader
+#   for any of them, and a caller naming one gets that explanation rather than the message a
+#   misspelled record name deserves.
+# WHY : Refactoring Rationale: `TRAN` was a fourth member of this set and is REMOVED, because it
+#   did not belong to the category the set names. The other three have no reader and no extract in
+#   any encoding; the transaction master has a reader, a 350-byte layout, a registered row in
+#   `sql/verify/row_counts.sql` and a REPRO job of its own at `app/jcl/TRANFILE.jcl`. What it
+#   lacks is a dataset in the SEED CORPUS, which is a fact about the corpus rather than about the
+#   record, and treating the two as the same fact is what left `ledger.transactions` unloadable.
+_BATCH_WRITTEN_RECORDS: Final[frozenset[str]] = frozenset({"TRNX", "REJECT", "INTTRAN"})
 
 # Assumptions: the staging table lives in the session's temporary schema and is named from the
 #   target table, so two concurrent loads of DIFFERENT records cannot collide on it and a load of
@@ -997,15 +1115,28 @@ _POSTING_FILLED_RECORDS: Final[frozenset[str]] = frozenset({"TRAN", "TRNX", "REJ
 _STAGE_PREFIX: Final[str] = "carddemo_stage_"
 
 # WHY : Assumptions: every mapping below was read from the owning service's own Flyway
-#   migration rather than derived, and each records one anti-corruption decision. The three
-#   baseline misspellings are corrected here: the account and card expiration dates, spelled
-#   `EXPIRAION` in the copybooks, and the authorization merchant category code. `FILLER` never
-#   appears, because a reader never publishes it.
-# WHY : Assumptions: TEN records, which is every base master except the transaction master. That
-#   one has no target here for a reason recorded from three sides: no `TRANSACT` dataset ships in
-#   either encoding, `readers/transaction.py` treats an absent source as a normal state, and
-#   `sql/verify/row_counts.sql` gives `ledger.transactions` a NULL baseline rather than zero --
-#   the table is filled by the posting job from `ledger.daily_transactions`, which IS loaded here.
+#   migration rather than derived, and each records one anti-corruption decision. TWO of the
+#   baseline's three documented misspellings are corrected here, each at its own mapping site: the
+#   account and card expiration dates, both spelled `EXPIRAION` in the copybooks. The third,
+#   `PA-MERCHANT-CATAGORY-CODE` becoming `merchant_category_code`, is NOT corrected here and cannot
+#   be -- it belongs to the pending-authorization detail segment, whose schema this module does not
+#   load at all, so the correction is made by the owning service's own mapper. All three are
+#   registered in `docs/architecture/data-model-and-schema-mapping.md`, which is where the lineage
+#   is recorded; naming only the two this file performs keeps that register and this comment from
+#   disagreeing about which code makes which change. `FILLER` never appears in any mapping below,
+#   because a reader never publishes it.
+# WHY : Assumptions: ELEVEN records, which is every base master, and every one of the eleven
+#   baselines `sql/verify/row_counts.sql` registers now has a target able to fill it. The twelfth
+#   registered layout, the export record, is deliberately absent: `app/cpy/CVEXPORT.cpy` describes
+#   an interchange file the batch chain writes and reads back, and no service declares a table for
+#   it, so a target would have to invent one.
+# WHY : Assumptions: FIVE of the eight schemas are written, and they own the eleven tables between
+#   them -- `auth` one, `account` three, `card` one, `ledger` three, `reference` three. Counted
+#   from the declarations below rather than restated from the plan, whose prose says six: the
+#   eleven target tables name five distinct schemas and no sixth appears anywhere in this mapping.
+#   Nothing here writes `batch`, `"authorization"` or `reporting`. The first two are filled by
+#   their owning services at run time, and `V0__schemas_and_roles.sql` gives `reporting` no table
+#   at all and a SELECT-only role, so a load into it could not be granted even if one were written.
 TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
     {
         "XREF": TableTarget(
@@ -1083,9 +1214,17 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                     "ACCT-CREDIT-LIMIT": "credit_limit",
                     "ACCT-CASH-CREDIT-LIMIT": "cash_credit_limit",
                     "ACCT-OPEN-DATE": "open_date",
-                    # WHY : the source field is spelled EXPIRAION in app/cpy/CVACT01Y.cpy. The
-                    #   correction happens here, once, and the target column carries the correct
-                    #   spelling; the copybook is reference-only and keeps its own.
+                    # WHY : Refactoring Rationale: the source field is MISSPELLED -- `EXPIRAION`,
+                    #   missing the second `T`, in app/cpy/CVACT01Y.cpy. The correction to
+                    #   `expiration_date` happens here, once, at the boundary that already
+                    #   translates every other name, because the copybook is reference-only and
+                    #   keeps its own spelling forever. Carrying the misspelling forward into a
+                    #   persisted column name was the alternative and is worse for a reason that
+                    #   outlives the load: every future query, index and mapper would have to
+                    #   reproduce a typo to work, and one that reads correctly would silently
+                    #   return nothing. The lineage is registered in
+                    #   docs/architecture/data-model-and-schema-mapping.md so the rename is
+                    #   traceable rather than merely applied.
                     "ACCT-EXPIRAION-DATE": "expiration_date",
                     "ACCT-REISSUE-DATE": "reissue_date",
                     "ACCT-CURR-CYC-CREDIT": "curr_cyc_credit",
@@ -1111,9 +1250,12 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                     "CARD-ACCT-ID": "account_id",
                     "CARD-CVV-CD": "cvv_encrypted",
                     "CARD-EMBOSSED-NAME": "embossed_name",
-                    # WHY : the source field is spelled EXPIRAION in app/cpy/CVACT02Y.cpy, the
-                    #   second of the baseline's three misspellings. The correction happens here,
-                    #   once, exactly as it does for the account master above.
+                    # WHY : Refactoring Rationale: the same misspelling again -- `EXPIRAION` in
+                    #   app/cpy/CVACT02Y.cpy, the second of the baseline's three. Corrected to
+                    #   `expiration_date` here for the same reason as the account master above, and
+                    #   registered in the same place. Both are corrected at their own mapping site
+                    #   rather than by one shared rule, because a rule keyed on the misspelled stem
+                    #   would also rewrite any correctly-spelled field that happened to match it.
                     "CARD-EXPIRAION-DATE": "expiration_date",
                     "CARD-ACTIVE-STATUS": "active_status",
                 }
@@ -1220,6 +1362,84 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                     "DALYTRAN-PROC-TS": Projection.TIMESTAMP_OR_NULL,
                 }
             ),
+        ),
+        # WHY : Refactoring Rationale: this target was ABSENT, and unlike the customer and card
+        #   records its absence was not a refusal that a cipher answered -- it was the claim that
+        #   the record has nothing to load. Three facts were cited for it and all three are true:
+        #   no `TRANSACT` dataset ships under `app/data/ASCII` or `app/data/EBCDIC`,
+        #   `readers/transaction.py` treats an absent source as a normal state, and
+        #   `sql/verify/row_counts.sql` gives this table a NULL baseline rather than a count. None
+        #   of them says the record is unloadable. They say the SEED CORPUS carries no extract for
+        #   it, which is a fact about the corpus: `app/jcl/TRANFILE.jcl` is a REPRO job exactly like
+        #   its nine siblings, it is named as a source of this module for that reason, and it primes
+        #   the cluster at L67-L74 from a 350-byte initializer -- one record -- rather than from a
+        #   master extract. Declaring no target turned "the corpus ships no rows" into "a cutover
+        #   cannot move the transaction master", which is the largest table in the system and the
+        #   one AAP 0.9.2's read-then-verify-then-switch sequence most needs to move. The
+        #   zero-row case is preserved rather than traded away: an empty extract streams no rows,
+        #   commits, and reports `staged=0 inserted=0`, so a corpus-only run behaves exactly as it
+        #   did while a real extract now has somewhere to go.
+        # WHY : Assumptions: a conflict key IS declared here, which no other master declares, and
+        #   the reason is the one the reference targets use rather than an exception to it -- this
+        #   table has a SECOND WRITER. `app/cbl/CBTRN02C.cbl` posts from the daily feed into this
+        #   master as part of its three-write unit of work, so by the time a load is re-run the
+        #   posting job may already have inserted rows carrying these keys. A plain COPY would
+        #   abort on the first of them and report a duplicate key, which on a single-writer master
+        #   is useful information but here would misreport a correctly-posted row as a load fault.
+        #   It is also what makes the load restartable: AAP 0.4.1.7 drives the staging state through
+        #   Step Functions redrive, which re-enters a failed state from the beginning, and a
+        #   cutover-sized extract is precisely where a partial load followed by a retry happens.
+        # WHY : Assumptions: the conflict target is `transaction_id` because that is what the
+        #   DESCRIPTOR declares -- `LAYOUTS["TRAN"]` carries `key_length=16` at `key_offset=0`,
+        #   which spans `TRAN-ID` exactly and is the same `KEYS(16 0)` that
+        #   `app/jcl/TRANFILE.jcl` gives the cluster. `V1__ledger.sql` names the matching
+        #   constraint `pk_transactions PRIMARY KEY (transaction_id)`, so the merge conflicts on a
+        #   real unique index rather than on a key invented here. Reading the key off the
+        #   descriptor is what keeps this from becoming a second place the VSAM key length is
+        #   written down and can drift.
+        # WHY : Assumptions: the money column is `amount`, taken from `V1__ledger.sql`, and NOT the
+        #   `tran_amt` the migration plan's prose names. The shipped migration and
+        #   `sql/verify/money_totals.sql` agree on `amount` for both ledger tables, and the
+        #   verification pass aggregates the column it names -- so a target declaring the plan's
+        #   spelling would fail on the COPY, and the money-parity check would have no column to
+        #   total. `TRAN-AMT` decodes to an exact `Decimal` and lands in `NUMERIC(11,2)` with no
+        #   float on the path.
+        "TRAN": TableTarget(
+            schema="ledger",
+            table="transactions",
+            columns=MappingProxyType(
+                {
+                    "TRAN-ID": "transaction_id",
+                    "TRAN-TYPE-CD": "type_cd",
+                    "TRAN-CAT-CD": "category_cd",
+                    "TRAN-SOURCE": "source",
+                    "TRAN-DESC": "description",
+                    "TRAN-AMT": "amount",
+                    "TRAN-MERCHANT-ID": "merchant_id",
+                    "TRAN-MERCHANT-NAME": "merchant_name",
+                    "TRAN-MERCHANT-CITY": "merchant_city",
+                    "TRAN-MERCHANT-ZIP": "merchant_zip",
+                    "TRAN-CARD-NUM": "card_num",
+                    "TRAN-ORIG-TS": "orig_ts",
+                    "TRAN-PROC-TS": "proc_ts",
+                }
+            ),
+            # WHY : Trade-offs: the three descriptive columns are trimmed and the two stamps are
+            #   rendered, matching the `DALYTRAN` target field for field because the two layouts
+            #   are field for field identical -- same offsets, same kinds, same 350 bytes. Keeping
+            #   the two declarations parallel is what lets the posting parity comparison put a
+            #   daily row beside the transaction row it became and diff them, which a different
+            #   trimming or a different stamp spelling on either side would defeat.
+            projections=MappingProxyType(
+                {
+                    "TRAN-DESC": Projection.TRIMMED,
+                    "TRAN-MERCHANT-NAME": Projection.TRIMMED,
+                    "TRAN-MERCHANT-CITY": Projection.TRIMMED,
+                    "TRAN-ORIG-TS": Projection.TIMESTAMP_OR_NULL,
+                    "TRAN-PROC-TS": Projection.TIMESTAMP_OR_NULL,
+                }
+            ),
+            conflict_key=("transaction_id",),
         ),
         # WHY : Assumptions: the field spelled `TRANCAT-CD` becomes `category_cd` while its
         #   siblings keep their stems, because the copybook's own group prefix is inconsistent --
@@ -1358,27 +1578,27 @@ def target_for(record_name: str) -> TableTarget:
     Raises
     ------
     AuroraLoadError
-        If the record has no declared target. The transaction master is named explicitly,
-        because it is the one base master with no target BY DESIGN and the reason is not
-        guessable from the message a misspelling would deserve.
+        If the record has no declared target. A layout the batch chain WRITES is named
+        explicitly, because "no target" and "no target because nothing ever reads this layout
+        in" send the next reader to entirely different places.
     """
     try:
         return TARGETS[record_name]
     except KeyError as exc:
-        # WHY : Refactoring Rationale: this branch used to name CUSTOMER and CARD as
-        #   deliberately unloadable "because its table declares protected columns holding
-        #   ciphertext ... under a key this package does not hold". Both now load, through
-        #   `loaders/protected_columns.py`, and that refusal is withdrawn rather than reworded --
-        #   it was the mechanism by which two core masters had no migration path at all. What
-        #   remains is the one record that genuinely has no target, and it is named for the
-        #   opposite reason: not because loading it is refused, but because there is nothing to
-        #   load. No `TRANSACT` dataset ships in either encoding, and `ledger.transactions` is
-        #   filled by the posting job from `ledger.daily_transactions`, which this module does load.
-        if record_name in _POSTING_FILLED_RECORDS:
+        # WHY : Refactoring Rationale: this branch used to name CUSTOMER, CARD and TRAN as
+        #   deliberately unloadable. CUSTOMER and CARD were refused "because its table declares
+        #   protected columns holding ciphertext ... under a key this package does not hold"; both
+        #   now load through `loaders/protected_columns.py`. TRAN was refused on the ground that no
+        #   extract ships for it, which described the seed corpus rather than the record and left
+        #   the transaction master with no migration path. All three refusals are withdrawn rather
+        #   than reworded, because each named an obstacle that no longer exists. What remains are
+        #   the three layouts the batch chain writes and nothing reads in, for which there is no
+        #   load direction to declare a target for.
+        if record_name in _BATCH_WRITTEN_RECORDS:
             raise AuroraLoadError(
-                f"record {record_name} has no load target because no extract for it ships in"
-                " either encoding; ledger.transactions is filled by the posting job from"
-                " ledger.daily_transactions, which is loadable here as DALYTRAN"
+                f"record {record_name} has no load target because it is written BY the batch"
+                " chain rather than loaded into it: it is a derived layout with no reader and no"
+                " extract in either encoding, so there is no load direction for it"
             ) from exc
         raise AuroraLoadError(
             f"record {record_name} has no declared load target; the loadable records are"
@@ -1412,6 +1632,23 @@ def connect(settings: AuroraConnectionSettings) -> Any:
     AuroraLoadError
         If the driver is present and the connection attempt fails.
     """
+    # WHY : Assumptions: the caller resolves ONE settings object PER SCHEMA and connects as that
+    #   schema's own `carddemo_*` role -- `cli.py` does exactly that, calling
+    #   `resolve_aurora_settings(target.schema)` for each dataset it loads. This function
+    #   deliberately takes the resolved settings rather than a schema name, so it cannot choose a
+    #   role and cannot be handed one connection to reuse for everything.
+    #   `sql/V0__schemas_and_roles.sql` grants privileges PER OWNING ROLE and gives each role
+    #   exactly its own schema, so a single shared superuser connection would load every table
+    #   successfully while bypassing the least-privilege boundary the bootstrap exists to
+    #   establish -- and a load that only works as a superuser proves nothing about whether the
+    #   service that owns the table can write it. Connecting per schema means an ungranted table
+    #   fails here, during migration, rather than at first write in production.
+    # WHY : Assumptions: no connection parameter is built from a literal in this module. Host,
+    #   port, database, user, password and both TLS settings all come from
+    #   `AuroraConnectionSettings.as_connection_params()`, which resolves them from Parameter Store
+    #   and Secrets Manager. That is what keeps a credential out of this source file, and it is why
+    #   the failure message below renders `settings` -- whose `__repr__` masks the password -- and
+    #   never the parameter mapping itself.
     try:
         import psycopg
     except ImportError as exc:  # pragma: no cover - exercised only on an incomplete install
@@ -1498,6 +1735,16 @@ def load_records(
         If a record does not carry a mapped field, a projection cannot be applied, or the COPY or
         the merge fails. The transaction is rolled back before the error is raised.
     """
+    # WHY : Trade-offs: ONE transaction spans the whole dataset, rather than a commit every N
+    #   rows. The cost is a longer-held transaction and its accumulated locks and WAL, which on a
+    #   cutover-sized extract is the larger of the two costs here. It is accepted because the
+    #   alternative leaves a PARTIAL load behind on any failure, and a partially-loaded master is
+    #   the one state this pipeline has no way to describe: `sql/verify/row_counts.sql` compares a
+    #   table's count against the extract's, so a load that stopped at row 200 000 of 300 000
+    #   reports as a mismatch indistinguishable from a decode fault or a wrong extract, and the
+    #   operator's only recovery -- emptying the table and starting over -- needs the DELETE
+    #   privilege that no role has. Committing once means the table is either fully loaded or
+    #   untouched, and a failure is always re-runnable.
     if target.conflict_key:
         return _merge_records(connection, target, records, context)
     return _copy_records(connection, target, records, context)

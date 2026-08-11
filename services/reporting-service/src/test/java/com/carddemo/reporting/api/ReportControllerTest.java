@@ -147,12 +147,12 @@ class ReportControllerTest {
     }
 
     /**
-     * Asserts that a confirmed request answers 200 with the accepted run and the verbatim sentence.
+     * Asserts that a confirmed request answers 201 with the accepted run and the verbatim sentence.
      *
      * @throws Exception if the request cannot be performed
      */
     @Test
-    @DisplayName("a confirmed request answers 200 carrying the accepted run")
+    @DisplayName("a confirmed request answers 201 carrying the accepted run")
     void aConfirmedRequestAnswersWithTheAcceptedRun() throws Exception {
         ReportRequest request = monthlyRequest("Y");
         LocalDate start = LocalDate.of(2022, 7, 1);

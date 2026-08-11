@@ -62,6 +62,20 @@ import org.springframework.web.bind.annotation.RestController;
  * per-method annotation would restate a rule that is already total and would drift from it silently.
  * The published contract records the requirement per operation as machine-readable metadata, and the
  * contract test holds the two together.
+ *
+ * <p>Assumptions: this layer carries no golden master of its own, and the position has two halves
+ * that are both stated because stating either alone would misdescribe the evidence. The program this
+ * controller surfaces is an online one, and {@code tests/README.md} records at its L40 to L46, and
+ * again at its L83 to L85, that the eighteen online programs reach their screens through the CICS
+ * command-level interface and so cannot be driven end to end on a runner that carries no CICS
+ * runtime, which leaves their extractable field-validation logic as what is covered there. Parity for
+ * this class therefore rests on logic transcribed from the reference and on the copybook contracts
+ * rather than on any byte comparison of its own output. The other half is that the batch programs
+ * behind the assembled report and the statements do fall under that oracle, because they carry no
+ * CICS verbs and run standalone, which is what makes the file cited above a real comparison for the
+ * report path. Recording only the favourable half would let a covered claim stand in for a bounded
+ * one, which is exactly what the auditability position stated at that document's L50 and L51 rules
+ * out.
  */
 @RestController
 @RequestMapping(path = ReportController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -246,9 +260,17 @@ public class ReportController {
             // WHY : Assumptions: a deliberate cancellation answers 200 and a started run answers 201,
             //       which is what the published contract declares and what the browser client
             //       switches on -- it reads the status before it reads the body, so the two outcomes
-            //       are distinguishable without inspecting a member. A single 200 for both would make
-            //       the outcome recoverable only from the body, and a client that forgot to look
-            //       would report a cancellation as a submission.
+            //       are distinguishable without inspecting a member.
+            // WHY : Alternatives Considered: two other statuses were weighed for the started run and
+            //       both were rejected against the contract of record, which declares 200 and 201 for
+            //       this operation at src/main/resources/openapi/reporting-api.yaml and therefore
+            //       settles the question. A single 200 for both outcomes would make the outcome
+            //       recoverable only from the body, so a client that forgot to read a member would
+            //       report a cancellation as a submission. A 202 was the other candidate, and it does
+            //       describe the delegated-and-polled design accurately, since what this returns is a
+            //       durable handle to an execution that is still running rather than a finished
+            //       report; it was declined only because the published document names 201, and a
+            //       controller that answered 202 would break the client written against that document.
             return ResponseEntity.ok(ReportSubmissionOutcome.cancelled(CANCELLED_MESSAGE));
         }
 

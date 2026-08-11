@@ -6,6 +6,7 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -80,6 +81,19 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
      * @throws IllegalStateException if the base address is absent, is not an absolute HTTPS address,
      *     carries user information, a path, a query or a fragment, or is not the approved origin
      */
+    // WHY : Assumptions: the annotation is REQUIRED here and its absence stopped the context from
+    //       starting. Spring's implicit constructor injection applies only to a class with exactly
+    //       ONE constructor; this class has two, because the package-private one below is a test
+    //       seam. With two candidates and no marked one, the container stops looking for an
+    //       injectable constructor and falls back to a no-argument constructor, which this class
+    //       does not declare, so bean creation failed with "No default constructor found" and the
+    //       whole account context failed to start rather than degrading.
+    // WHY : Alternatives Considered: removing the test seam so a single constructor would again be
+    //       implicit. Rejected because that seam exists for a measured reason recorded on it: the
+    //       public constructor installs its own request factory to apply the two timeouts, which
+    //       REPLACES any transport a test had bound, so tests would reach the real network. Marking
+    //       the injection point keeps both the seam and the timeouts.
+    @Autowired
     public RestReferenceAddressLookup(RestClient.Builder builder,
             @Value("${carddemo.reference-context.base-url}") String baseUrl,
             @Value("${carddemo.reference-context.approved-origin:"

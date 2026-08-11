@@ -908,7 +908,7 @@ the batch context.
 |---|---|---|
 | [`DataSourceConfig`](src/main/java/com/carddemo/batch/config/DataSourceConfig.java) | **Owned** | Binds the HikariCP pool from `spring.datasource.hikari`, and verifies once, before any step runs, that the connection's effective schema is the one Flyway was configured to migrate |
 | `BatchConfig` | **Owned** | Chunk-oriented step definitions and their reader, processor and writer wiring. **This is the only module in the repository that owns one.** See below for why it is a separate class rather than annotations spread across the jobs |
-| `SqsConfig` | **Owned** where a job publishes or consumes | Queue wiring; the listener must not auto-start, because a job runs on command rather than on arrival |
+| [`SqsConfig`](src/main/java/com/carddemo/batch/config/SqsConfig.java) | **Owned**, and publish-only | Send-side queue wiring for the one terminal error sink: a bounded synchronous client and the closed three-attribute set a published event carries. It declares no listener and no `@SqsListener`, because a job runs on command rather than on arrival — the listener flag itself is set in `application.yml`, where the lifecycle concern belongs |
 | `OpenApiConfig` | **Excluded** | See §9.1 |
 | `SecurityConfig` | **Excluded** | See §9.1 |
 

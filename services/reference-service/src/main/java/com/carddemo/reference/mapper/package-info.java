@@ -104,15 +104,15 @@
  * illustration, so that a reviewer auditing the tree by literal search finds only labels that are
  * actually in use. The two forms are never mixed inside one file.</p>
  *
- * <h2>The seven mappers, and why four of them are static</h2>
+ * <h2>The eight mappers, and why four of them are static</h2>
  *
- * <p>Assumptions: seven mappers are landed as compilation units beside this charter, and the closed
- * set of this package is those seven plus this file. Nothing is outstanding, so a reader who cannot
- * open one of the seven has found a gap rather than the expected state. The count is measured against
+ * <p>Assumptions: eight mappers are landed as compilation units beside this charter, and the closed
+ * set of this package is those eight plus this file. Nothing is outstanding, so a reader who cannot
+ * open one of the eight has found a gap rather than the expected state. The count is measured against
  * the directory on every build:</p>
  *
  * <pre>
- * this directory: 8 java files = 7 classes + 1 charter
+ * this directory: 9 java files = 8 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section said five, and enumerated five, while
@@ -125,7 +125,7 @@
  * hardest kind of wrong document to act on. What is actually true is recorded in its entry below,
  * including that it has no caller today. The marker line above is measured by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so an eighth mapper arriving without an entry here now fails the build.</p>
+ * so a further mapper arriving without an entry here now fails the build.</p>
  *
  * <p>Refactoring Rationale: the same correction is recorded a second time rather than folded into the
  * paragraph above, because two occurrences are evidence of a pattern where one was evidence of a slip.
@@ -133,7 +133,7 @@
  * class stands to {@code LookupMapper}'s state member in exactly the relation
  * {@code UsPhoneAreaCodeMapper} stands in to its area-code member, so the identical misreading was
  * available: a reader trusting the closed set would have taken a second implementation of one
- * conversion for a misplacement. Both entries below therefore state the duplication and the caller
+ * conversion for a misplacement. The entries below therefore state the duplication and the caller
  * position outright rather than leaving either to be inferred. Assumptions: the marker line is the
  * only figure here a build can check, so the heading and the three sentences in this section that
  * carry a number are kept in step with it by hand, and they are the places that has to happen.</p>
@@ -192,6 +192,22 @@
  *       {@code app/cpy/CSLKPCDY.cpy} L1013. Trade-offs: the same dead-weight cost as the entry above
  *       is accepted on the same terms, and the two classes are deliberately symmetrical so that a
  *       reader who has understood one has understood both.</dd>
+ *
+ *   <dt>{@code UsStateZipPrefixMapper}</dt>
+ *   <dd>Renders one seeded state-and-postal-prefix combination as
+ *       {@code UsStateZipPrefixResponse}, and renders a list of them. Assumptions: this is the SAME
+ *       conversion {@code LookupMapper}'s combination member performs at its L64 to L66, and the
+ *       duplication is stated for the same reason as the two entries above.
+ *       {@code AddressLookupController} reaches {@code LookupMapper} on both combination routes --
+ *       by method reference at its L344 and directly at its L363 -- so this class has <b>no caller
+ *       in the delivered code</b> either. What it adds is the list member and a per-entity home for
+ *       the ruling its own header records: that the four characters are one indivisible value,
+ *       evidenced by {@code VALID-US-STATE-ZIP-CD2-COMBO} standing over the whole
+ *       {@code PIC X(4)} field at {@code app/cpy/CSLKPCDY.cpy} L1072 to L1073 and by the edit at
+ *       {@code app/cbl/COACTUPC.cbl} L2537 to L2542, which assembles the value by concatenation and
+ *       only then tests the assembled whole. Trade-offs: the same dead-weight cost as the two
+ *       entries above is accepted on the same terms, and the three lookup classes are deliberately
+ *       symmetrical.</dd>
  * </dl>
  *
  * <p>Alternatives Considered: the four entity conversions are {@code final} classes with a private

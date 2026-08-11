@@ -80,7 +80,26 @@ public class RecordConflictException extends RuntimeException {
          * <p>Assumptions: this is the migrated form of the {@code ON DELETE RESTRICT} relationship that
          * preserves the baseline's own {@code XTRNTYCAT} constraint.</p>
          */
-        REFERENCED_ROW
+        REFERENCED_ROW,
+
+        /**
+         * An insert was refused because the key it carried is already stored.
+         *
+         * <p>Assumptions: this is the migrated form of the TWO duplicate conditions the baseline's two
+         * transaction-writing screens each handle together. {@code app/cbl/COTRN02C.cbl} names the
+         * duplicate-key condition at line 735 and the duplicate-record condition at line 736 and falls
+         * through to one arm whose sentence is at line 738, and {@code app/cbl/COBIL00C.cbl} does the
+         * same at lines 533, 534 and 536 with the identical sentence. One kind therefore covers both
+         * conditions of both programs, because none of the four draws a distinction a caller could act
+         * on.</p>
+         *
+         * <p>Assumptions: this is distinct from {@link #REFERENCED_ROW} even though the persistence
+         * provider reports both as one integrity violation. A caller refused for a duplicate key acts by
+         * submitting again, because the key is derived rather than supplied; a caller refused for a
+         * dependent row acts by deleting the dependents or stopping. Answering the first with the
+         * second's sentence would name child records to a caller that deleted nothing.</p>
+         */
+        DUPLICATE_KEY
     }
 
     /**

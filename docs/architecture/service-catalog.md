@@ -515,8 +515,8 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | `account-service` | 39 | `V1__account.sql` |
 | `card-service` | 23 | `V1__card.sql` |
 | `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
-| `reference-service` | 57 | `V1__reference.sql`, `V2__seed_reference.sql` |
-| `batch-service` | 51 | `V1__batch.sql` |
+| `reference-service` | 58 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `batch-service` | 52 | `V1__batch.sql` |
 | `authorization-service` | 55 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
 | `reporting-service` | 53 | none by design — it owns no table, only read-only views |
 
@@ -575,6 +575,34 @@ the same single row `LookupMapper` already renders, so the module carries one mo
 conversion than the delivered routes reach; the duplication and the caller position are
 stated outright in that class's own header and in its package charter's roster rather
 than being left for a reader to infer from a count in this table.
+
+*Refactoring Rationale:* `reference-service` reads 58 where it read 57. One class was
+added, `com.carddemo.reference.mapper.UsStateZipPrefixMapper`, the third and last of the
+three per-entity lookup mappers, standing to the state-and-postal-prefix combination as
+the two classes the paragraphs above describe stand to the state code and the area code.
+Assumptions: it is recorded here as an addition and not as a correction, on the same
+ground as the entry above — the figure was accurate for the tree it was measured against.
+Trade-offs: it too renders a single row `LookupMapper` already renders, so this is the
+third conversion the delivered routes do not reach, and the duplication and caller
+position are again stated in that class's own header and in its package charter's roster
+rather than being inferable only from this figure. What that class adds over the shared
+mapper is the list member and a per-entity home for the ruling its header records: that
+the four characters of the combination are one indivisible value, evidenced by the
+allow-list condition standing over the whole `PIC X(4)` field at `app/cpy/CSLKPCDY.cpy`
+L1072 to L1073 and by the edit at `app/cbl/COACTUPC.cbl` L2537 to L2542, which assembles
+the value by concatenation and only then tests the assembled whole.
+
+*Refactoring Rationale:* `batch-service` reads 52 where it read 51. One class was added,
+`com.carddemo.batch.config.SqsConfig`, which completes the three-class roster its
+configuration package charter has always declared and which §0.4.1.2 of the technical
+specification scopes to this module and to `authorization-service` alone. It is recorded
+here as an addition rather than as a correction, because nothing was miscounted — 51 was
+accurate for the tree it was measured against, and that charter named the class as
+planned rather than present so the two statements agreed while it was absent.
+Assumptions: it adds no schema, no migration and no queue resource, so only this column
+moves; the queues, their dead-letter queues and their encryption keys belong to
+`infra/modules/sqs`, and the class is property-gated so a task whose selected job has
+nothing to report starts and exits without it.
 
 
 ## The eight bounded contexts
@@ -768,7 +796,7 @@ documented business rule fails silently.
 | Owned schema | `batch` — the durable step ledger plus the job-repository tables |
 | Owned tables | `batch_run`, plus the batch framework's own job-repository tables |
 | Synchronous dependencies | None on another context's HTTP surface. Jobs are argument-driven and receive their parameters, including the business date, from the orchestrator. It does reach four schemas directly under the scoped database grants described below, which is a database dependency rather than a service hop and is why no client class appears in this module |
-| Asynchronous dependencies | None. It is invoked by the orchestrator rather than by a queue |
+| Asynchronous dependencies | None inbound: it is invoked by the orchestrator rather than by a queue, and it registers no listener. Outbound it is publish-only, sending a failed step's notification to the one terminal error sink through `com.carddemo.batch.config.SqsConfig`, which is property-gated so a job with nothing to report needs no queue |
 | Cross-schema access | **Scoped write grants on `ledger.*` and `account.*` only** — see below |
 
 The business date is a job parameter rather than a clock read, preserving the

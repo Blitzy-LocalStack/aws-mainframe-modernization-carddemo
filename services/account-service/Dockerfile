@@ -7,19 +7,65 @@
 #   COACTUPC.cbl online, the batch readers CBACT01C, CBACT03C and CBCUS01C, and the
 #   queue-driven inquiry app/app-vsam-mq/cbl/COACCT01.cbl.
 #
+# Stages:
+#   build   - resolves the reactor's dependencies, then compiles the unpublished
+#             common-lib sibling and this module from source in one invocation,
+#             producing the repackaged bootable jar under account-service/target.
+#   runtime - carries that one jar plus the shared listener-material entry point,
+#             and nothing else from the build stage: no Maven, no compiler, no
+#             resolved dependency cache and no sources.
+#
+# Artifact:
+#   One bootable Spring Boot jar at /app/app.jar, owned and executed by the
+#   non-root identity 10001:10001, listening on 8080, and probed by the single
+#   HEALTHCHECK below against the actuator health endpoint /actuator/health over
+#   TLS. This module's POM records that the same endpoint is read by BOTH the ALB
+#   target group and this container check, and application.yml declares the path,
+#   so the two readers cannot disagree about one instance.
+#
+# Gates:
+#   The Checkstyle documentation gate runs INSIDE this build, not merely in the
+#   pipeline. services/pom.xml binds its checkstyle-documentation-gate execution
+#   to Maven's validate phase, and validate precedes package, so a missing or
+#   incomplete Javadoc in either module compiled here fails `docker build`.
+#
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
+#   This image declares no build argument, and the entry point takes no argument
+#   of its own: it forwards "$@", so a `docker run` trailer or an ECS container
+#   `command` override reaches the JVM unchanged. There is no per-run token of the
+#   kind the batch image accepts, because this process is a long-running HTTP
+#   listener rather than a job.
 #   Runtime configuration arrives entirely through environment variables that the
-#   ECS task definition supplies. The values this service cannot start without,
-#   because their placeholders declare no fallback, are:
+#   ECS task definition supplies from Parameter Store and Secrets Manager. The
+#   variables whose application.yml placeholders declare NO fallback, so the
+#   context cannot start without them, are:
 #     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
+#     - CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID
+#     - CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY and
+#       CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY
+#     - CARDDEMO_REFERENCE_CONTEXT_BASE_URL
 #     - AWS_REGION
 #     - CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE, CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE
 #       and CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE
+#   That list is the complete set of no-fallback placeholders in application.yml
+#   with ONE deliberate exclusion. CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no
+#   fallback either and is omitted on purpose: the entry point mints the keystore
+#   and exports its password itself, so a deployment that injected one would be
+#   overriding material this task generates for its own single use.
+#   One further input is required and is NOT a placeholder, so it does not appear
+#   in the list above and is easy to miss:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the
+#       property carddemo.pagination.cursor.signing-key, base64 over at least 32
+#       bytes. The shared kernel publishes the keyset-cursor signer only when that
+#       property is set, and it is defaulted nowhere on purpose so that no
+#       deployment can sign cursors with a key someone else also holds. Omitting it
+#       does not degrade paging; it removes the bean, and the context then fails to
+#       start because the read services require it.
+#   Every entry above is a variable NAME. No value, and therefore no credential,
+#   endpoint, queue URL, account identifier or key ARN, appears in this file.
 #
 # Return values:
 #   0 (integer): the JVM exited after a requested shutdown.
@@ -33,20 +79,71 @@
 #
 # Governing convention:
 #   docs/CODE_DOCUMENTATION_STANDARD.md
+#   Label form: this file uses the PLURAL labels "Alternatives Considered:",
+#   "Refactoring Rationale:", "Assumptions:" and "Trade-offs:", spelled as Rule 1
+#   and the house convention in tests/README.md section 12 spell them.
+#   config/checkstyle/checkstyle.xml and its suppressions file use the singular in
+#   file forms instead; that variant is deliberately NOT followed here, so please
+#   do not harmonise this file toward it.
+#   Comment shape: instruction comments are WHY-only, matching the sibling service
+#   images. Rule 1 forbids a comment that restates what the code does, and beside a
+#   Dockerfile instruction a "what" line is almost always that restatement, so the
+#   "what" is carried by the Purpose, Stages, Artifact and Build sections above
+#   instead. The one exception is the reactor-trimming step, whose mechanism is not
+#   evident from reading it and which therefore states what it does as well as why.
 #
-# WHAT: From the repository root, build this image with:
-#       docker build --file services/account-service/Dockerfile \
-#         --tag carddemo-account-service:validation .
-# WHY : Assumptions: the repository root is the build context, not services/,
-#       because the image compiles the unpublished common-lib sibling from source
-#       and the inherited Checkstyle documentation gate reads config/checkstyle,
-#       which sits OUTSIDE the services reactor. Every COPY below is therefore
-#       repository-root-relative and all of them fail if the context is narrowed.
+# Build:
+#   Run from the REPOSITORY ROOT, so that the trailing dot is the repository root
+#   and not this module's directory:
+#     docker build -f services/account-service/Dockerfile -t carddemo/account-service:local .
+#   The gating workflow spells the same two flags long-form and tags per commit:
+#     docker build --file services/account-service/Dockerfile \
+#       --tag carddemo-account-service:validation .
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: the repository root is the build context, not services/,
+#     because the image compiles the unpublished common-lib sibling from source
+#     and the inherited Checkstyle documentation gate reads config/checkstyle,
+#     which sits OUTSIDE the services reactor. Every COPY below is therefore
+#     repository-root-relative and all of them fail if the context is narrowed.
+#     Running `docker build .` from inside services/account-service/ does not
+#     produce a smaller image, it produces no image at all: the first COPY names a
+#     path the narrowed context does not contain.
+#   - Alternatives Considered: a module-scoped context was evaluated and rejected
+#     twice over. It cannot reach common-lib, which no registry carries because
+#     com.carddemo:carddemo-services is never published, and it cannot reach
+#     config/checkstyle, which the gate addresses relative to the repository root.
+#     Pre-installing common-lib into a shared local repository from a separate
+#     image was also rejected: it splits one reproducible build into two coupled
+#     ones, and the second would compile against whatever the first happened to
+#     leave behind rather than against this commit's sources.
+#   - Trade-offs: two stages rather than one. Maven, the JDK compiler and the
+#     entire resolved dependency cache stay out of the shipped image, which is the
+#     difference between shipping a build toolchain to production and shipping a
+#     jar. The cost is that the artifact must cross a stage boundary by path, so
+#     this file and the module's jar naming are coupled.
+#   - Trade-offs: the build context is the whole repository, which is larger than
+#     this module. The repository-root .dockerignore already excludes .git, every
+#     target/, node_modules/, dist/, .terraform/ and the virtual environments, so
+#     the transferred context stays small; no .dockerignore is authored here,
+#     because build-context scope is a repository-wide concern rather than this
+#     module's.
+#   - Assumptions: nothing here publishes. The only registry hostname in this file
+#     belongs to the public base image, and the tags in the Build section above
+#     name no account and no region, so no line of this file can be mistaken for a
+#     publishable reference or carry an account-scoped registry host.
 # =============================================================================
 
 # WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
 #       Corretto vendor and Java 21 major version, so a class-file level or
 #       vendor-specific behavior cannot first appear after the jar is shipped.
+# WHY : Alternatives Considered: a generic maven:3-eclipse-temurin-21 was
+#       rejected. It would compile with one vendor's JDK what the other vendor's
+#       runtime below executes, and a vendor mismatch is the class of difference
+#       that surfaces under load rather than at build time - a garbage collector
+#       default or a security-provider list differing between the image that
+#       produced the bytecode and the image that runs it. Matching the two costs
+#       nothing here, because both vendors publish a Maven image.
 # WHY : Assumptions: the digest is the MULTI-PLATFORM INDEX digest read with
 #       `docker buildx imagetools inspect`, not the platform manifest digest that
 #       `docker images` reports, so linux/amd64 and linux/arm64 builders both
@@ -64,11 +161,25 @@ WORKDIR /build/services
 #       dependency layer. The extra COPY instructions make this file longer, but
 #       they avoid repeating Maven's dependency download, which dominates the
 #       otherwise immutable cost of this build.
+# WHY : Assumptions: config/checkstyle belongs in THIS layer, beside the POMs, and
+#       not with the sources below. The inherited checkstyle-documentation-gate
+#       execution is bound to `validate`, which precedes `compile`, so the ruleset
+#       has to be present before the dependency step runs; arriving with the
+#       sources would be too late and the gate would fail for want of its own
+#       configuration rather than for a documentation defect.
+# WHY : Assumptions: the whole directory is copied, not checkstyle.xml alone,
+#       because that ruleset declares a SuppressionFilter on
+#       ${config_loc}/suppressions.xml with its optional flag false. The filter is
+#       fail-closed by design, so a missing companion file is a hard error, and
+#       copying one file of the pair would break the build in a way that reads like
+#       a ruleset problem.
 COPY services/pom.xml ./pom.xml
 COPY services/common-lib/pom.xml ./common-lib/pom.xml
 COPY services/account-service/pom.xml ./account-service/pom.xml
 COPY config/checkstyle /build/config/checkstyle
 
+# WHAT: rewrites the copied aggregator POM so its module list names only the two
+#       modules this stage carries, then warms the dependency cache for them.
 # WHY : Assumptions: Maven validates every module directory an aggregator declares
 #       before -pl can select from it, so the copied parent must list only the two
 #       modules whose directories exist in this stage. The source parent POM is
@@ -109,25 +220,62 @@ RUN awk ' \
     && mvn -B -ntp -f pom.xml -pl common-lib,account-service -am \
        dependency:go-offline
 
+# WHY : Trade-offs: the sources land here, after the dependency step above, which
+#       is what makes that step's layer reusable: editing a Java file invalidates
+#       this layer and everything below it, and nothing above it.
+# WHY : Assumptions: the ENTIRE src tree is copied, including src/test, rather than
+#       src/main alone. Two inherited settings require it - the documentation gate
+#       runs with includeTestSourceDirectory true, so test sources are audited, and
+#       -DskipTests below still COMPILES them. Narrowing this to src/main would
+#       silently shrink the gate's coverage and then fail at test compilation.
 COPY services/common-lib/src ./common-lib/src
 COPY services/account-service/src ./account-service/src
 
 # WHY : Trade-offs: tests are skipped while packaging because the suite gate is
 #       the repository-root reactor build `mvn -f services/pom.xml clean verify`,
-#       whose Surefire and Failsafe executions cover all ten modules. This stage
+#       whose Surefire and Failsafe executions cover all nine modules. This stage
 #       sees only common-lib and account-service, so running tests here would report a
-#       narrower result under a name that reads like the full one.
+#       narrower result under a name that reads like the full one. The Testcontainers
+#       backed *RepositoryIT classes also need a Docker daemon, which a builder
+#       running this very build cannot be assumed to nest.
 # WHY : Assumptions: Checkstyle stays bound to `validate` and therefore still runs
 #       inside this stage, before `package`, even under -DskipTests. It is the one
 #       gate this image build keeps, because a missing Javadoc is a defect in the
 #       sources being compiled here rather than a statement about behavior.
+#       -DskipTests skips test EXECUTION only: it neither skips test compilation
+#       nor relaxes the documentation gate, which still runs with failOnViolation
+#       true at warning severity over main AND test sources.
+# WHY : Assumptions: skipping test EXECUTION is the ONLY build-shortening this
+#       stage is permitted, and the alternatives are named in prose here rather
+#       than written as literal flags so that no reader mistakes the prohibition
+#       for a switch to turn on. A Checkstyle skip property, or one grading its
+#       violation threshold down, would disarm the documentation gate outright.
+#       Maven's broader test-skip property would additionally skip test
+#       COMPILATION, letting a broken test source tree ship as a green image. And
+#       any return-code tolerance appended to this command would convert every
+#       failure above into a successful build. None of the four appears here, and
+#       none may be added.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,account-service -am \
     clean package -DskipTests
 
-# WHY : Assumptions: the publisher provides no Alpine variant of this Corretto
-#       image; `21-alpine` does not resolve and would fail the build. 21.0.12 is
-#       the highest published 21.x tag and headless is selected because an HTTP
-#       service needs no AWT or graphics stack.
+# WHY : Assumptions: the publisher provides NO Alpine variant of this Corretto
+#       image. The repository publishes -al2 and -al2023 only, each with the
+#       headful, headless, generic and jdk suffixes, and 21.0.12 is the highest
+#       published 21.x. So the reflex reach for a smaller base, `21-alpine`, is not
+#       a different or larger image - it is a tag that does not resolve, and
+#       substituting it fails this build outright at the pull. An earlier draft of
+#       the migration plan named exactly that tag, which is why the fact is
+#       recorded here beside the line it would be edited on.
+# WHY : Trade-offs: headless is chosen over the other three suffixes. It omits the
+#       AWT and graphics stack that an HTTP service never loads; generic keeps it,
+#       and jdk would additionally ship javac and the whole compiler toolchain into
+#       a production runtime, which is the very thing the build stage exists to
+#       keep out. What is given up is the ability to render an image or open a font
+#       inside the container, neither of which this context does.
+# WHY : Alternatives Considered: a floating tag such as `21`, or `latest`, was
+#       rejected on both stages. An unpinned base lets the runtime change with no
+#       commit to point at, so a behaviour difference between two builds of one
+#       revision would have no explanation in the repository.
 # WHY : Refactoring Rationale: the reference is digest-pinned rather than left on
 #       the bare tag because this tag has already moved at least once - the
 #       registry index for `21.0.12-al2023-headless` and a copy cached earlier on
@@ -193,9 +341,26 @@ RUN chmod 0555 /usr/local/bin/carddemo-entrypoint.sh
 
 # WHY : Assumptions: the named account resolves to the 10001:10001 identity
 #       created above; naming it keeps the non-root intent visible in image
-#       metadata while the numeric records keep behavior deterministic.
+#       metadata while the numeric records keep behavior deterministic. USER is set
+#       BEFORE the entry point so the JVM is never started as root and no later
+#       instruction can switch back; nothing below re-declares USER root, and no
+#       path in the image is made world-writable to compensate.
 USER carddemo:carddemo
 
+# WHY : Assumptions: this image carries NO ENV instruction, and that absence is a
+#       decision rather than an omission. Every value the context reads - the
+#       datasource URL and credentials, the Flyway role, the JWT issuer URI and
+#       expected client id, the customer-identifier key id, the two internal
+#       identity signing keys, the reference context base URL, the region and the
+#       three inquiry queue names - arrives at run time from Parameter Store and
+#       Secrets Manager through the task definition. Baking any of them into a
+#       layer would make one image environment-specific AND readable by anyone who
+#       can pull it, since a layer is not a secret store.
+# WHY : Assumptions: SPRING_PROFILES_ACTIVE is deliberately NOT set here either.
+#       The same image artifact is promoted from dev to prod unchanged, so the
+#       profile is chosen by the task definition; pinning it in the image would
+#       either ship two different images or let a stale layer decide which
+#       environment's configuration a task loads.
 # WHY : Assumptions: the three inquiry queue names are supplied as NAMES, not
 #       URLs, and the image carries no endpoint override, so the SQS client
 #       resolves them against the real regional endpoint using the task role.

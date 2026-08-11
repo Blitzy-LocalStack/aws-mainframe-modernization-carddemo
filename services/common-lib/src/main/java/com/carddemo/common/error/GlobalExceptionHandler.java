@@ -301,6 +301,22 @@ public class GlobalExceptionHandler {
             "Please delete associated child records first:";
 
     /**
+     * The verbatim message the baseline displays when an insert carries a key that is already stored.
+     *
+     * <p>Assumptions: this sentence is declared here rather than in either service that raises it because
+     * BOTH of the baseline's transaction-writing screens emit the identical characters --
+     * {@code app/cbl/COTRN02C.cbl} line 738 and {@code app/cbl/COBIL00C.cbl} line 536 -- so it is shared
+     * text in the same way {@link #MESSAGE_REFERENCED_ROW} is, whose own two declarations sit in the two
+     * reference-data programs. Declaring it twice in two services would let one drift.</p>
+     *
+     * <p>Assumptions: the singular verb is the baseline's and is carried across as written.
+     * Transformation rule T8 reproduces every user-visible string character for character, so correcting
+     * the grammar would be a behavioural change to a string an operator reads and a golden comparison
+     * would flag it.</p>
+     */
+    public static final String MESSAGE_DUPLICATE_KEY = "Tran ID already exist...";
+
+    /**
      * The message returned for a failure the client cannot correct.
      *
      * <p>Assumptions: this sentence names nothing about the cause on purpose. The cause is written to
@@ -1944,6 +1960,7 @@ public class GlobalExceptionHandler {
             case STALE_VERSION -> MESSAGE_RECORD_CHANGED;
             case LOCK_UNAVAILABLE -> MESSAGE_LOCK_UNAVAILABLE;
             case REFERENCED_ROW -> MESSAGE_REFERENCED_ROW;
+            case DUPLICATE_KEY -> MESSAGE_DUPLICATE_KEY;
         };
 
         LOG.warn("event=api.conflict.declared code={} status=409 path={} kind={} versionReported={}",

@@ -198,19 +198,32 @@ were to be issued three times, which is wrong for a load that is not idempotent:
 schema fails on the primary key rather than reloading. One sequence and one gate is
 therefore the corrected procedure, not merely the shorter one.
 
+Refactoring Rationale: this sequence loaded FIVE datasets and now loads TEN. It was
+written when the loader declared five targets and was not revised as the loader grew
+to eleven, so an operator following it verbatim migrated the reference tables, the
+cross-reference and the account master and left the card master, the customer master,
+the security users, the daily feed and the category balances empty — while every
+verification pass below reported green, because a pass compares a source it was pointed
+at against a table and cannot know a dataset was never named. The count is stated in the
+comment so the list and its description cannot drift apart again.
+
 ```bash
-# WHAT: load the five records this package can load, smallest reference data first.
+# WHAT: load ten of the eleven records, smallest reference data first. The eleventh,
+#       TRAN, is handled separately below because no seed extract ships for it.
 # WHY : Assumptions: the reference tables are loaded before the account tables
 #       because `reference.transaction_categories` carries a foreign key to
 #       `reference.transaction_types` with ON DELETE RESTRICT, and
 #       `account.card_xref` is what every later lookup joins through. Loading in
 #       this order means a referential failure names the row that is missing
 #       rather than the constraint that noticed.
-# WHY : Trade-offs: `--encoding ascii` is used for these five because the ASCII
-#       tree is the authoritative form for them; the EBCDIC twin is loadable by
+# WHY : Trade-offs: `--encoding ascii` is used for the nine with an ASCII twin because
+#       that tree is the authoritative form for them; the EBCDIC twin is loadable by
 #       naming the other path and encoding, which is why the flag is required
 #       rather than defaulted. A sniffed encoding would read an all-ASCII EBCDIC
 #       extract as text and decode plausible wrong values.
+# WHY : Assumptions: SECUSER is the one master with no ASCII counterpart, so it is the
+#       one line here that names the EBCDIC tree. Its password span is read as bytes and
+#       discarded — `auth.users` declares no column for it — so no credential is loaded.
 python -m carddemo_migration.cli load-dataset \
   --dataset TRANTYPE --source app/data/ASCII/trantype.txt --encoding ascii
 python -m carddemo_migration.cli load-dataset \
@@ -218,9 +231,38 @@ python -m carddemo_migration.cli load-dataset \
 python -m carddemo_migration.cli load-dataset \
   --dataset DISGROUP --source app/data/ASCII/discgrp.txt  --encoding ascii
 python -m carddemo_migration.cli load-dataset \
-  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
+  --dataset CUSTOMER --source app/data/ASCII/custdata.txt --encoding ascii
 python -m carddemo_migration.cli load-dataset \
   --dataset ACCOUNT  --source app/data/ASCII/acctdata.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset CARD     --source app/data/ASCII/carddata.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset DALYTRAN --source app/data/ASCII/dailytran.txt --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset TCATBAL  --source app/data/ASCII/tcatbal.txt  --encoding ascii
+python -m carddemo_migration.cli load-dataset \
+  --dataset SECUSER  --source app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS --encoding ebcdic
+```
+
+**The eleventh record, `TRAN`, only when a real extract exists.** No `TRANSACT`
+dataset ships in either tree, so there is nothing for `--source` to name on a
+corpus-only run and the command below is skipped entirely; `ledger.transactions` is
+then filled by the posting job from `ledger.daily_transactions`, and
+`sql/verify/row_counts.sql` reports it against a NULL baseline rather than a count. On a
+cutover from a production extract, run it with the path the extract was staged to.
+
+```bash
+# WHAT: load the transaction master, ONLY on a cutover that supplies a real extract.
+# WHY : Assumptions: this is the one load that is safe to re-run as well as to skip.
+#       `ledger.transactions` has a second writer -- the posting job inserts into it --
+#       so the loader merges on `transaction_id` instead of failing on the primary key,
+#       which is what lets a redriven staging step re-enter without duplicating rows.
+#       Every other master above is single-writer and a second run there is expected to
+#       fail on its key rather than silently do nothing.
+python -m carddemo_migration.cli load-dataset \
+  --dataset TRAN --source "$STAGING_ROOT/AWS.M2.CARDDEMO.TRANSACT.PS" --encoding ebcdic
 ```
 
 ## Run All Three Verification Passes
@@ -236,18 +278,62 @@ python -m carddemo_migration.cli load-dataset \
 # WHY : Assumptions: a non-zero exit is the gate. Each pass exits 8 on a
 #       difference and prints the comparison line, so `set -e` stops at the first
 #       failing dataset with the evidence on standard output.
+# WHY : Refactoring Rationale: this loop covered the same FIVE datasets the load
+#       sequence did, and ran all three passes over each. Both halves were wrong. It
+#       verified five of the ten loaded datasets, so five arrived unverified; and it ran
+#       the checksum pass over XREF and ACCOUNT, which that pass cannot digest -- it
+#       fails on a `BIGINT`, `DATE` or `SMALLINT` column rather than reporting a
+#       difference, as the section above measures. A mandatory pass that aborts on a
+#       dataset it was never able to serve stops the run before the datasets after it are
+#       checked at all, which is why the checksum is now scoped to the three records it
+#       serves and the other two passes run over all ten.
 set -e
+
+# All three passes for the three reference records, which the checksum pass can digest.
 for pair in \
   "TRANTYPE app/data/ASCII/trantype.txt" \
   "TRANCAT  app/data/ASCII/trancatg.txt" \
-  "DISGROUP app/data/ASCII/discgrp.txt" \
-  "XREF     app/data/ASCII/cardxref.txt" \
-  "ACCOUNT  app/data/ASCII/acctdata.txt" ; do
+  "DISGROUP app/data/ASCII/discgrp.txt" ; do
   set -- $pair
   python -m carddemo_migration.cli verify-row-counts   --dataset "$1" --source "$2" --encoding ascii
   python -m carddemo_migration.cli verify-checksum     --dataset "$1" --source "$2" --encoding ascii
   python -m carddemo_migration.cli verify-money-parity --dataset "$1" --source "$2" --encoding ascii
 done
+
+# Row counts and money parity for the remaining seven, which those two passes do serve.
+for pair in \
+  "CUSTOMER app/data/ASCII/custdata.txt" \
+  "ACCOUNT  app/data/ASCII/acctdata.txt" \
+  "XREF     app/data/ASCII/cardxref.txt" \
+  "CARD     app/data/ASCII/carddata.txt" \
+  "DALYTRAN app/data/ASCII/dailytran.txt" \
+  "TCATBAL  app/data/ASCII/tcatbal.txt" ; do
+  set -- $pair
+  python -m carddemo_migration.cli verify-row-counts   --dataset "$1" --source "$2" --encoding ascii
+  python -m carddemo_migration.cli verify-money-parity --dataset "$1" --source "$2" --encoding ascii
+done
+
+# WHY : Assumptions: SECUSER is verified from the EBCDIC tree because that is its only
+#       form, so it cannot join either ASCII loop above.
+python -m carddemo_migration.cli verify-row-counts \
+  --dataset SECUSER --source app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS --encoding ebcdic
+python -m carddemo_migration.cli verify-money-parity \
+  --dataset SECUSER --source app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS --encoding ebcdic
+```
+
+Finally, run the two whole-schema SQL reports, which read every table including
+`ledger.transactions` and so are the only check that covers the eleventh record:
+
+```bash
+# WHAT: the schema-wide row-count and money-total reports.
+# WHY : Assumptions: these are run LAST and separately from the per-dataset passes above
+#       because they are the only pass that reports a table no dataset was named for.
+#       `ledger.transactions` has no `--source` to point a per-dataset pass at, so a
+#       corpus-only run reports it here against a NULL baseline and nowhere else.
+psql "$CARDDEMO_ADMIN_URL" -v ON_ERROR_STOP=1 \
+  -f data-migration/sql/verify/row_counts.sql
+psql "$CARDDEMO_ADMIN_URL" -v ON_ERROR_STOP=1 \
+  -f data-migration/sql/verify/money_totals.sql
 ```
 
 ```bash
@@ -295,13 +381,26 @@ catch it. The row counts agree, the money totals agree, and the ciphertext is
 well-formed either way — the key identifier is not recoverable from the envelope by
 anything in this package, and the authentication failure is deferred to first read.
 
-**2. The checksum pass covers three of the ten records.**
-Row counts and money parity cover all ten; the checksum pass covers the three
+**2. The checksum pass covers three of the eleven records.**
+Row counts and money parity cover all eleven; the checksum pass covers the three
 reference records, for the measured reason given in the section above. Decide
-explicitly whether that is acceptable evidence for the seven master records, or
+explicitly whether that is acceptable evidence for the eight master records, or
 whether the read-back should first be extended to render non-character columns back
 into the reader's published shape.
 
 Assumptions: the alternative to stating this is to let a reader infer from "all
-passes green" that all three passes ran for all ten records, which they did not. A
+passes green" that all three passes ran for all eleven records, which they did not. A
 gate that overstates its own coverage is worse than one that names the gap.
+
+**3. `ledger.transactions` loading zero rows is a NORMAL result, not a skipped step.**
+The transaction master is the eleventh loadable record and the only one for which no
+seed extract ships, so a corpus-only run loads it successfully with zero rows and
+`sql/verify/row_counts.sql` reports it against a NULL baseline rather than a count.
+Confirm which of the two situations applies before reading the result: on a corpus-only
+run zero is correct and the table is filled later by the posting job, whereas on a
+cutover from a real extract zero means the extract was not supplied and the largest
+table in the system has not moved.
+
+Assumptions: this is a gate condition because the two cases are indistinguishable from
+the pass output alone — both report a committed load and a NULL-baseline row. Naming it
+here is what stops "row counts green" being read as "every master arrived".

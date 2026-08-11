@@ -45,30 +45,26 @@
  *
  * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
  *
- * <p>Assumptions: the roster below names three classes, of which two are present and one is not.
- * Measured at this revision this directory holds this charter, {@code DataSourceConfig} and
- * {@code BatchConfig}:
+ * <p>Assumptions: the roster below names three classes and all three are present, so it is an
+ * inventory and not a forecast. Measured at this revision this directory holds this charter,
+ * {@code DataSourceConfig}, {@code BatchConfig} and {@code SqsConfig}:
  *
  * <pre>
- * this directory: 3 java files = 2 classes + 1 charter (planned: SqsConfig)
+ * this directory: 4 java files = 3 classes + 1 charter
  * </pre>
  *
- * <p>{@code SqsConfig} remains assigned to another index of the same plan and is described below as a
- * target rather than as an inventory entry. The distinction is declared because the roster otherwise
- * reads as present tense, and a roster a reader cannot tell apart from an inventory stops being usable
- * the moment one named class turns out to be absent. The parent charter at {@code com.carddemo.batch}
- * makes the same declaration for the subtree as a whole, and the two agree deliberately.</p>
- *
- * <p>Refactoring Rationale: this paragraph said the directory "still holds only this charter and
- * {@code DataSourceConfig}" and listed {@code BatchConfig} among the absent. That was overtaken when
- * the seven job beans landed: they need a time source and a shared ledger-guarded step builder, so
- * {@code BatchConfig} was authored with them and the sentence became a false report of the directory
- * rather than an honest declaration about a plan. The marker line above is measured against this
- * directory on every build by
+ * <p>Refactoring Rationale: the marker line carried a planned clause naming {@code SqsConfig}, and the
+ * paragraphs around it declared that class a target rather than an inventory entry. Both were correct
+ * for the tree they were written against and are now false of this directory: the class landed, so a
+ * clause reserving its name and a prose declaration of its absence would each report the opposite of
+ * what a reader finds here. The clause is withdrawn rather than left in place because the check that
+ * reads it asserts BOTH directions -- a planned name whose file exists fails the build, which is
+ * precisely the drift the clause was added to catch. The marker is measured against this directory on
+ * every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so the same drift cannot recur silently. Assumptions: the marker counts what is PRESENT, and the
- * roster below still names the one planned class, which is why the two figures differ by one and the
- * difference is stated rather than reconciled away.</p>
+ * so neither figure can drift silently. Assumptions: with no planned clause the two figures now differ
+ * by exactly one -- the charter itself -- which is the ordinary relationship every other marked
+ * charter in the tree states.</p>
  *
  * <h2>Purpose</h2>
  *
@@ -83,31 +79,34 @@
  * the table mappings to {@code domain}. A reader asking why a transaction was rejected, or how a
  * monthly interest figure was reached, will not find the answer in this directory.</p>
  *
- * <h2>The membership canon: three configuration classes at the target, two delivered</h2>
+ * <h2>The membership canon: three configuration classes, all three delivered</h2>
  *
  * <p>The set is closed at three {@code @Configuration} classes, so the question "which
  * configuration class does this bean belong on" keeps a definite answer as the module grows. Three
- * production classes plus this charter is four {@code .java} files at the target, and there is no fifth
- * type. The directory currently holds three of those four.</p>
+ * production classes plus this charter is four {@code .java} files, and there is no fifth type. The
+ * directory holds all four.</p>
  *
- * <p>Refactoring Rationale: TWO of the three are delivered. {@code DataSourceConfig} and
- * {@code BatchConfig} are present; {@code SqsConfig} is not, so the capability its entry below describes
- * -- the publish-only terminal error sink and the message attributes a published event carries -- is a
- * TARGET description and not a delivered one, and nothing in this module publishes
- * {@code BatchErrorEvent} today. That distinction is restated here because the entry reads in the
- * present tense, and a reader who took it at face value would look for a message publisher and find
- * none. Its prose is left in place rather than deleted because it is the agreed contract for that class
- * and is what its authoring must satisfy; what is corrected is the impression that satisfying it has
- * already happened. Assumptions: no job depends on that publisher, so its absence blocks no unit of
- * work -- it costs the terminal-sink notification a failed run would otherwise emit, which the state
- * machine's own catch-and-notify path covers independently.</p>
+ * <p>Refactoring Rationale: this section headed itself "two delivered" and its two paragraphs argued at
+ * length why {@code SqsConfig}'s entry below was a target description rather than a delivered one, and
+ * why an empty configuration would not be authored merely to make the roster true. Both arguments have
+ * been answered by the class landing with beans in it, so what they now do is tell a reader to expect
+ * an absence that is not there -- the same failure mode in the opposite direction, and the one this
+ * charter's own preamble warns about when it says a roster a reader cannot tell apart from an inventory
+ * stops being usable. They are replaced rather than amended because a paragraph whose subject is why
+ * something is missing has nothing left to say once it arrives. Assumptions: the closed set of three is
+ * unchanged and was never in question; only its delivery state was, and
+ * {@code services/batch-service/pom.xml} records the same closure independently when it declines to
+ * attach a hand-built client to a fourth class this roster forecloses.</p>
  *
- * <p>Assumptions: the one absent class is NOT authored as an empty configuration to make the roster
- * true. A configuration class contributing no bean would be a placeholder occupying the name of a
- * reviewed contract. The step infrastructure, by contrast, could not be authored honestly ahead of the
- * jobs whose steps it wires, and it was authored WITH them: {@code BatchConfig} now supplies the time
- * source the ledger stamps its rows with and one nested builder that wraps a job's work in a
- * ledger-guarded step, so a redrive of an already-completed step is a no-op. The durable ledger itself
+ * <p>Assumptions: each of the three was authored only once it could be authored honestly, and the
+ * sequence is worth recording because it is the reason the roster and the directory disagreed for as
+ * long as they did. {@code DataSourceConfig} came first because a search path and a migration scope are
+ * decisions a module needs settled before its first entity. {@code BatchConfig} could not be written
+ * ahead of the jobs whose steps it wires, so it was written WITH them: it supplies the time source the
+ * ledger stamps its rows with and one nested builder that wraps a job's work in a ledger-guarded step,
+ * so a redrive of an already-completed step is a no-op. {@code SqsConfig} came last because it had the
+ * least to go on -- no reference batch program names a queue at all -- so its scope had to be derived
+ * from the plan and from the one messaging role no other context owns. The durable ledger itself
  * remains {@code BatchStepLedger} in the sibling service package, which is where its transaction
  * posture belongs.</p>
  *
@@ -141,18 +140,29 @@
  *       schema migration alone emits table definitions and this module emits none; and the
  *       transaction posture, which is one auto-configured transaction manager over one data source
  *       and no coordinator of any kind.</li>
- *   <li>{@code SqsConfig} owns publish-only access to the terminal error sink, and the message
- *       attributes a published event carries, whose shape is fixed by the {@code BatchErrorEvent}
- *       record in the sibling {@code dto} package. Trade-offs: it is property-gated and its
- *       listener does not start with the context, so a task whose selected job publishes nothing
- *       starts and exits cleanly instead of failing on a queue it never needed, and a context
- *       started for one job cannot begin consuming work the orchestrator did not select. That
- *       follows from this module being argument-driven: {@code BatchApplication} selects the unit
- *       of work from its {@code --job=} argument, never from message arrival, and the SQS starter
- *       reaches this module only through
+ *   <li>{@code SqsConfig} owns publish-only access to the terminal error sink: a bounded synchronous
+ *       queue client, and the closed set of message attributes a published event carries, whose
+ *       payload shape is fixed by the {@code BatchErrorEvent} record in the sibling {@code dto}
+ *       package. Refactoring Rationale: this entry said the class owned a listener that "does not
+ *       start with the context". It owns no listener at all -- the delivered class declares no
+ *       listener container factory and no {@code @SqsListener}, and listener startup is switched off
+ *       in {@code src/main/resources/application.yml} where the lifecycle concern belongs. Naming a
+ *       listener here implied a consumer whose absence a reader would have had to discover by
+ *       looking, and this module has no consumer: no reference batch program reads a queue, and the
+ *       two reference producers of the sink's own name are online programs of the inquiry extension
+ *       that migrate to other contexts. Trade-offs: the class is property-gated, so a task whose
+ *       selected job has nothing to report starts and exits cleanly instead of failing on a queue it
+ *       never needed. That follows from this module being argument-driven:
+ *       {@code BatchApplication} selects the unit of work from its {@code --job=} argument, never
+ *       from message arrival, and the queue starter reaches this module only through
  *       {@code io.awspring.cloud:spring-cloud-aws-starter-sqs} in
- *       {@code services/batch-service/pom.xml}. The accepted cost is that a misconfigured queue is
- *       discovered at the first publish rather than at startup.</li>
+ *       {@code services/batch-service/pom.xml}. Assumptions: what the gate opens IS validated at
+ *       startup -- a blank address, an ordered destination, or a source identifier wider than the
+ *       reference field it populates each fail context refresh. What is still discovered at the
+ *       first publish is only whether the queue EXISTS, which is deliberately not probed: probing
+ *       it would make context refresh depend on a reachable queue and would pass silently in every
+ *       test and local run, which is the same objection the sibling contexts record against reading
+ *       a queue's own settings at startup.</li>
  * </ul>
  *
  * <h2>The negative boundary: no OpenApiConfig and no SecurityConfig</h2>
