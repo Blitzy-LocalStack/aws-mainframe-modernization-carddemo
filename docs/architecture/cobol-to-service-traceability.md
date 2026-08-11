@@ -454,8 +454,8 @@ transaction definition anywhere ([§4.1](#41-copaus2c-present-in-neither-transac
 | `COPAUA0C` | batch | [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) | `AuthorizationRequestListener`, `OutboxPublisher` | The queue consumer. Registered divergences: [D-5](#d-5--the-reply-published-before-the-decision-is-committed), [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
 | `CBPAUP0C` | batch | [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl) | `PurgeJob` | Expiry and purge of pending authorizations |
 | `PAUDBLOD` | batch | [`PAUDBLOD.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL) | `LoadService` | Segment load utility. Registered divergences: [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported), [D-LOAD-PREFIX-REFUSED](#d-load-prefix-refused--an-undecodable-parent-key-is-reported-where-the-guard-has-no-else-branch), [D-LOAD-READ-BOUNDED](#d-load-read-bounded--the-load-walk-cannot-fail-to-terminate-where-two-read-branches-suspend-it) |
-| `PAUDBUNL` | batch | [`PAUDBUNL.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL) | `UnloadService` | Segment unload utility |
-| `DBUNLDGS` | batch | [`DBUNLDGS.CBL`](../../app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL) | `UnloadService` sequential path | Sequential unload utility |
+| `PAUDBUNL` | batch | [`PAUDBUNL.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL) | `UnloadService` | Segment unload utility, and the **default** export form because it is the one a load reads back. Registered divergence: [D-UNLOAD-SKIP-REPORTED](#d-unload-skip-reported--a-root-the-unload-cannot-attribute-is-counted-and-reported-where-the-guard-passes-it-over-in-silence) |
+| `DBUNLDGS` | batch | [`DBUNLDGS.CBL`](../../app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL) | `UnloadService` sequential path | Sequential unload utility, reached only by naming `UnloadForm.SEQUENTIAL`. Its child record is the **bare 200-byte segment**, per its two commented-out `WRITE`s at **L242** and **L281** and the `ISRT` operands at **L302**–**L304** and **L321**–**L323**; the 206-byte group surviving at its **L53**–**L56** is working storage nothing writes. Registered divergence: [D-UNLOAD-SKIP-REPORTED](#d-unload-skip-reported--a-root-the-unload-cannot-attribute-is-counted-and-reported-where-the-guard-passes-it-over-in-silence) |
 
 ### 2.8 `reporting-service`
 
@@ -597,24 +597,56 @@ The formula is declared at L464–L465 as
 
 ### 3.3 `COPAUA0C` — the authorization consumer
 
-| COBOL paragraph | Line | Target method | What it does |
+**All twenty-one paragraphs, with the line range each occupies.** The range is the
+paragraph label to its own `-EXIT` label, both measured from the source.
+
+| COBOL paragraph | Lines | Target owner | What it does |
 |---|---|---|---|
-| `1100-OPEN-REQUEST-QUEUE` | L255 | listener container start-up | Opens the request queue |
-| `1200-SCHEDULE-PSB` | L292 | transaction manager enlistment | Schedules the database access block |
-| `2000-MAIN-PROCESS` | L323 | `AuthorizationRequestListener.onMessage` loop | Commits per message at **L335** |
+| `1000-INITIALIZE` | L230–L249 | listener container start-up | Retrieves the trigger message at **L233–L236**, takes the queue name from it at **L238**, sets the wait interval at **L242**, then opens and issues the first read. In the target the queue reference is a configured property and the container performs the polling, so no application method corresponds |
+| `1100-OPEN-REQUEST-QUEUE` | L255–L286 | listener container start-up | Opens the request queue |
+| `1200-SCHEDULE-PSB` | L292–L319 | **no target — retired mechanism** | Schedules the hierarchical database's access block. Performed exactly once per message, from **L443**, so it is reachable and not dead code. Registered in [§5.1](#51-retired-with-an-analogue--function-preserved-mechanism-replaced) |
+| `2000-MAIN-PROCESS` | L323–L347 | `AuthorizationRequestListener.onRequest` | One iteration is the method body; the per-message commit at **L335** is the method's transaction boundary |
 | **`2100-EXTRACT-REQUEST-MSG`** | **L351–L382** | `CsvAuthCodec.decodeRequest` | Parses the positional payload; `2100-EXIT` at **L382** |
-| **`3100-READ-REQUEST-MQ`** | **L386–L434** | `AuthorizationRequestListener.receive` | The bounded receive with its wait interval |
-| **`5000-PROCESS-AUTH`** | **L438–L468** | `AuthorizationService.process` | Orchestrates the decision path |
-| `5100-READ-XREF-RECORD` | L472 | `AuthorizationService.loadCrossReference` | Cross-reference lookup |
-| `5200-READ-ACCT-RECORD` | L520 | `AuthorizationService.loadAccount` | Account lookup |
-| `5300-READ-CUST-RECORD` | L568 | `AuthorizationService.loadCustomer` | Customer lookup |
-| **`5500-READ-AUTH-SUMMRY`** | **L616–L643** | `PendingAuthSummaryRepository.find` | Reads the pending-authorization summary |
-| `6000-MAKE-DECISION` | L657–L734 | `AuthorizationService.decide` | The approve/decline decision |
-| `7100-SEND-RESPONSE` | L738–L782 | `OutboxPublisher.publishReply` | Builds and sends the reply; the no-syncpoint put is at **L753** |
-| `8400-UPDATE-SUMMARY` | L798–L850 | `PendingAuthSummaryRepository.save` | Updates the summary segment |
-| `8500-INSERT-AUTH` | L854–L935 | `PendingAuthDetailRepository.insert` | Inserts the detail segment |
+| **`3100-READ-REQUEST-MQ`** | **L386–L434** | **no application method** — the listener container's own receive | The bounded receive with its wait interval. The receive is performed by the messaging container, which is why the target has no method here and why its terminality on failure is structural rather than coded |
+| **`5000-PROCESS-AUTH`** | **L438–L468** | `AuthorizationRequestListener.handleNewRequest` | Orchestrates the decision path, guarding the reads at **L448–L458** and the writes at **L463** on the cross-reference having resolved |
+| `5100-READ-XREF-RECORD` | L472–L516 | `AccountContextClient.findCardXref` | Cross-reference lookup. The record belongs to the account context, so the target reads it through a port rather than mapping a table here |
+| `5200-READ-ACCT-RECORD` | L520–L564 | `AccountContextClient.findAccount` | Account lookup, through the same port |
+| `5300-READ-CUST-RECORD` | L568–L612 | `AccountContextClient.customerExists` | Customer lookup. The baseline tests only that the record exists, so the port exposes exactly that |
+| **`5500-READ-AUTH-SUMMRY`** | **L616–L643** | `PendingAuthSummaryRepository.findByAccountId` | Reads the pending-authorization summary. Its two-branch outcome at **L627–L640** has no end-of-database branch, so absence is an empty optional and never an error |
+| `5600-READ-PROFILE-DATA` | L647–L653 | **no target — an empty extension point** | The paragraph body is `CONTINUE` alone at **L650**. It IS performed, from **L456**, so it is reachable; it simply does nothing, in the same way `CBACT04C`'s fee paragraph does. Preserved as an absence rather than invented as behaviour |
+| `6000-MAKE-DECISION` | L657–L734 | `AuthorizationDecisionService.decide` | The approve/decline decision, the available-credit fork and the reason ladder |
+| `7100-SEND-RESPONSE` | L738–L782 | `AuthorizationRequestListener.enqueueReply`, then `OutboxPublisher.drain` | Builds and sends the reply; the no-syncpoint put is at **L753–L754** and the put itself at **L758**. The target SPLITS this paragraph in two: the row is written inside the deciding transaction and sent after it commits, which is the whole of [D-5](#d-5--the-reply-published-before-the-decision-is-committed) |
+| `8000-WRITE-AUTH-TO-DB` | L786–L794 | `AuthorizationRequestListener.persist` | Performs the two segment writes in order, summary at **L790** then detail at **L791** |
+| `8400-UPDATE-SUMMARY` | L798–L850 | `PendingAuthSummaryRepository.insertSummaryIfAbsent`, `addApprovedAuthorization`, `addDeclinedAuthorization` and `save` | The upsert. Its insert arm is **L801–L806** and its replace arm **L824–L828**; the target keeps the two arms distinguishable and adds the counters through atomic statements rather than through a written-back instance |
+| `8500-INSERT-AUTH` | L854–L935 | `PendingAuthDetailRepository.save` | Inserts the detail segment. `insertDetailIfAbsent` on the same repository is the loader's duplicate-tolerant form, not this path's |
+| `9000-TERMINATE` | L940–L950 | listener container shutdown | Releases the database access block at **L943–L945** when it was scheduled, then closes the queue |
 | `9100-CLOSE-REQUEST-QUEUE` | L953–L979 | listener container shutdown | Closes the request queue |
-| **`9500-LOG-ERROR`** | **L983** | `AuthorizationErrorLogger.emit` | The centralised error emission, invoked from **fourteen** call sites |
+| **`9500-LOG-ERROR`** | **L983–L1012** | `AuthorizationMessageMapper.ErrorLogEntry` projected onto the structured logger, with `GlobalExceptionHandler` for the failure itself | The centralised error emission, invoked from **fourteen** call sites. Its severity test at **L1008–L1010** is what makes a critical severity terminal |
+| `9990-END-ROUTINE` | L1016–L1024 | exception propagation to the transaction boundary | Terminates and returns at **L1019–L1022**. A task returning normally takes the platform's implicit end-of-task commit, which is why the target's rollback is a difference — registered as [D-D](#d-d--a-failed-segment-write-rolls-the-message-back-rather-than-letting-a-partial-write-stand) |
+
+> Refactoring Rationale: this table previously named **nine target methods and types
+> that do not exist in the repository**, and named sixteen of the twenty-one
+> paragraphs. Both are corrected together because they are the same failure — a map
+> that cannot be followed to a real symbol is indistinguishable from a map that stops
+> early. The nine were an `AuthorizationService` type that exists under no name
+> anywhere, carrying four methods (`process`, `loadCrossReference`, `loadAccount`,
+> `decide`); an `AuthorizationErrorLogger.emit` that likewise exists nowhere; a
+> `loadCustomer` on that absent type; `AuthorizationRequestListener.onMessage` and
+> `.receive`, where the method is `onRequest` and the receive belongs to the container;
+> `PendingAuthSummaryRepository.find`, where the method is `findByAccountId`;
+> `PendingAuthDetailRepository.insert`, where this path uses `save`; and
+> `OutboxPublisher.publishReply`, where the publisher's public surface is `drain` and
+> `purgePublished`. Every name in the table above was checked against the source tree
+> before it was written, and the three reads now name the port that owns them rather
+> than a service in this context, which is the boundary the layering test enforces.
+> Assumptions: the five paragraphs that were missing are `1000-INITIALIZE`,
+> `5600-READ-PROFILE-DATA`, `8000-WRITE-AUTH-TO-DB`, `9000-TERMINATE` and
+> `9990-END-ROUTINE`. Two of them carry a consequence a reader needs — the
+> initialisation is where the wait interval and the dynamic queue name come from, and
+> the end routine is where the implicit commit that makes `D-D` a difference happens —
+> so omitting them dropped evidence rather than only rows. There is no `5400`, no
+> `7000` and no `8100`, `8200` or `8300` paragraph in this program; a reader who infers
+> one from the numbering gaps will not find it.
 
 The fourteen call sites of `9500-LOG-ERROR` are at **L282, L316, L429, L500, L512,
 L547, L560, L595, L608, L639, L778, L846, L931** and **L975**.
@@ -677,6 +709,91 @@ migration. All five streams were read whole with columns 73 to 80 stripped: no s
 `COND=`, no record-selecting `INCLUDE COND=` — the two share a keyword — no job-level `IF`,
 `THEN` or `ELSE`, no `RESTART=` and no `CHKPT=`. There is nothing to invert and no branch
 predicate to derive for this program.
+
+### 3.6 `PAUDBUNL` and `DBUNLDGS` — the two segment unloads
+
+Assumptions: the two programs are tabulated TOGETHER because they perform the same walk of
+the same database and differ only in the shape of the child record they emit, so one target
+class transcribes both and one table states both line ranges. Splitting them into two
+sections would repeat every row to change one column. The same **columns 73 to 80 stripping**
+applies as in [§3.5](#35-paudblod--the-segment-load): both
+[`PAUDBUNL.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL) and
+[`DBUNLDGS.CBL`](../../app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL) carry eight-digit
+legacy sequence numbers there, and so do the continuation lines of
+[`UNLDPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDPADB.JCL) at its L50, L51,
+L55 and L56.
+
+| COBOL paragraph | `PAUDBUNL` | `DBUNLDGS` | Target method | What it does |
+|---|---|---|---|---|
+| `MAIN-PARA` | L157–L170 | L164–L179 | `UnloadService.unload` | One `PERFORM ... UNTIL WS-END-OF-ROOT-SEG = 'Y'` over the root walk, at PAUDBUNL **L163**–**L164** and DBUNLDGS **L172**–**L173**, then the file close |
+| `1000-INITIALIZE` | L173–L200 | L182–L194 | *no method* | Opens the two output files. The target receives streams a caller already owns, so there is nothing to open. DBUNLDGS's `OPEN` statements are themselves **commented out** at its L195–L209 |
+| `2000-FIND-NEXT-AUTH-SUMMARY` | L207–L247 | L216–L257 | `UnloadService.writeRoot` | Gets the next root and emits it, then walks its children. The root is written FIRST — PAUDBUNL **L233**, DBUNLDGS by way of **L243** — and the child loop follows at their **L235** and **L245** |
+| the numeric guard on the account key | **L232** | **L241** | `UnloadService.exportableAccountId` | Encloses BOTH the root write and the child loop, and has no `ELSE`, so a root failing it emits nothing and its children are never read; registered as [D-UNLOAD-SKIP-REPORTED](#d-unload-skip-reported--a-root-the-unload-cannot-attribute-is-counted-and-reported-where-the-guard-passes-it-over-in-silence) |
+| `3000-FIND-NEXT-AUTH-DTL` | L253–L284 | L263–L295 | `UnloadService.writeChildren` | Repeats a get-next-within-parent until the children are exhausted, which each detects from a segment-not-found status at PAUDBUNL **L273** and DBUNLDGS **L284** |
+| the root record | its FD at **L44**, moved at **L227** | moved at **L236** | `UnloadService.rootRecord` | `01 OPFIL1-REC PIC X(100)` — the segment verbatim with **no** prefix. **Identical in both forms**, because a root's first six bytes already are its key |
+| `3100-INSERT-PARENT-SEG-GSAM` | *absent* | L300–L315 | `UnloadService.rootRecord` | Sequential insert of the summary segment alone, at its **L302**–**L304**. Reaches the same hundred-byte image the other program writes |
+| `3200-INSERT-CHILD-SEG-GSAM` | *absent* | L319–L334 | `UnloadService.childRecord` | Sequential insert of the detail segment alone, at its **L321**–**L323**, giving the **bare 200-byte** child |
+| the child record | its FD at **L45**–**L48**, prefix populated at **L230**, written at **L271** | *its `WRITE` commented out at* **L281** | `UnloadService.childRecord` | The ONE place the two forms differ: a `PIC S9(11) COMP-3` parent key of six bytes ahead of a `PIC X(200)` segment, giving **206**, against the bare **200**. The prefix is encoded through `com.carddemo.common.codec.PackedDecimalCodec`, reached by `PendingAuthDetailMapper.unloadRecordLength`, never as text |
+| `4000-FILE-CLOSE` | L289–L304 | L338–L339 | *no method* | Closes both files, reporting a bad close without abending. The caller owns the streams, so the target closes neither. DBUNLDGS's `CLOSE` statements are **commented out** at its L340–L353 |
+| `9999-ABEND` | L308–L314 | L357–L363 | a propagated exception | Sets return code **16** at PAUDBUNL **L313** and DBUNLDGS **L362**. The target raises instead |
+
+Assumptions: the **live** authority for the sequential form's two hundred bytes is the database
+description and the insert operands, not the record group that appears in `DBUNLDGS.CBL`. That
+program's `FILE SECTION` is commented out at its **L42**–**L48** and both `WRITE` statements at
+its **L242** and **L281**, so the 206-byte group surviving at its **L53**–**L56** is working
+storage used as a DL/I input-output area and written by nothing. The declared geometry is
+[`PASFLDBD.DBD`](../../app/app-authorization-ims-db2-mq/ims/PASFLDBD.DBD) **L27**,
+`RECORD=(100),RECFM=F`, and
+[`PADFLDBD.DBD`](../../app/app-authorization-ims-db2-mq/ims/PADFLDBD.DBD) **L27**,
+`RECORD=(200),RECFM=F`; the chain from job to declaration closes because the sequential job's
+`PASFILOP` and `PADFILOP` data-definition names at
+[`UNLDGSAM.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDGSAM.JCL) **L36** and **L39**
+are exactly those descriptions' `DD2=` operands. Reading the commented group as the contract
+yields 206 where the truth is 200.
+
+Assumptions: the prefixed form is the **default** and the sequential form an explicit opt-in,
+on three findings the job streams settle. Only the prefixed pair is read back — `ROOT.GSAM`
+and `CHILD.GSAM` appear at `UNLDGSAM.JCL` **L36** and **L39** and nowhere else in the module,
+while `ROOT.FILEO` and `CHILD.FILEO` are written by `UNLDPADB.JCL` **L48** and **L53** and read
+by [`LOADPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/LOADPADB.JCL) **L36** and
+**L38**. Only the prefixed job provisions its own output, `DISP=(NEW,CATLG,DELETE)` with
+`UNIT=3390` and `SPACE` at **L49**–**L51** and **L54**–**L56**, against
+`DISP=(OLD,KEEP,KEEP)` with no unit, space or device characteristics at `UNLDGSAM.JCL` **L37**
+and **L40** — and `OLD` requires the dataset to exist already. And only the prefixed job is
+repeatable by construction: it is the module's one multi-step stream, whose `STEP0 EXEC
+PGM=IEFBR14` at **L25** deletes both outputs at **L33**–**L36** first.
+
+Assumptions: neither unload takes a **parameter** and neither is a **write**. Neither stream
+has a `SYSIN` data definition — across the module's five streams only the purge job does — and
+`PRM-INFO`, declared at `PAUDBUNL.CBL` **L119** and `DBUNLDGS.CBL` **L123**, is read only by
+statements that are commented out at their **L179** and **L188**. Both run batch-exclusive
+against read-only access specifications: `PARM='DLI,PAUDBUNL,PAUTBUNL,,,,,,,,,,,N'` at
+`UNLDPADB.JCL` **L38**–**L39** and `PARM='DLI,DBUNLDGS,DLIGSAMP,,,,,,,,,,,N'` at
+`UNLDGSAM.JCL` **L26**–**L27**, with `PROCOPT=GOTP` at
+[`PAUTBUNL.PSB`](../../app/app-authorization-ims-db2-mq/ims/PAUTBUNL.PSB) **L18** and
+[`DLIGSAMP.PSB`](../../app/app-authorization-ims-db2-mq/ims/DLIGSAMP.PSB) **L18** where the
+load and purge jobs pass the update-capable `PSBPAUTB`, declared `PROCOPT=AP` at
+[`PSBPAUTB.psb`](../../app/app-authorization-ims-db2-mq/ims/PSBPAUTB.psb) **L17**. Both unload
+streams also carry ACTIVE database data-definition statements — `UNLDPADB.JCL` **L58**–**L59**
+and `UNLDGSAM.JCL` **L42**–**L43** — where the load job's equivalents at `LOADPADB.JCL`
+**L40**–**L41** are commented out, which is the signature of a job holding the database itself
+rather than reaching it through the online region.
+
+Assumptions: [`DBPAUTP0.jcl`](../../app/app-authorization-ims-db2-mq/jcl/DBPAUTP0.jcl) is **not
+a third export shape** and appears in no row above, because it names no application program at
+all: its **L16** is `PARM=(ULU,DFSURGU0,DBPAUTP0)`, the vendor's reorganisation-unload utility,
+and its output at **L25**–**L29** is a variable-blocked `LRECL=27990` dump. It is the only job
+in the module registered with the recovery control datasets, at **L40**–**L42**, and the only
+one carrying a utility control statement, at **L34**–**L35**. Its disposition is
+[§5.1](#51-retired-with-an-analogue--function-preserved-mechanism-replaced): the managed
+backup and snapshot configuration in `infra/modules/aurora-postgresql`. The absence is stated
+because the arithmetic invites the wrong conclusion — five job streams beside three load and
+unload programs — and there are exactly **two** export shapes.
+
+Assumptions: **no `COND=` of either form occurs anywhere in this module's job streams**, exactly
+as [§3.5](#35-paudblod--the-segment-load) records, and the finding covers the unload pair too.
+Even the prefixed form's two-step stream has no gate between its delete step and its unload
+step, so every step edge in this module is the unconditional success edge.
 
 Where a program's paragraph structure is analysed in depth by a sibling, the
 analysis is cited rather than repeated:
@@ -778,6 +895,8 @@ removing anything from the baseline.
 | The scheduler definitions, [`CardDemo.ca7`](../../app/scheduler/CardDemo.ca7) and [`CardDemo.controlm`](../../app/scheduler/CardDemo.controlm) | Declare the job graph and its calendar | **Retired as syntax**; the scheduling **intent** is carried by the managed scheduler. [`batch-orchestration.md`](batch-orchestration.md) owns the curation analysis |
 | `IDCAMS BLDINDEX`, in [`TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L49 and L52–L54 | Builds the alternate index from the base cluster | **The rebuild step is retired because the target database maintains indexes transactionally. The index itself is not dropped** — the alternate index becomes a real secondary index, and only the step that rebuilt it has nothing left to do |
 | The assembler modules and macro library, [`app/asm`](../../app/asm) and [`app/maclib`](../../app/maclib) | Platform services invoked from COBOL, including the wait primitive | Retired — no cloud analogue; the behaviour that reached them is expressed natively |
+| The reorganisation unload, [`DBPAUTP0.jcl`](../../app/app-authorization-ims-db2-mq/jcl/DBPAUTP0.jcl) | A whole-database utility unload. Its **L16** is `PARM=(ULU,DFSURGU0,DBPAUTP0)` — the vendor's own reorganisation-unload utility in utility-unload mode, naming **no application program** — and its output at **L25**–**L29** is a variable-blocked `LRECL=27990` dump, none of the 100, 200 or 206 byte application records the two application unloads emit. It is also the only job in the module registered with the recovery control datasets, at **L40**–**L42**, and the only one carrying a utility control statement, at **L34**–**L35** | **The managed store's automated backups and snapshots**, configured in `infra/modules/aurora-postgresql`. It is a **platform-utility** job, so it has no target service method and is **not a third export shape**: [§3.6](#36-paudbunl-and-dbunldgs--the-two-segment-unloads) states the two that exist and forecloses a third. Its **function is preserved** — a full, restorable copy of the database taken on a schedule — which is why it belongs here rather than in [§5.2](#52-retired-with-no-target-at-all--exactly-two) |
+| Per-message resource scheduling, `1200-SCHEDULE-PSB` in [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) **L292–L319**, paired with the flag reset at **L337** | Schedules the hierarchical database's access block for the message about to be handled, and clears the flag again immediately after each commit | **The mechanism retires; its consequence is preserved.** Nothing in the target schedules anything — a connection is drawn from the pool for the transaction the handler opens and returned when it closes. What survives is the property the schedule-and-reset pairing produced, that **no resource and no accumulated value crosses from one message to the next**: every field of `AuthorizationRequestListener` is `final` and every per-message value is a local or a parameter. **This row exists because the paragraph is easy to mistake for dead code** — it is performed exactly once per message, from **L443** inside `5000-PROCESS-AUTH`, so it is reachable, and retiring it is a decision about mechanism rather than a removal of something unused |
 
 > Refactoring Rationale: the `IDCAMS BLDINDEX` row is the one a reader most often
 > misreads, so it is stated twice in different words. What is retired is the *step*,
@@ -1433,7 +1552,7 @@ which carries the same citations at its update method.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **sixty-five** are cited **by identifier**, the identifier here being the
+source, and all **sixty-nine** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1443,15 +1562,15 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-seventy-five is a measured count of the `####` headings in **the whole document** and not a
+seventy-seven is a measured count of the `####` headings in **the whole document** and not a
 running tally kept by hand, so a reader adding an entry updates one number here and nothing
 else. Count them document-wide and not within this section's own body: the register
 continues past the horizontal rule that follows *Related documents*, where entries were
 appended after this section had already been closed, so a count confined to the body
-between this heading and `## 8` omits those seven and returns **sixty-eight**. Count the `####`
+between this heading and `## 8` omits those eight and returns **sixty-nine**. Count the `####`
 headings themselves rather than the ones beginning `D-`: one entry is identified
 `C-ROUNDING`, so a count restricted to the `D-` prefix is short by one and returns
-seventy-four.
+seventy-six.
 Refactoring Rationale: the figure read forty-three when the section already held forty-five
 headings, so three entries were added against a number that was already two short. It is
 restated as the measured value rather than incremented from the stale one, because
@@ -1466,10 +1585,20 @@ population cannot prevent: entries continued to be appended, and an appender who
 heading without recounting leaves every figure here behind. All three numbers are therefore
 re-measured together rather than adjusted by the number of entries anyone believes was added,
 and the two derived figures are stated so that they check the first — the document-wide count
-less the seven appended after *Related documents* is the section-confined count, and less the
+less the eight appended after *Related documents* is the section-confined count, and less the
 single `C-ROUNDING` heading is the `D-`-prefixed count. A figure that disagrees with its own
 two subtractions is wrong on its face, which is the closest a prose count can come to being
-self-checking. Trade-offs: the alternative was to move the appended entries back
+self-checking. It went stale a fourth time at sixty-five while the document held
+seventy-five headings, and the correction is recorded rather than quietly applied because the
+failure repeated in exactly the way this paragraph predicts: entries were appended and no
+figure was recounted. All four numbers here — this section's own population, the document-wide
+count, the section-confined count and the `D-`-prefixed count — were re-measured together
+against the current file when `D-D` was appended, and the two subtractions above were
+evaluated to confirm they agree. Assumptions: this section's population and the
+section-confined count are DIFFERENT quantities that happen to coincide at sixty-nine today,
+because this section's entries are its own body plus the appended continuation while the
+section-confined count is the whole of `## 7`. They will diverge again the moment an entry is
+added to 7.1, 7.2, 7.3 or 7.5, so a reader must not treat one as a check on the other. Trade-offs: the alternative was to move the appended entries back
 inside this section's body so that "this section" became true. That was rejected as the
 larger and riskier change for the smaller gain — it relocates several hundred lines and
 every anchor a reader may have bookmarked, to fix a sentence rather than a fact — and it
@@ -1480,7 +1609,12 @@ Assumptions: several entries carry TWO identifiers in one heading, and both are 
 identifier used in shipped source character for character. The four purge entries that
 close this section are the case: the letter forms `D-E`, `D-F` and `D-G` are the ones the
 authorization service's test package charters use, while the descriptive `D-PURGE-*` forms
-are the ones `PurgeJob` itself uses, and the two schemes name the same differences. Citing
+are the ones `PurgeJob` itself uses, and the two schemes name the same differences. Assumptions: the
+letter scheme is CLOSED to new entries, and `D-UNLOAD-SKIP-REPORTED` is descriptive-only for
+that reason. `D-D` is already the receive-failure difference, in three citations across the
+authorization service's two test package charters, so a second entry under that letter would
+make every citation of it ambiguous in exactly the direction the reconcile-by-search
+discipline below depends on. Citing
 both in the heading is what keeps the reconcile-by-search discipline below workable from
 either side; assigning one and retiring the other would silently break every citation
 written in the scheme that lost.
@@ -3481,6 +3615,67 @@ a register of this size stays true.
 * **Files.**
   `services/authorization-service/src/main/java/com/carddemo/authorization/service/LoadService.java`.
 
+#### D-UNLOAD-SKIP-REPORTED — a root the unload cannot attribute is counted and reported, where the guard passes it over in silence
+
+* **Baseline behaviour.** Both unload programs guard the whole of a root's output with
+  `IF PA-ACCT-ID IS NUMERIC` —
+  [`PAUDBUNL.CBL`](../../app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL) at **L232** and
+  [`DBUNLDGS.CBL`](../../app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL) at **L241** — and
+  supply no `ELSE`. The guard encloses BOTH the root write and the child walk: PAUDBUNL writes the
+  root at **L233** and performs its child loop at **L235**–**L236**, DBUNLDGS reaches the same two
+  through **L243** and **L245**–**L246**, and each closes with one `END-IF` at **L237** and
+  **L247**. A root failing the test therefore emits nothing, has its children left unread, and
+  leaves the run with no message: neither program has a `DISPLAY` on that path, and the two
+  counters they do keep — `WS-NO-SUMRY-READ` and `WS-AUTH-SMRY-PROC-CNT`, incremented at PAUDBUNL
+  **L225**–**L226** — are never displayed at all.
+* **Target behaviour.** `UnloadService.exportableAccountId` reproduces the skip exactly — no root
+  record is written and the child walk is not reached, so the account costs no query — and then
+  reports it twice: it increments `UnloadOutcome.rootsSkipped()` on the returned carrier and writes
+  one `WARN` line naming the customer identifier the segment carries at
+  [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) **L20**, the account
+  being exactly the value that is absent.
+* **Category.** Documented divergence — additive diagnostics. A condition the baseline passes over
+  in silence becomes a counted and logged occurrence. No record content, no record order and no
+  rule content changes, and the bytes of both output files are identical to what the reference
+  guard would have produced.
+* **Why the difference is accepted.** The two outcomes differ in what an operator can conclude from
+  a completed run. In silence the extract simply holds fewer roots than the table holds rows, and
+  nothing in the run says which rows are missing or that any are — the shortfall is discoverable
+  only by counting the file against the table afterwards, and a load of that extract then succeeds,
+  because every record it does contain is well formed. With the count on the carrier, a caller
+  comparing `rootsWritten()` against `rootsSkipped()` sees the shortfall in the result it already
+  holds, and the identity `rootsWritten + rootsSkipped` equals the number of roots the walk reached,
+  so there is no third disposition a returned outcome can hide. Alternatives Considered: raising
+  instead, which is the treatment [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported)
+  gives the mirror-image condition on the load side. Rejected here because the two sides are not
+  symmetric in what continuing costs: a load that continues past an unattributable record loses an
+  authorization permanently, whereas an unload that continues past one still exports every other
+  root, and the row it passed over is still in the table to be exported by the next run. Refusing
+  would discard the roots already written for no gain in what the operator learns. Assumptions: the
+  condition is unreachable through the schema, so this is a statement about the walk rather than a
+  live code path. `V1__authorization.sql` declares `account_id BIGINT NOT NULL` as
+  `pending_auth_summary`'s whole primary key, and a keyed page predicate cannot return a row whose
+  key is absent in any case. The guard is reproduced so that a reader comparing this walk against
+  either reference program finds the same branch, and so that a summary reaching the exporter from
+  somewhere other than that table is handled by a stated decision rather than by whatever a
+  dereference happens to do.
+* **Where it is verified.**
+  `UnloadServiceTest.aSummaryWithNoAccountIdentifierIsSkippedAndCounted` presents an
+  unattributable row ahead of the two fixture roots and asserts all three halves of the guard
+  together: the skip count is one, both real roots are still exported, the root file holds exactly
+  two hundred-byte records, and the child walk is never asked about the unattributable row while
+  being asked exactly twice in total.
+  `theOutcomeAccountsForEveryRootTheWalkReached` asserts the reconciliation identity itself rather
+  than inferring it from those two counts agreeing in one case.
+  `aPageWithNoResumableKeyEndsTheWalk` asserts the adjacent termination property under a bounded
+  timeout — expressed as a timeout deliberately, because a walk that could not advance its position
+  would hang rather than fail. Parity honesty: no golden master exists for any path in this module,
+  so nothing here is compared against a recorded reference output; what is asserted is the branch
+  structure of the two transcribed walks and the geometry the copybooks, the database descriptions
+  and the job streams declare.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/UnloadService.java`.
+
 #### D-E, also D-PURGE-YEAR-BOUNDARY — ordinal day numbers are subtracted as plain integers
 
 * **Baseline behaviour.**
@@ -4619,6 +4814,71 @@ trees.
   `services/authorization-service/src/main/java/com/carddemo/authorization/mapper/AuthorizationMessageMapper.java`,
   `services/authorization-service/src/main/java/com/carddemo/authorization/config/SqsConfig.java`,
   `services/authorization-service/src/main/resources/db/migration/V3__authorization_outbox_fifo_identities.sql`.
+
+#### D-D — a failed segment write rolls the message back rather than letting a partial write stand
+
+* **Baseline behaviour.** Both of the authorization consumer's segment writes end the
+  same way, and neither ends the unit of work.
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+  `8400-UPDATE-SUMMARY` at **L835–L847** and `8500-INSERT-AUTH` at **L920–L932** each
+  move the database status into the return field, test `IF STATUS-OK CONTINUE`, and on
+  the `ELSE` set an error location — `'I003'` and `'I004'` — together with the critical
+  level, the subsystem, the status code, a message, and the card number as the event
+  key, then perform the error paragraph at **L846** and **L931** and fall through to
+  their own exit. **Neither sets an abort flag and neither skips the syncpoint at
+  L335.** What ends the task instead is the critical level itself: the error paragraph
+  tests it at **L1008–L1010** and performs the end routine at **L1016–L1024**, which
+  terminates and issues `EXEC CICS RETURN` at **L1021–L1022** — and a task returning
+  normally takes the platform's implicit end-of-task syncpoint, so **the partial write
+  commits.** The request cannot be presented again to re-derive the missing half,
+  because the get at **L389** is `MQGMO-NO-SYNCPOINT` and destroyed it on read.
+  The receive path has the same shape without the severity: `3100-READ-REQUEST-MQ` at
+  **L386–L434** handles a reason other than no-message-available at **L418** by logging
+  `'M003'` at **L429**, after which the paragraph simply ends at **L430–L432** and exits
+  at **L434**, setting neither the no-more-messages condition nor the loop-end flag.
+* **Target behaviour.** The whole of one message's handling is one transaction, so a
+  failed write rolls back the summary contribution, the detail row and the outbox reply
+  together. `AuthorizationRequestListener.onRequest` lets the exception propagate — its
+  `@throws` clauses name both types that leave — the message becomes visible again after
+  its visibility timeout, and the redrive policy moves it to the dead-letter queue at the
+  fifth receive. A receive failure is terminal for the poll cycle structurally rather
+  than by a coded flag: there is no retained get buffer to re-extract, so there is no
+  second decision to prevent.
+* **Category.** Documented divergence — durability of a partially-written unit of work.
+* **Why the difference is accepted.** On the axis of *stopping*, the two systems agree:
+  the critical severity ends the baseline task and the exception ends this delivery, so
+  neither goes on to handle further messages as though nothing had happened. The
+  divergence is on the axis of *durability* — a rollback here against an implicit commit
+  there. It is accepted because the alternative is not available: reproducing the
+  baseline would require committing a decision whose contribution reached only one of the
+  two segments, and the reply for that decision has already been published by then, so
+  the requester holds an answer that the stored state does not account for and the
+  request that would let it be re-derived no longer exists. A rollback leaves the message
+  on the queue, which is the only outcome from which the correct state is still
+  reachable. Assumptions: this is a statement about the target's obligations, not a
+  verdict on the baseline; `app/**` is the parity oracle and is unchanged.
+  One classification difference is recorded here as a non-divergence, so that a reader
+  comparing log dimensions does not raise it as one: the baseline attributes the receive
+  failure to the transaction monitor, setting `ERR-CICS` at **L421**, while attributing
+  the reply put at **L770** to the message transport with `ERR-MQ`. The target reports
+  both as messaging faults. Nothing observable turns on it — the field is a log
+  dimension and not a control value.
+* **Where it is verified.** `AuthorizationRequestListenerTest`'s
+  `aVanishedSummaryRefusesTheDecision` asserts that a disagreement discovered during the
+  write raises and that **neither** the outbox row **nor** the detail row is written, so
+  the reply cannot precede the state that justifies it; `anUnlistedReplyDestinationRefusesTheRequest`,
+  `aRequestNamingNoReplyDestinationIsRefused`, `aRequestDeclaringNoWireFormatIsRefused`
+  and `aNonCanonicalCorrelationAttributeRefusesTheMessage` each assert a refusal
+  together with the absence of every side effect, which is what shows nothing is logged
+  and then swallowed. `everyReceivedMessageCountsTowardsTheWindow` asserts that a
+  malformed request still consumes its place in the admission window, so the bound
+  advances on failure exactly as the baseline counter at **L332** does.
+  `AuthorizationDecisionUnitOfWorkRepositoryIT` runs the unit of work against a live
+  database and asserts that a failure leaves no row of any of the three kinds behind.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/mapper/AuthorizationMessageMapper.java`,
+  `services/authorization-service/src/test/java/com/carddemo/authorization/service/AuthorizationRequestListenerTest.java`.
 
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited

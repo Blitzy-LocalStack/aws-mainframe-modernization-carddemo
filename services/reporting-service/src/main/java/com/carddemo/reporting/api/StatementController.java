@@ -30,9 +30,10 @@ import org.springframework.web.bind.annotation.RestController;
  * the two artifact locations; {@link #listStatementTransactions(StatementRequest)} returns the
  * transactions those artifacts were built from, and nothing else. A caller rendering the lines takes
  * the second; a caller that only needs to know where the artifacts are, or what the statement
- * totals, takes the first and does not pay to transport up to two thousand lines it would discard.
+ * totals, takes the first and does not pay to transport the row window it would discard, which
+ * {@link StatementService#MAX_RESPONSE_TRANSACTIONS} caps at 1,000.
  *
- * <p>Refactoring Rationale: both method names are the published operation identifiers verbatim —
+ * <p>Refactoring Rationale: both method names are the published operation identifiers verbatim --
  * an earlier revision named them {@code describeStatement} and {@code getStatementDocument}. The
  * documentation library derives an operation identifier from the method name when none is annotated,
  * so a method named otherwise makes the document served at run time disagree with the document
@@ -40,7 +41,7 @@ import org.springframework.web.bind.annotation.RestController;
  * Naming the method after the operation removes the divergence at its source rather than adding a
  * second annotation to paper over it.
  *
- * <p>Refactoring Rationale: both operations are {@code POST} even though both are reads, and the
+ * <p>Trade-offs: both operations are {@code POST} even though both are reads, and the
  * reason is disclosure rather than semantics. A statement is selected by a primary account number,
  * and a request line is written into the access log of every intermediary between the browser and
  * this service, into browser history and into a referrer header -- none of which this service can
@@ -121,7 +122,7 @@ public class StatementController {
     /**
      * Policy set on every response from this controller.
      *
-     * <p>Refactoring Rationale: this is defence in depth behind the escaping the statement markup
+     * <p>Assumptions: this is defence in depth behind the escaping the statement markup
      * mapper performs, and it is not a substitute for it. The mapper escapes every dynamic value into
      * its context and refuses a value it cannot render, which is the control that actually prevents
      * injected markup from executing; this policy is what limits the consequence if a payload from
@@ -178,15 +179,27 @@ public class StatementController {
      * <p>Refactoring Rationale: the body carries the TRANSACTIONS alone, where an earlier revision
      * returned the whole document -- the heading summary and the transactions together. The published
      * contract declares two operations here, one for the summary and one for the rows, and the reason
-     * is size rather than taste: a statement carries as many rows as the card has activity, with no
-     * ceiling on that count, and a caller that wants only the heading figures and the two artifact
-     * locations should not have to receive all of them. The summary operation above answers that
-     * caller. Assumptions: the absence of a ceiling is divergence D-2, which
-     * {@code com.carddemo.reporting.service.StatementService} owns and documents; an earlier revision
-     * of this paragraph cited a row ceiling on that service, and no such ceiling exists, because
-     * capping a statement would stop it at a number the business never chose.
+     * is size rather than taste: a statement carries as many rows as the card has activity, a count no
+     * contract fixes, and a caller that wants only the heading figures and the two artifact locations
+     * should not have to receive them. The summary operation above answers that caller.
      *
-     * <p>Assumptions: this is not a page and carries no cursor. The set is bounded by the statement's
+     * <p>Assumptions: the body returned here is a BOUNDED window, and the two bounds in play belong to
+     * different destinations rather than being one bound stated twice. The rendered artifact carries no
+     * fixed arity at all, which is divergence D-2, owned and documented by {@link StatementService} and
+     * registered in {@code docs/architecture/cobol-to-service-traceability.md}; the reference reached
+     * its two static dimensions through a single working-storage index measuring
+     * 51 x (16 + 10 x 334) = 51 x 3356 = 171,156 characters. The response is a surface the reference
+     * never published at all, and it is capped separately by
+     * {@link StatementService#MAX_RESPONSE_TRANSACTIONS} at 1,000 rows under the distinct marker
+     * D-STMT-RESPONSE-BOUNDED. An earlier revision of this paragraph attributed the response bound to
+     * D-2 and stated that no such bound existed, which described neither destination accurately.
+     *
+     * <p>Assumptions: a capped window stays measurable rather than silent, because the heading the
+     * summary operation returns carries the card's true transaction count taken from a database
+     * aggregate over the whole card, so a caller comparing the rows it received against that count
+     * learns whether and by how much the window was capped.
+     *
+     * <p>Assumptions: this is not a page and carries no cursor. The set is closed by the statement's
      * own period, so there is no open-ended sequence to walk, which is the argument recorded on
      * {@link StatementTransactionCollection}.
      *

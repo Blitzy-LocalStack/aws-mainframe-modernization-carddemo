@@ -2,7 +2,9 @@ package com.carddemo.batch.job;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -17,12 +19,10 @@ import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DisclosureGroupKey;
 import com.carddemo.batch.dto.InterestRateLookup;
-import com.carddemo.batch.repository.AccountRepository;
-import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
-import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.InterestCalculationService;
 import com.carddemo.common.money.Money;
@@ -94,15 +94,6 @@ class CalculateInterestJobTest {
     /** The category-balance master being walked. */
     private TransactionCategoryBalanceRepository categoryBalances;
 
-    /** The account master being read and updated. */
-    private AccountRepository accounts;
-
-    /** The cross-reference the generated transaction's card number comes from. */
-    private CardXrefRepository crossReferences;
-
-    /** The ledger the generated interest transactions are written to. */
-    private TransactionRepository ledger;
-
     /** The rate resolution and accrual arithmetic. */
     private InterestCalculationService interest;
 
@@ -124,9 +115,6 @@ class CalculateInterestJobTest {
     @BeforeEach
     void buildJob() {
         this.categoryBalances = mock(TransactionCategoryBalanceRepository.class);
-        this.accounts = mock(AccountRepository.class);
-        this.crossReferences = mock(CardXrefRepository.class);
-        this.ledger = mock(TransactionRepository.class);
         this.interest = mock(InterestCalculationService.class);
         this.ledgerOfSteps = mock(BatchStepLedger.class);
 
@@ -141,17 +129,16 @@ class CalculateInterestJobTest {
         //       canonically here would need a hand-padded literal, which is a second padding
         //       mechanism that could drift from the first.
         DisclosureGroupKey key = DisclosureGroupKey.ofBlankPaddedAccountGroupId("DEFAULT", "01", 1);
-        when(this.interest.resolveRate(any()))
-                .thenReturn(Optional.of(new InterestRateLookup(key, key, new BigDecimal("2.50"))));
-        when(this.interest.accrue(any(), any())).thenReturn(Money.of(new BigDecimal("2.08")));
-        when(this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(any()))
-                .thenReturn(Optional.of(crossReference()));
+        when(this.interest.rateFor(any()))
+                .thenReturn(new InterestRateLookup(key, key, new BigDecimal("2.50")));
+        when(this.interest.monthlyInterest(any(), any()))
+                .thenReturn(Money.of(new BigDecimal("2.08")));
+        when(this.interest.loadCrossReference(any())).thenReturn(CARD_NUMBER);
 
         Clock clock = Clock.fixed(
                 LocalDateTime.of(2022, 7, 18, 1, 2, 3).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-        CalculateInterestJob configuration = new CalculateInterestJob(this.categoryBalances,
-                this.accounts, this.crossReferences, this.ledger, this.interest, this.ledgerOfSteps,
-                clock);
+        CalculateInterestJob configuration = new CalculateInterestJob(
+                this.categoryBalances, this.interest, this.ledgerOfSteps, clock);
 
         this.jobRepository = new ResourcelessJobRepository();
         JobParametersValidator validator = new BatchConfig().carddemoJobParametersValidator();
@@ -178,11 +165,16 @@ class CalculateInterestJobTest {
         JobExecution execution = run();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        verify(this.accounts).save(account);
-        verify(this.ledger).save(any(Transaction.class));
-        // The cycle totals are zeroed on the same write, matching app/cbl/CBACT04C.cbl:342-344.
-        assertThat(account.getCurrCycCredit()).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(account.getCurrCycDebit()).isEqualByComparingTo(BigDecimal.ZERO);
+        // WHY : Refactoring Rationale: the flush is asserted as a CALL carrying the accumulated total,
+        //       and the two cycle amounts it zeroes are no longer asserted here. The three state
+        //       changes at app/cbl/CBACT04C.cbl:352-354 belong to InterestCalculationService, which the
+        //       register maps 1050-UPDATE-ACCOUNT at :350 to, and that collaborator is a mock in this
+        //       class -- so asserting the zeroed amounts here would assert the mock rather than the
+        //       rule, and would pass whether or not the rule still performed the reset. The reset is
+        //       asserted against the real implementation in InterestCalculationServiceTest.
+        verify(this.interest).flushAccount(account, Money.of(new BigDecimal("2.08")));
+        verify(this.interest).writeInterestTransaction(eq(READABLE_ACCOUNT), eq(CARD_NUMBER),
+                any(Money.class), any(BusinessDate.class), eq(1L), any(LocalDateTime.class));
     }
 
     /**
@@ -201,17 +193,18 @@ class CalculateInterestJobTest {
         stageRows(
                 balanceRow(ORPHANED_ACCOUNT, "01", "0001", "500.00"),
                 balanceRow(READABLE_ACCOUNT, "01", "0001", "1000.00"));
-        when(this.accounts.findByAccountId(ORPHANED_ACCOUNT)).thenReturn(Optional.empty());
+        when(this.interest.loadAccount(ORPHANED_ACCOUNT)).thenReturn(Optional.empty());
         Account readable = stageReadableAccount();
 
         JobExecution execution = run();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         // Exactly one account is written, and it is the one that could be read.
-        verify(this.accounts, times(1)).save(any(Account.class));
-        verify(this.accounts).save(readable);
+        verify(this.interest, times(1)).flushAccount(any(Account.class), any(Money.class));
+        verify(this.interest).flushAccount(eq(readable), any(Money.class));
         // Exactly one accrual reaches the ledger: none for the orphaned account.
-        verify(this.ledger, times(1)).save(any(Transaction.class));
+        verify(this.interest, times(1)).writeInterestTransaction(any(), any(), any(), any(),
+                anyLong(), any());
     }
 
     /**
@@ -233,15 +226,16 @@ class CalculateInterestJobTest {
         //       canonically here would need a hand-padded literal, which is a second padding
         //       mechanism that could drift from the first.
         DisclosureGroupKey key = DisclosureGroupKey.ofBlankPaddedAccountGroupId("DEFAULT", "01", 1);
-        when(this.interest.resolveRate(any()))
-                .thenReturn(Optional.of(new InterestRateLookup(key, key, BigDecimal.ZERO)));
+        when(this.interest.rateFor(any()))
+                .thenReturn(new InterestRateLookup(key, key, BigDecimal.ZERO));
         stageRows(balanceRow(READABLE_ACCOUNT, "01", "0001", "1000.00"));
         stageReadableAccount();
 
         JobExecution execution = run();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        verify(this.ledger, never()).save(any(Transaction.class));
+        verify(this.interest, never()).writeInterestTransaction(any(), any(), any(), any(),
+                anyLong(), any());
     }
 
     /**
@@ -257,8 +251,9 @@ class CalculateInterestJobTest {
         JobExecution execution = run();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        verify(this.accounts, never()).save(any(Account.class));
-        verify(this.ledger, never()).save(any(Transaction.class));
+        verify(this.interest, never()).flushAccount(any(Account.class), any(Money.class));
+        verify(this.interest, never()).writeInterestTransaction(any(), any(), any(), any(),
+                anyLong(), any());
     }
 
     /**
@@ -281,7 +276,7 @@ class CalculateInterestJobTest {
                 new BigDecimal("5000.00"), new BigDecimal("500.00"), LocalDate.of(2020, 1, 1),
                 LocalDate.of(2030, 1, 1), LocalDate.of(2024, 1, 1), new BigDecimal("25.00"),
                 new BigDecimal("75.00"), "98101", "DEFAULT");
-        when(this.accounts.findByAccountId(READABLE_ACCOUNT)).thenReturn(Optional.of(account));
+        when(this.interest.loadAccount(READABLE_ACCOUNT)).thenReturn(Optional.of(account));
         return account;
     }
 

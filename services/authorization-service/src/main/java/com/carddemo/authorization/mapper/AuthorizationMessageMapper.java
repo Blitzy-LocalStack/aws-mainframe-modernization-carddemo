@@ -998,6 +998,79 @@ public class AuthorizationMessageMapper {
      * worst. The projection below truncates nothing and pads nothing; it hands the values to the logger
      * as they are.</p>
      *
+     * <p><b>Where the reference program emits these records.</b> Assumptions: fourteen sites, each a
+     * {@code PERFORM 9500-LOG-ERROR}, all funnelling into one paragraph at {@code cbl/COPAUA0C.cbl}
+     * L983 to L1012. Counted first-hand at L282, L316, L429, L500, L512, L547, L560, L595, L608, L639,
+     * L778, L846, L931 and L975. The figure is stated because it is easy to under-count: a reader who
+     * scans only the reading paragraphs stops at L639 and finds ten, missing the reply put at L778, the
+     * two segment writes at L846 and L931 and the close at L975. Fourteen call sites resolving to one
+     * emitting paragraph is the reference program's OWN centralization of diagnostics, which is why the
+     * target emits through one structured logger and a single exception handler rather than logging at
+     * each failing site.</p>
+     *
+     * <p><b>Severity: the domain is retained and its population disclosed.</b> Assumptions: four
+     * severities are declared -- {@code 'L'}, {@code 'I'}, {@code 'W'} and {@code 'C'} at
+     * {@code cpy/CCPAUERY.cpy} L26 to L29 -- and only TWO are ever set. Ten sites set
+     * {@link #ERROR_LEVEL_CRITICAL}, at L274, L312, L420, L503, L551, L599, L634, L769, L841 and L926,
+     * and four set {@link #ERROR_LEVEL_WARNING}, at L495, L542, L590 and L967; ten plus four closes on
+     * the fourteen call sites with nothing left over, and {@code 'L'} and {@code 'I'} appear nowhere in
+     * the program outside their own declarations. So two of the four are declared-but-unused, and a
+     * reader must not infer a live four-level scale from the copybook alone.</p>
+     *
+     * <p><b>Severity: two disclosed differences in the target's vocabulary.</b> Refactoring Rationale:
+     * the target's logger carries a debug level the reference vocabulary has none of, and it separates
+     * an error from a fatal where the reference has one terminal severity covering both. The
+     * consequence in each direction is worth stating. Debug is ADDITIVE: no reference record maps to it,
+     * so it can only ever carry target-side detail, and a reader comparing volumes will see debug
+     * entries with no counterpart in the reference stream. The split is a REFINEMENT of {@code 'C'}:
+     * that one value means both "the operation failed" and "stop", because L1008 to L1010 tests it and
+     * performs the end routine, so mapping it to a single target level would lose one of the two
+     * meanings. It maps to the target's fatal level where consumption stops and to its error level where
+     * the message alone is abandoned, and {@link ErrorLogEntry#isTerminal()} is what keeps the
+     * distinction answerable rather than editorial.</p>
+     *
+     * <p><b>Subsystem: the dimension is retained, its domain re-based.</b> Refactoring Rationale: three
+     * of the six declared values name platforms that do not exist in the target -- {@code 'C'} for the
+     * transaction monitor at L32, {@code 'I'} for the hierarchical database at L33 and {@code 'D'} for
+     * the relational subsystem at L34 -- and three map forward: {@code 'A'} for the application itself
+     * at L31, {@code 'M'} for messaging at L35 and {@code 'F'} for the file subsystem at L36, the last
+     * two becoming the queue service and object storage. Dropping the dimension because half its domain
+     * retires would lose the distinction the reference draws deliberately, which is between a condition
+     * the application itself detected and a fault of whatever answered it -- the pairing visible in
+     * {@link #ERROR_SUBSYSTEM_APPLICATION} always accompanying a warning while a datastore fault always
+     * accompanies a critical. The dimension is therefore kept and its domain re-based onto the
+     * replacing technologies. Assumptions: this program sets only four of the six -- {@code 'A'},
+     * {@code 'C'}, {@code 'I'} and {@code 'M'} -- so {@code 'D'} and {@code 'F'} are part of the shared
+     * layout's domain rather than of this program's behaviour.</p>
+     *
+     * <p><b>The two code slots are re-based, not dropped.</b> Refactoring Rationale: {@code codeOne}
+     * and {@code codeTwo} carry the status the failing platform returned -- a database status, a
+     * transaction-monitor response, a queue-manager reason -- so the literal values cannot survive a
+     * platform change. Removing the slots was the alternative and it was rejected: they are the only
+     * place the diagnostic records WHAT the underlying technology said, and without them a record states
+     * that a step failed and not how, which is the difference between a log entry that ends an
+     * investigation and one that starts a second. The slots keep their positions and their meaning --
+     * the code the answering technology returned -- and are populated from the replacing technology's
+     * own status instead.</p>
+     *
+     * <p><b>Mapping onto the shared abend contract.</b> Assumptions: {@code app/cpy/CSMSG02Y.cpy}
+     * declares {@code ABEND-DATA} at L21 with four components across L21 to L29 --
+     * {@code ABEND-CODE PIC X(4)}, {@code ABEND-CULPRIT PIC X(8)}, {@code ABEND-REASON PIC X(50)} and
+     * {@code ABEND-MSG PIC X(72)} -- which {@code com.carddemo.common.error.AbendDetail} carries. The
+     * range is checkable rather than asserted: the file is thirty-five lines long, so no citation beyond
+     * it can be read, and this copybook additionally carries six-digit sequence numbers in columns one
+     * to six, a third numbering regime distinct from both the unnumbered and the
+     * trailing-numbered sources in this migration. THREE components pair at exactly equal width --
+     * {@code ERR-LOCATION X(04)} with {@code ABEND-CODE X(4)}, {@code ERR-PROGRAM X(08)} with
+     * {@code ABEND-CULPRIT X(8)} and {@code ERR-MESSAGE X(50)} with {@code ABEND-REASON X(50)} -- so
+     * those three transfer without a width decision. The remaining EIGHT components of this record have
+     * no counterpart in that contract and become structured log dimensions instead, which is what
+     * {@link #structuredFields()} emits; the event key is the one of the eight held back from that
+     * projection and recorded only as a keyed token. Assumptions: the pairing is a width and role
+     * correspondence, not an inheritance -- this record stays the reference layout's own shape, and the
+     * abend contract stays the shared one, because collapsing them would oblige every service to know
+     * this extension's eleven-field diagnostic.</p>
+     *
      * @param errDate the six characters of the observation date, year first and unseparated
      * @param errTime the six characters of the observation time, hours first and unseparated
      * @param application the eight-character transaction identifier the failure was observed under

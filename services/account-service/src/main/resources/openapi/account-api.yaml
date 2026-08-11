@@ -110,15 +110,47 @@
 #   Every failure is rendered by the shared advice in common-lib as one problem
 #   document, so the error vocabulary is identical to every other contract in
 #   this migration and a client writes one error handler rather than one per
-#   service. Assumptions: each operation declares EVERY status it can produce
-#   and no status it cannot. Both halves of that are load bearing -- a declared
-#   status no response can produce is a branch a client writes and never
-#   reaches, and an undeclared status it does produce is a branch the client
-#   does not write at all. Two consequences are worth naming because they are
-#   easy to get wrong in the other direction: the by-account listing declares NO
-#   404, because an account with no card is an empty list rather than an absence;
-#   and every operation with a numeric path parameter declares 400, because a
-#   segment that will not convert to that number is refused as caller input.
+#   service. The statuses this document emits, and what each means here:
+#     - 400  Caller input refused, nothing read and nothing written. The
+#            fieldErrors array names the offending request property. On the two
+#            end-user account operations this also covers an all-zeroes account
+#            identifier, because the reference refuses that key rather than
+#            treating it as one that matches nothing.
+#     - 401  No credential, or one the verifier does not admit.
+#     - 403  A credential the verifier admits but which lacks the authority or
+#            the scope the route requires. An internal token presented to an
+#            end-user operation, or the reverse, lands here rather than on 401.
+#     - 404  The keyed row does not exist. Never returned as a 200 carrying
+#            nulls, because the consuming context treats an absence as a
+#            decision input and a missing member as a dependency failure, and
+#            those two have opposite meanings on its side.
+#     - 409  THE OPTIMISTIC-LOCK CONFLICT, and the status this document exists
+#            to get right. It is emitted by the update alone, when the If-Match
+#            revision does not name the stored state -- either because another
+#            writer changed the row between the caller's read and its request,
+#            or because the precondition was blank, or because the persistence
+#            provider found the version stale between this transaction's read
+#            and its flush. The body carries the reference's own changed-record
+#            sentence verbatim and a fieldErrors entry keyed version reporting
+#            the CURRENT revision, so a caller re-reads and retries without a
+#            second round trip. It is the target form of the before-image
+#            comparison app/cbl/COACTUPC.cbl performs across the
+#            pseudo-conversational gap, whose failure branch there rolls the
+#            unit of work back at L4100 rather than reporting a status.
+#     - 500  A fault that is not the caller's. This is the only status whose
+#            body carries the abend block; its presence is the signal that the
+#            failure was not caller input.
+#     - 503  A dependency is unavailable, or writes are quiesced for the batch
+#            window.
+#   Assumptions: each operation declares EVERY status it can produce and no
+#   status it cannot. Both halves of that are load bearing -- a declared status
+#   no response can produce is a branch a client writes and never reaches, and
+#   an undeclared status it does produce is a branch the client does not write
+#   at all. Two consequences are worth naming because they are easy to get wrong
+#   in the other direction: the by-account listing declares NO 404, because an
+#   account with no card is an empty list rather than an absence; and every
+#   operation with a numeric path parameter declares 400, because a segment that
+#   will not convert to that number is refused as caller input.
 #
 # Authorization:
 #   The internal reads are governed by a dedicated filter chain,
@@ -161,6 +193,26 @@
 
 openapi: 3.1.0
 
+# WHY : Assumptions: THIS FILE IS THE CONTRACT OF RECORD, and the four info members below
+#       are the source the Java side copies rather than the other way round.
+#       config/OpenApiConfig.java holds a title, version, summary and description as
+#       string constants and states in its own header that each is reproduced from the
+#       corresponding member here, so that a comparison between the document springdoc
+#       generates at run time and this file finds those members equal rather than merely
+#       similar. The direction matters because the two are edited by different hands: an
+#       edit to any member below obliges the same edit to the matching constant there,
+#       and an edit made only on the Java side is a regression against this file no
+#       matter which value reads better. It is recorded here because nothing in the
+#       build compares the two -- the contract tests pin the security scheme, its
+#       scopes and the specification version, and stop short of the info block -- so a
+#       divergence in these four members is visible to a reader and to nothing else.
+# WHY : Assumptions: the specification version is declared 3.1.0 and not a 3.0 release,
+#       and members used below exist only from 3.1 -- a summary on the info object, a
+#       type union expressed as an explicit 'null' member rather than the 3.0-era
+#       nullable flag, and an SPDX-era licence object. Decision D6 of the migration
+#       plan fixes 3.1 for every service contract, so a 3.0 declaration here would not
+#       merely be older, it would make the nullable page cursors below unexpressible in
+#       the form the shared page envelope actually serialises.
 info:
   title: CardDemo Account Context API
   version: 2.0.0
@@ -283,6 +335,11 @@ paths:
       security:
         - internalServiceToken: []
       requestBody:
+        description: >-
+          The primary account number to resolve, as the sole input. It travels in
+          the body and not in the request line because a request line is composed
+          into an access record before any application code runs, and this value is
+          one the logging contract withholds from a durable diagnostic.
         required: true
         content:
           application/json:
@@ -352,6 +409,10 @@ paths:
       security:
         - internalServiceToken: []
       requestBody:
+        description: >-
+          The internal account identifier whose cross-reference row is wanted, as
+          the sole input. It is carried in the body for the same reason the
+          card-keyed lookup beside it is: the key is withheld from access records.
         required: true
         content:
           application/json:
@@ -458,6 +519,11 @@ paths:
             type: string
             enum: [next, previous]
       requestBody:
+        description: >-
+          The internal account identifier whose cross-reference rows are wanted, as
+          the sole body input. The page position and bound travel as query
+          parameters instead, because a cursor names no account and nothing is
+          withheld by logging it.
         required: true
         content:
           application/json:
@@ -523,6 +589,11 @@ paths:
       security:
         - internalServiceToken: []
       requestBody:
+        description: >-
+          The internal account identifier to resolve, as the sole input. This
+          operation exists because the neighbouring authorization context reads
+          three amounts against an account; the identifier moved out of the request
+          line so it appears in no access record on either side.
         required: true
         content:
           application/json:
@@ -596,6 +667,13 @@ paths:
         - $ref: '#/components/parameters/AccountIdEndUserPath'
         - $ref: '#/components/parameters/IfMatchHeader'
       requestBody:
+        description: >-
+          The complete submitted state of the account edit -- all forty-three screen
+          values, every one a string. Absent and unchanged are not distinguished
+          here: the reference normalises a blank or asterisk to low-values before
+          validating, so a value the caller leaves empty arrives empty rather than
+          missing. The revision the edit is conditional on travels in the If-Match
+          header and not in this body.
         required: true
         content:
           application/json:
@@ -642,20 +720,62 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        # WHY : Assumptions: the sentence in the example below is reproduced BYTE-FOR-BYTE
+        #       from app/cbl/COACTUPC.cbl, where 88 DATA-WAS-CHANGED-BEFORE-UPDATE is
+        #       declared at L521 with its literal at L522, and two of its properties are
+        #       load-bearing rather than typographical. "some one" is TWO WORDS in the
+        #       reference, so the single-word spelling is a different string and would be a
+        #       reworded message rather than a carried one; and the literal ENDS at
+        #       "review" with no closing period, because the period that appears after the
+        #       closing quote at L522 is the COBOL statement terminator and not part of the
+        #       value. No character count is asserted for it here on purpose: the physical
+        #       line is the only authority for its length, and a count written into prose
+        #       is a second place for that fact to be wrong.
+        # WHY : Assumptions: this status is emitted by the SHARED advice in common-lib and
+        #       not by any local handler, so the wording below and the wording that advice
+        #       carries must agree. Recording the coupling here is what stops one of the
+        #       two being edited alone.
         '409':
           description: >-
-            The precondition does not name the stored state, so the record was
-            changed by someone else since the caller read it, and nothing was
-            written. The body carries the reference's own changed-record sentence
-            and a fieldErrors entry keyed version reporting the CURRENT revision,
-            so a caller can re-read and retry without a second round trip to
-            discover what it changed to. The same status answers a blank
-            precondition and a version the persistence provider found stale
-            between this transaction's read and its flush.
+            The precondition does not name the stored state, so the row was
+            changed by another writer between the caller's read and this request,
+            and nothing was written. The body carries the reference's own
+            changed-record sentence and a fieldErrors entry keyed version
+            reporting the CURRENT revision, so a caller can re-read and retry
+            without a second round trip to discover what it changed to. The same
+            status answers a blank precondition and a version the persistence
+            provider found stale between this transaction's read and its flush.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+              # WHY : Assumptions: every member below is the value the shared advice actually
+              #       emits for this condition, read from ApiError.CODE_CONFLICT and the
+              #       ofConflict factory in common-lib rather than chosen to look plausible:
+              #       the code is CARDDEMO-0409, the severity WARNING, and the subsystem
+              #       RELATIONAL. RELATIONAL rather than a subsystem naming this context is
+              #       what the Subsystem schema requires -- a contention refusal reports the
+              #       store the contention is over even when this service is what noticed it
+              #       -- and the fieldErrors entry is keyed version because that is the key
+              #       the FieldError schema reserves for a 409. An example that disagreed
+              #       with the advice would be a client's binding failure rather than a
+              #       documentation nit, since this body is the only one a 409 ever carries.
+              example:
+                code: 'CARDDEMO-0409'
+                secondaryCode: ''
+                message: 'Record changed by some one else. Please review'
+                severity: WARNING
+                subsystem: RELATIONAL
+                status: 409
+                correlationId: '00000000-0000-4000-8000-000000000000'
+                path: /api/v1/accounts/12345678901
+                timestamp: '2024-01-15 09:30:00.000000'
+                fieldErrors:
+                  - field: version
+                    state: NOT_OK
+                    message: 'Record changed by some one else. Please review'
+                    error: true
+                abend: null
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -713,14 +833,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AccountViewResponse'
+        # WHY : Assumptions: the sentence in the example below is the one the reference
+        #       actually EMITS, taken from the MOVE at app/cbl/COACTVWC.cbl L672, and it is
+        #       reproduced with its two consecutive spaces between "must" and "be" intact.
+        #       That doubled space is in the source literal, so normalising it to one would
+        #       change what the screen says. The wording also carries an ASCII hyphen in
+        #       "non-zero" and the word "Filter".
+        # WHY : Trade-offs: this document reproduces the EMITTED wording and not the
+        #       DECLARED one, and the two genuinely differ. The conditions declared at
+        #       app/cbl/COACTVWC.cbl L125 with L126 and L127 with L128 read "Account number
+        #       must be a non zero 11 digit number" -- single-spaced, no hyphen, the word
+        #       "number" -- and are byte-identical to each other under two distinct
+        #       condition names, while the MOVE at L672 overwrites the channel with the
+        #       "Filter" wording. What is accepted is that a reader comparing this contract
+        #       with the declarations will find a mismatch; what it buys is that the
+        #       contract states what a caller receives. The two must never be folded
+        #       together on the strength of describing one condition.
         '400':
           description: >-
-            The account identifier in the path would not convert to a number. The
-            fieldErrors array names accountId.
+            The account identifier in the path would not convert to a number, or
+            converted to zero. The fieldErrors array names accountId.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+              # WHY : Assumptions: the code, severity and subsystem below are read from
+              #       ApiError.CODE_VALIDATION and the ofFieldErrors factory in common-lib
+              #       rather than chosen to look plausible -- CARDDEMO-0400 with WARNING
+              #       severity and the APPLICATION subsystem. APPLICATION rather than
+              #       RELATIONAL because nothing reached the store: the identifier is refused
+              #       at the binding stage, which is the same point app/cbl/COACTVWC.cbl
+              #       refuses it at L666 with L667 before any file read. The abend member is
+              #       null because the ApiError schema reserves it for a 500, and its
+              #       presence is what distinguishes a service fault from a refusal the
+              #       caller can correct.
+              example:
+                code: 'CARDDEMO-0400'
+                secondaryCode: ''
+                message: 'Account Filter must  be a non-zero 11 digit number'
+                severity: WARNING
+                subsystem: APPLICATION
+                status: 400
+                correlationId: '00000000-0000-4000-8000-000000000000'
+                path: /api/v1/accounts/00000000000/view
+                timestamp: '2024-01-15 09:30:00.000000'
+                fieldErrors:
+                  - field: accountId
+                    state: NOT_OK
+                    message: 'Account Filter must  be a non-zero 11 digit number'
+                    error: true
+                abend: null
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -994,6 +1156,10 @@ paths:
       security:
         - internalServiceToken: []
       requestBody:
+        description: >-
+          The nine-digit customer identifier whose existence is being tested, as the
+          sole input. The answer is a status and never a body, so a caller wanting
+          only presence transfers no customer data at all.
         required: true
         content:
           application/json:
@@ -1070,6 +1236,11 @@ paths:
       security:
         - internalServiceToken: []
       requestBody:
+        description: >-
+          The nine-digit customer identifier whose record is wanted, as the sole
+          input. It is carried in the body rather than in a path segment so the key
+          reaches no access record, which is why this read is a post and the
+          cursor-positioned scan beside it is a get.
         required: true
         content:
           application/json:
@@ -1257,6 +1428,38 @@ components:
         type: integer
         format: int64
         minimum: 0
+        maximum: 99999999999
+      example: 12345678901
+
+    # WHY : Assumptions: this parameter exists ONLY to carry a floor of one, and the
+    #       floor is the reference's own key edit rather than a tightening this
+    #       migration invented. app/cbl/COACTVWC.cbl refuses the key at L666 with L667
+    #       -- IF CC-ACCT-ID IS NOT NUMERIC OR CC-ACCT-ID EQUAL ZEROES -- before it
+    #       reads any file, and the sentence it moves into the message channel at L672
+    #       names the condition as requiring a non-zero eleven-digit number. An
+    #       all-zeroes key is therefore a REFUSAL on these two operations, where on the
+    #       by-account listing above it is an ordinary data condition.
+    # WHY : Trade-offs: two components describe one identifier, which is duplication
+    #       accepted deliberately. Collapsing them onto the wider floor would let an
+    #       all-zeroes key reach the account read and be answered 404 instead of 400,
+    #       and collapsing them onto the narrower floor would make the cross-reference
+    #       listing refuse a value the reference reaches from a stored row. Neither
+    #       collapse preserves both behaviours, so the split is the cheaper compromise.
+    AccountIdEndUserPath:
+      name: accountId
+      in: path
+      required: true
+      description: >-
+        The account identifier on the two operations that apply the reference's own
+        key edit -- the account view and the account update. It is identical to
+        AccountIdPath except that its floor is ONE rather than zero, because
+        app/cbl/COACTVWC.cbl treats an all-zeroes key as a refusal at L666 with L667
+        rather than as a key that simply matches nothing. A value outside the range
+        is answered 400 with the reference's own wording and never 404.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
         maximum: 99999999999
       example: 12345678901
 
@@ -1471,15 +1674,28 @@ components:
           $ref: '#/components/schemas/AccountDetail'
         customer:
           $ref: '#/components/schemas/CustomerDetail'
+        # WHY : Assumptions: the two message members carry DIFFERENT widths because the
+        #       reference declares two separate channels, and the narrower of the two is
+        #       not a rounding of the other. app/cbl/COACTVWC.cbl declares
+        #       05 WS-INFO-MSG PIC X(40) at L110 and 05 WS-RETURN-MSG PIC X(75) at L117,
+        #       and app/cbl/COACTUPC.cbl repeats the same pair at L463 and L479. The
+        #       symbolic map gives each container MORE room than the program that fills
+        #       it -- INFOMSGI PIC X(45) at L234 and ERRMSGI PIC X(78) at L240 of
+        #       app/cpy-bms/COACTVW.CPY -- so 45 and 78 are the sizes of the boxes while
+        #       40 and 75 are the sizes of what the programs actually move into them. The
+        #       PROGRAM width is the binding contract for that reason: a caller allocating
+        #       45 would be sizing for a value this system never emits.
         informationMessage:
           oneOf:
             - type: string
-              maxLength: 75
+              maxLength: 40
             - type: 'null'
           description: >-
             The screen's information line, or null. It is always null on this
             operation and is declared because the shape is shared with the update
-            response, where it is not. Assumptions: it is not omitted from the
+            response, where it is not. The width is the 40 characters
+            WS-INFO-MSG declares at L110 of app/cbl/COACTVWC.cbl, not the 45 its
+            screen container holds. Assumptions: it is not omitted from the
             response when null -- the serialiser emits declared members as null
             rather than dropping them -- so a client sees the key either way.
         returnMessage:
@@ -1490,8 +1706,8 @@ components:
           description: >-
             The screen's message line, or null; always null on this operation. The
             width is the 75 characters CCARD-ERROR-MSG and CCARD-RETURN-MSG
-            declare, which is a rendering constraint carried across rather than a
-            suggestion.
+            declare, matching WS-RETURN-MSG at L117 of app/cbl/COACTVWC.cbl, which
+            is a rendering constraint carried across rather than a suggestion.
 
     AccountDetail:
       type: object
@@ -1971,20 +2187,44 @@ components:
           pattern: '^[0-9]{1,11}$'
           description: The account that was updated, echoed as digits.
           example: '12345678901'
+        # WHY : Assumptions: the acceptance sentence belongs to the INFORMATION channel and
+        #       not to the return channel, which is why the two members below carry
+        #       different widths and different examples. app/cbl/COACTUPC.cbl declares
+        #       88 CONFIRM-UPDATE-SUCCESS VALUE 'Changes committed to database' at L474
+        #       with L475, and that condition is declared under 05 WS-INFO-MSG PIC X(40)
+        #       at L463 -- so the sentence a caller reads on success is a 40-character
+        #       value. The return channel at L479 is 75 characters and carries the refusal
+        #       and conflict wordings instead.
         informationMessage:
           oneOf:
             - type: string
-              maxLength: 75
+              maxLength: 40
             - type: 'null'
-          description: The screen's information line, or null.
+          description: >-
+            The screen's information line, or null. On a committed edit it carries
+            the reference's own acceptance sentence character for character. The
+            width is the 40 characters WS-INFO-MSG declares at L463 of
+            app/cbl/COACTUPC.cbl, not the 45 its screen container holds.
+          example: 'Changes committed to database'
+        # WHY : Trade-offs: the example below is the reference's DEVELOPER-PLACEHOLDER
+        #       wording, declared 88 CODING-TO-BE-DONE VALUE 'Looks Good.... so far' at
+        #       app/cbl/COACTUPC.cbl L527 with L528, and it is retained rather than
+        #       replaced by an invented sentence. What is accepted is that the example
+        #       shows a placeholder; what it buys is that no wording appears in this
+        #       contract that the reference cannot produce. It is NOT the acceptance
+        #       sentence -- that one is on the information channel above -- and labelling
+        #       it as such would attribute an outcome to a value the program only ever
+        #       moves where its logic is unfinished.
         returnMessage:
           oneOf:
             - type: string
               maxLength: 75
             - type: 'null'
           description: >-
-            The reference's own acceptance sentence, carried character for
-            character from app/cbl/COACTUPC.cbl rather than reworded.
+            The screen's message line, or null; empty on a committed edit. Any
+            wording it carries is taken character for character from the
+            conditions declared under WS-RETURN-MSG at L479 of
+            app/cbl/COACTUPC.cbl rather than reworded.
           example: 'Looks Good.... so far'
         fieldErrors:
           type: array
@@ -2361,62 +2601,6 @@ components:
             PIC 9(09) declares at L5 of app/cpy/CVCUS01Y.cpy.
           example: 987654321
 
-    CardXrefPage:
-      type: object
-      additionalProperties: false
-      required: [items, hasNext, hasPrevious]
-      description: >-
-        One page of cross-reference rows together with the two boundary tokens and
-        the further-page indicator a caller needs to walk the set by key. It
-        carries exactly four members: no total count and no page number, because
-        the baseline cursor holds neither -- app/cbl/COCRDLIC.cbl keeps two key
-        pairs at L230 through L235 and a further-page indicator at L242 through
-        L244, and nothing that counts rows already consumed.
-      properties:
-        items:
-          type: array
-          description: >-
-            The rows of this page in ascending card-number order, which is the
-            base cluster's own order per RECORD KEY IS FD-XREF-CARD-NUM at L32 of
-            app/cbl/CBACT03C.cbl. An exhausted walk carries an empty array.
-          items:
-            $ref: '#/components/schemas/CardXrefResponse'
-        firstKey:
-          type: string
-          nullable: true
-          maxLength: 256
-          description: >-
-            The sealed token naming this page's leading boundary, absent when the
-            page carries no rows. Its presence is what tells a caller a backward
-            step is expressible.
-        lastKey:
-          type: string
-          nullable: true
-          maxLength: 256
-          description: >-
-            The sealed token naming this page's trailing boundary -- the last row
-            the caller actually received, never the surplus row read to settle
-            hasNext -- absent when the page carries no rows.
-        hasNext:
-          type: boolean
-          description: >-
-            Whether a further page follows, established by reading one row beyond
-            the page and observing whether it arrived, never from a tally of how
-            many rows exist. It is true only alongside a present lastKey, so a
-            caller told to continue always holds the position to continue from.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
-
     Money:
       type: string
       pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'
@@ -2519,13 +2703,39 @@ components:
             comparable as text.
           pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
           example: '2026-08-07 00:00:00.000000'
+        # WHY : Refactoring Rationale: THIS ARRAY IS WHERE A PSEUDO-CONVERSATIONAL COUPLING
+        #       IS SEVERED, and the severance is the most consequential structural
+        #       difference between the reference presentation and this contract. The
+        #       templated highlight at app/cpy/CSSETATY.cpy conjoins THREE conditions at
+        #       L18, L19 and L20: the field's flag is unacceptable, OR the flag is absent,
+        #       AND the program is on a re-entry. That third conjunct is a session fact,
+        #       declared as CDEMO-PGM-CONTEXT PIC 9(01) at app/cpy/COCOM01Y.cpy L29 with
+        #       its two conditions at L30 and L31, and it survives between screen turns
+        #       only because the terminal echoes the communication area back. Its effect
+        #       is that on a FIRST entry a rejected field is not marked at all -- the
+        #       refusal is real but invisible.
+        #       Alternatives Considered: carrying that flag forward, as a body member, a
+        #       header or a server-side session entry, so the rendering rule could be
+        #       transcribed unchanged. Rejected because a stateless handler has no turn to
+        #       remember, so the flag would have to be manufactured by the very client
+        #       whose display it then governs -- and a client that can assert "this is a
+        #       first entry" can suppress the marking of its own refused fields. This
+        #       array is instead the WHOLE input to field-error rendering: an entry is
+        #       present exactly when a field was refused, so the first response marks
+        #       every refusal and no client-supplied value can change that.
+        #       Trade-offs: the reference's two-turn behaviour is therefore NOT
+        #       reproduced, and that is an intentional, documented divergence rather than
+        #       an omission -- a refusal is marked one turn earlier here than on the 3270
+        #       screen. What is given up is byte-identical first-entry behaviour; what is
+        #       bought is that a refusal is never silent.
         fieldErrors:
           type: array
           description: >-
             One entry per rejected field on a 400, and an empty array on every
             other status. This is the target form of the reference programs'
             FLG-*-NOT-OK and FLG-*-BLANK validation flags and of the templated
-            field highlight at app/cpy/CSSETATY.cpy L17 to L27. On a 409 it carries
+            field highlight at app/cpy/CSSETATY.cpy L17 to L27, with the re-entry
+            conjunct at L20 deliberately not carried across. On a 409 it carries
             one entry keyed version reporting the current revision.
           items:
             $ref: '#/components/schemas/FieldError'

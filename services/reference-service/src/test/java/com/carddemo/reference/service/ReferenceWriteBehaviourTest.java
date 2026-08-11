@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.reference.domain.DisclosureGroup;
 import com.carddemo.reference.domain.DisclosureGroup.DisclosureGroupId;
@@ -28,10 +29,14 @@ import com.carddemo.reference.mapper.TransactionTypeMapper;
 import com.carddemo.reference.repository.DisclosureGroupRepository;
 import com.carddemo.reference.repository.TransactionCategoryRepository;
 import com.carddemo.reference.repository.TransactionTypeRepository;
+import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -482,7 +487,16 @@ class ReferenceWriteBehaviourTest {
             assertThat(reply.outcomes().get(0).applied()).isFalse();
             assertThat(reply.outcomes().get(1).outcome())
                     .isEqualTo(ReferenceBatchUpdateService.OUTCOME_APPLIED);
-            verify(types).save(any(TransactionType.class));
+            // WHY : Refactoring Rationale: the insert is verified through the repository's explicit
+            //       insert member, where this verified a save. A save cannot insert this entity at all
+            //       -- its identifier is caller-assigned and its version is a primitive, so newness
+            //       cannot be detected and every save of a new instance reaches a merge, which loads
+            //       the row the identifier names and writes an update against it. Verifying the save
+            //       therefore asserted a call that could not have inserted the row, and it also made
+            //       the duplicate-code refusal unreachable, because a merge raises a lock failure or
+            //       silently overwrites rather than violating the primary key. The assertion's own
+            //       intent is unchanged: the later action's write is still what is verified.
+            verify(types).insertType("03", "Credit");
         }
 
         /**
@@ -519,6 +533,353 @@ class ReferenceWriteBehaviourTest {
             assertThat(reply.returnCode())
                     .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
             assertThat(reply.outcomes().get(0).applied()).isTrue();
+        }
+
+        /**
+         * One maintenance record decodes to its three declared fields at the offsets the layout states.
+         *
+         * <p>Assumptions: the field values are asserted rather than only the branch taken, because the
+         * three offsets are 0, 1 and 3 and a record read one byte out of alignment still decodes to
+         * characters. Nothing would raise, so only the values reveal a misaligned layout.</p>
+         */
+        @Test
+        @DisplayName("decode one record to its three fields at offsets zero, one and three")
+        void decodeOneRecordToItsThreeFieldsAtOffsetsZeroOneAndThree() {
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.RecordOutcome outcome =
+                    service.applyRecord(maintenanceRecord("A", "08", "Fee Assessment"));
+
+            assertThat(outcome.action()).isEqualTo(ReferenceBatchUpdateService.RecordAction.ADD);
+            assertThat(outcome.typeCode()).isEqualTo("08");
+            assertThat(outcome.succeeded()).isTrue();
+            assertThat(outcome.message())
+                    .isEqualTo(ReferenceBatchUpdateService.MESSAGE_RECORD_INSERTED);
+            // WHY : Assumptions: the description reaches storage trimmed while the code keeps its
+            //       declared width. Verifying the argument is what distinguishes the two, since a
+            //       record that stored fifty blank-padded bytes would satisfy every assertion above.
+            verify(types).insertType("08", "Fee Assessment");
+        }
+
+        /**
+         * A stream whose length is not a whole multiple of the record length is refused as a whole.
+         *
+         * <p>Assumptions: this is the one failure the run does not tolerate, and the distinction is the
+         * point of the case. A malformed length is something the baseline cannot meet, because its
+         * access method guarantees the record length before the program sees a record, so there is no
+         * per-record branch to transcribe and nothing to soft reject into.</p>
+         */
+        @Test
+        @DisplayName("refuse a stream that is not a whole number of records")
+        void refuseAStreamThatIsNotAWholeNumberOfRecords() {
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            byte[] trailingPartialRecord = new byte[ReferenceBatchUpdateService.RECORD_LENGTH + 2];
+
+            assertThatThrownBy(
+                    () -> service.apply(new ByteArrayInputStream(trailingPartialRecord)))
+                    .isInstanceOf(FixedWidthCodec.RecordLengthException.class)
+                    .hasMessageContaining("WS-INPUT-REC")
+                    .hasMessageContaining("53")
+                    .hasMessageContaining("2");
+        }
+
+        /**
+         * Each of the five dispatch branches is selected by its own action code.
+         *
+         * <p>Assumptions: the lowercase action code is included deliberately. A COBOL
+         * {@code EVALUATE} compares the byte, so a lowercase code falls through every named arm to the
+         * catch-all rather than selecting the branch its uppercase form would.</p>
+         */
+        @Test
+        @DisplayName("select each of the five dispatch branches")
+        void selectEachOfTheFiveDispatchBranches() {
+            when(types.findByTypeCd("02"))
+                    .thenReturn(Optional.of(new TransactionType("02", "Payment")));
+            when(types.findByTypeCd("03"))
+                    .thenReturn(Optional.of(new TransactionType("03", "Credit")));
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            assertThat(service.applyRecord(maintenanceRecord("A", "08", "New")).action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.ADD);
+            assertThat(service.applyRecord(maintenanceRecord("U", "02", "Changed")).action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.UPDATE);
+            assertThat(service.applyRecord(maintenanceRecord("D", "03", "")).action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.DELETE);
+
+            ReferenceBatchUpdateService.RecordOutcome commented =
+                    service.applyRecord(maintenanceRecord("*", "01", "a commented line"));
+            assertThat(commented.action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.COMMENT);
+            assertThat(commented.succeeded()).isTrue();
+            assertThat(commented.message())
+                    .isEqualTo(ReferenceBatchUpdateService.DISPLAY_IGNORING_COMMENTED_LINE);
+
+            ReferenceBatchUpdateService.RecordOutcome invalid =
+                    service.applyRecord(maintenanceRecord("a", "01", "Purchase"));
+            assertThat(invalid.action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.INVALID);
+            assertThat(invalid.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.INVALID_ACTION_CODE);
+            assertThat(invalid.message())
+                    .isEqualTo(ReferenceBatchUpdateService.MESSAGE_TYPE_NOT_VALID);
+        }
+
+        /**
+         * A refused record does not stop the records after it, and the writes of those records happen.
+         *
+         * <p>Assumptions: this is the case that proves the soft reject, so it asserts the later writes
+         * and not merely the length of the outcome list. A run that built three outcomes while writing
+         * nothing after the first refusal would satisfy a count assertion and would still have given
+         * up. The aggregate and the identity of the refused record are both asserted, because the
+         * baseline's own condition-code register carries the aggregate and nothing else.</p>
+         */
+        @Test
+        @DisplayName("apply later records after an earlier one is refused")
+        void applyLaterRecordsAfterAnEarlierOneIsRefused() {
+            when(types.findByTypeCd("01")).thenReturn(Optional.empty());
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
+                    maintenanceStream(
+                            maintenanceRecord("U", "01", "No such row"),
+                            maintenanceRecord("A", "08", "Fee Assessment"),
+                            maintenanceRecord("A", "09", "Chargeback")));
+
+            assertThat(result.processedCount()).isEqualTo(3);
+            assertThat(result.anyRejected()).isTrue();
+            assertThat(result.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_SOFT_WARN);
+            assertThat(result.outcomes().get(0).succeeded()).isFalse();
+            assertThat(result.outcomes().get(0).rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.NOT_FOUND);
+            assertThat(result.outcomes().get(1).succeeded()).isTrue();
+            assertThat(result.outcomes().get(2).succeeded()).isTrue();
+            verify(types).insertType("08", "Fee Assessment");
+            verify(types).insertType("09", "Chargeback");
+        }
+
+        /**
+         * A run in which every record applied reports the clean code, and an empty stream is such a run.
+         *
+         * <p>Assumptions: the empty stream is asserted alongside the clean run because zero refusals is
+         * the same aggregate as zero records, and a reader has to be able to tell that the empty case
+         * reaches the loop rather than raising on it.</p>
+         */
+        @Test
+        @DisplayName("report the clean code for a clean run and for an empty stream")
+        void reportTheCleanCodeForACleanRunAndForAnEmptyStream() {
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.BatchUpdateResult applied = service.apply(
+                    maintenanceStream(maintenanceRecord("A", "08", "Fee Assessment")));
+            assertThat(applied.anyRejected()).isFalse();
+            assertThat(applied.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
+
+            ReferenceBatchUpdateService.BatchUpdateResult empty =
+                    service.apply(new ByteArrayInputStream(new byte[0]));
+            assertThat(empty.outcomes()).isEmpty();
+            assertThat(empty.processedCount()).isZero();
+            assertThat(empty.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
+        }
+
+        /**
+         * An update and a delete against an absent code both report the baseline not-found text.
+         *
+         * <p>Assumptions: both paths are asserted because the baseline composes the identical literal at
+         * two separate sites, and the terminating period is part of it. Asserting one site would leave
+         * the other free to drift.</p>
+         */
+        @Test
+        @DisplayName("report the not-found text for an update and for a delete")
+        void reportTheNotFoundTextForAnUpdateAndForADelete() {
+            when(types.findByTypeCd("55")).thenReturn(Optional.empty());
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.RecordOutcome updated =
+                    service.applyRecord(maintenanceRecord("U", "55", "No such row"));
+            ReferenceBatchUpdateService.RecordOutcome deleted =
+                    service.applyRecord(maintenanceRecord("D", "55", ""));
+
+            assertThat(updated.message()).isEqualTo("No records found.");
+            assertThat(deleted.message()).isEqualTo("No records found.");
+            assertThat(updated.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.NOT_FOUND);
+            assertThat(deleted.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.NOT_FOUND);
+            verify(types, never()).saveAndFlush(any(TransactionType.class));
+            verify(types, never()).delete(any(TransactionType.class));
+        }
+
+        /**
+         * The two states the baseline cannot tell apart are classified as distinct typed reasons.
+         *
+         * <p>Assumptions: this case is the documented divergence and asserts both halves of it. The
+         * baseline's insert has no duplicate-key arm and neither its update nor its delete has a
+         * referential-integrity arm, so both refusals collapse into one opaque negative arm there. The
+         * verbatim text is asserted alongside the reason, because the text stays the baseline's while
+         * only the classification is new.</p>
+         */
+        @Test
+        @DisplayName("classify a duplicate key and a restricted removal as distinct reasons")
+        void classifyADuplicateKeyAndARestrictedRemovalAsDistinctReasons() {
+            when(types.insertType("01", "Purchase"))
+                    .thenThrow(integrityViolation("23505"));
+            when(types.findByTypeCd("01"))
+                    .thenReturn(Optional.of(new TransactionType("01", "Purchase")));
+            Mockito.doThrow(integrityViolation("23503")).when(types).flush();
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.RecordOutcome duplicate =
+                    service.applyRecord(maintenanceRecord("A", "01", "Purchase"));
+            assertThat(duplicate.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.DUPLICATE_KEY);
+            assertThat(duplicate.sqlState()).isEqualTo("23505");
+            assertThat(duplicate.message())
+                    .isEqualTo("Error accessing: TRANSACTION_TYPE table. SQLCODE:");
+
+            ReferenceBatchUpdateService.RecordOutcome restricted =
+                    service.applyRecord(maintenanceRecord("D", "01", ""));
+            assertThat(restricted.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.REFERENTIAL_INTEGRITY);
+            assertThat(restricted.sqlState()).isEqualTo("23503");
+            assertThat(restricted.succeeded()).isFalse();
+        }
+
+        /**
+         * A state outside the two classified ones is still a soft refusal.
+         *
+         * <p>Assumptions: the fallback is asserted so that classifying two states cannot be mistaken for
+         * narrowing the negative arm to those two. The baseline tolerates every negative outcome, and so
+         * does this.</p>
+         */
+        @Test
+        @DisplayName("fall back to the general reason for an unclassified state")
+        void fallBackToTheGeneralReasonForAnUnclassifiedState() {
+            when(types.insertType("08", "Fee Assessment"))
+                    .thenThrow(integrityViolation("40001"));
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.RecordOutcome outcome =
+                    service.applyRecord(maintenanceRecord("A", "08", "Fee Assessment"));
+
+            assertThat(outcome.rejectReason())
+                    .isEqualTo(ReferenceBatchUpdateService.RejectReason.SQL_ERROR);
+            assertThat(outcome.succeeded()).isFalse();
+        }
+
+        /**
+         * The dispatch branches are declared in the program's own order and carry its verbatim texts.
+         *
+         * <p>Assumptions: the order is asserted because the driver's comment block documents a different
+         * one, putting delete second, and the two are deliberately left disagreeing. An assertion is
+         * what stops a later reader harmonising the transcription to the documentation.</p>
+         */
+        @Test
+        @DisplayName("declare the branches in the dispatch order with their verbatim texts")
+        void declareTheBranchesInTheDispatchOrderWithTheirVerbatimTexts() {
+            assertThat(ReferenceBatchUpdateService.RecordAction.values()).containsExactly(
+                    ReferenceBatchUpdateService.RecordAction.ADD,
+                    ReferenceBatchUpdateService.RecordAction.UPDATE,
+                    ReferenceBatchUpdateService.RecordAction.DELETE,
+                    ReferenceBatchUpdateService.RecordAction.COMMENT,
+                    ReferenceBatchUpdateService.RecordAction.INVALID);
+            assertThat(ReferenceBatchUpdateService.RecordAction.ADD.displayText())
+                    .isEqualTo("ADDING RECORD");
+            assertThat(ReferenceBatchUpdateService.RecordAction.UPDATE.displayText())
+                    .isEqualTo("UPDATING RECORD");
+            assertThat(ReferenceBatchUpdateService.RecordAction.DELETE.displayText())
+                    .isEqualTo("DELETING RECORD");
+            // WHY : Assumptions: the three trailing spaces are asserted with an exact comparison rather
+            //       than a trimmed one, because they are the separator the program places between this
+            //       text and the record it appends, and a trimmed comparison would pass without them.
+            assertThat(ReferenceBatchUpdateService.DISPLAY_PROCESSING).isEqualTo("PROCESSING   ");
+            assertThat(ReferenceBatchUpdateService.RETURN_MESSAGE_WIDTH).isEqualTo(80);
+        }
+
+        /**
+         * The stored fixture bytes decode and dispatch through the same entry point.
+         *
+         * <p>Assumptions: the fixture file stores each record followed by a newline, so the terminators
+         * are stripped here before the bytes are handed in. That is the staging step the record contract
+         * assumes: the program's own recording mode admits no delimiter, so a newline is a property of
+         * how the fixture is stored and not of the record.</p>
+         *
+         * @throws java.io.IOException if the fixture resource cannot be read from the test classpath
+         */
+        @Test
+        @DisplayName("decode and dispatch the stored fixture bytes")
+        void decodeAndDispatchTheStoredFixtureBytes() throws java.io.IOException {
+            int reclen = ReferenceBatchUpdateService.RECORD_LENGTH;
+            byte[] stored;
+            try (java.io.InputStream source = getClass().getClassLoader().getResourceAsStream(
+                    "fixtures/batch_reference_update/add_record/trtype-update.txt")) {
+                assertThat(source).as("the add-record fixture must be on the test classpath")
+                        .isNotNull();
+                stored = source.readAllBytes();
+            }
+            assertThat(stored).hasSize(2 * (reclen + 1));
+            byte[] contiguous = new byte[2 * reclen];
+            System.arraycopy(stored, 0, contiguous, 0, reclen);
+            System.arraycopy(stored, reclen + 1, contiguous, reclen, reclen);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+
+            ReferenceBatchUpdateService.BatchUpdateResult result =
+                    service.apply(new ByteArrayInputStream(contiguous));
+
+            assertThat(result.processedCount()).isEqualTo(2);
+            assertThat(result.anyRejected()).isFalse();
+            verify(types).insertType("08", "Fee Assessment");
+            verify(types).insertType("09", "Chargeback");
+        }
+
+        /**
+         * Builds one maintenance record at the declared geometry of the input group.
+         *
+         * <p>Assumptions: the description is padded to its declared fifty bytes rather than written
+         * short, because the record is fixed length and a short row would be refused at decode rather
+         * than exercising the branch the case is about.</p>
+         *
+         * @param actionCode the one-character action code to place at offset zero
+         * @param typeCode the two-character type code to place at offset one
+         * @param description the description to place at offset three, padded out to fifty bytes
+         * @return the record as {@value ReferenceBatchUpdateService#RECORD_LENGTH} bytes of US-ASCII
+         */
+        private byte[] maintenanceRecord(String actionCode, String typeCode, String description) {
+            String composed = actionCode + typeCode + String.format("%-50s", description);
+            return composed.getBytes(StandardCharsets.US_ASCII);
+        }
+
+        /**
+         * Lays records end to end with no delimiter, as the record contract states.
+         *
+         * @param records the records to concatenate, each of the declared record length
+         * @return a stream over the concatenated records
+         */
+        private ByteArrayInputStream maintenanceStream(byte[]... records) {
+            byte[] joined = new byte[records.length * ReferenceBatchUpdateService.RECORD_LENGTH];
+            for (int index = 0; index < records.length; index++) {
+                System.arraycopy(records[index], 0, joined,
+                        index * ReferenceBatchUpdateService.RECORD_LENGTH,
+                        ReferenceBatchUpdateService.RECORD_LENGTH);
+            }
+            return new ByteArrayInputStream(joined);
+        }
+
+        /**
+         * Builds the refusal a database driver reports for a violated constraint.
+         *
+         * <p>Assumptions: the state is carried on a cause rather than on the exception itself, because
+         * that is where the persistence layer puts it and where the classifier walks to find it. A
+         * refusal built with the state on the outer exception would not exercise the walk at all.</p>
+         *
+         * @param sqlState the state the driver reports for the violated constraint
+         * @return the exception the write path is expected to catch
+         */
+        private DataIntegrityViolationException integrityViolation(String sqlState) {
+            return new DataIntegrityViolationException(
+                    "the constraint refused the statement", new SQLException("refused", sqlState));
         }
     }
 

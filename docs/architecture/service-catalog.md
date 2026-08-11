@@ -515,7 +515,7 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | `account-service` | 39 | `V1__account.sql` |
 | `card-service` | 23 | `V1__card.sql` |
 | `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
-| `reference-service` | 56 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `reference-service` | 57 | `V1__reference.sql`, `V2__seed_reference.sql` |
 | `batch-service` | 51 | `V1__batch.sql` |
 | `authorization-service` | 55 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
 | `reporting-service` | 53 | none by design — it owns no table, only read-only views |
@@ -565,6 +565,16 @@ The count is restated rather than left to drift because
 `ServiceCatalogInventoryTest` compares every figure in this table against the tree on
 each build, which is what turned a stale count into a failing test instead of a
 sentence a reader would have believed.
+
+*Refactoring Rationale:* `reference-service` reads 57 where it read 56. One class was
+added, `com.carddemo.reference.mapper.UsStateMapper`, the state-side counterpart of the
+area-code mapper the paragraph above describes. Assumptions: it is recorded here as an
+addition and not as a correction, because nothing in the tree was miscounted — the
+figure was accurate for the tree it was measured against. Trade-offs: that class renders
+the same single row `LookupMapper` already renders, so the module carries one more
+conversion than the delivered routes reach; the duplication and the caller position are
+stated outright in that class's own header and in its package charter's roster rather
+than being left for a reader to infer from a count in this table.
 
 
 ## The eight bounded contexts

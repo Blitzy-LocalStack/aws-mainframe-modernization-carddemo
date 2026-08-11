@@ -33,16 +33,30 @@
  *
  * <ul>
  *   <li>{@code PendingAuthController} -- the pending-authorization summary list, and the detail
- *       view of one pending authorization. It serves the two operations the contract publishes as
- *       {@code listPendingAuthorizations} and {@code getPendingAuthorization}.</li>
+ *       view of one pending authorization in two shapes plus its forward paging move. It serves the
+ *       four read operations the contract publishes as {@code listPendingAuthorizations},
+ *       {@code getPendingAuthorization}, {@code getPendingAuthorizationScreen} and
+ *       {@code getNextPendingAuthorization}.</li>
  *   <li>{@code FraudController} -- setting the fraud state of one authorization message, published as
  *       {@code setAuthorizationFraudState}. It is the only route here that changes state.</li>
  * </ul>
  *
- * <p>Assumptions: three operations across two controllers, which is the whole of this context's HTTP
- * surface. The contract declares exactly those three and no fourth, so a method added here without a
+ * <p>Assumptions: five operations across two controllers, which is the whole of this context's HTTP
+ * surface. The contract declares exactly those five and no sixth, so a method added here without a
  * corresponding operation in that document would publish behaviour no client is told about, and an
  * operation added there without a method here would promise behaviour nothing serves.</p>
+ *
+ * <p>Refactoring Rationale: this count read THREE, and it went on reading three after the screen-shaped
+ * read and the forward paging move were mapped onto {@code PendingAuthController} and declared in that
+ * document. The sentence is corrected rather than deleted because the invariant it states is the one
+ * this charter exists to hold, and stating it at the wrong number inverted it: a reader auditing the
+ * package against "exactly those three and no fourth" would have concluded that two live routes were
+ * the very undeclared surface the sentence forbids, and would have removed them. The bound is held
+ * mechanically as well as here, by
+ * {@code src/test/java/com/carddemo/authorization/config/ContractPublicationTest.java}, which compares
+ * the document's path keys and operation identifiers against the controllers' own mapping constants in
+ * both directions -- so the number in this paragraph is documentation of that assertion and never its
+ * source.</p>
  *
  * <h2>Lineage: two terminal transactions, three programs</h2>
  *

@@ -104,15 +104,15 @@
  * illustration, so that a reviewer auditing the tree by literal search finds only labels that are
  * actually in use. The two forms are never mixed inside one file.</p>
  *
- * <h2>The six mappers, and why four of them are static</h2>
+ * <h2>The seven mappers, and why four of them are static</h2>
  *
- * <p>Assumptions: six mappers are landed as compilation units beside this charter, and the closed
- * set of this package is those six plus this file. Nothing is outstanding, so a reader who cannot
- * open one of the six has found a gap rather than the expected state. The count is measured against
+ * <p>Assumptions: seven mappers are landed as compilation units beside this charter, and the closed
+ * set of this package is those seven plus this file. Nothing is outstanding, so a reader who cannot
+ * open one of the seven has found a gap rather than the expected state. The count is measured against
  * the directory on every build:</p>
  *
  * <pre>
- * this directory: 7 java files = 6 classes + 1 charter
+ * this directory: 8 java files = 7 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section said five, and enumerated five, while
@@ -125,7 +125,18 @@
  * hardest kind of wrong document to act on. What is actually true is recorded in its entry below,
  * including that it has no caller today. The marker line above is measured by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so a seventh mapper arriving without an entry here now fails the build.</p>
+ * so an eighth mapper arriving without an entry here now fails the build.</p>
+ *
+ * <p>Refactoring Rationale: the same correction is recorded a second time rather than folded into the
+ * paragraph above, because two occurrences are evidence of a pattern where one was evidence of a slip.
+ * This section then said six, and enumerated six, as {@code UsStateMapper} was added beside it. That
+ * class stands to {@code LookupMapper}'s state member in exactly the relation
+ * {@code UsPhoneAreaCodeMapper} stands in to its area-code member, so the identical misreading was
+ * available: a reader trusting the closed set would have taken a second implementation of one
+ * conversion for a misplacement. Both entries below therefore state the duplication and the caller
+ * position outright rather than leaving either to be inferred. Assumptions: the marker line is the
+ * only figure here a build can check, so the heading and the three sentences in this section that
+ * carry a number are kept in step with it by hand, and they are the places that has to happen.</p>
  *
  * <dl>
  *   <dt>{@code TransactionTypeMapper}</dt>
@@ -165,23 +176,43 @@
  *       such here rather than defended; removing it or routing the controller through it are both
  *       single-caller changes, and either is preferable to leaving a reader to guess which member the
  *       area-code route uses.</dd>
+ *
+ *   <dt>{@code UsStateMapper}</dt>
+ *   <dd>Renders one seeded state or territory code as {@code UsStateResponse}, and renders a list of
+ *       them. Assumptions: this is the SAME conversion {@code LookupMapper}'s state member performs at
+ *       its L53 to L55, and the duplication is stated for the same reason as the entry above.
+ *       {@code AddressLookupController} routes both state operations through {@code LookupMapper} -- as
+ *       a method reference on the paged route at its L287 and directly on the single-code route at its
+ *       L306 -- so this class has <b>no caller in the delivered code</b> either. What it adds is the
+ *       list member and a per-entity home for the two rulings its own header records: that the
+ *       two-character code crosses at its declared width, evidenced by the contrast between the state
+ *       edit at {@code app/cbl/COACTUPC.cbl} L2493 to L2495 and the trimmed area-code edit at L2296 to
+ *       L2297 of that same program; and that no membership test is applied here, because the
+ *       authoritative membership is the seeded table together with {@code VALID-US-STATE-CODE} at
+ *       {@code app/cpy/CSLKPCDY.cpy} L1013. Trade-offs: the same dead-weight cost as the entry above
+ *       is accepted on the same terms, and the two classes are deliberately symmetrical so that a
+ *       reader who has understood one has understood both.</dd>
  * </dl>
  *
  * <p>Alternatives Considered: the four entity conversions are {@code final} classes with a private
- * constructor and static members, while {@code DateInquiryReplyMapper} alone is a Spring
+ * constructor and static members, while {@code DateInquiryReplyMapper} is a Spring
  * {@code @Component} with instance members. A uniform set of injected instance components was the
  * alternative, and the split is deliberate rather than residue. Each of the four is a total function
  * of its argument: it has no collaborator, no configuration and no state, so a static call site
  * states that honestly and leaves no constructor through which a dependency could later be
- * introduced without anyone noticing the class had stopped being a pure conversion. The other two are
- * not that shape, for two different reasons. {@code DateInquiryReplyMapper} delegates framing to
+ * introduced without anyone noticing the class had stopped being a pure conversion. The other three
+ * are not that shape, for two different reasons. {@code DateInquiryReplyMapper} delegates framing to
  * {@code com.carddemo.common.codec.InquiryRequestCodec} and is
  * consumed by the message listener in {@code com.carddemo.reference.service}, where being a bean is
  * what allows a listener test to supply a substitute without the listener changing.
- * {@code UsPhoneAreaCodeMapper} is a bean because it was authored for constructor injection into a
- * route that would page area codes, and its own header records that choice; it is the one member of
- * this package whose shape is justified by a consumer that does not exist yet, which is why its entry
- * above says so plainly instead of letting the static/bean split look uniform.</p>
+ * {@code UsPhoneAreaCodeMapper} and {@code UsStateMapper} are beans because each was authored for
+ * constructor injection into a per-entity lookup route, and each one's own header records that choice;
+ * they are the two members of this package whose shape is justified by a consumer that does not reach
+ * them, which is why both entries above say so plainly instead of letting the static/bean split look
+ * uniform. Assumptions: the static/bean split therefore does not divide pure conversions from impure
+ * ones -- all three beans are as pure as the four static classes -- it divides classes a call site
+ * injects from classes a call site names, and reading it any other way would make the two lookup
+ * beans look like a mistake.</p>
  *
  * <p>Trade-offs: the four static classes are declared {@code final} with private constructors, so
  * nothing can subclass or proxy them, and a later cross-cutting concern that needed to wrap a
@@ -203,7 +234,7 @@
  * baseline manipulates most, and {@code TransactionCategoryMapper} calls it by qualified name.
  * Trade-offs: that makes the category mapper depend on a sibling rather than on a neutral utility,
  * which is the cost accepted for keeping one implementation of the rule. Every other mapper calls
- * it not at all: {@code LookupMapper}, {@code UsPhoneAreaCodeMapper} and
+ * it not at all: {@code LookupMapper}, {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper} and
  * {@code DisclosureGroupMapper} convert records that carry no
  * description, {@code DateInquiryReplyMapper} converts no record, so the trim boundary below never
  * reaches any of them and every value they publish is

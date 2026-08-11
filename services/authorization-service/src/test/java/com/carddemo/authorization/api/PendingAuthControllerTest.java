@@ -4,7 +4,9 @@ package com.carddemo.authorization.api;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
+import com.carddemo.authorization.dto.PendingAuthDetailResponse;
 import com.carddemo.authorization.dto.PendingAuthListView;
+import com.carddemo.authorization.mapper.PendingAuthDetailMapper;
 import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.service.PendingAuthDetailService;
 import com.carddemo.authorization.service.PendingAuthSummaryService;
@@ -25,11 +27,13 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -110,6 +114,22 @@ class PendingAuthControllerTest {
     /** The member route the contract publishes, with a placeholder for the sealed selector. */
     private static final String READ_ROUTE = "/api/v1/authorizations/{key}";
 
+    /** The screen-shaped member route the contract publishes. */
+    private static final String SCREEN_ROUTE = "/api/v1/authorizations/{key}/screen";
+
+    /** The forward paging move the contract publishes on the member. */
+    private static final String NEXT_ROUTE = "/api/v1/authorizations/{key}/next";
+
+    /**
+     * The declared width of the screen message line.
+     *
+     * <p>Assumptions: 78 is declared here as a literal rather than imported, because the response record
+     * keeps its own width private and a test that reached for it would be asserting a value against itself.
+     * The authority is the map: {@code cpy-bms/COPAU00.cpy} L764 and {@code cpy-bms/COPAU01.cpy} L344 each
+     * declare {@code 02  ERRMSGO  PIC X(78)}.</p>
+     */
+    private static final int SCREEN_MESSAGE_WIDTH = 78;
+
     /** The account every request in this class scopes itself to, as eleven digits. */
     private static final String ACCOUNT_ID_DIGITS = "00000000011";
 
@@ -127,6 +147,36 @@ class PendingAuthControllerTest {
 
     /** The card number the row carries, which the body must publish masked. */
     private static final String CARD_NUMBER = "4111111111111111";
+
+    /**
+     * The approval reason the shared row carries, which is itself a table entry.
+     *
+     * <p>Assumptions: {@code '0000'} is declared as the FIRST entry of the reference display table at
+     * {@code cbl/COPAUS1C.cbl} L58, so the default row exercises a table hit rather than the no-entry
+     * path -- the reference runs its search on every authorization, approved ones included.</p>
+     */
+    private static final String APPROVED_REASON = "0000";
+
+    /**
+     * The reason the producing ladder writes when it declines for a reason it does not enumerate.
+     *
+     * <p>Assumptions: {@code '9000'} is BOTH a reachable outcome and a table entry -- L715 and L716 of
+     * {@code cbl/COPAUA0C.cbl} write it on the ladder's {@code WHEN OTHER} arm and L67 of
+     * {@code cbl/COPAUS1C.cbl} carries its description -- which is what makes it a different case from a
+     * code the table does not hold.</p>
+     */
+    private static final String CATCH_ALL_REASON = "9000";
+
+    /**
+     * A response reason no reference program writes and the display table does not hold.
+     *
+     * <p>Assumptions: the value is outside the table on purpose, so the read takes the no-entry path the
+     * reference reaches at L319 to L323. It is not one of the ten table codes and not one of the eight the
+     * ladder emits, and it is deliberately NOT {@code '4400'} or {@code '5300'}: those two ARE table
+     * entries, held at L63 and L66 while no program writes them, so either would take the hit path and
+     * assert the opposite of what this case is for.</p>
+     */
+    private static final String UNTABLED_REASON = "7777";
 
     /** The list service double. */
     private PendingAuthSummaryService summaries;
@@ -369,6 +419,338 @@ class PendingAuthControllerTest {
     }
 
     /**
+     * A full page reports a further page, and the envelope carries no counted or numbered member.
+     *
+     * <p>Assumptions: the boundary is FIVE rows, which is the reference page depth stated three times over
+     * in {@code cbl/COPAUS0C.cbl} -- L126 declares {@code CDEMO-CPVS-AUTH-KEYS PIC X(08) OCCURS 5 TIMES},
+     * L424 bounds the fill loop with {@code WS-IDX > 5}, and L611 bounds the clearing loop the same way.
+     * Asserting at exactly that depth is what distinguishes a further-page indicator from a row count: a
+     * page of five with more behind it and a page of five with nothing behind it are the two cases a caller
+     * cannot tell apart from the row list alone.</p>
+     *
+     * <p>Assumptions: the absence of a page number, an offset, a skip and a total is asserted POSITIVELY
+     * rather than trusted, because those are the members an offset-paged envelope would carry, and an
+     * envelope that quietly grew one would let a client start paging by position against data that is
+     * positioned by key. The reference indicator is {@code CDEMO-CPVS-NEXT-PAGE-FLG}, declared at L123 with
+     * its two condition names at L124 and L125, and it is a flag rather than a count.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a full page of five reports a further page and the envelope counts nothing")
+    void fullPageReportsAFurtherPageAndCarriesNoCountedMember() throws Exception {
+        when(this.summaries.list(ACCOUNT_ID, null, null, SUBJECT)).thenReturn(fullPageListView());
+
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(listBody(ACCOUNT_ID_DIGITS, null))
+                        .principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page.items.length()").value(PendingAuthSummaryService.PAGE_SIZE))
+                .andExpect(jsonPath("$.page.hasNext").value(true))
+                .andExpect(jsonPath("$.page.firstKey").exists())
+                .andExpect(jsonPath("$.page.lastKey").exists())
+                .andExpect(jsonPath("$.page.pageNumber").doesNotExist())
+                .andExpect(jsonPath("$.page.page").doesNotExist())
+                .andExpect(jsonPath("$.page.offset").doesNotExist())
+                .andExpect(jsonPath("$.page.skip").doesNotExist())
+                .andExpect(jsonPath("$.page.size").doesNotExist())
+                .andExpect(jsonPath("$.page.totalCount").doesNotExist())
+                .andExpect(jsonPath("$.page.totalElements").doesNotExist())
+                .andExpect(jsonPath("$.page.totalPages").doesNotExist());
+    }
+
+    /**
+     * The two list-boundary sentences reach the caller on the message line, each on its own move.
+     *
+     * <p>Assumptions: the two are asserted as SEPARATE cases against separate literals, because they are
+     * two strings in the reference and not one parameterised string: {@code cbl/COPAUS0C.cbl} L381 writes
+     * the top-of-page sentence on a backward move and L409 writes the bottom-of-page sentence on a forward
+     * move. Neither carries a leading space, unlike every error sentence in the same program, so the
+     * assertion is character for character.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the top and bottom list boundaries publish their own reference sentences")
+    void listBoundarySentencesArePublishedDistinctly() throws Exception {
+        String cursor = this.mapper.toRowView(row(), SUBJECT).key();
+        when(this.summaries.list(ACCOUNT_ID, cursor, PendingAuthSummaryService.DIRECTION_PREVIOUS, SUBJECT))
+                .thenReturn(messageListView(PendingAuthListView.MESSAGE_TOP_OF_PAGE));
+        when(this.summaries.list(ACCOUNT_ID, cursor, PendingAuthSummaryService.DIRECTION_NEXT, SUBJECT))
+                .thenReturn(messageListView(PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE));
+
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(pagingBody(cursor, PendingAuthSummaryService.DIRECTION_PREVIOUS))
+                        .principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.screenMessage")
+                        .value("You are already at the top of the page..."));
+
+        this.mockMvc.perform(post(LIST_ROUTE).contentType(MediaType.APPLICATION_JSON)
+                        .content(pagingBody(cursor, PendingAuthSummaryService.DIRECTION_NEXT))
+                        .principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.screenMessage")
+                        .value("You are already at the bottom of the page..."));
+    }
+
+    /**
+     * A successful screen read writes no message line, and every sentence that can be written fits it.
+     *
+     * <p>Assumptions: the absence is a property of the CONTROLLER, which supplies that component of the
+     * screen context absent rather than empty, because the reference program writes its message line only
+     * on a refusal or a navigation boundary and leaves it untouched on a read that succeeded. Asserting the
+     * member is missing rather than blank is what keeps a client able to tell "nothing was said" from "an
+     * empty sentence was said".</p>
+     *
+     * <p>Assumptions: the width the line admits is 78, per {@code cpy-bms/COPAU00.cpy} L764 and
+     * {@code cpy-bms/COPAU01.cpy} L344, and NOT the 75 of the house error line at
+     * {@code app/cpy/CVCRD01Y.cpy} L28 and L29. The three sentences that may occupy it are checked against
+     * that bound here because a sentence longer than the field could never have appeared on the terminal at
+     * all, so publishing one would be a divergence no width annotation on the response would catch -- the
+     * list view's message is drawn from a closed set, not from a length-checked string. The declared
+     * maximum itself is asserted against the published contract by
+     * {@code config/AuthorizationApiContractTest}, which pins the screen line at 78 and the shared error
+     * line at 75 so the two cannot converge.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a successful screen read writes no message line, and every sentence fits 78 positions")
+    void successfulScreenReadWritesNoMessageLine() throws Exception {
+        String selector = this.mapper.toRowView(row(), SUBJECT).key();
+        when(this.detail.readForScreen(eq(selector), eq(SUBJECT), any()))
+                .thenAnswer(invocation -> screenResponse(invocation.getArgument(2), row()));
+
+        this.mockMvc.perform(get(SCREEN_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.message").doesNotExist());
+
+        for (String sentence : PendingAuthListView.BOUNDARY_MESSAGES) {
+            org.assertj.core.api.Assertions.assertThat(sentence.length())
+                    .as("the reference sentence must fit the message line the map declares")
+                    .isLessThanOrEqualTo(SCREEN_MESSAGE_WIDTH);
+        }
+    }
+
+    /**
+     * Contention on the stored row answers 409 rather than surfacing a persistence failure.
+     *
+     * <p>Assumptions: the mapping belongs to the shared advice and not to the controller, so the case is
+     * driven by letting the service double raise the framework's optimistic-lock failure and asserting the
+     * status and the conflict code the advice produces. A local handler on the controller would answer this
+     * identically while making the advice's contract unobservable, and the two could then disagree.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an optimistic-lock conflict answers 409 through the shared advice")
+    void optimisticLockConflictAnswersConflict() throws Exception {
+        when(this.detail.read(any(), any()))
+                .thenThrow(new OptimisticLockingFailureException("row changed"));
+
+        this.mockMvc.perform(get(READ_ROUTE, this.mapper.toRowView(row(), SUBJECT).key())
+                        .principal(PRINCIPAL))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT));
+    }
+
+    /**
+     * The screen route reports the reference chrome, and reports it from the reference declarations.
+     *
+     * <p>Assumptions: all four chrome values are asserted against the reference literals rather than against
+     * the controller's constants, so the assertion cannot follow a constant that drifts. The transaction name
+     * is {@code CPVD} per {@code cbl/COPAUS1C.cbl} L36, moved to the screen at L415; the program name is
+     * {@code COPAUS1C} per L33, moved at L416; and the two title lines are the complete forty-position
+     * {@code CCDA-TITLE01} and {@code CCDA-TITLE02} of {@code app/cpy/COTTL01Y.cpy} L18 to L22, moved at
+     * L413 and L414. The leading and trailing blanks are part of each assertion because the reference moves
+     * a forty-position item into a forty-position field, so trimming either would be a different value.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the screen route reports the reference transaction, program and title band")
+    void screenRouteReportsTheReferenceChrome() throws Exception {
+        String selector = this.mapper.toRowView(row(), SUBJECT).key();
+        when(this.detail.readForScreen(eq(selector), eq(SUBJECT), any()))
+                .thenAnswer(invocation -> screenResponse(invocation.getArgument(2), row()));
+
+        this.mockMvc.perform(get(SCREEN_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactionName").value("CPVD"))
+                .andExpect(jsonPath("$.programName").value("COPAUS1C"))
+                .andExpect(jsonPath("$.title01").value("      AWS Mainframe Modernization       "))
+                .andExpect(jsonPath("$.title02").value("              CardDemo                  "))
+                .andExpect(jsonPath("$.currentDate").value("08/05/26"))
+                .andExpect(jsonPath("$.currentTime").value("10:45:35"))
+                .andExpect(jsonPath("$.cardNumber").value("************1111"))
+                .andExpect(jsonPath("$.cardVerificationValue").doesNotExist())
+                .andExpect(jsonPath("$.cvv").doesNotExist());
+    }
+
+    /**
+     * A recognised catch-all reason and a reason absent from the table render differently.
+     *
+     * <p>Assumptions: the two are asserted as separate cases because they answer different questions and the
+     * reference keeps them apart. {@code '9000UNKNOWN'} is a table ENTRY, declared at
+     * {@code cbl/COPAUS1C.cbl} L67 and reachable because L715 and L716 of {@code cbl/COPAUA0C.cbl} write
+     * {@code '9000'} on the ladder's {@code WHEN OTHER} arm; the table MISS is a different mechanism,
+     * rendering the {@code '9999'} and {@code 'ERROR'} pair that L321 to L323 write. A single case could not
+     * distinguish them, and a client shown {@code 9999-ERROR} for a declined-for-an-unenumerated-reason
+     * authorization would be told the stored row was unreadable when it was not.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the catch-all reason and a reason outside the table render as distinct values")
+    void declineReasonRendersTheCatchAllAndTheTableMissDistinctly() throws Exception {
+        String selector = this.mapper.toRowView(row(), SUBJECT).key();
+
+        // WHY : Assumptions: the composed value is asserted at the full twenty positions the map's field
+        //       declares, blanks included, rather than as the twelve significant characters. The reference
+        //       moves a four-position code, a separator and a fifteen-position description into
+        //       AUTHRSNO PIC X(20) at cpy-bms/COPAU01.cpy L248, so the trailing blanks are positions the
+        //       field has rather than whitespace a comparison may ignore.
+        when(this.detail.readForScreen(eq(selector), eq(SUBJECT), any())).thenAnswer(invocation ->
+                screenResponse(invocation.getArgument(2), rowWithReason(CATCH_ALL_REASON)));
+        this.mockMvc.perform(get(SCREEN_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authResponseReason").value("9000-UNKNOWN        "));
+
+        when(this.detail.readForScreen(eq(selector), eq(SUBJECT), any())).thenAnswer(invocation ->
+                screenResponse(invocation.getArgument(2), rowWithReason(UNTABLED_REASON)));
+        this.mockMvc.perform(get(SCREEN_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authResponseReason").value("9999-ERROR          "));
+    }
+
+    /**
+     * The forward move on the detail route answers 200 with the reference end-of-data sentence.
+     *
+     * <p>Assumptions: the sentence is the detail screen's own third boundary string,
+     * {@code 'Already at the last Authorization...'} at {@code cbl/COPAUS1C.cbl} L283, and it is asserted
+     * against that literal rather than against either list sentence. All three are separate strings in the
+     * reference -- the two list ones read "You are already at the top" and "the bottom of the page" -- so an
+     * assertion that accepted any of the three would let them be merged into one.</p>
+     *
+     * <p>Assumptions: the status is 200 and not 404, because "nothing follows" is a successful answer to the
+     * forward move: the reference writes the sentence on the screen and leaves the displayed authorization in
+     * place rather than refusing the request.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the forward move answers 200 with the detail screen's own boundary sentence")
+    void forwardMoveAnswersEndOfDataWithTheDetailBoundarySentence() throws Exception {
+        String selector = this.mapper.toRowView(row(), SUBJECT).key();
+        when(this.detail.readNext(selector, SUBJECT)).thenReturn(
+                new PendingAuthDetailService.NextAuthorization(null, true,
+                        PendingAuthDetailService.LAST_AUTHORIZATION_REACHED));
+
+        this.mockMvc.perform(get(NEXT_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.endOfData").value(true))
+                .andExpect(jsonPath("$.authorization").doesNotExist())
+                .andExpect(jsonPath("$.message").value("Already at the last Authorization..."));
+    }
+
+    /**
+     * The forward move answers the following authorization with its card number masked.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the forward move publishes the following authorization with a masked card number")
+    void forwardMovePublishesTheFollowingAuthorization() throws Exception {
+        String selector = this.mapper.toRowView(row(), SUBJECT).key();
+        when(this.detail.readNext(selector, SUBJECT)).thenReturn(
+                new PendingAuthDetailService.NextAuthorization(
+                        this.mapper.toDetailView(row(), SUBJECT), false, null));
+
+        this.mockMvc.perform(get(NEXT_ROUTE, selector).principal(PRINCIPAL))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.endOfData").value(false))
+                .andExpect(jsonPath("$.authorization.cardNum").value("************1111"))
+                .andExpect(jsonPath("$.authorization.transactionAmt").value("250.00"))
+                .andExpect(jsonPath("$.message").doesNotExist());
+    }
+
+    /**
+     * Builds the screen-shaped body the double returns, rendered through the real mapper.
+     *
+     * <p>Assumptions: the chrome is taken from the context the CONTROLLER built rather than restated here,
+     * which is what makes the chrome assertions above assertions about the controller. Restating it would
+     * test this helper.</p>
+     *
+     * <p>Assumptions: the description is resolved from the row's own stored reason through the SERVICE's
+     * lookup, which is the composition the production read performs -- it resolves the description from
+     * {@code detail.getAuthRespReason()} and hands both to the mapper. Passing an unrelated description
+     * would let a case assert a pairing the service cannot produce.</p>
+     *
+     * @param context the screen context the controller passed to the service, captured from the invocation;
+     *     must not be {@code null}
+     * @param detail the authorization row to render; must not be {@code null}
+     * @return the screen-shaped response for that row, never {@code null}
+     */
+    private static PendingAuthDetailResponse screenResponse(
+            PendingAuthDetailMapper.ScreenContext context, PendingAuthDetail detail) {
+        return PendingAuthDetailMapper.toResponse(detail,
+                PendingAuthDetailService.declineDescriptionFor(detail.getAuthRespReason()), context);
+    }
+
+    /**
+     * Builds the shared authorization row carrying a chosen stored response reason.
+     *
+     * @param authRespReason the four-character response reason as the segment would hold it; must not be
+     *     {@code null}
+     * @return a fully populated authorization row carrying that reason, never {@code null}
+     */
+    private static PendingAuthDetail rowWithReason(String authRespReason) {
+        return row(AUTH_TIME, authRespReason);
+    }
+
+    /**
+     * Builds the JSON body a paging move sends: a cursor and a direction, with the account scope.
+     *
+     * @param cursor the sealed cursor to send; must not be {@code null}
+     * @param direction the paging direction to send; must not be {@code null}
+     * @return a JSON object carrying the scope, the cursor and the direction, never {@code null}
+     */
+    private static String pagingBody(String cursor, String direction) {
+        return "{\"accountId\":\"" + ACCOUNT_ID_DIGITS + "\",\"cursor\":\"" + cursor
+                + "\",\"direction\":\"" + direction + "\"}";
+    }
+
+    /**
+     * Builds a list body carrying a message line and no rows.
+     *
+     * @param message the message line the view should carry; may be {@code null} for none
+     * @return a mapped list view carrying the message and an empty page, never {@code null}
+     */
+    private PendingAuthListView messageListView(String message) {
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), List.of(), false,
+                false, message, SUBJECT, null);
+    }
+
+    /**
+     * Builds a list body carrying a full page of rows and a further page behind it.
+     *
+     * <p>Assumptions: the rows are distinct only in their time component, because the page depth is what this
+     * body exists to exercise and the sealed cursors are derived per row -- identical rows would seal to one
+     * value and the envelope's two boundary cursors would then be indistinguishable.</p>
+     *
+     * @return a mapped list view carrying exactly the reference page depth of rows, never {@code null}
+     */
+    private PendingAuthListView fullPageListView() {
+        List<PendingAuthDetail> rows = new java.util.ArrayList<>();
+        for (int index = 0; index < PendingAuthSummaryService.PAGE_SIZE; index++) {
+            rows.add(rowAt(AUTH_TIME - index));
+        }
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), rows, true, false,
+                null, SUBJECT, null);
+    }
+
+    /**
      * Builds the list body the double returns: one summary block and one row.
      *
      * @return a mapped list view carrying one row and no further page
@@ -401,10 +783,39 @@ class PendingAuthControllerTest {
      * @return a fully populated authorization row
      */
     private static PendingAuthDetail row() {
+        return rowAt(AUTH_TIME);
+    }
+
+    /**
+     * Builds the shared authorization row at a chosen time component of its key.
+     *
+     * <p>Assumptions: only the time component varies, because it is the part of the key that orders rows
+     * within one day and it is therefore the smallest change that yields distinct rows -- and distinct sealed
+     * selectors -- for a multi-row page.</p>
+     *
+     * @param authTime the composed time component of the key, positionally hours, minutes, seconds and
+     *     milliseconds
+     * @return a fully populated authorization row keyed at that time, never {@code null}
+     */
+    private static PendingAuthDetail rowAt(int authTime) {
+        return row(authTime, APPROVED_REASON);
+    }
+
+    /**
+     * Builds the authorization row every body in this class is rendered from, at a chosen key time and
+     * stored response reason.
+     *
+     * @param authTime the composed time component of the key, positionally hours, minutes, seconds and
+     *     milliseconds
+     * @param authRespReason the four-character response reason as the segment would hold it; must not be
+     *     {@code null}
+     * @return a fully populated authorization row, never {@code null}
+     */
+    private static PendingAuthDetail row(int authTime, String authRespReason) {
         return new PendingAuthDetail(
-                new PendingAuthDetailKey(ACCOUNT_ID, AUTH_DATE, AUTH_TIME),
+                new PendingAuthDetailKey(ACCOUNT_ID, AUTH_DATE, authTime),
                 "260803", "091644", CARD_NUMBER, "0100", "2712", "0100", "0000",
-                "AUTH01", "00", "0000", "003000",
+                "AUTH01", "00", authRespReason, "003000",
                 new BigDecimal("250.00"), new BigDecimal("250.00"),
                 "5411", "840", (short) 5, "MERCHANT000001", "ACME HARDWARE",
                 "SPRINGFIELD", "IL", "627040000", "TX0000000000001",

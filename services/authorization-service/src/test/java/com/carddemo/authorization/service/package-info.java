@@ -13,7 +13,7 @@
  * divergence, and how far the parity claim actually reaches. It declares no type and holds no import, so
  * nothing here executes; its entire effect is on what the classes beside it assert.</p>
  *
- * <h2>The closed inventory: seventeen files here, sixteen of them tests</h2>
+ * <h2>The closed inventory: nineteen files here, eighteen of them tests</h2>
  *
  * <p>The parent charter at {@code com.carddemo.authorization} deliberately fixes no leaf-class count and
  * names no leaf class, making each package's own charter the authority for its own inventory. This is that
@@ -23,7 +23,7 @@
  * citation that normalises either half points at nothing.</p>
  *
  * <pre>
- * this directory: 17 java files = 16 tests + 1 charter
+ * this directory: 19 java files = 18 tests + 1 charter
  * </pre>
  *
  * <p>Alternatives Considered: stating the inventory in prose alone, which is what this charter did before
@@ -78,6 +78,32 @@
  *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL},
  *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL} and
  *       {@code app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL}.</li>
+ *   <li>{@code LoadServiceTest} exercises {@code LoadService} alone against
+ *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL}, for the three conditions that
+ *       program passes over in silence and for what the migrated service does at each instead. Its
+ *       subject is the SERVICE BOUNDARY -- what is raised, what is written, what is logged and what is
+ *       rolled back -- where the entry above owns the FILE FORMAT and proves it survives a circuit.
+ *       Refactoring Rationale: this is a second class over a subject that already has one, and the
+ *       division is by subject rather than by tier, as it is for
+ *       {@code PendingAuthDetailProjectionTest} above. Three of its claims cannot be made inside a
+ *       round-trip fixture at all: a rollback needs an observable transaction manager rather than the
+ *       lenient stub a happy circuit needs, a diagnostic needs a captured appender, and a refusal held
+ *       against a tolerated duplicate needs both outcomes inside one case so that a change satisfying
+ *       each of them separately still fails.</li>
+ *   <li>{@code UnloadServiceTest} exercises {@code UnloadService} for the RULINGS a round trip cannot
+ *       reach, against {@code app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL} and
+ *       {@code app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL}: that the prefixed form is the default
+ *       and the sequential form an explicit opt-in, that the two forms emit child records of two hundred
+ *       and six and two hundred bytes and so can never silently converge, that the parent prefix is
+ *       written packed rather than as text, that a root carrying no account identifier is passed over
+ *       explicitly rather than in silence, that a page offering no key to resume from ends the walk, and
+ *       that the export declares a read-only unit of work and reaches no operation that writes.
+ *       Refactoring Rationale: this is a second class over a subject the round-trip class already covers,
+ *       and the division is by QUESTION rather than by tier. A circuit asserts that a format survives
+ *       being written and read back, which is silent on which form was written and on what happens to a
+ *       row the walk cannot attribute -- and the two cases about that row have to present rows the
+ *       circuit's own fixtures do not contain, so they cannot share its fixture without changing what the
+ *       circuit proves.</li>
  *   <li>{@code AuthorizationDecisionUnitOfWorkRepositoryIT} exercises
  *       {@code AuthorizationRequestListener} against a real engine, for the one property its unit test
  *       cannot reach: that the summary, the authorization and the reply row of one decision commit and
@@ -162,10 +188,19 @@
  *       {@code COPAUS1C.cbl} links at lines 248 to 252, replaces the segment at lines 525 to 528, and
  *       commits once at line 558.</li>
  *   <li><b>D-C</b> -- a genuine root-lookup failure silently skips the child insert, and here it fails
- *       loudly. Owner: {@code AuthorizationExtractRoundTripTest}, which carries the load half of the round
- *       trip. Baseline: {@code PAUDBLOD.CBL} tests the root status at line 305, inserts at line 309, opens
- *       a second test at line 310 and closes both with the single {@code END-IF.} at line 314, so the
- *       failure branch is reachable only from inside the success branch.</li>
+ *       loudly. Owner: {@code LoadServiceTest}, whose {@code RootPositioningFailure} cases assert the
+ *       three properties the corrected behaviour has to carry -- that the refusal is RAISED, that its
+ *       unit of work is ROLLED BACK, and that it is VISIBLE in the job log -- and assert it beside a
+ *       tolerated duplicate so the correction cannot be over-applied.
+ *       {@code AuthorizationExtractRoundTripTest} also asserts this divergence, from the other side:
+ *       that the refusal carries the unresolved account in typed form and ends the pass at the first
+ *       such record. Assumptions: naming one owner and one corroborator is deliberate rather than a
+ *       divided claim. The registration in {@code docs/architecture/cobol-to-service-traceability.md}
+ *       is single, and a divergence asserted in two places needs one entry here that says which class a
+ *       reader should open first. Baseline: {@code PAUDBLOD.CBL} tests the root status at line 305,
+ *       inserts at line 309, opens a second test at line 310 and closes both with the single
+ *       {@code END-IF.} at line 314, so the failure branch is reachable only from inside the success
+ *       branch.</li>
  *   <li><b>D-D</b> -- a receive failure sets neither exit flag, so the poll cycle continues over a stale
  *       buffer; here a receive failure is terminal for that cycle. Owner:
  *       {@code AuthorizationRequestListenerTest}. Baseline: {@code COPAUA0C.cbl} lines 418 to 431 mark the
@@ -325,7 +360,9 @@
  * not pad short rows, do not truncate long ones and do not silently drop blank lines, and that the only
  * input treated as empty is a genuinely zero-byte dataset -- because, in its own words at lines 150 to
  * 151, a malformed monetary record must never be silently coerced into a well-formed-looking one. D-C,
- * D-D and D-H are that same stance applied to this context.</p>
+ * D-D and D-H are that same stance applied to this context, and D-UNLOAD-SKIP-REPORTED is its REPORTING
+ * half rather than its refusing half: an export cannot coerce a row it declines to write, so what that
+ * difference adds is a count and a log line where the reference programs leave neither.</p>
  *
  * <h2>What a test here may reach for</h2>
  *

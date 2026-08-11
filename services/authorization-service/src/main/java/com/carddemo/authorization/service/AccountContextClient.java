@@ -40,9 +40,22 @@ import java.util.Optional;
  * read inside the private network is the lower-risk shape.</p>
  *
  * <p><b>Parameters, return values, exceptions or errors at the type level.</b> An interface
- * declaration takes no parameters, returns no value and raises nothing; the three operations and the
- * two views below carry their own at-clauses. The inapplicability is declared rather than left silent
- * so a reader can tell it from an omission.</p>
+ * declaration takes no parameters, returns no value and raises nothing; the four operations, the three
+ * views and the one failure type below carry their own at-clauses. The inapplicability is declared
+ * rather than left silent so a reader can tell it from an omission.</p>
+ *
+ * <p>Assumptions: three records is the WHOLE of what this context borrows, and that is a counted
+ * result rather than an expectation. Every {@code COPY} statement in
+ * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} was enumerated: sixteen statements, of
+ * which eight name the six distinct absent vendor message-interface books -- two of them are copied
+ * twice, at lines 149 and 155 and at lines 152 and 158 -- five name this context's own staging and
+ * segment layouts, and exactly three name a layout another context owns: {@code CVACT03Y} at line 203,
+ * {@code CVACT01Y} at line 206 and {@code CVCUS01Y} at line 209. Eight plus five plus three closes on
+ * sixteen with nothing left over, so the enumeration is exhaustive and this interface is COMPLETE:
+ * there is no fourth borrowed record that a decision silently needs and this seam does not name. That
+ * matters because an incomplete seam does not fail loudly -- it fails as a decline the reference
+ * program would have approved, which is the failure mode the substitute lookup this interface replaced
+ * already exhibited.</p>
  *
  * <p>Assumptions: every operation answers with an empty optional for a record that does not exist,
  * and raises only for a failure to ask. That split is what lets the decision logic treat

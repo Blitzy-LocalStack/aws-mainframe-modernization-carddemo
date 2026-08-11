@@ -159,13 +159,25 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * Adds one approved authorization's contribution to an account's summary, atomically.
      *
      * <p>Purpose: this is the write half of {@code cbl/COPAUA0C.cbl} L814 and L815, plus the credit
-     * balance the same paragraph moves. All three members are incremented in ONE statement so a
-     * concurrent contribution to the same row cannot displace this one.</p>
+     * balance the same paragraph moves at L817 and the cash balance it assigns at L818. All four members
+     * move in ONE statement so a concurrent contribution to the same row cannot displace this one.</p>
      *
      * <p>Assumptions: the credit balance moves with the approved pair and not separately, because the
      * entity's own {@code recordApproved} moves all three together and the three are meaningless apart
      * -- an approved total that has advanced while the balance has not describes an account no
      * reference program could produce.
+     *
+     * <p>Refactoring Rationale: the cash balance is ASSIGNED zero here and was previously left
+     * untouched, and the fourth member joins the statement for the same reason the other three are in
+     * it. {@code MOVE 0 TO PA-CASH-BALANCE} at L818 is an assignment rather than an accumulation, so it
+     * is the one member of the four for which a concurrent contribution cannot lose anything -- but
+     * splitting it out would mean an approval reached the row through two statements, and a reader
+     * comparing the reference branch's four statements with a three-member update would have to go
+     * looking for the fourth. Its effect is not vacuous: a summary the extract load rehydrated carries
+     * whatever cash balance the stored segment held, and the reference program zeroes it on the first
+     * approval thereafter, so omitting the assignment left a seeded value standing that the reference
+     * clears. It is expressed as a literal zero rather than as a parameter because the reference moves a
+     * literal.
      *
      * <p>Assumptions: the statement reports the number of rows it changed, and the caller is expected
      * to treat zero as "no summary for this account" rather than ignoring it. That is the same
@@ -181,7 +193,8 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
             update PendingAuthSummary s
                set s.approvedAuthCount = s.approvedAuthCount + 1,
                    s.approvedAuthAmount = s.approvedAuthAmount + :amount,
-                   s.creditBalance = s.creditBalance + :amount
+                   s.creditBalance = s.creditBalance + :amount,
+                   s.cashBalance = 0
              where s.accountId = :accountId
             """)
     int addApprovedAuthorization(@Param("accountId") Long accountId,

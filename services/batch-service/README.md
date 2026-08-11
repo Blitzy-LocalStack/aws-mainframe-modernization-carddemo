@@ -1152,7 +1152,7 @@ exactly and a column here would answer it only until the next commit.
 | `PostingValidationServiceTest` | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
 | The exit-status test | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
 | `CategoryBalanceServiceTest` | The create path and the update path **separately**, so an upsert that collapsed them would fail |
-| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent** across a multi-row fixture set, the single `HALF_UP` reduction, the `DEFAULT` fallback, and the corrected final-account flush |
+| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent**, the truncating reduction under `RoundingMode.DOWN` on a datum where half up would differ, per-row truncation rather than truncation of the sum, the `DEFAULT` fallback carrying type and category through, a missing `DEFAULT` row failing hard, and the final-account flush that the baseline does not reach |
 | `ExportJob` / `ImportJob` round trip | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
 | The business-date test | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
 | `*RepositoryIT` | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |

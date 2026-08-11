@@ -2,22 +2,16 @@ package com.carddemo.batch.job;
 
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.Account;
-import com.carddemo.batch.domain.CardXref;
-import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DisclosureGroupKey;
 import com.carddemo.batch.dto.InterestRateLookup;
-import com.carddemo.batch.repository.AccountRepository;
-import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
-import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.InterestCalculationService;
 import com.carddemo.common.money.Money;
-import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.Objects;
@@ -91,38 +85,22 @@ public class CalculateInterestJob {
     /** The step name the durable ledger records this job's progress under. */
     public static final String STEP_NAME = "calculate-interest-step";
 
-    /** The transaction type code every generated interest transaction carries, {@code 01}. */
-    public static final String INTEREST_TYPE_CODE = "01";
-
-    /** The transaction category code every generated interest transaction carries, {@code 05}. */
-    public static final String INTEREST_CATEGORY_CODE = "05";
-
-    /** The source every generated interest transaction is attributed to, {@code System}. */
-    public static final String INTEREST_SOURCE = "System";
-
-    /** The description prefix a generated interest transaction carries before the account identifier. */
-    public static final String INTEREST_DESCRIPTION_PREFIX = "Int. for a/c ";
-
-    /** The merchant identifier a generated interest transaction carries, zero. */
-    private static final long NO_MERCHANT = 0L;
-
-    /** The width the generated transaction identifier's suffix is zero-padded to, six digits. */
-    private static final int SUFFIX_DIGITS = 6;
+    // WHY : Refactoring Rationale: the generated transaction's literal field values, its identifier
+    //       suffix width and the rendering of both used to be declared here, beside a private copy of
+    //       the paragraph that assembles the row. They now live on InterestCalculationService, which
+    //       this file's own charter names as the owner of the paragraph-equivalent methods, and the
+    //       register at docs/architecture/cobol-to-service-traceability.md maps 1300-B-WRITE-TX at
+    //       app/cbl/CBACT04C.cbl:473 to that type. Two copies of one record's field values is the
+    //       failure being removed: the copy here rendered the account identifier as a plain number,
+    //       so it produced the fourteen characters "Int. for a/c 1" where :485-489 moves
+    //       ACCT-ID PIC 9(11) at its declared width and the committed golden carries the twenty-four
+    //       characters "Int. for a/c 00000000001".
 
     /** The operational log this job reports its accrual counts through. */
     private static final Logger LOG = LoggerFactory.getLogger(CalculateInterestJob.class);
 
     /** The category balances the accrual walks. */
     private final TransactionCategoryBalanceRepository categoryBalances;
-
-    /** The account master the accumulated interest is written onto. */
-    private final AccountRepository accounts;
-
-    /** The cross-reference the generated transaction's card number is taken from. */
-    private final CardXrefRepository crossReferences;
-
-    /** The ledger the generated interest transactions are written to. */
-    private final TransactionRepository ledger;
 
     /** The rule resolving a disclosure-group rate and accruing at it. */
     private final InterestCalculationService interest;
@@ -136,26 +114,19 @@ public class CalculateInterestJob {
     /**
      * Builds the job over the rules and repositories it composes.
      *
-     * @param categoryBalances the category balances to walk; must not be {@code null}
-     * @param accounts the account master; must not be {@code null}
-     * @param crossReferences the card cross-reference; must not be {@code null}
-     * @param ledger the transaction ledger; must not be {@code null}
-     * @param interest the rate-resolution and accrual rule; must not be {@code null}
+     * @param categoryBalances the category balances to walk, whose ordering by account, type and
+     *     category is what makes the control break correct; must not be {@code null}
+     * @param interest the accrual rule this job delegates every paragraph of
+     *     {@code app/cbl/CBACT04C.cbl} to except the walk itself; must not be {@code null}
      * @param ledgerOfSteps the durable step ledger; must not be {@code null}
      * @param clock the clock the generated stamps are read from; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public CalculateInterestJob(TransactionCategoryBalanceRepository categoryBalances,
-            AccountRepository accounts, CardXrefRepository crossReferences,
-            TransactionRepository ledger, InterestCalculationService interest,
-            BatchStepLedger ledgerOfSteps, Clock clock) {
+            InterestCalculationService interest, BatchStepLedger ledgerOfSteps, Clock clock) {
 
         this.categoryBalances =
                 Objects.requireNonNull(categoryBalances, "categoryBalances must not be null");
-        this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
-        this.crossReferences =
-                Objects.requireNonNull(crossReferences, "crossReferences must not be null");
-        this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.interest = Objects.requireNonNull(interest, "interest must not be null");
         this.ledgerOfSteps = Objects.requireNonNull(ledgerOfSteps, "ledgerOfSteps must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
@@ -262,8 +233,18 @@ public class CalculateInterestJob {
 
         if (!accountId.equals(accrual.openAccountId)) {
             flushOpenAccount(accrual);
-            accrual.openTo(accountId, this.accounts.findByAccountId(accountId),
-                    this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId));
+            accrual.openTo(accountId, this.interest.loadAccount(accountId));
+
+            // WHY : Assumptions: the account is read BEFORE the cross-reference and the card read is
+            //       reached only when the account was found, which is the order and the guarding
+            //       app/cbl/CBACT04C.cbl:203 and :205 impose. The order matters for more than
+            //       fidelity: 1110-GET-XREF-DATA raises when an account has no card row, so reading
+            //       it for an account that is itself absent would turn the skip registered as
+            //       divergence D-INTEREST-ORPHAN-ROW into a hard failure -- and the reference can
+            //       never reach :205 for such a row, because :389 abends inside 1100 first.
+            if (accrual.openAccount != null) {
+                accrual.openCardNumber = this.interest.loadCrossReference(accountId);
+            }
         }
 
         // WHY : Assumptions: a row whose account cannot be read is skipped rather than abending. The
@@ -283,31 +264,49 @@ public class CalculateInterestJob {
                 accrual.openAccount.getGroupId(), row.getId().getTypeCd(),
                 Integer.parseInt(row.getId().getCategoryCd().trim()));
 
-        Optional<InterestRateLookup> lookup = this.interest.resolveRate(requested);
-        if (lookup.isEmpty() || !lookup.get().interestApplicable()) {
+        // WHY : Assumptions: the lookup answers with a resolved rate or it raises, and there is no
+        //       third "not found" result to test for. app/cbl/CBACT04C.cbl:422 accepts file status '23'
+        //       as normal and retries under the substituted group at :436-438, and the retry at :443
+        //       carries no INVALID KEY clause at all -- so a run in which neither key resolves abends
+        //       at :455 rather than continuing with no rate.
+        InterestRateLookup lookup = this.interest.rateFor(requested);
+        if (!lookup.interestApplicable()) {
             // WHY : Assumptions: a zero rate is skipped rather than accrued at zero, matching
-            //       app/cbl/CBACT04C.cbl:213 which guards the whole computation with
+            //       app/cbl/CBACT04C.cbl:214 which guards the whole computation with
             //       IF DIS-INT-RATE NOT = 0. The difference is observable: accruing at zero would write a
             //       transaction of amount zero for every category the account holds, and the reference
-            //       writes none.
+            //       writes none. The gate encloses :215 AND :216, so the fee call is skipped with it.
             return;
         }
 
-        Money accrued = this.interest.accrue(Money.of(row.getBalance()), lookup.get());
+        // WHY : Assumptions: the per-row value is accumulated ALREADY TRUNCATED, because :467 adds
+        //       WS-MONTHLY-INT after the preceding statement has stored it into PIC S9(09)V99. The
+        //       account increment is therefore the sum of the truncated terms and not the truncation of
+        //       their sum, and the two differ by cents on a multi-category account.
+        Money accrued = this.interest.monthlyInterest(Money.of(row.getBalance()), lookup);
         accrual.total = accrual.total.plus(accrued);
         accrual.accrualsWritten++;
-        writeInterestTransaction(row, accrual, accrued);
-        computeFees();
+
+        // WHY : Assumptions: ONE row is emitted per CATEGORY BALANCE, because the PERFORM at :468 sits
+        //       inside 1300-COMPUTE-INTEREST alongside the accumulate at :467 rather than at the
+        //       account level. The suffix advances from the run-scoped counter this walk owns, since
+        //       :474 never resets it on a control break.
+        accrual.suffix++;
+        this.interest.writeInterestTransaction(accountId, accrual.openCardNumber, accrued,
+                accrual.businessDate, accrual.suffix, LocalDateTime.now(this.clock));
+
+        this.interest.computeFees();
     }
 
     /**
      * Writes one account's accumulated interest onto the account and resets its cycle totals.
      *
      * <p>Assumptions: both cycle totals are set to zero rather than left alone, matching
-     * {@code app/cbl/CBACT04C.cbl:342-344}. This is the statement-cycle boundary: the totals the posting
-     * job accumulated during the cycle have now been billed, so the next cycle starts from zero. Leaving
-     * them would make the over-limit projection the posting job computes carry a whole prior cycle's
-     * activity into the next one.</p>
+     * {@code app/cbl/CBACT04C.cbl:353-354}, which the delegate applies alongside the balance addition
+     * at {@code :352}. This is the statement-cycle boundary: the totals the posting job accumulated
+     * during the cycle have now been billed, so the next cycle starts from zero. Leaving them would
+     * make the over-limit projection the posting job computes carry a whole prior cycle's activity
+     * into the next one.</p>
      *
      * @param accrual the running state of the walk; must not be {@code null}
      */
@@ -316,96 +315,14 @@ public class CalculateInterestJob {
             return;
         }
 
-        Account account = accrual.openAccount;
-        account.setCurrBal(Money.of(account.getCurrBal()).plus(accrual.total).amount());
-        account.setCurrCycCredit(BigDecimal.ZERO.setScale(Money.SCALE));
-        account.setCurrCycDebit(BigDecimal.ZERO.setScale(Money.SCALE));
-        this.accounts.save(account);
+        // WHY : Refactoring Rationale: the three state changes at app/cbl/CBACT04C.cbl:352-354 used to
+        //       be applied here field by field, which put the balance addition and the two cycle resets
+        //       in a place a caller could perform partially. They are now one call on
+        //       InterestCalculationService, which the register maps 1050-UPDATE-ACCOUNT at :350 to, and
+        //       the entity exposes the transition as a single indivisible operation.
+        this.interest.flushAccount(accrual.openAccount, accrual.total);
         accrual.accountsUpdated++;
         accrual.openAccount = null;
-    }
-
-    /**
-     * Writes the system transaction that records one accrual.
-     *
-     * <p>Assumptions: every field is set exactly as {@code app/cbl/CBACT04C.cbl:474-503} sets it,
-     * including the ones that look like placeholders. The merchant identifier is zero and the three
-     * merchant text fields are blank because an accrual has no merchant, and the originating and
-     * processing stamps are the SAME value because the accrual originates at the moment it is
-     * processed -- unlike a feed record, whose originating stamp arrives on the feed.</p>
-     *
-     * @param row the category balance the accrual came from; must not be {@code null}
-     * @param accrual the running state of the walk, whose suffix counter this advances; must not be
-     *     {@code null}
-     * @param accrued the amount accrued; must not be {@code null}
-     */
-    private void writeInterestTransaction(TransactionCategoryBalance row, Accrual accrual,
-            Money accrued) {
-
-        accrual.suffix++;
-        Transaction generated = new Transaction(
-                accrual.businessDate.token() + zeroPadded(accrual.suffix));
-
-        generated.setTypeCd(INTEREST_TYPE_CODE);
-        generated.setCategoryCd(INTEREST_CATEGORY_CODE);
-        generated.setSource(INTEREST_SOURCE);
-        generated.setDescription(INTEREST_DESCRIPTION_PREFIX + row.getId().getAccountId());
-        generated.setAmount(accrued.amount());
-        generated.setMerchantId(NO_MERCHANT);
-        generated.setMerchantName("");
-        generated.setMerchantCity("");
-        generated.setMerchantZip("");
-        generated.setCardNum(accrual.openCardNumber);
-
-        LocalDateTime stamp = LocalDateTime.now(this.clock);
-        generated.setOrigTs(stamp);
-        generated.setProcTs(stamp);
-
-        this.ledger.save(generated);
-    }
-
-    /**
-     * Renders a suffix counter zero-padded to the width the generated identifier reserves for it.
-     *
-     * <p>Assumptions: the padding is assembled around a plain integer rendering rather than produced by a
-     * formatting call with a width specifier. A single-argument formatting call resolves its digit
-     * characters from the default formatting locale, so under a locale whose numbering system is not latin
-     * it would emit that system's digits and the identifier would no longer be the ASCII form every other
-     * reader compares and sorts against.</p>
-     *
-     * @param suffix the counter to render; must be positive
-     * @return the counter rendered in exactly {@value #SUFFIX_DIGITS} ASCII digits, never {@code null}
-     * @throws IllegalStateException if the counter has outgrown the reserved width, which would otherwise
-     *     produce an identifier wider than the column holds
-     */
-    private static String zeroPadded(long suffix) {
-        String digits = Long.toString(suffix);
-        if (digits.length() > SUFFIX_DIGITS) {
-            throw new IllegalStateException("the interest accrual generated more than "
-                    + (int) Math.pow(10, SUFFIX_DIGITS) + " transactions in one run, so a generated"
-                    + " identifier no longer fits the width the reference reserves for it");
-        }
-
-        StringBuilder padded = new StringBuilder(SUFFIX_DIGITS);
-        for (int pad = digits.length(); pad < SUFFIX_DIGITS; pad++) {
-            padded.append('0');
-        }
-        return padded.append(digits).toString();
-    }
-
-    /**
-     * The fee-accrual extension point the reference declares and never implements.
-     *
-     * <p>Assumptions: this method does nothing, and that is the whole of its contract.
-     * {@code app/cbl/CBACT04C.cbl:518-520} declares {@code 1400-COMPUTE-FEES} with the comment
-     * {@code To be implemented} and an immediate exit, and it is performed once per accrual from inside
-     * the non-zero-rate branch. It is preserved rather than dropped so that a reader comparing the two
-     * implementations can tell that fee accrual was intended and never written, which a silent omission
-     * here would hide, and it is called from the same position so that implementing it later needs no
-     * decision about where it belongs.</p>
-     */
-    private void computeFees() {
-        LOG.debug("event=batch.interest.fees-not-implemented");
     }
 
     /**
@@ -465,14 +382,19 @@ public class CalculateInterestJob {
          *
          * @param accountId the account now open; must not be {@code null}
          * @param account the account row, which may be empty when the account cannot be read
-         * @param crossReference the account's cross-reference, which may be empty
          */
-        private void openTo(Long accountId, Optional<Account> account,
-                Optional<CardXref> crossReference) {
-
+        private void openTo(Long accountId, Optional<Account> account) {
             this.openAccountId = accountId;
             this.openAccount = account.orElse(null);
-            this.openCardNumber = crossReference.map(CardXref::getCardNum).orElse("");
+
+            // WHY : Assumptions: the card number is reset to blank here and populated by the caller
+            //       only when the account was found, rather than being taken as a second argument.
+            //       app/cbl/CBACT04C.cbl:205 reads the cross-reference AFTER :203 has read the
+            //       account, and the migrated read raises on an account with no card row, so opening
+            //       an unreadable account must not require a card number to have been resolved for
+            //       it. Leaving the previous account's card number in place instead would stamp it on
+            //       the next account's generated rows.
+            this.openCardNumber = "";
             this.total = Money.ZERO;
         }
     }

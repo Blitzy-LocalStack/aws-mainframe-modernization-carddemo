@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -184,6 +185,21 @@ class AuthorizationRequestListenerTest {
         this.accounts = mock(AccountContextClient.class);
         this.closedWindows = new ArrayList<>();
         this.closedGenerations = new ArrayList<>();
+        // WHY : Assumptions: the three row-count-returning summary operations are stubbed to their
+        //       SUCCESS value here, because a mock's default for an int is zero and zero is the value
+        //       each of them uses to report that it changed nothing. Left unstubbed, the duplicate-
+        //       tolerant insert reports a conflict that did not happen and each atomic contribution
+        //       reports a row that was not there, so every case would fail on the listener's own
+        //       consistency check rather than on the property it set out to assert. Stubbing success in
+        //       the shared fixture makes "the repository works" the baseline condition and leaves each
+        //       case that wants a failing write to say so, which is what the conflict and vanished-row
+        //       cases below do.
+        // WHY : Trade-offs: this couples the fixture to those three return contracts, so a repository
+        //       that stopped reporting one row per contribution would keep these unit cases green. That is
+        //       accepted because the contracts are pinned where they are actually exercised --
+        //       PendingAuthSummaryRepositoryIT runs them against a real database -- and duplicating that
+        //       assertion here would test the mock rather than the repository.
+        givenWorkingSummaryWrites();
         // WHY : Refactoring Rationale: the window boundary arrives as a lambda rather than as the
         //       production container-cycling implementation. The bound is what these tests assert, and the
         //       mechanism that acts on it needs a listener container registry and a live queue; separating
@@ -387,6 +403,14 @@ class AuthorizationRequestListenerTest {
      * account's approved and declined totals stayed absent until an extract load happened to supply
      * one.</p>
      *
+     * <p>Refactoring Rationale: the creation is asserted through the DUPLICATE-TOLERANT insert rather
+     * than through a plain save, because that is what the listener now issues. A save on an assigned key
+     * is a merge, so it reads the row and then writes every column of the instance in hand -- and a
+     * concurrent authorization for a different card of the same account, which the queue's per-card
+     * ordering permits, would have its counters overwritten by whatever this instance was built from. The
+     * insert reports a conflict instead of overwriting, which is why the following case can then assert
+     * the additive fall-through.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -398,7 +422,8 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         ArgumentCaptor<PendingAuthSummary> saved = ArgumentCaptor.forClass(PendingAuthSummary.class);
-        verify(this.summaries).save(saved.capture());
+        verify(this.summaries).insertSummaryIfAbsent(saved.capture());
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
         assertEquals(ACCOUNT_ID, saved.getValue().getAccountId());
         assertEquals(CUSTOMER_ID, saved.getValue().getCustomerId());
         assertEquals(0, new BigDecimal("5000.00").compareTo(saved.getValue().getCreditLimit()));
@@ -904,6 +929,12 @@ class AuthorizationRequestListenerTest {
         reset(this.details);
         reset(this.summaries);
         reset(this.outbox);
+        // WHY : Assumptions: resetting the summary mock discards its STUBBING as well as its recorded
+        //       calls, so the shared fixture's row-count stubs have to be re-applied before the second
+        //       message runs. Without this the contribution reports zero rows changed and the listener
+        //       refuses the decision, which would fail this case on a consistency check rather than on
+        //       the stored match status it exists to assert.
+        givenWorkingSummaryWrites();
         givenResolvableCard();
         when(this.summaries.findByAccountId(ACCOUNT_ID))
                 .thenReturn(Optional.of(summaryWithRoom()));
@@ -1001,6 +1032,185 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
+     * Every message in a multi-message run produces exactly ONE reply of exactly the declared length.
+     *
+     * <p>Purpose: this is the assertion that pins the reply-length divergence registered as
+     * {@code D-REPLY-PUT-LENGTH}. The reference program composes its reply with a {@code STRING ... WITH
+     * POINTER WS-RESP-LENGTH} at line 730 of {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl},
+     * and that pointer is referenced in only three places in the whole program -- its declaration with
+     * {@code VALUE 1} at line 46, the composition at line 730, and the length moved to the put buffer at
+     * line 756. It is never reset. Within one run of the task the replies therefore accumulate in the
+     * buffer: the first occupies positions 1 to 63, the second 64 to 126, the third 127 to 189, and the
+     * fourth needs 190 to 252 in a buffer declared as 200 characters, at which point the {@code STRING}
+     * has no {@code ON OVERFLOW} clause and is simply not performed, so a stale buffer is sent again.</p>
+     *
+     * <p>Assumptions: FOUR messages are driven rather than two, because four is where the reference
+     * arithmetic changes character -- the first three each land at a fresh offset inside the buffer while
+     * the fourth exceeds it and leaves the previous contents in place -- so a run of two would pass
+     * against an implementation that accumulated. Each message carries its own transaction identifier, so
+     * the assertion can also show that reply N belongs to message N rather than to a buffer shared
+     * between them.</p>
+     *
+     * <p>Assumptions: the length is asserted HERE rather than where the row is published, because the
+     * publisher treats the payload as opaque bytes and asserting a wire length there would give it
+     * knowledge of a format it deliberately does not have. The delimiter count is asserted beside the
+     * length because the two together are what fix the frame: six fields whose widths sum to 57, plus a
+     * delimiter after every one of them INCLUDING the last, is what makes 63 rather than the 62 an
+     * interior-delimiter count would predict.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("each message produces exactly one reply of the declared 63 characters, never a shared buffer")
+    void everyMessageProducesExactlyOneReplyOfTheDeclaredLength() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+        List<String> transactionIds =
+                List.of("TXN000000000001", "TXN000000000002", "TXN000000000003", "TXN000000000004");
+
+        for (String transactionId : transactionIds) {
+            this.listener.onRequest(
+                    messageFor(requestFor(Money.of("100.99"), transactionId), ALLOWED_REPLY_QUEUE));
+        }
+
+        ArgumentCaptor<AuthReplyOutbox> replies = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox, times(transactionIds.size())).save(replies.capture());
+        assertEquals(transactionIds.size(), replies.getAllValues().size(),
+                "each message must leave exactly one publishable reply row");
+        for (int index = 0; index < transactionIds.size(); index++) {
+            AuthReplyOutbox row = replies.getAllValues().get(index);
+            assertEquals(CsvAuthCodec.REPLY_WIRE_LENGTH, row.getPayload().length(),
+                    "reply " + (index + 1) + " must be exactly the declared wire length");
+            assertEquals(CsvAuthCodec.REPLY_FIELD_COUNT,
+                    row.getPayload().chars().filter(each -> each == CsvAuthCodec.DELIMITER).count(),
+                    "reply " + (index + 1) + " must carry one delimiter per field, the last included");
+            assertThat(row.getPayload()).startsWith(CARD_NUM + CsvAuthCodec.DELIMITER);
+            assertEquals(transactionIds.get(index), row.getDeduplicationId(),
+                    "reply " + (index + 1) + " must be keyed by its OWN transaction identifier");
+            assertEquals(CARD_NUM, row.getOrderGroupId(),
+                    "every reply for one card must share that card's ordering group");
+            assertEquals(ALLOWED_REPLY_QUEUE, row.getReplyQueueUrl());
+        }
+    }
+
+    /**
+     * A summary the transaction already read is contributed to rather than created again.
+     *
+     * <p>Purpose: this is the replace arm of {@code 8400-UPDATE-SUMMARY} at lines 824 to 828, the
+     * counterpart of the insert arm the case above asserts, and the two are kept as separate cases because
+     * the reference program's own branch is separate -- {@code IF FOUND-PAUT-SMRY-SEG} replaces and the
+     * {@code ELSE} at line 829 inserts. An implementation that took one path for both would satisfy a
+     * single combined case.</p>
+     *
+     * <p>Assumptions: the contribution is asserted as an ATOMIC statement against the account identifier
+     * rather than as a saved instance carrying new totals, because that is what makes a contribution
+     * additive. Reading the row, adding to it in memory and writing it back would lose a concurrent
+     * card's contribution on the same account, which the queue's per-card ordering positively permits.
+     * The limit refresh is asserted alongside, because the reference program refreshes both limits from
+     * the account master on EVERY message at lines 810 and 811, not only when it creates the row.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a stored summary is contributed to atomically and its limits are refreshed")
+    void aStoredSummaryIsContributedToAtomically() {
+        givenResolvableCard();
+        PendingAuthSummary stored = summaryWithRoom();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(stored));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries, never()).insertSummaryIfAbsent(any(PendingAuthSummary.class));
+        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
+        ArgumentCaptor<PendingAuthSummary> refreshed =
+                ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).save(refreshed.capture());
+        assertEquals(0,
+                new BigDecimal("5000.00").compareTo(refreshed.getValue().getCreditLimit()));
+        assertEquals(0, new BigDecimal("500.00").compareTo(refreshed.getValue().getCashLimit()));
+    }
+
+    /**
+     * A summary that appeared between the read and the insert receives an ADDITIVE contribution.
+     *
+     * <p>Purpose: this is the path that exists because the insert is duplicate-tolerant. When it reports
+     * that a row already existed, this decision's contribution must be applied to the row that is
+     * actually there rather than to the instance this transaction built, or the concurrent authorization
+     * that created it loses its own counters. The window is real rather than theoretical: the request
+     * queue groups by card number, so two cards of one account are delivered concurrently by design.</p>
+     *
+     * <p>Assumptions: the two reads are stubbed as a SEQUENCE -- empty first, then present -- because that
+     * is exactly the interleaving being reproduced: this transaction read no summary, another transaction
+     * inserted one, and the insert then reported the conflict. A single stubbed value could not express
+     * the change of state that makes the path reachable.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a summary that appeared after the read is contributed to, not overwritten")
+    void anAppearedSummaryReceivesAnAdditiveContribution() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(summaryWithRoom()));
+        when(this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class))).thenReturn(0);
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries).insertSummaryIfAbsent(any(PendingAuthSummary.class));
+        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.outbox).save(any(AuthReplyOutbox.class));
+    }
+
+    /**
+     * A summary reported as existing and then absent REFUSES the decision instead of losing it.
+     *
+     * <p>Purpose: the insert reporting a conflict asserts that a row exists, so a following read that
+     * finds none means the two statements disagree about the state of the account. Continuing would
+     * commit a decision and a reply whose contribution reached no summary at all, which is the one
+     * outcome the unit of work exists to prevent. The refusal rolls the message back so the queue
+     * redelivers it, and the idempotency seek finds nothing on the retry because nothing committed.</p>
+     *
+     * <p>Assumptions: the absence of the reply row is asserted as well as the exception. A test that
+     * only asserted the throw would pass against an implementation that had already written the reply
+     * before discovering the disagreement, and the ordering is the property that matters.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a summary reported present on insert and then absent refuses the decision")
+    void aVanishedSummaryRefusesTheDecision() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+        when(this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class))).thenReturn(0);
+
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> this.listener.onRequest(
+                        messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE)));
+
+        assertThat(refused).hasMessageContaining("nowhere to land");
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+    }
+
+    /**
+     * Stubs the three row-count-returning summary operations to report the one row each changed.
+     *
+     * <p>Assumptions: this exists as a named helper rather than three inline stubs because it is needed in
+     * two places -- the shared fixture, and again after any case that resets the summary mock mid-run,
+     * since a reset discards stubbing as well as recorded calls. Inlining it twice is what allowed the
+     * mid-run reset below to leave the contribution reporting zero rows, which surfaced as the listener's
+     * own consistency failure in a case about something else entirely.</p>
+     */
+    private void givenWorkingSummaryWrites() {
+        when(this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class))).thenReturn(1);
+        when(this.summaries.addApprovedAuthorization(anyLong(), any(BigDecimal.class))).thenReturn(1);
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class))).thenReturn(1);
+    }
+
+    /**
      * Stubs a cross-reference and an account that resolve, with an existing customer.
      *
      * <p>Assumptions: the limits are ample so that the decision is an approval unless a case says
@@ -1084,9 +1294,26 @@ class AuthorizationRequestListenerTest {
      * @return the request, never {@code null}
      */
     private AuthRequest requestFor(Money amount) {
+        return requestFor(amount, TRANSACTION_ID);
+    }
+
+    /**
+     * Builds a request for the shared card at the amount and transaction identifier supplied.
+     *
+     * <p>Assumptions: this overload exists so a multi-message case can vary the ONE field that makes two
+     * requests distinct to this listener. The identifier is what the idempotency seek looks up and what
+     * becomes the reply's deduplication key, so holding it constant across a run would make the second
+     * message a replay of the first and would test the replay path instead of the intended one.</p>
+     *
+     * @param amount the transaction amount; must not be {@code null}
+     * @param transactionId the fifteen-character transaction identifier this request carries; must not be
+     *     {@code null}
+     * @return the request, never {@code null}
+     */
+    private AuthRequest requestFor(Money amount, String transactionId) {
         return new AuthRequest("250801", "104530", CARD_NUM, "0100", "1230", "0100", "POS001",
                 "000000", amount, "5411", "840", "05", "MERCHANT0000001",
-                "TEST MERCHANT NAME 01", "SPRINGFIELD", "IL", "627010000", TRANSACTION_ID);
+                "TEST MERCHANT NAME 01", "SPRINGFIELD", "IL", "627010000", transactionId);
     }
 
     /**

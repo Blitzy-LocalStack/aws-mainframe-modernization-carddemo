@@ -133,16 +133,24 @@ class ContractPublicationTest {
      * a handler answers it, and a Java record compiles whether or not anything constructs it.</p>
      *
      * <p>Assumptions: the comparison is between the document's own path keys and the mapping constants the
-     * two controllers publish, so both sides are read rather than restated. Writing the three paths out as
+     * two controllers publish, so both sides are read rather than restated. Writing the five paths out as
      * literals here would let this test agree with itself while the document and the routes diverged, which
      * is the exact failure it exists to catch.</p>
      *
-     * <p>Assumptions: the set is asserted to be EXACTLY the three, in both directions. A fourth path in the
-     * document would be an operation no handler answers; a fourth route in the module would be behaviour
+     * <p>Assumptions: the set is asserted to be EXACTLY the five, in both directions. A sixth path in the
+     * document would be an operation no handler answers; a sixth route in the module would be behaviour
      * no client is told about, reachable and unreviewed.</p>
+     *
+     * <p>Refactoring Rationale: the two paragraphs above, and this method's display name, counted THREE
+     * while the assertion body below already listed five -- the screen-shaped read and the forward paging
+     * move having been added to both sides in the same revision that left this prose behind. The count is
+     * brought to five because a display name is what a reader sees in a report and in a failure, so one
+     * reading "the three published paths" beside a five-element expectation invites the reader to conclude
+     * the expectation is the thing that drifted and to delete two entries from it, which would reopen
+     * exactly the reachable-but-undeclared gap this test was written to close.</p>
      */
     @Test
-    @DisplayName("the three published paths are exactly the routes the two controllers declare")
+    @DisplayName("the five published paths are exactly the routes the two controllers declare")
     void publishedPathsAreExactlyTheRoutesTheControllersDeclare() {
         @SuppressWarnings("unchecked")
         Map<String, Object> paths = (Map<String, Object>) contract().get("paths");

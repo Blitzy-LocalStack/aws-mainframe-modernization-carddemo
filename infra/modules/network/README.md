@@ -1,319 +1,636 @@
 # Network module
 
-This reusable Terraform module provisions the CardDemo VPC boundary defined by
-AAP sections 0.4.1.6, 0.4.1.9, and 0.5.1.12: three availability zones, public,
-private-application, and isolated-data subnet tiers, per-zone NAT egress, eight
-interface endpoints, an S3 gateway endpoint, security groups, and encrypted VPC
-flow logs. The security rationale is fixed by AAP decision D8 and expanded in
-the existing
-[security architecture](../../../docs/architecture/security-and-identity.md);
-the Terraform module convention is fixed by AAP decision D9.
+This reusable Terraform module provisions the VPC boundary that carries the
+migrated CardDemo workload: three availability zones; public,
+private-application and isolated-data subnet tiers; per-zone NAT egress; ten
+interface VPC endpoints and one S3 gateway endpoint; four security groups; and
+an encrypted VPC flow log. It is the network floor every other module in this
+package is placed on.
 
-This README is the prose half of Rule 1 Explainability and is required by AAP
-section 0.2.1.6. The mechanical half is enforced by
-[TFLint](../../.tflint.hcl) and the
-[terraform-docs configuration](../../.terraform-docs.yml). The four Terraform
-files are the executable source of truth. `app/csd/CARDDEMO.CSD` is read-only
-lineage; the migration adds this network path beside the existing mainframe
-path and does not modify it.
+Source of truth, in the order a disagreement should be resolved. The module's
+responsibility is fixed by AAP sections 0.4.1.6, 0.4.1.9 and 0.5.1.12. The
+security design is decision D8, recorded in
+[ADR-008](../../../docs/adr/ADR-008-security-and-identity.md) and expanded in
+the [security architecture](../../../docs/architecture/security-and-identity.md);
+the choice of Terraform and of module reuse from one source of truth is decision
+D9, recorded in [ADR-009](../../../docs/adr/ADR-009-iac-tool.md). Where this
+document and the four `.tf` files beside it disagree, **the `.tf` files win** —
+they are what runs, and the reference tables at the end of this document are
+generated from them. `app/csd/CARDDEMO.CSD` is read-only lineage, cited by line
+and never edited: this tree adds a network path beside the existing mainframe
+path rather than removing one.
+
+This README exists because of a rule, not because of a migration requirement.
+AAP section 0.2.1.6 lists a `README.md` in every `infra/modules/*` directory
+among its rule-mandated files and opens that list by saying none of them would
+be in scope from the migration requirements alone. HCL has no docstring
+construct, so the documentation obligation is split in two: the mechanical half
+is enforced by [TFLint](../../.tflint.hcl), which fails any variable or output
+with no description, and by the
+[terraform-docs configuration](../../.terraform-docs.yml), which lifts those
+descriptions into this file and then gates them against drift. This document is
+the prose half — the reasoning a generated table cannot hold. The convention it
+follows is
+[the code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
 
 ## Topology
 
-| Tier | Internet route | Occupants | Output |
+| Tier | Route to the internet | Occupants | Published output |
 |---|---|---|---|
-| Public | Default route to the internet gateway | Internal ALB nodes and one NAT gateway per zone | `public_subnet_ids` |
-| Private application | Default route to that zone's NAT gateway | ECS tasks, API Gateway VPC Link interfaces, interface endpoint ENIs | `private_app_subnet_ids` |
-| Isolated data | None | Aurora PostgreSQL | `isolated_data_subnet_ids` |
+| Public | Default route to the internet gateway | The load balancer's interfaces and one NAT gateway per zone, and nothing else | `public_subnet_ids` |
+| Private application | Default route to that zone's NAT gateway | ECS tasks, Fargate batch tasks, the API Gateway VPC Link, the interface endpoint ENIs | `private_app_subnet_ids` |
+| Isolated data | None at all | Aurora PostgreSQL | `isolated_data_subnet_ids` |
 
-The load balancer is internal even though it is placed in public subnets:
-`internal = true` in the ALB module withholds public addresses and a public DNS
-name. Public subnets describe routing, not direct reachability of every resource
-inside them.
+The load balancer sits in the public tier and is still not reachable from the
+internet, and reading those two facts as a contradiction is the expected
+mistake. AAP section 0.4.1.9 places the load balancer in the public tier —
+public subnets carrying only the load balancer and NAT gateways — and both
+environment roots pass it `public_subnet_ids`. The `alb` module then sets
+`internal = true`, which withholds public addresses and an internet-routable
+name whatever the route table on the selected subnets says. Assumptions: a
+subnet tier decides where a network interface lives; the load balancer's scheme
+decides whether the internet can address it. The same reconciliation is recorded
+beside the input at `infra/modules/alb/variables.tf`, because the two halves are
+read in either order.
 
 ```mermaid
 graph LR
-    API[API Gateway] -->|VPC Link, TLS 443| ALB[Internal ALB]
-    ALB -->|TLS 8080| APP[Private application tier]
-    APP -->|"service-to-service TLS 443"| ALB
-    APP -->|PostgreSQL 5432| DB[(Isolated data tier)]
-    APP -->|TLS 443| EP[Interface endpoints]
-    APP -->|"TLS 443 to the S3 managed prefix list"| S3[S3 gateway endpoint]
-    DB -->|S3 prefix route only| S3
+    API[API Gateway] -->|VPC Link, 443| ALB[Load balancer, internal scheme]
+    ALB -->|app_container_port| APP[Private application tier]
+    APP -->|443| ALB
+    APP -->|database_port| DB[(Isolated data tier)]
+    APP -->|443| EP[Interface endpoints]
+    APP -->|443 to prefix list| S3[S3 gateway endpoint]
+    DB -->|prefix-list route only| S3
+    APP -->|443, identity provider only| NAT[NAT gateway per zone]
+    NAT --> IGW{{Internet gateway}}
 ```
 
-The application security group's egress is **enumerated, not allow-all**: exactly
-three destinations are permitted — the internal ALB listener on 443 for
-service-to-service calls, Aurora on 5432, and 443 to the interface-endpoint ENIs
-and to the S3 managed prefix list. There is no `0.0.0.0/0` rule, so a task
-reaches a NAT gateway for nothing: the route exists for future need but no
-security-group rule admits general egress. A new outbound dependency therefore
-has to arrive as a named rule visible in a plan diff.
+Every arrow above is either a named rule or a route in `main.tf`, and there is no
+arrow out of the isolated data tier except to the S3 gateway endpoint.
 
-### Private AWS service paths
+The NAT arrow is narrower than it looks, and it is the one place a reader is
+likely to assume more than the configuration grants. The private-application
+route tables do carry a default route to the zone-local NAT gateway, but the
+application security group's egress is enumerated, so the only traffic that can
+actually take that route is TLS 443 to `identity_provider_egress_cidrs` — the
+issuer metadata and signing keys every service fetches at start-up, and the
+administrative user-pool calls. Everything else a task needs reaches its service
+through an endpoint without leaving the VPC. General outbound access is not
+available to a task merely because a default route exists; see entries 4 and 5.
 
-| Endpoint | Consumer |
+## Private AWS service paths
+
+Ten interface endpoints are created, one per entry in
+`interface_endpoint_services`, each placing an ENI in the private application
+subnets so that a task reaches the service without its traffic leaving the VPC.
+The column that matters is the second one: it records which part of the migrated
+stack would stop working if the endpoint were removed.
+
+| Endpoint | What depends on it |
 |---|---|
-| `ecr.api` | Authorises container-image pulls |
-| `ecr.dkr` | Serves the Docker Registry API half of an image pull. The layers themselves come from S3 and travel over the gateway endpoint, which is why the application group needs an egress rule to that endpoint's prefix list as well as to this one |
-| `logs` | Delivers container and workflow logs |
-| `secretsmanager` | Retrieves generated service credentials |
-| `kms` | Performs envelope-encryption operations |
-| `sqs` | Carries authorization, inquiry, and error messages |
-| `states` | Starts workflows from reporting and supports orchestration calls |
-| `ssm` | Reads runtime configuration and the batch read-only flag |
-| `xray` | Exports the telemetry sidecar's trace segments |
-| `cognito-idp` | Resolves the identity-provider issuer and its signing keys, and carries auth-service's administrative pool calls |
-| S3 gateway | Routes dataset and statement object traffic through route-table prefix entries, with no endpoint ENI or hourly interface-endpoint charge |
+| `ecr.api` | Authorises a container image pull at task start-up |
+| `ecr.dkr` | Serves the registry API half of that pull. The layers themselves come from object storage over the gateway endpoint, which is why the application group needs egress to that prefix list as well as to this endpoint |
+| `logs` | Delivers container and batch log events |
+| `secretsmanager` | Retrieves the generated database and service credentials at start-up |
+| `kms` | Performs the envelope-decryption calls behind those credentials |
+| `sqs` | Carries the authorization, inquiry and error queue traffic |
+| `states` | Starts a batch or report execution from the reporting service |
+| `ssm` | Reads runtime parameters, including the batch read-only flag |
+| `xray` | Exports trace segments from the telemetry sidecar |
+| `cognito-idp` | Resolves the identity-provider issuer and its signing keys, and carries the administrative user-pool calls |
+| S3 gateway endpoint | Carries dataset, statement and report object traffic. It is a route-table entry pointing at a service prefix list rather than an ENI, so it places no interface, carries no security group and incurs no hourly endpoint charge |
 
-Assumptions: the endpoint set is identical in dev and prod. Removing one
-does not produce a cleanly degraded topology; because the application group's
-egress is enumerated rather than allow-all, that service's traffic is **dropped at
-the group** rather than quietly rerouted through NAT.
-`interface_endpoint_services` is therefore validated against the exact ten-entry
-set rather than treated as an environment lever.
+Assumptions: the endpoint set is identical in both environments and is validated
+against exactly this list rather than treated as an environment lever. Removing
+an entry does not degrade gracefully. Because the application group's egress is
+enumerated rather than allow-all, that service's traffic is dropped at the group
+instead of quietly falling back through NAT — which is the better failure, but
+only if a reader knows to expect it.
 
 ## Module boundary and usage
 
-This directory is a module, not a root. It declares no provider block, backend,
-or call to a sibling module. `infra/envs/dev` and `infra/envs/prod` inherit the
-root provider's Region and default tags and call this module with
-`source = "../../modules/network"`.
+This directory is a module, not a Terraform root, and several absences follow
+from that single fact rather than from oversight.
+
+- **It is never applied directly.** `infra/envs/dev/main.tf` and
+  `infra/envs/prod/main.tf` call it with `source = "../../modules/network"`.
+- **It declares no `provider` block body, no `backend` and no call to a sibling
+  module.** The AWS region and the common `default_tags` are configured once in
+  the calling root and inherited from there, which is what lets one root fix
+  them for its whole module graph.
+- **It is validated transitively.** The infra CI workflow runs
+  `terraform -chdir=infra/envs/<env> init -backend=false` and then `validate`,
+  and this module is initialised as part of that root's graph.
+- **Isolation caveat.** A module that references an undeclared variable behaves
+  differently when planned on its own than when planned through a root, so every
+  name `main.tf` and `outputs.tf` reference is declared in `variables.tf`. That
+  is also what makes the standalone `validate` in the commands below meaningful.
+
+The call below is what both environment roots actually pass, reproduced rather
+than idealised. Seven inputs are supplied and the remaining six take their
+defaults; no value here is account-specific, and the encryption key arrives as a
+reference to the sibling `kms` module's output rather than as a literal.
 
 ```hcl
 module "network" {
   source = "../../modules/network"
 
-  name_prefix                = var.name_prefix
-  environment                = var.environment
-  vpc_cidr                   = var.vpc_cidr
-  flow_log_retention_days    = var.log_retention_days
-  flow_log_kms_key_arn       = module.kms.s3_key_arn
-  interface_endpoint_services = [
-    "ecr.api",
-    "ecr.dkr",
-    "logs",
-    "secretsmanager",
-    "kms",
-    "sqs",
-    "states",
-    "ssm",
-    "xray",
-    "cognito-idp",
-  ]
-  tags = var.tags
-}
-
-module "service" {
-  source = "../../modules/ecs-service"
-
-  vpc_id                  = module.network.vpc_id
-  private_app_subnet_ids  = module.network.private_app_subnet_ids
-  security_group_ids      = [module.network.app_security_group_id]
-  container_port          = module.network.app_container_port
-  # Other service inputs omitted from this focused wiring example.
-}
-
-module "database" {
-  source = "../../modules/aurora-postgresql"
-
-  subnet_ids         = module.network.isolated_data_subnet_ids
-  security_group_ids = [module.network.data_security_group_id]
-  port               = module.network.database_port
-  # Other database inputs omitted from this focused wiring example.
+  name_prefix             = var.name_prefix
+  environment             = var.environment
+  vpc_cidr                = var.vpc_cidr
+  app_container_port      = 8080
+  database_port           = 5432
+  flow_log_retention_days = var.log_retention_days
+  flow_log_kms_key_arn    = module.kms.s3_key_arn
 }
 ```
 
-Refactoring Rationale: the two ports are module outputs even though they
-begin as inputs. The environment root passes those outputs into the service and
-database modules, making the security-group rule and the listener it admits one
-contract rather than three repeated literals.
+Consumers then read the outputs. Two calls show the pattern; the argument names
+on the left belong to the consuming module, and only the network wiring is
+shown.
+
+```hcl
+module "aurora" {
+  source = "../../modules/aurora-postgresql"
+
+  isolated_subnet_ids = module.network.isolated_data_subnet_ids
+  security_group_ids  = [module.network.data_security_group_id]
+  port                = module.network.database_port
+}
+
+module "ecs_service" {
+  source = "../../modules/ecs-service"
+
+  vpc_id                 = module.network.vpc_id
+  private_app_subnet_ids = module.network.private_app_subnet_ids
+  security_group_ids     = [module.network.app_security_group_id]
+  container_port         = module.network.app_container_port
+}
+```
+
+Refactoring Rationale: `app_container_port` and `database_port` are republished
+as outputs even though they arrive as inputs, which looks redundant until the
+alternative is written out. The root would otherwise repeat each port number in
+three places — the security-group rule here, the container and target group in
+`ecs-service`, and the cluster port in `aurora-postgresql` — where a change to
+one is a rule that no longer admits the listener it was written for. Passing the
+output makes the rule and the thing it admits one value.
 
 ## Consumer contract
 
-Renaming or removing an output is a breaking change. This table is measured
-against `infra/envs/*/main.tf` and `infra/envs/*/outputs.tf` rather than
-asserted, and it distinguishes the **two** ways an output is consumed, because
-conflating them is what let an earlier version of this table name consumers that
-did not exist.
+Renaming or removing any of the sixteen published outputs is a breaking change
+for the consumers named below.
 
-The Consumers column below is **measured**, not intended: each entry names the
-`module` blocks in `infra/envs/*/main.tf` that actually reference the output. An
-output with no reader says so.
+The Consumers column is **measured, not intended**: each entry names the `module`
+blocks in `infra/envs/*/main.tf` that actually reference the output. Both roots
+reference the same set, so one column serves both. An output nothing reads says
+so, because a row claiming a consumer it does not have is worse than an honest
+none — the next reader preserves the false row as load-bearing.
 
 | Output | Consumers (measured) |
 |---|---|
-| `vpc_id` | `api_gateway`, `ecs_service` |
-| `private_app_subnet_ids` | `alb`, `api_gateway`, `ecs_service`, `step_functions` |
+| `vpc_id` | `ecs_service`, and the root's own private hosted zone for the internal service name |
+| `public_subnet_ids` | `alb` |
+| `private_app_subnet_ids` | `ecs_service`, `api_gateway`, `step_functions` |
 | `isolated_data_subnet_ids` | `aurora` |
 | `alb_security_group_id` | `alb`, `api_gateway` |
 | `app_security_group_id` | `ecs_service`, `step_functions` |
 | `data_security_group_id` | `aurora` |
 | `app_container_port` | `ecs_service` |
 | `database_port` | `aurora` |
+| `s3_gateway_endpoint_id` | `s3_datasets` |
 | `flow_log_group_name` | `observability` |
 | `vpc_cidr_block` | none today |
 | `availability_zones` | none today |
-| `public_subnet_ids` | none today |
 | `nat_gateway_ids` | none today |
 | `nat_gateway_public_ips` | none today |
 | `interface_vpc_endpoint_ids` | none today |
-| `s3_gateway_endpoint_id` | none today |
 
-Refactoring Rationale: this table previously listed eighteen rows and named a
-consumer for every one, including three route-table outputs and several values
-nothing reads. Both halves were wrong. The three route-table outputs --
-`public_route_table_id`, `private_app_route_table_ids` and
-`isolated_data_route_table_ids` -- together with `flow_log_group_arn` and
-`flow_log_id`, have been **withdrawn** from the module, taking the contract from
-twenty-one published outputs to the sixteen it is specified at; `outputs.tf`
-carries a comment at each position recording the measurement. Of the sixteen that
-remain, seven have no reader yet, and the table now says so rather than
-attributing them to a root that does not reference them. A row claiming a
-consumer it does not have is worse than an honest none-today, because the next
-reader preserves it as load-bearing.
+Two rows are worth reading twice, because both were previously recorded the
+other way round. `alb` reads `public_subnet_ids`, not `private_app_subnet_ids` —
+see the reconciliation in [Topology](#topology). And `api_gateway` takes
+`private_app_subnet_ids` for its VPC Link and `alb_security_group_id` for its
+listener rule, but does not take `vpc_id`.
 
-Assumptions: the seven readerless outputs are kept rather than withdrawn too.
-They are part of the specified contract, each answers a question an operator or a
-later root will ask -- the address space a rule must be scoped to, the zones a
-deployment really got, the gateway addresses an external allow-list needs -- and
-each is derived from a resource this module already creates, so keeping them
-costs nothing at apply time. Renaming or removing any of the sixteen is still a
-breaking change for the consumers named above.
+Assumptions: the five readerless outputs are kept rather than withdrawn. Each
+answers a question an operator or a later root will ask — the address space a
+future rule must be scoped to, the zones a deployment actually received after
+`az_count` was clamped, the egress addresses an external allow-list needs, the
+endpoint identities a policy or metric attaches to — and each is derived from a
+resource this module already creates, so keeping them costs nothing at apply
+time.
 
-The module does not publish its endpoint security group, flow-log IAM role,
-route tables, or internet gateway. No sibling attaches to those resources;
-publishing them would create a second owner for an internal boundary.
+The module deliberately does not publish four things it creates:
+
+- **the `vpc_endpoints` security group id**, because no sibling attaches to it
+  and publishing it would invite a future caller to attach something and thereby
+  hand that thing the application tier's 443 path;
+- **the flow-log IAM role ARN**, because its only consumer is the flow log in
+  this module;
+- **the route table ids**, because tier reachability is decided here and a second
+  owner adding a route elsewhere is exactly the change entry 1 below exists to
+  prevent; and
+- **the internet gateway id**, for the same reason.
+
+Refactoring Rationale: this contract was previously published as twenty-one
+outputs, including three route-table ids and two further flow-log values, and
+the table named a consumer for every one of them. Both halves were wrong in the
+same direction — the module published internal boundaries, and the document
+attributed them to roots that never referenced them. The five were withdrawn to
+reach the sixteen specified, and the remaining table was re-measured against the
+roots rather than re-asserted.
 
 ## Deliberate decisions
 
-1. **Isolated data has no default route.** Alternatives Considered: placing
-   Aurora in the private-application tier. Rejected because no route is a
-   routing fact that survives a security-group or credential mistake.
-   Trade-offs: direct operator egress and package access from the data tier
-   are unavailable.
-2. **One NAT gateway is created per zone.** Alternatives Considered: one
-   shared gateway to reduce the largest fixed network cost. Rejected because a
-   zone loss would remove egress from every zone, and a differently shaped dev
-   network would not validate prod.
+The `.tf` files carry each of these as an inline comment beside the argument it
+governs. They are restated here as prose so that a reader can find them without
+reading HCL, and so that a later change has to argue with the reasoning rather
+than merely overwrite the value.
+
+1. **The isolated-data route tables carry no default route.** `main.tf` creates
+   a route table per zone for this tier and associates the subnets to it, then
+   declares no `aws_route` for it at all — the absence is the control.
+   Alternatives Considered: a two-tier design with the database in the
+   private-application subnets. Rejected because a task in a subnet that has an
+   egress route and a task in a subnet that has none are materially different
+   exposures. With no next hop toward the internet, an outbound attempt from the
+   data tier does not fail an authorization check, it fails to route; ADR-008
+   states the property as isolation being a routing fact rather than a policy
+   statement, and the distinction is that a rule, a key policy and an IAM policy
+   all have to be authored correctly whereas a missing route does not.
+   Trade-offs: there is no direct operator path into the data tier and no
+   package or update egress from it. Access arrives through the application tier
+   or a controlled session mechanism.
+
+2. **One NAT gateway per availability zone, with no input to collapse them.**
+   Alternatives Considered: a single shared gateway, billing one gateway-hour
+   and one address-hour instead of three of each. Rejected on two independent
+   grounds. Availability: with one gateway, egress from the two zones that do
+   not hold it becomes a cross-zone path, and losing the zone that holds it
+   removes egress from all three. Fidelity: AAP section 0.4.1.6 confines
+   environment difference to sizing and retention and never topology, and
+   ADR-008 records that a dev environment with a different network shape would
+   not validate the prod one. Trade-offs: three gateway-hours and three
+   address-hours are accepted in exchange for per-zone egress independence.
+   Note what this entry does **not** claim. An earlier reading called the NAT
+   tier the largest fixed cost in the network, and ADR-008 has since retracted
+   that as false. On the unit counts it records, the interface-endpoint fleet
+   bills per endpoint per availability zone and carries the larger fixed hourly
+   term; the NAT tier is the smaller of the two line items. Only charge shapes
+   are repeated here, because a ranking of two rates goes stale in a way a
+   structural count does not.
+
 3. **Four security groups are created and three are published.** `alb`, `app`
-   and `data` are published for the sibling modules that attach to them;
-   `vpc_endpoints` is attached by this module alone to the interface-endpoint
-   ENIs and is therefore internal. An interface endpoint must carry a group, so
-   the application-to-endpoint flow has to terminate somewhere. Alternatives
-   Considered: reusing the application group, which needs a self-referencing 443
-   rule that would also permit task-to-task TLS; or reusing the ALB group, which
-   needs an application-to-ALB 443 rule that would let every task reach the edge
-   listener group. Both widen a flow beyond the three this topology allows.
+   and `data` are published because sibling modules attach to them.
+   `vpc_endpoints` is attached by this module alone, to the interface-endpoint
+   ENIs, and is therefore internal. An interface endpoint must carry a group, so
+   the application-to-endpoint flow has to terminate somewhere.
+   Alternatives Considered: reusing the application group, which needs a
+   self-referencing 443 ingress rule that would also permit task-to-task traffic
+   on 443 — widening the very radius the isolated tier exists to narrow; or
+   reusing the load-balancer group, which needs an application-to-load-balancer
+   443 rule that would let every task reach the edge listener group.
    Trade-offs: one more group to reason about, accepted in exchange for a rule
    set in which each permitted flow has exactly one source and one destination.
-4. **The application group's egress is enumerated, not implicit.** Four named
-   destinations are reachable and nothing else: Aurora on `database_port`, the
-   interface-endpoint group on 443, the S3 gateway endpoint's managed prefix list
-   on 443, and `identity_provider_egress_cidrs` on 443.
 
-   Refactoring Rationale: the last two were **missing**, and their absence broke
-   two required paths rather than merely tightening them. The S3 gateway endpoint
-   was provisioned and both the private-application and isolated-data route
-   tables were associated with it, but a gateway endpoint places no ENI and
-   therefore carries no security group to reference — S3 traffic is matched
-   against the destination addresses in a managed prefix list, and a group whose
-   only egress referenced the endpoint group matched none of them, so every
-   object-storage call was dropped at the ENI before the route table was
-   consulted. Separately, every service is an OAuth2 resource server that
-   resolves its Cognito issuer and fetches the JWK set during context refresh, so
-   with no egress rule for the identity provider the tasks did not degrade — they
-   failed their health checks and never entered service.
+4. **Every tier-to-tier rule references a peer security group rather than a CIDR
+   block.** Alternatives Considered: CIDR-based rules scoped to the VPC or to a
+   subnet range. Rejected because a CIDR rule admits anything that happens to
+   hold an in-range address, whereas a group reference admits only the specific
+   attached role, and it stays correct when a subnet is resized or the network
+   gains a zone. `data_security_group_id` is the clearest case: its single
+   ingress rule names the application group, so a host inside the VPC that is
+   not a member of that group cannot open a database session at all. There is no
+   `0.0.0.0/0` ingress rule on any group in this module; the public tier's
+   reachability is a route-table property, not a rule.
+   The one deliberate exception is a single egress rule.
+   `identity_provider_egress_cidrs` is a CIDR set because its destination is a
+   public regional endpoint that has no interface endpoint in the set and so has
+   no group to reference. Assumptions: the rule is TLS-only, one rule is keyed
+   per entry so that narrowing the set removes rules individually, and it names
+   its purpose in its description so it is identifiable in a plan diff and in a
+   flow log. Deriving the destination from the provider's published address
+   ranges was rejected on a hard limit rather than on preference — the regional
+   range lists run to hundreds of entries and a security group admits far fewer,
+   so the apply would fail on quota.
 
-   Assumptions: the Cognito flow leaves through NAT, and that is the specified
-   topology's own design rather than a concession. The private-application route
-   tables already carry a default route to the zone-local NAT gateway, and the
-   endpoint set is fixed at eight named services with Cognito not among them, so
-   a ninth interface endpoint is not the answer. Trade-offs: that rule's default
-   destination is open, which is why it is an input rather than a literal — it is
-   TLS-only, it names its purpose in its description so it is identifiable in a
-   plan diff and in a flow log, and an environment that has determined its
-   provider's ranges can narrow it without editing this module. Deriving the
-   destination from AWS's published ranges was rejected on a hard limit: the
-   regional ranges run to hundreds of CIDRs and a security group admits far
-   fewer, so the apply would fail on quota. Any further outbound dependency still
-   has to arrive as a named rule visible in a plan diff rather than being
-   absorbed by an allow-all default. There is no `0.0.0.0/0` ingress rule on any
-   group. The edge-to-ALB
-   rule is not authored here either: the VPC Link carries its own group, which
-   `api-gateway-http` creates and uses to open this module's ALB group, so
-   declaring it here would close a cycle between the two modules.
-5. **No subnet auto-assigns a public address.** The NAT gateways allocate their
-   own Elastic IPs and the ALB is internal. Enabling auto-assignment would only
-   create an unintended public-address path.
-6. **S3 uses a gateway endpoint.** Trade-offs: it is a route-table prefix
-   entry rather than an ENI with a security group and carries no interface
-   endpoint hourly charge. Associating isolated route tables does not create an
-   internet path because the route can reach S3 only. Assumptions: having no
-   security group of its own does not mean it needs no rule — the application
-   group's egress is enumerated, so the tasks carry their own egress rule toward
-   the endpoint's managed prefix list. The route and the rule are two separate
-   permissions and object storage needs both; a plan-time postcondition on the
-   endpoint refuses a configuration in which the prefix list does not resolve,
-   because the rule would then have no destination.
-7. **Subnet CIDRs are derived.** Alternatives Considered: three explicit
-   lists of CIDRs. Nine hand-maintained blocks can overlap or drift from zone
-   order; one `cidrsubnet` arithmetic cannot.
-10. **VPC flow logs are owned here.** Their lifecycle follows the VPC, while the
-   observability module owns dashboards, alarms, and application log groups.
-   `traffic_type = "ALL"` is fixed because accepted-only and rejected-only logs
-   each omit half the audit trail.
+5. **The application group's egress is enumerated, not implicit.** Four
+   destinations are reachable and nothing else: the data group on
+   `database_port`, the endpoint group on 443, the S3 gateway endpoint's managed
+   prefix list on 443, and `identity_provider_egress_cidrs` on 443.
+   Alternatives Considered: leaving a new group's implicit allow-all in place,
+   which is less configuration. Rejected because it would make every one of
+   those four dependencies invisible and absorb the fifth silently.
+   Trade-offs: a new outbound dependency now has to arrive as a named rule that
+   appears in a plan diff, which is more work per dependency. This is also what
+   makes the note under [Private AWS service paths](#private-aws-service-paths)
+   true: with egress enumerated, dropping a service from the endpoint set drops
+   its traffic at the group rather than rerouting it through NAT.
 
-At the defaults, `10.0.0.0/16` plus four new prefix bits yields sixteen `/20`
-blocks. Three zones consume nine: netnums `0..2` public, `3..5` private
-application, and `6..8` isolated data. Changing `vpc_cidr` or `subnet_newbits`
-after apply replaces every subnet and cascades into the resources placed in
-them.
+6. **No subnet auto-assigns a public address, including the public tier.**
+   `map_public_ip_on_launch = false` on all three tiers. The public tier is
+   public because its route table carries a default route to the internet
+   gateway, not because things launched in it receive addresses: each NAT gateway
+   takes an Elastic IP this module allocates, and the load balancer's interfaces
+   are created by `alb` under an internal scheme. Alternatives Considered:
+   leaving auto-assignment enabled on the public tier, which is the more common
+   arrangement elsewhere. Rejected because nothing in this topology that is
+   launched there needs it, so the setting would create only the possibility of
+   an unintended public address on some later resource — and it is what lets the
+   no-public-address-by-default policy condition pass on all three subnets by
+   construction rather than by a suppression.
 
-Dev and prod differ here only in `flow_log_retention_days`. Zone count, tier
-layout, NAT count, endpoint set, security-group flows, and shared ports are
-identical. This implements the AAP constraint that environments differ in
-sizing and retention, never topology.
+7. **Object storage uses a gateway endpoint, not an interface endpoint.**
+   ADR-008 records that a gateway endpoint carries no hourly charge, which is why
+   object storage takes this form and is deliberately absent from the interface
+   set. The mechanical difference is that a gateway endpoint is a route-table
+   entry pointing at a service prefix list, where an interface endpoint is an ENI
+   with a security group.
+   This does not contradict entry 1, and the two are easy to read as though it
+   did. The isolated-data route tables **are** associated with the gateway
+   endpoint, and that association adds a route to one service's prefix list and
+   nothing else. A prefix-list route has no path to an arbitrary internet
+   address, so the data tier reaches object storage while its default route
+   remains absent — the tier is still unable to route anywhere else.
+   Assumptions: carrying no security group does not mean the endpoint needs no
+   rule. Because the application group's egress is enumerated, tasks carry their
+   own egress rule toward the endpoint's prefix list; the route and the rule are
+   two separate permissions and an object-storage call needs both. A plan-time
+   postcondition refuses a configuration in which the prefix list does not
+   resolve, because the rule would then have no destination.
+
+8. **Rules are separate `aws_vpc_security_group_ingress_rule` and
+   `aws_vpc_security_group_egress_rule` resources, never inline `ingress` and
+   `egress` blocks.** Alternatives Considered: inline blocks, which are more
+   compact. Rejected for three independent reasons. A plan diff on a separate
+   resource names the one rule that changed, where an inline set is replaced
+   wholesale and shows the reader nothing about which entry moved. The two forms
+   conflict if both are used on one group, so committing to one up front removes
+   that failure mode rather than documenting it. And each rule resource carries
+   its own `description`, which is what lets the per-rule description policy
+   condition pass across all seventeen group and rule resources without a single
+   exemption.
+
+9. **VPC flow logs are owned by this module, not by `observability`.** The
+   boundary is drawn at "lifecycle follows the VPC": the log group is created and
+   destroyed with the VPC, and a flow log cannot outlive the VPC it describes.
+   `observability` owns application log groups, dashboards, alarms and the
+   notification topic, and reads `flow_log_group_name` from here rather than
+   reassembling the name from a prefix and an environment.
+   Assumptions: there is no baseline network or data audit trail to carry
+   forward, so flow logging is something this path adds rather than something it
+   preserves. Each of the eight `DEFINE FILE` stanzas in `app/csd/CARDDEMO.CSD`
+   records `JOURNAL(NO)` (L7) and `RECOVERY(NONE)` (L9). That is a property of a
+   deliberately instructive sample configuration, noted here only so that a
+   reader does not look for a predecessor to preserve.
+
+10. **`traffic_type` is fixed at `ALL` rather than exposed as an input.**
+    Alternatives Considered: parameterising it so an environment could narrow the
+    record. Rejected because each narrower setting discards half of it — an
+    accepted-only log cannot show what was blocked and a rejected-only log cannot
+    show what succeeded — and there is no baseline behaviour to narrow toward. An
+    input here would offer only a way to make the log less useful.
+
+11. **`flow_log_kms_key_arn` defaults to `null`, and
+    `allow_service_managed_flow_log_encryption` is what makes that default
+    safe.** Alternatives Considered: declaring the key ARN required. Rejected
+    because it would create a hard dependency on the sibling `kms` module and
+    leave this module un-plannable on its own. The `null` default is not a silent
+    downgrade: the opt-out flag defaults to `false`, so omitting the key without
+    explicitly setting that flag is an error rather than an unencrypted log
+    group. Both environment roots pass the customer-managed key — the call in
+    [Module boundary and usage](#module-boundary-and-usage) shows it arriving
+    from `module.kms` — so the encrypted path is the one that ships, and the
+    log-group-encryption policy condition is satisfied at the root rather than
+    suppressed here.
+
+12. **`environment` has no default and no closed list of permitted values.** It
+    is the only required input, and both halves of that are deliberate.
+    Alternatives Considered: giving it a default of `dev`, and constraining it to
+    a `["dev", "prod"]` allow-list. The default was rejected because this value
+    names every resource the module creates, so the safe failure mode is a
+    missing-required-variable error at plan time rather than a network that
+    applies cleanly under another environment's name. The allow-list was rejected
+    because nothing in the module behaves differently according to the name — it
+    is a tag component, not a switch — so a closed list would buy no safety and
+    would make the module unusable for a third environment without editing it.
+    Assumptions: its validation therefore constrains the shape a tag component
+    must have, lowercase alphanumerics and hyphens within a length bound, rather
+    than the vocabulary it may draw on.
+
+13. **Subnet CIDRs are derived from one block rather than enumerated per tier.**
+    Alternatives Considered: three hand-written per-tier CIDR lists. Rejected
+    because nine hand-maintained blocks have to be kept mutually non-overlapping
+    and consistent with `az_count` by hand, whereas three consecutive netnum
+    ranges taken from one `cidrsubnet` derivation cannot overlap by
+    construction. Trade-offs: a caller gives up control over exact subnet
+    placement and receives two sizing levers instead. Accepted, and it is the
+    same derivation that makes `az_count` a single lever rather than an edit in
+    three separate lists.
+
+## Addressing, and what forces replacement
+
+The generated Inputs table below gives each input's type, default and
+description. What it cannot show is the arithmetic that relates three of them,
+so it is worked through once here.
+
+`vpc_cidr` and `subnet_newbits` together fix every subnet's size, and `az_count`
+fixes how many are cut. At the defaults — `10.0.0.0/16` with four additional
+prefix bits — the block divides into sixteen `/20` subnets, of which three zones
+consume nine. The three tiers are taken from consecutive netnum ranges of that
+one division, which is what makes overlap impossible rather than merely unlikely:
+
+| Tier | Netnum range | At the defaults |
+|---|---|---|
+| Public | `0` to `az_count - 1` | 0, 1, 2 |
+| Private application | `az_count` to `2 * az_count - 1` | 3, 4, 5 |
+| Isolated data | `2 * az_count` to `3 * az_count - 1` | 6, 7, 8 |
+
+Seven `/20` blocks are left unused, which is deliberate headroom for a later
+tier rather than an accounting error. `subnet_newbits` is validated to admit at
+least `3 * az_count` distinct subnets, so a combination that cannot be cut is
+refused at plan time instead of failing partway through an apply.
+
+Assumptions: `az_count` is the number of zones requested, and the module clamps
+it to the number the account can actually place a subnet in before slicing. The
+`availability_zones` output reports the span a deployment actually received, and
+every subnet-id list is ordered to match it, which is why a consumer should read
+that output rather than assume the requested count.
+
+**Changing `vpc_cidr` or `subnet_newbits` after an apply forces replacement of
+the VPC and of every subnet in it, and that cascades into everything placed
+inside them** — the database cluster, the tasks, the endpoints and the load
+balancer. Neither input is a value to adjust on a running environment; sizing
+the address space is a decision taken before the first apply.
+
+## What differs between dev and prod
+
+**Exactly one input differs: `flow_log_retention_days`.** The two roots' calls to
+this module are otherwise byte-identical, and the difference reaches the module
+through each environment's `log_retention_days` variable. Everything structural
+is the same in both: three zones, three tiers, three NAT gateways, the same ten
+interface endpoints, the same S3 gateway endpoint, the same four security groups
+and the same enumerated flows, the same ports.
+
+That identity is the point, and it is worth saying plainly for an operator
+wondering why dev is not cheaper here.
+Trade-offs: identical topology means the dev environment pays the network floor —
+three NAT gateways, three addresses and the full endpoint fleet — for a workload
+that would run on less. ADR-008 accepts that cost deliberately and gives the
+reason directly: a dev environment with a different network shape would not
+validate the prod one. A cheaper dev network would be a different network, and
+would stop being a rehearsal for the one that matters. Alternatives Considered:
+exposing a single-NAT or reduced-endpoint switch for non-production, which is the
+usual way this cost is trimmed. Rejected because the first defect it would hide
+is a routing or endpoint-reachability defect — precisely the class of problem a
+pre-production environment exists to surface.
 
 `identity_provider_egress_cidrs` is the one input an environment *may*
-legitimately differ on without differing in topology: it narrows a destination
-set, not a flow. Neither root sets it today, so both take the open default and
-remain identical; an environment whose egress traverses a proxy that resolves the
-issuer's addresses should set it there rather than here. The input is a set rather
-than a list so that reordering cannot churn a plan, and `main.tf` keys one rule per
-entry so that narrowing the set removes rules individually.
+legitimately differ on without differing in topology, because it narrows a
+destination set rather than adding or removing a flow. Neither root sets it
+today, so both take the open default and remain identical. An environment whose
+egress traverses a proxy that resolves the issuer's addresses should narrow it
+there rather than here.
+
+## Policy-scan posture
+
+The module is clean under the infra CI policy gate **by construction, not by
+suppression**. It contains no `checkov:skip` annotation and no
+`tflint-ignore` directive of any kind, and the scan reports zero skipped checks
+for this directory — which is the measurement that distinguishes the two, since a
+suppressed check also reports as not-failed.
+
+Each condition below is satisfied by a decision recorded above rather than by an
+exemption:
+
+| Condition | What satisfies it |
+|---|---|
+| Flow logging is enabled on the VPC | The flow log, log group, role and policy owned by this module — entry 9 |
+| The VPC's default security group restricts all traffic | The default group is adopted with empty ingress and egress rather than left unmanaged |
+| No subnet assigns a public address by default | `map_public_ip_on_launch = false` on all three tiers — entry 6 |
+| Every security group and rule carries a description | One `description` per separate rule resource — entry 8 |
+| No security group admits ingress from an open CIDR | Every ingress rule names a peer group; there is no open ingress rule — entry 4 |
+| Every Elastic IP is attached | Each allocated address is attached to that zone's NAT gateway — entry 2 |
+| No IAM policy grants unconstrained write access | The flow-log policy's write actions are scoped to this module's own log-group ARN |
+| The log group is encrypted with a customer-managed key | Resolved at the root, which passes the `kms` module's key — entry 11 |
+
+Alternatives Considered: satisfying the gate by suppressing findings instead —
+annotating each one and recording the exemption. Rejected for this module because
+every condition above is reachable by configuration, so a suppression would trade
+a real control for a passing report. The distinction is not cosmetic: a
+suppression records that someone decided a finding was acceptable, whereas a pass
+records that the configuration does not produce it. Sibling modules in this
+package do carry a small number of bounded exceptions, each guarded by its own
+assertion in the workflow, so the mechanism exists and is deliberately unused
+here.
+
+If a check is ever suppressed in this module, the check identifier and the reason
+belong in the register above, next to the decision that made the suppression
+necessary — not in a comment that only the scanner reads.
 
 ## Validation
 
-All commands below are gating and have no tolerated non-zero return code.
+Every command below is gating. None has a tolerated non-zero return code, and
+none of them writes to the tree — a failure is fixed by a human and committed,
+not repaired by the pipeline.
 
 ```bash
-# WHAT: verify canonical HCL formatting without rewriting committed files.
-# WHY : CI checks rather than fixes, so formatting drift is a review failure.
+# WHAT: check this module's HCL against canonical formatting without rewriting
+#       a byte of it.
+# WHY : Trade-offs: `-check` reports and exits non-zero, whereas a bare
+#       `terraform fmt` rewrites in place -- which in CI would let a formatting
+#       regression pass as green because the command repaired the tree and then
+#       succeeded.
 terraform fmt -check -recursive infra/
 
-# WHAT: initialise and validate the module without a backend.
-# WHY : provider-schema validation catches invalid arguments before a root plan.
+# WHAT: parse and type-check this module's configuration with no backend and no
+#       credentials.
+# WHY : Assumptions: `validate` refuses to run in an uninitialised directory, so
+#       `init` must precede it, and `-backend=false` is what lets it run offline
+#       -- a module has no backend of its own to configure. The GATING path runs
+#       this against each environment root, where this module is initialised as
+#       part of that root's graph.
 terraform -chdir=infra/modules/network init -backend=false
 terraform -chdir=infra/modules/network validate
 
-# WHAT: enforce documented, typed, used declarations and AWS-specific rules.
-# WHY : a declared-but-unused contract or an invalid resource argument fails CI.
+# WHAT: enforce documented, typed and used declarations plus the AWS-specific
+#       ruleset.
+# WHY : Assumptions: the ruleset plugin is pinned in infra/.tflint.hcl, so
+#       `--init` installs that exact version; an undocumented variable or output
+#       fails here, which is the mechanical half this README is the prose half
+#       of.
+tflint --init --config="$(pwd)/infra/.tflint.hcl"
 tflint --chdir=infra/modules/network --config="$(pwd)/infra/.tflint.hcl"
 
-# WHAT: verify the generated reference below still matches the HCL.
-# WHY : variable, resource, or output drift makes this README incorrect.
+# WHAT: verify the generated reference below still matches the HCL beside it.
+# WHY : Trade-offs: check-only writes nothing, so a stale table fails the build
+#       instead of being silently rewritten. Regenerate by dropping
+#       `--output-check`, then read the diff before committing -- that read is
+#       the review value an auto-commit would discard.
 terraform-docs --config infra/.terraform-docs.yml \
   --output-check infra/modules/network
+
+# WHAT: scan this module against the curated policy baseline the infra workflow
+#       gates on, where material_checks_csv is the explicit check list that
+#       workflow builds.
+# WHY : Assumptions: the gate names its checks explicitly because the ruleset
+#       carries no severities, so a severity filter would select nothing and
+#       produce a gate that cannot fail. `--skip-path` keeps a downloaded
+#       provider out of the scan. Read the skipped count, not just the failed
+#       count: a suppressed check also reports as not-failed, so only zero
+#       skipped shows the directory is clean by construction.
+checkov -d infra/modules/network --framework terraform \
+  --check "$material_checks_csv" --skip-path '\.terraform' --compact
 ```
 
-The module is authored and statically validated; applying it to a live AWS
-account is an operator action outside this scope. It has not been benchmarked or
-penetration-tested. The top-level [infrastructure guide](../../README.md)
-defines the static-validation and operator boundary; the
-[security architecture](../../../docs/architecture/security-and-identity.md)
-defines the wider network boundary.
+## Deployment boundary
+
+Stated plainly, because softening it would misrepresent what has been done: this
+module is **authored and statically validated** — formatting check, backend-free
+initialise and validate, lint, documentation-drift check and policy scan. Running
+`terraform apply` against a live AWS account is an operator action outside this
+scope. **This module has not been provisioned, has not carried live traffic, has
+not been benchmarked and has not been penetration-tested.** No claim here rests
+on runtime evidence.
+
+Assumptions: static validation establishes that the configuration is
+syntactically valid, internally consistent, type-correct against the provider
+schema, and free of the policy conditions the gate names. It establishes nothing
+about behaviour under load, nothing about actual latency between tiers, and
+nothing about whether an account's quotas or zone availability will accept the
+plan. Reading the green gates above as evidence of a working network is the
+mistake this paragraph exists to prevent — they are evidence of a well-formed
+description of one.
+
+Two topology items are out of scope and are not delivered by this module, named
+so that their absence is not mistaken for an omission: multi-region and
+disaster-recovery topology, because the target is deliberately single-region
+across three availability zones; and blue-green or canary deployment, because
+services roll in place.
+
+The operator commands for provisioning and removing an environment live in
+[the deploy runbook](../../../docs/runbooks/deploy.md) and
+[the teardown runbook](../../../docs/runbooks/teardown.md), and are not
+reproduced here.
+
+## Related documents
+
+| Document | What to read it for |
+|---|---|
+| [`infra/README.md`](../../README.md) | The package overview, the module catalogue and the static-validation boundary |
+| [`infra/.tflint.hcl`](../../.tflint.hcl) | The lint rules that make a missing description a build failure |
+| [`infra/.terraform-docs.yml`](../../.terraform-docs.yml) | The generator and drift gate behind the reference tables below |
+| [ADR-008](../../../docs/adr/ADR-008-security-and-identity.md) | Decision D8: the isolated tier, the identity model and the cost shapes cited above |
+| [ADR-009](../../../docs/adr/ADR-009-iac-tool.md) | Decision D9: Terraform, and module reuse from one source of truth |
+| [Security and identity architecture](../../../docs/architecture/security-and-identity.md) | The full network inventory, which this README deliberately does not duplicate |
+| [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The convention this document is written to, including the four rationale labels |
 
 ## Generated reference
+
+Everything between the two markers below is generated from the four `.tf` files
+in this directory and is checked for drift on every build. Do not edit it by
+hand — regenerate it with the command in [Validation](#validation) instead.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -422,22 +739,3 @@ defines the wider network boundary.
 | <a name="output_vpc_cidr_block"></a> [vpc\_cidr\_block](#output\_vpc\_cidr\_block) | IPv4 CIDR block (string) AWS assigned to this VPC. No consumer reads it today - neither a sibling module nor either environment root - because every tier-to-tier flow this topology allows is expressed group-to-group instead. It is published for a rule or policy that has to be scoped to the whole network rather than to a peer security group. Publishing it means no consumer is ever handed var.vpc\_cidr a second time. |
 | <a name="output_vpc_id"></a> [vpc\_id](#output\_vpc\_id) | Identifier (string) of the VPC that owns every subnet, route table, security group and endpoint this module creates. Read by api-gateway-http for its VPC Link and by ecs-service for its target groups, and required by any further module that creates a VPC-scoped resource. |
 <!-- END_TF_DOCS -->
-
-### Correction: the load balancer's subnet tier
-
-Refactoring Rationale: an earlier revision of the consumer table above credited
-`public_subnet_ids` to nothing and credited `private_app_subnet_ids` to `alb`,
-recording that the load balancer "in fact takes `private_app_subnet_ids` because
-the load balancer is internal". That was an accurate description of the code as it
-then stood and an inaccurate description of the design. AAP §0.4.1.9 places the
-load balancer in the **public** tier — "public subnets carrying only the load
-balancer and NAT gateways" — so the code was aligned to the frozen topology and
-this table now credits `public_subnet_ids` to `alb`.
-
-Assumptions: public placement and an internal scheme are not in tension. The `alb`
-module sets `internal = true`, which withholds public addresses and the
-internet-routable name whatever the route table attached to the selected subnets
-says, so the tier decides where the load balancer's network interfaces live and
-not whether the internet can reach it. Reading the two together as a contradiction
-is the expected mistake, which is why the reconciliation is recorded at
-`infra/modules/alb/variables.tf` beside the input as well as here.

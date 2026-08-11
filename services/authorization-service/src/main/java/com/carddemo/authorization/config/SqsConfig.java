@@ -155,8 +155,20 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * L339, {@code IF WS-MSG-PROCESSED > WS-REQSTS-PROCESS-LIMIT}. Counts one through five hundred all
  * fail that test and read another request, so the loop ends only once the five-hundred-and-first has
  * been handled. Reproducing a bounded window at all is what keeps the target's throughput profile
- * the same shape as the baseline's instead of shifting it silently; which of the two numbers is
- * enforced is a registered divergence and the property, not this class, decides it.</p>
+ * the same shape as the baseline's instead of shifting it silently.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph used to close by saying that which of the two numbers is
+ * enforced is a registered divergence which the property decides. Neither half of that holds any
+ * longer. The listener publishes the off-by-one as its own
+ * {@code AuthorizationRequestListener.BASELINE_COMPARISON_OFFSET} and derives its admission
+ * allowance as the configured limit PLUS that offset, so the enforced number is always the declared
+ * one plus one and lowering the property lowers both together -- there is no longer a choice between
+ * two numbers for anything to decide. The register entry that recorded the difference,
+ * {@code D-AUTH-REQUEST-WINDOW}, was withdrawn with it, so the sentence also pointed at an
+ * identifier no longer in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. It is restated rather than deleted
+ * because a reader who measured 501 against a property reading 500 would otherwise go looking for
+ * the divergence this text promised.</p>
  *
  * <p>Assumptions: an empty receive after the wait completes the poll cycle NORMALLY and is not a
  * failure. The baseline treats its no-message-available reason at {@code COPAUA0C.cbl} L416 by

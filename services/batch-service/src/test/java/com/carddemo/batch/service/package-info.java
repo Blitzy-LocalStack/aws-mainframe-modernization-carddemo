@@ -62,21 +62,35 @@
  * <p>Refactoring Rationale: the pairings above are the target shape and are NOT a description of the
  * current directory, and stating them as though they were is the single most misleading thing this
  * charter could do -- the production charter records the same hazard against its own inventory.
- * Measured at this revision the directory holds <b>three</b> test types, not two and not four:
+ * Measured at this revision the directory holds <b>five</b> test types, which is every pairing in
+ * the roster above plus the aggregate:
  *
  * <ul>
- *   <li>{@code PostingValidationServiceTest} -- landed against the first pairing, 9 cases.</li>
- *   <li>{@code DatasetGenerationServiceTest} -- landed against the fourth pairing, 15 cases.</li>
+ *   <li>{@code PostingValidationServiceTest} -- landed against the first pairing, 15 cases.</li>
+ *   <li>{@code CategoryBalanceServiceTest} -- landed against the second pairing, 15 cases across
+ *       three nested groupings.</li>
+ *   <li>{@code InterestCalculationServiceTest} -- landed against the third pairing, 27 cases across
+ *       five nested groupings: the accrual arithmetic, the rate lookup and its {@code DEFAULT}
+ *       fallback, the generated transaction, the account flush, and the two control-break reads with
+ *       the preserved fee seam.</li>
+ *   <li>{@code DatasetGenerationServiceTest} -- landed against the fourth pairing, 31 cases across
+ *       nine nested groupings.</li>
  *   <li>{@code BatchServicesTest} -- 18 cases across four nested groupings: the category-balance
- *       arms and the interest accrual, which are the two roster subjects still unsplit; the
- *       generation discipline; and the durable step ledger.</li>
+ *       arms, the interest accrual, the generation discipline and the durable step ledger.</li>
  * </ul>
  *
- * <p>So every subject in the roster is under assertion and no ruling below is unasserted. What has
- * not happened is the split of the aggregate into the two remaining separately named types,
- * {@code CategoryBalanceServiceTest} and {@code InterestCalculationServiceTest}. A reader consulting
- * this list to find where the accrual is asserted would otherwise search for a file that is not
- * there.</p>
+ * <p>So every subject in the roster is under assertion and no ruling below is unasserted, and the
+ * split of the aggregate into separately named types is now complete -- the paragraph that stood
+ * here instructed a reader that {@code CategoryBalanceServiceTest} and
+ * {@code InterestCalculationServiceTest} were absent, and both are present. What remains is the
+ * OVERLAP the paragraph below already records: three subjects are now asserted in two places each,
+ * by their own named type and by the aggregate's corresponding grouping.</p>
+ *
+ * <p>Refactoring Rationale: the count in this paragraph read three when the directory already held
+ * four, which is the drift the paragraph itself warned would happen once a type was added. The
+ * measurement is restated with the per-type case counts so the next reader can re-measure it against
+ * the directory rather than trusting it, and the claim that the split had not happened is withdrawn
+ * because it had.</p>
  *
  * <p>Assumptions: the generation subject is consequently asserted in TWO places -- its own landed
  * type and the aggregate's third grouping -- and that overlap is recorded rather than removed. The

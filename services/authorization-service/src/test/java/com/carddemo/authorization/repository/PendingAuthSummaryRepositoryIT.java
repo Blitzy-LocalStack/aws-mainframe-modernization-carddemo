@@ -342,6 +342,9 @@ class PendingAuthSummaryRepositoryIT {
     /** The offset owned by the insert-if-absent case, which offers three rows over two identifiers. */
     private static final long OFFSET_INSERT_IF_ABSENT = 1700L;
 
+    /** The offset owned by the cash-balance assignment case, whose row starts with a non-zero one. */
+    private static final long OFFSET_CASH_BALANCE = 1800L;
+
     /**
      * The offset owned by the checkpoint-walk case, which inserts three consecutive accounts.
      */
@@ -1378,6 +1381,36 @@ class PendingAuthSummaryRepositoryIT {
     }
 
     /**
+     * Rebuilds the entity from a decoded record with only the cash balance overridden.
+     *
+     * <p>Assumptions: a third override is introduced rather than widening the two-parameter form,
+     * because that form's own charter states which two members are parameterised and why, and adding a
+     * third to it would let every existing case stop asserting the recorded cash balance. This overload
+     * is used by one case, whose whole subject is a cash balance the record does not carry.</p>
+     *
+     * @param fields the decoded record
+     * @param accountOffset the offset that keeps one case's rows to itself
+     * @param cashBalance the cash balance to store in place of the recorded one
+     * @return the entity the load path would build, with that one member replaced
+     */
+    private static PendingAuthSummary withCashBalance(Map<String, Object> fields, long accountOffset,
+            BigDecimal cashBalance) {
+        return PendingAuthSummary.rehydrated(
+                accountOf(fields, accountOffset),
+                (Long) fields.get(CUSTOMER_ID_FIELD),
+                text(fields, AUTH_STATUS_FIELD),
+                slot(fields, 0), slot(fields, 1), slot(fields, 2), slot(fields, 3), slot(fields, 4),
+                amount(fields, CREDIT_LIMIT_FIELD),
+                amount(fields, CASH_LIMIT_FIELD),
+                amount(fields, CREDIT_BALANCE_FIELD),
+                cashBalance,
+                amount(fields, APPROVED_COUNT_FIELD).shortValueExact(),
+                amount(fields, DECLINED_COUNT_FIELD).shortValueExact(),
+                amount(fields, APPROVED_AMOUNT_FIELD),
+                amount(fields, DECLINED_AMOUNT_FIELD));
+    }
+
+    /**
      * Rebuilds the entity from a decoded record with the status character and credit limit overridden.
      *
      * <p>Assumptions: exactly these two members are parameterised and the other fourteen are taken
@@ -1510,7 +1543,8 @@ class PendingAuthSummaryRepositoryIT {
                 .isEqualTo((short) 7);
         assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo("700.00");
         assertThat(reread.getCashBalance())
-                .as("the cash balance is not an authorization accumulator")
+                .as("L818 assigns zero, which this fixture's already-zero column cannot distinguish"
+                        + " from an omission -- the seeded case below is the one that can")
                 .isEqualByComparingTo("0.00");
     }
 
@@ -1543,6 +1577,59 @@ class PendingAuthSummaryRepositoryIT {
                 .isEqualByComparingTo("-100.00");
         assertThat(reread.getApprovedAuthCount()).isEqualTo((short) 42);
         assertThat(reread.getApprovedAuthAmount()).isEqualByComparingTo("4200.00");
+    }
+
+    /**
+     * An approved contribution assigns zero to a cash balance a seeded row carried, and a decline does
+     * not.
+     *
+     * <p>Purpose: this pins {@code MOVE 0 TO PA-CASH-BALANCE} at {@code cbl/COPAUA0C.cbl} L818, which is
+     * the fourth statement of that paragraph's approved arm and the only one of the four that ASSIGNS
+     * rather than accumulates. The canonical fixture carries a zero cash balance, so the sibling case
+     * above cannot tell an assignment from an omission -- both leave the column reading zero. This case
+     * seeds a NON-ZERO cash balance so the two outcomes differ, which is the only arrangement in which
+     * the statement is observable at all.
+     *
+     * <p>Assumptions: the seeded value is what makes the case meaningful rather than incidental. A
+     * summary reaches this state through the extract load, whose factory accepts and stores whatever
+     * cash balance the stored segment carried; a summary the online path created starts at zero and
+     * could never distinguish the two behaviours. So the seeded row is the deployed path being asserted,
+     * not a contrivance.
+     *
+     * <p>Assumptions: the declined arm is asserted in the same case, because the reference program's
+     * declined arm at L819 to L821 carries no balance statement of any kind. Asserting only the approved
+     * arm would leave a statement that zeroed the column on BOTH arms indistinguishable from the
+     * reference, and that implementation would clear a seeded value on a refusal the reference leaves
+     * alone.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an approved contribution assigns zero to the cash balance and a decline leaves it")
+    void anApprovedContributionAssignsZeroToTheCashBalance() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        BigDecimal seededCashBalance = new BigDecimal("321.45");
+
+        long approvedAccount = inTransaction(repository -> repository.save(
+                withCashBalance(fields, OFFSET_CASH_BALANCE, seededCashBalance))).getAccountId();
+        long declinedAccount = inTransaction(repository -> repository.save(
+                withCashBalance(fields, OFFSET_CASH_BALANCE + 1L, seededCashBalance))).getAccountId();
+
+        assertThat(read(approvedAccount).orElseThrow().getCashBalance())
+                .as("the seeded value is stored, so the case starts from a state the load path produces")
+                .isEqualByComparingTo(seededCashBalance);
+
+        inTransaction(repository -> repository
+                .addApprovedAuthorization(approvedAccount, new BigDecimal("25.50")));
+        inTransaction(repository -> repository
+                .addDeclinedAuthorization(declinedAccount, new BigDecimal("25.50")));
+
+        assertThat(read(approvedAccount).orElseThrow().getCashBalance())
+                .as("L818 assigns zero on the approved arm")
+                .isEqualByComparingTo("0.00");
+        assertThat(read(declinedAccount).orElseThrow().getCashBalance())
+                .as("the declined arm at L820 to L821 carries no balance statement, so it is untouched")
+                .isEqualByComparingTo(seededCashBalance);
     }
 
     /**

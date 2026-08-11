@@ -18,8 +18,11 @@ import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DisclosureGroupKey;
 import com.carddemo.batch.dto.InterestRateLookup;
+import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.BatchRunRepository;
+import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.DisclosureGroupRepository;
+import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.common.money.Money;
 import java.math.BigDecimal;
@@ -115,6 +118,23 @@ class BatchServicesTest {
         /** The key the cases look up. */
         private final DisclosureGroupKey requested = new DisclosureGroupKey("ZEROAPR   ", "01", 5);
 
+        /**
+         * Builds the accrual service over one stubbed rate repository and mocks for the rest.
+         *
+         * <p>Assumptions: only the rate repository participates in these cases, because the rules
+         * asserted here are the lookup, the fallback and the formula. The remaining three
+         * collaborators are supplied as mocks rather than as nulls so that a case which
+         * unexpectedly reached one of them fails as an unstubbed interaction naming the
+         * collaborator, rather than as a null-pointer failure that names nothing.</p>
+         *
+         * @param groups the rate repository the case has stubbed; must not be {@code null}
+         * @return the service under test, never {@code null}
+         */
+        private InterestCalculationService serviceOver(DisclosureGroupRepository groups) {
+            return new InterestCalculationService(groups, mock(AccountRepository.class),
+                    mock(CardXrefRepository.class), mock(TransactionRepository.class));
+        }
+
         /** A group that exists answers directly and records no fallback. */
         @Test
         @DisplayName("answer directly when the account's own group exists")
@@ -124,12 +144,10 @@ class BatchServicesTest {
                     new DisclosureGroup.DisclosureGroupId("ZEROAPR   ", "01", "0005"),
                     new BigDecimal("12.00"))));
 
-            Optional<InterestRateLookup> lookup =
-                    new InterestCalculationService(groups).resolveRate(this.requested);
+            InterestRateLookup lookup = serviceOver(groups).rateFor(this.requested);
 
-            assertThat(lookup).isPresent();
-            assertThat(lookup.get().defaultGroupFallbackApplied()).isFalse();
-            assertThat(lookup.get().resolvedRate()).isEqualByComparingTo("12.00");
+            assertThat(lookup.defaultGroupFallbackApplied()).isFalse();
+            assertThat(lookup.resolvedRate()).isEqualByComparingTo("12.00");
         }
 
         /**
@@ -146,22 +164,40 @@ class BatchServicesTest {
                             new DisclosureGroup.DisclosureGroupId("DEFAULT   ", "01", "0005"),
                             new BigDecimal("18.00"))));
 
-            Optional<InterestRateLookup> lookup =
-                    new InterestCalculationService(groups).resolveRate(this.requested);
+            InterestRateLookup lookup = serviceOver(groups).rateFor(this.requested);
 
-            assertThat(lookup).isPresent();
-            assertThat(lookup.get().defaultGroupFallbackApplied()).isTrue();
-            assertThat(lookup.get().resolvedRate()).isEqualByComparingTo("18.00");
+            assertThat(lookup.defaultGroupFallbackApplied()).isTrue();
+            assertThat(lookup.resolvedRate()).isEqualByComparingTo("18.00");
+            assertThat(lookup.effectiveKey().transactionTypeCode())
+                    .as("the substitution replaces the account group alone, so :437 carries the type"
+                            + " through unchanged")
+                    .isEqualTo(this.requested.transactionTypeCode());
+            assertThat(lookup.effectiveKey().transactionCategoryCode())
+                    .as("the substitution replaces the account group alone, so :437 carries the"
+                            + " category through unchanged")
+                    .isEqualTo(this.requested.transactionCategoryCode());
         }
 
-        /** Neither the requested key nor its fallback resolving yields an empty answer. */
+        /**
+         * An absent {@code DEFAULT} row is fatal, and is emphatically not a zero rate.
+         *
+         * <p>Assumptions: {@code 1200-A-GET-DEFAULT-INT-RATE} at
+         * {@code app/cbl/CBACT04C.cbl:443-460} reads with NO {@code INVALID KEY} clause at all and
+         * then accepts only file status {@code '00'}, displaying
+         * {@code ERROR READING DEFAULT DISCLOSURE GROUP} and abending otherwise. Answering zero
+         * instead would suppress the accrual for every account whose group is unknown while
+         * reporting a clean run, which is the outcome this case exists to rule out.</p>
+         */
         @Test
-        @DisplayName("answer nothing when neither the group nor DEFAULT resolves")
+        @DisplayName("fail hard when neither the group nor DEFAULT resolves")
         void neitherKeyResolving() {
             DisclosureGroupRepository groups = mock(DisclosureGroupRepository.class);
             when(groups.findByIdIs(any())).thenReturn(Optional.empty());
+            InterestCalculationService service = serviceOver(groups);
 
-            assertThat(new InterestCalculationService(groups).resolveRate(this.requested)).isEmpty();
+            assertThatThrownBy(() -> service.rateFor(this.requested))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("DEFAULT");
         }
 
         /**
@@ -176,11 +212,11 @@ class BatchServicesTest {
         @DisplayName("accrue the reference formula, multiplying before dividing")
         void accrualMultipliesBeforeDividing() {
             DisclosureGroupRepository groups = mock(DisclosureGroupRepository.class);
-            InterestCalculationService service = new InterestCalculationService(groups);
+            InterestCalculationService service = serviceOver(groups);
             InterestRateLookup lookup = InterestRateLookup.ofDirectHit(
                     new DisclosureGroupKey("DEFAULT   ", "01", 5), new BigDecimal("13.25"));
 
-            assertThat(service.accrue(Money.of("507.03"), lookup).amount())
+            assertThat(service.monthlyInterest(Money.of("507.03"), lookup).amount())
                     .isEqualByComparingTo(new BigDecimal("507.03")
                             .multiply(new BigDecimal("13.25"))
                             .divide(new BigDecimal("1200"), 2, java.math.RoundingMode.DOWN));
@@ -217,8 +253,8 @@ class BatchServicesTest {
             InterestRateLookup lookup = InterestRateLookup.ofDirectHit(
                     new DisclosureGroupKey("ZEROAPR   ", "01", 5), new BigDecimal("0.00"));
 
-            assertThat(new InterestCalculationService(groups)
-                    .accrue(Money.of("1000.00"), lookup).amount())
+            assertThat(serviceOver(groups)
+                    .monthlyInterest(Money.of("1000.00"), lookup).amount())
                     .isEqualByComparingTo("0.00");
             assertThat(lookup.interestApplicable()).isFalse();
         }

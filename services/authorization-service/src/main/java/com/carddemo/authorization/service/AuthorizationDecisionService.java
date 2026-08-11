@@ -220,9 +220,35 @@ public class AuthorizationDecisionService {
      *
      * <p>Assumptions: the available amount is a limit MINUS a balance and the request is declined when
      * the requested amount is STRICTLY GREATER than that difference, at lines 668 and 676. Strictness
-     * matters: a request for exactly the available amount is approved, which is the same
-     * inclusive-boundary treatment the posting program applies to its own limit check, and an
-     * off-by-one here would decline a transaction the baseline approves.</p>
+     * matters: a request for exactly the available amount is approved, and an off-by-one here would
+     * decline a transaction the baseline approves.</p>
+     *
+     * <p>Assumptions: this boundary and the POSTING program's over-limit boundary reach the same verdict
+     * at the boundary value and are written in OPPOSITE forms, and the two must not be conflated. Here
+     * the test is {@code IF WS-TRANSACTION-AMT > WS-AVAILABLE-AMT} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 668 and 676, so the STRICT operator
+     * sits on the REFUSAL branch and equality falls through to the approval. In the posting program the
+     * test is {@code IF ACCT-CREDIT-LIMIT >= WS-TEMP-BAL} at {@code app/cbl/CBTRN02C.cbl} line 407, so
+     * the INCLUSIVE operator sits on the ACCEPTANCE branch and equality is admitted by the comparison
+     * itself. Both therefore admit the exact boundary, and either operator transcribed into the other's
+     * position inverts it: an inclusive comparison on this refusal branch would decline a request for
+     * exactly the available amount, and a strict one on the posting program's acceptance branch would
+     * post a transaction one cent over the limit that reject reason 102 exists to stop. The two are
+     * compared here, rather than each being described as "the boundary", because they read as the same
+     * rule and are not the same expression of it.</p>
+     *
+     * <p>Assumptions: the reference program's own arithmetic can lose the high-order digits of the
+     * available amount, and the exposure belongs to ONE of the two arms. Its accumulator is declared
+     * {@code 05 WS-AVAILABLE-AMT PIC S9(09)V99 COMP-3} at line 62, nine integer digits. The summary arm
+     * at lines 666 and 667 subtracts two members declared {@code PIC S9(09)V99 COMP-3} in
+     * {@code cpy/CIPAUSMY.cpy}, so source and destination are the same declared width and the
+     * subtraction has nowhere to overflow to. The account-master arm at lines 674 and 675 subtracts
+     * {@code ACCT-CURR-BAL} from {@code ACCT-CREDIT-LIMIT}, both declared {@code PIC S9(10)V99} at
+     * {@code app/cpy/CVACT01Y.cpy} lines 7 and 8 -- TEN integer digits into nine -- so an account whose
+     * available amount reaches a thousand million loses the leading digit there and is measured against a
+     * remainder. The migrated form carries {@link Money}, which is not width-bounded, so it does not
+     * reproduce the loss; nothing is claimed to be reproduced, and the arithmetic is named here because a
+     * reader comparing the two on a large account will find figures that differ and is owed the reason.</p>
      *
      * <p>Assumptions: WHICH limit and balance are used depends on the summary, and the order is the
      * baseline's. When a summary segment exists the check reads the summary's credit limit and credit

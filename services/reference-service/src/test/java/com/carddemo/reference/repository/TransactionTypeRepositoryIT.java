@@ -1,10 +1,79 @@
+// =============================================================================
+// services/reference-service/src/test/java/com/carddemo/reference/repository/TransactionTypeRepositoryIT.java
+// -----------------------------------------------------------------------------
+// Purpose:
+//      The container-backed integration tests of TransactionTypeRepository, and
+//      the host of ReferencePersistenceBase -- the one engine fixture every
+//      class in this package shares, declared below as a second top-level type
+//      rather than as a further file.
+//
+// WHY (non-obvious design decisions):
+//  (1) Assumptions: the four rationale labels below are written in the PLURAL
+//      form throughout -- Alternatives Considered:, Refactoring Rationale:,
+//      Assumptions: and Trade-offs: -- which is the form
+//      docs/CODE_DOCUMENTATION_STANDARD.md rules at its lines 236 to 251. The
+//      singular spellings mean the same thing and are deliberately not used, so
+//      that the labels can be found by grep before they are read by a person.
+//      This equivalence is stated once here and nowhere restated.
+//  (2) Alternatives Considered: giving the shared fixture a file of its own,
+//      which is where a reader would look for it first. Rejected because it
+//      would take this package's closed set from eight compilation units to
+//      nine, which package-info.java rules against at its lines 144 to 153,
+//      and because the fixture's NAME is load-bearing: six sibling classes
+//      extend ReferencePersistenceBase by same-package resolution with no
+//      import, so moving or renaming it breaks all six at once. The remaining
+//      alternative, one engine per class, is answered beside the static
+//      initialiser further down this file.
+//  (3) Alternatives Considered: the persistence-only test slice, which loads no
+//      configuration or component beans and is the narrower instrument for a
+//      repository assertion. Two concrete costs decided against it. It
+//      substitutes an embedded datasource unless that is countermanded, and
+//      this module declares no embedded driver among its test dependencies, so
+//      the countermand is not optional -- and if it were ever dropped the
+//      container would be bypassed silently rather than noisily. Whether the
+//      migration runner is auto-configured under that slice is version-
+//      dependent, so it becomes a second thing to keep true, and the two
+//      migrations under test are the whole subject of several cases here. What
+//      is used instead is the full context with NO web environment,
+//      bootstrapped from the minimal configuration declared at the foot of this
+//      file rather than from the service's own entry point, which leaves out
+//      the security chain, the messaging listener and the interface document
+//      just as the narrower slice would have.
+//  (4) Alternatives Considered: a real PostgreSQL engine rather than an
+//      in-memory one. The headline case in this file asserts that the engine
+//      REFUSES a delete of a referenced transaction type and reports a
+//      particular state while doing it. An engine modelling the restrict action
+//      loosely, or reached through a different Flyway dialect, would let that
+//      case pass against a fiction while the deployed schema behaved otherwise,
+//      and the two remaining engine properties asserted here -- the ordering of
+//      a declared-width character column and the treatment of an escaped
+//      metacharacter in a like clause -- would go unverified for the same
+//      reason.
+//  (5) Assumptions: every line number cited below is a PHYSICAL line number and
+//      each was read at that address. In
+//      app/app-transaction-type-db2/cbl/COTRTLIC.cbl the printed sequence field
+//      runs four ahead of the physical line from physical line 1808 onward, so
+//      a citation checked by searching for a printed sequence value resolves to
+//      the wrong line. Everything beneath app/ is the behavioural oracle of
+//      this migration: it is read and cited, never modified, and a deliberate
+//      departure from it is registered in
+//      docs/architecture/cobol-to-service-traceability.md, which is maintained
+//      elsewhere and referenced rather than reproduced.
+//  (6) Trade-offs: this file is the slowest in the module because it starts an
+//      engine, and that cost is accepted rather than reduced. What it buys is
+//      that the constraint, the character semantics and the pattern escaping
+//      are proven where they are actually enforced; a faster suite that proved
+//      none of the three would be measuring its own doubles.
+// =============================================================================
 package com.carddemo.reference.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
+import com.carddemo.reference.domain.TransactionCategory;
 import com.carddemo.reference.domain.TransactionType;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
@@ -19,6 +88,7 @@ import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
@@ -40,9 +110,75 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
     /** The number of types the seed migration loads, which is also the published window. */
     private static final int SEEDED_TYPES = 7;
 
+    /** The rows the window publishes, being the program constant at COTRTLIC.cbl physical line 60. */
+    private static final int PAGE_SIZE = 7;
+
+    /** The number of categories the seed migration loads. */
+    private static final int SEEDED_CATEGORIES = 18;
+
+    /** The number of disclosure-group rows the seed migration loads. */
+    private static final int SEEDED_DISCLOSURE_GROUPS = 51;
+
+    /** The number of phone area codes the seed migration loads. */
+    private static final int SEEDED_PHONE_AREA_CODES = 490;
+
+    /** The number of states the seed migration loads. */
+    private static final int SEEDED_STATES = 56;
+
+    /** The number of state-and-postal-prefix combinations the seed migration loads. */
+    private static final int SEEDED_STATE_ZIP_PREFIXES = 240;
+
+    /** Every row the seed migration loads across the six tables of this schema. */
+    private static final long SEEDED_GRAND_TOTAL = 862L;
+
+    /** The state PostgreSQL reports when a foreign key refuses a delete of a referenced row. */
+    private static final String SQLSTATE_FOREIGN_KEY_VIOLATION = "23503";
+
+    /** The state PostgreSQL reports when a unique constraint refuses a duplicate key. */
+    private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
+
+    /** The state PostgreSQL reports when a not-null column is given an absent value. */
+    private static final String SQLSTATE_NOT_NULL_VIOLATION = "23502";
+
+    /** A code the seed gives children to, so a delete of it is the refused case. */
+    private static final String REFERENCED_TYPE_CD = "06";
+
     /** The repository under test. */
     @Autowired
     private TransactionTypeRepository types;
+
+    // WHY : Assumptions: the five repositories below are injected for ONE case, the cross-table seed
+    //       audit. They are not the subject of this class and no other case touches them.
+    // WHY : Refactoring Rationale: the audit lives here rather than being split across the six classes
+    //       that each own one table, because a per-table assertion can only state its own row count
+    //       while the property that matters is the SUM. Six separate assertions all passing does not
+    //       establish the total, since a table nobody counted would not be missed; one assertion over
+    //       every table does. This class already owns the shared base's plumbing, so hosting it here
+    //       costs no further setup and no further engine start.
+    // WHY : Refactoring Rationale: the counts are asserted at all because a DIFFERENT service consumes
+    //       them. account-service's AddressValidationService queries the three lookup tables and owns
+    //       none of them, so a row missing from this seed surfaces there as an address rejected during
+    //       account maintenance, with nothing in the rejection to point back at the seed that caused
+    //       it. V2__seed_reference.sql records the same reasoning beside its own counts.
+    /** The category repository, counted by the seed audit and used by the refused-delete case. */
+    @Autowired
+    private TransactionCategoryRepository categories;
+
+    /** The disclosure-group repository, counted by the seed audit. */
+    @Autowired
+    private DisclosureGroupRepository disclosureGroups;
+
+    /** The phone-area-code repository, counted by the seed audit. */
+    @Autowired
+    private UsPhoneAreaCodeRepository phoneAreaCodes;
+
+    /** The state repository, counted by the seed audit. */
+    @Autowired
+    private UsStateRepository states;
+
+    /** The state-and-postal-prefix repository, counted by the seed audit. */
+    @Autowired
+    private UsStateZipPrefixRepository stateZipPrefixes;
 
     /** Supplies the transaction the insert statement requires, one per write. */
     // WHY : Refactoring Rationale: the insert cases below run through this template rather than calling
@@ -280,7 +416,561 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
         assertThat(refusal).isNotNull();
         assertThat(sqlStateOf(refusal))
                 .as("the state the service branches on when it answers a duplicate create")
-                .isEqualTo("23505");
+                .isEqualTo(SQLSTATE_UNIQUE_VIOLATION);
+    }
+
+    /**
+     * Confirms the engine REFUSES a delete of a referenced type, and reports the state as 23503.
+     *
+     * <p>Purpose: this is the load-bearing assertion of the whole package and it is proven at no other
+     * level. {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} declares the constraint across L6 and
+     * L7 as a foreign key on the category table's type column referencing the type table with the
+     * restrict action, and {@code db/migration/V1__reference.sql} reproduces it at L266 to L268 as
+     * {@code fk_transaction_categories_type}. The refusal then travels a fixed chain: the reference
+     * platform answers a referential-constraint failure, the target answers PostgreSQL SQLSTATE
+     * {@code 23503}, the framework translates that into a data-integrity exception, and
+     * {@code com.carddemo.common.error.GlobalExceptionHandler} renders it as HTTP 409. Only the middle
+     * link is this package's to prove; the 409 belongs to the {@code api} subpackage, and this case may
+     * never be weakened to accept a server-error status in place of the conflict.</p>
+     *
+     * <p>Assumptions: the STATE is asserted rather than a message, because the state is what
+     * {@code TransactionTypeService} branches on -- it declares the same literal at its L245 -- and a
+     * message is free to change with a driver or a locale without any behaviour changing with it. The
+     * state is read by walking the cause chain, which is how the service reads it, so this case is
+     * evidence for that code rather than for a different mechanism.</p>
+     *
+     * <p>Assumptions: the sibling {@code TransactionCategoryRepositoryIT} asserts that a refusal
+     * ARRIVES, and this case asserts WHICH refusal it is. The two are not the same claim: a cascade
+     * removed by a later schema change would still raise something on some other statement, and only the
+     * state distinguishes a referential refusal from every other integrity failure the same exception
+     * type carries.</p>
+     *
+     * <p>Assumptions: the delete goes through the INHERITED KEYED operation rather than a declared
+     * modifying statement, which is what {@code package-info.java} rules at its L332 to L335, so the
+     * declared foreign key is what refuses it and the provider-managed counter column is not bypassed.
+     * The category count taken first is a fixture guard and NOT the proof -- the charter records at its
+     * L418 to L420 that a count is a diagnosis, since two callers deleting and inserting at once could
+     * each read zero -- so the refusal is established by attempting the delete.</p>
+     *
+     * <p>Assumptions: the flush is EXPLICIT. Without it the DELETE would be issued when the ambient
+     * transaction ends, so the refusal would arrive after this method returned and the case would assert
+     * nothing at all while still reading as green.</p>
+     *
+     * <p>Alternatives Considered: annotating this one method rather than the class, even though the class
+     * comment above rejects the class-level form. The rejection there is about a refusal whose ARRIVAL
+     * TIME would otherwise depend on when the context happened to flush; here the flush is written out,
+     * so the timing is pinned by the statement and the ambient transaction only supplies the rollback
+     * that keeps the seeded row this case deletes from actually disappearing.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("a delete of a referenced type is refused, and the engine reports SQLSTATE 23503")
+    void aDeleteOfAReferencedTypeIsRefusedWithTheForeignKeyState() {
+        assertThat(this.categories.countByTypeCd(REFERENCED_TYPE_CD))
+                .as("fixture guard only: the subject must be a type the seed gives children to")
+                .isPositive();
+
+        DataIntegrityViolationException refusal = catchThrowableOfType(
+                DataIntegrityViolationException.class,
+                () -> {
+                    this.types.findByTypeCd(REFERENCED_TYPE_CD).ifPresent(this.types::delete);
+                    this.types.flush();
+                });
+
+        assertThat(refusal)
+                .as("the engine must refuse the delete rather than cascade or null the reference")
+                .isNotNull();
+        assertThat(sqlStateOf(refusal))
+                .as("the state the service branches on when it answers a referential conflict")
+                .isEqualTo(SQLSTATE_FOREIGN_KEY_VIOLATION);
+    }
+
+    /**
+     * Confirms the refusal holds for a parent and child this case creates, not only for seeded rows.
+     *
+     * <p>Purpose: the case above deletes a SEEDED type, which proves the constraint but leans on the seed
+     * having given that type a child. This one creates both rows itself, so what it asserts is the
+     * constraint alone and it survives a seed that gains or loses a row. The sibling
+     * {@code TransactionCategoryRepositoryIT} records the same lesson from the other direction: its first
+     * attempt to find an UNREFERENCED seeded type failed because every one of the seven has a child,
+     * which is a property of the seed rather than of the constraint.</p>
+     *
+     * <p>Assumptions: the parent is written with the native insert and the child through the persistence
+     * context, and the two differ for a reason recorded on {@code insertType} in the main tree: a
+     * {@code save} of a type reaches {@code EntityManager.merge}, because the entity's assigned key and
+     * primitive version leave the framework's newness test with nothing to detect, so it cannot be relied
+     * on to issue an INSERT for a code that may already exist. The category is a genuinely new composite
+     * key here, so merge finds no row and persists one.</p>
+     *
+     * <p>Assumptions: the parent is created BEFORE the child, which is the order the constraint requires
+     * of any writer -- the same order {@code V2__seed_reference.sql} loads its two tables in.</p>
+     *
+     * <p>Assumptions: this is a separate case rather than a second half of the one above, because a
+     * persistence context that has raised an integrity violation cannot be used again. Continuing in the
+     * same context after the first refusal would fail on the reuse rather than on the constraint.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("the refusal holds for a parent and child this case creates, not only for seeded rows")
+    void aDeleteOfATypeThisCaseGaveAChildIsAlsoRefused() {
+        String parent = "96";
+        this.types.insertType(parent, "Parent created by the referential case");
+        this.categories.saveAndFlush(new TransactionCategory(
+                new TransactionCategory.TransactionCategoryId(parent, "0001"),
+                "Child created by the referential case"));
+
+        assertThat(this.categories.countByTypeCd(parent))
+                .as("fixture guard only: the child must have been written before the delete is tried")
+                .isEqualTo(1L);
+
+        DataIntegrityViolationException refusal = catchThrowableOfType(
+                DataIntegrityViolationException.class,
+                () -> {
+                    this.types.findByTypeCd(parent).ifPresent(this.types::delete);
+                    this.types.flush();
+                });
+
+        assertThat(refusal).as("the constraint must refuse a parent this case referenced").isNotNull();
+        assertThat(sqlStateOf(refusal)).isEqualTo(SQLSTATE_FOREIGN_KEY_VIOLATION);
+    }
+
+    /**
+     * Confirms the key round-trips at its declared width and the description keeps its stored case.
+     *
+     * <p>Purpose: two column contracts are read back here. The key is
+     * {@code TR_TYPE CHAR(2) NOT NULL} at {@code app/app-transaction-type-db2/ddl/TRNTYPE.ddl} L2 and
+     * the primary key at its L4, and the description is {@code TR_DESCRIPTION VARCHAR(50) NOT NULL} at
+     * its L3. A declared-width character column pads its value on the way in, so a round-trip is the
+     * only way to establish that what a caller receives is the two characters it stored and not those
+     * two followed by padding the width introduced.</p>
+     *
+     * <p>Assumptions: the description asserted is {@code Reversal}, in mixed case. Two seed sources
+     * exist for this table and they disagree.
+     * {@code app/app-transaction-type-db2/ctl/DB2LTTYP.ctl} inserts upper case and spells this row
+     * {@code REVERAL} -- a count over that file finds that spelling once and {@code REVERSAL} not at all
+     * -- whereas {@code app/data/ASCII/trantype.txt} carries mixed case and the correct spelling.
+     * {@code V2__seed_reference.sql} seeds from the ASCII dataset in preference to the control card, so
+     * neither {@code REVERSAL} nor {@code REVERAL} is an accepted value here.</p>
+     *
+     * <p>Assumptions: the record this is read against is 60 bytes -- {@code app/cpy/CVTRA03Y.cpy} L2
+     * declares {@code RECLN = 60} and its L5 to L7 sum to it as {@code X(02)} plus {@code X(50)} plus an
+     * {@code X(08)} FILLER, which V1 drops. The FILLER holds ASCII zero-fill rather than spaces in every
+     * one of the seven rows, which is why dropping it is a drop and not a trim.</p>
+     *
+     * <p>Assumptions: the 60 above is the RECORD length and not the line length of the dataset the seed
+     * was taken from, and the two differ. {@code app/data/ASCII/trantype.txt} is 433
+     * bytes over 7 lines and carries 6 carriage returns, so its first six lines measure 61 bytes and its
+     * last measures 60: it is CRLF-terminated EXCEPT on its final row. {@code app/data/ASCII/discgrp.txt}
+     * alongside it is LF-only. A reader that does not strip the carriage return pulls a 61st byte into a
+     * 60-byte record and every field after the first decodes one place out, and the symptom presents as a
+     * field-offset defect rather than as a line-ending one. Nothing in this file parses those bytes -- the
+     * seed migration is what read them -- so this is recorded to explain why the assertion above is
+     * against DATABASE contents and why the line endings must not be assumed uniform across the three
+     * datasets the reference seed draws on.</p>
+     *
+     * <p>Assumptions: code {@code 06} is the subject rather than the first seeded row, and the choice is
+     * deliberate. The case above named {@code aSaveCannotInsertThisEntity} reaches
+     * {@code EntityManager.merge} against the FIRST seeded row outside any transaction, so it commits a
+     * changed description for that row; a case asserting a description against that same row would then
+     * pass or fail on test ORDER. No case in this package writes to {@code 06} outside a transaction.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the key round-trips at its declared width and the description keeps its stored case")
+    void theKeyRoundTripsAtItsDeclaredWidth() {
+        Optional<TransactionType> row = this.types.findByTypeCd(REFERENCED_TYPE_CD);
+        assertThat(row).as("the seed must have loaded the subject row").isPresent();
+
+        assertThat(row.get().getTypeCd())
+                .as("a declared-width character column must not return its padding as data")
+                .isEqualTo(REFERENCED_TYPE_CD)
+                .hasSize(TransactionType.TYPE_CD_WIDTH);
+        assertThat(row.get().getDescription())
+                .as("the mixed-case ASCII dataset is the seed lineage, not the upper-case control card")
+                .isEqualTo("Reversal");
+    }
+
+    /**
+     * Confirms the description column refuses an absent value at the engine rather than above it.
+     *
+     * <p>Purpose: {@code TR_DESCRIPTION} is declared {@code NOT NULL} at
+     * {@code app/app-transaction-type-db2/ddl/TRNTYPE.ddl} L3 and {@code V1__reference.sql} reproduces
+     * that at its L117. What is asserted is that the ENGINE holds the column, so that the declaration
+     * remains a guarantee for every writer of the schema and not only for callers who happen to arrive
+     * through this application.</p>
+     *
+     * <p>Assumptions: the native insert is the only route that reaches the engine with an absent value.
+     * The mapped attribute is declared {@code nullable = false}, so a write through the persistence
+     * context is rejected by the provider before a statement is issued -- which would assert the mapping
+     * rather than the column, and would keep passing if the column's own declaration were dropped.</p>
+     *
+     * <p>Assumptions: the code inserted is outside the seeded range, so the statement fails on the
+     * absent description rather than on the key, and the state asserted distinguishes the two: a
+     * not-null violation is {@code 23502} where a duplicate key would be {@code 23505}.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("the description column refuses an absent value at the engine")
+    void theDescriptionColumnRefusesAnAbsentValue() {
+        DataIntegrityViolationException refusal = catchThrowableOfType(
+                DataIntegrityViolationException.class,
+                () -> this.types.insertType("95", null));
+
+        assertThat(refusal).as("the engine must refuse a row with no description").isNotNull();
+        assertThat(sqlStateOf(refusal))
+                .as("a not-null violation, which is a different state from a duplicate key")
+                .isEqualTo(SQLSTATE_NOT_NULL_VIOLATION);
+    }
+
+    /**
+     * Confirms the seed loads 862 rows across the six tables of this schema, table by table.
+     *
+     * <p>Purpose: {@code V2__seed_reference.sql} states its own counts in its header at L12 to L18 -- 7
+     * types, 18 categories, 51 disclosure-group rows, 490 phone area codes, 56 states and 240
+     * state-and-postal-prefix combinations, a reference subtotal of 76, a lookup subtotal of 786 and a
+     * grand total of 862 -- and this case is what turns that header from a description into a contract.
+     * Each per-table figure is a literal count of its baseline source, so a count asserted here states
+     * that the seed transcribed its source completely rather than merely that it ran.</p>
+     *
+     * <p>Refactoring Rationale: the aggregate is hosted here rather than distributed over the six classes
+     * that each own one table. A per-table assertion can only state its own figure, and six of those all
+     * passing still does not establish the sum, because a table that nobody counted would not be missed.
+     * One assertion spanning every table does establish it, and this class already owns the shared base's
+     * plumbing so the cross-table read needs no further setup and no further engine start.</p>
+     *
+     * <p>Refactoring Rationale: the counts are asserted at all because a DIFFERENT bounded context
+     * consumes three of these tables. account-service's {@code AddressValidationService} queries the
+     * lookup tables and owns none of them, so a row missing from this seed does not surface here -- it
+     * surfaces there as an address rejected during account maintenance, with nothing in the rejection to
+     * name the seed that caused it. Asserting the figures at the level that owns them is what makes that
+     * failure attributable.</p>
+     *
+     * <p>Assumptions: the figures hold whatever order the cases in this package run in. No case in the
+     * package commits an inserted or deleted row: every write is either inside a transaction that rolls
+     * back, or a statement the engine refuses. The one write that does commit reaches
+     * {@code EntityManager.merge} against an existing row, so it changes a description and leaves the row
+     * count untouched.</p>
+     *
+     * <p>Assumptions: this counts rows to audit a seed and is NOT a pagination total.
+     * {@code package-info.java} rules at its L456 to L462 that the further-page flag comes from reading
+     * one row beyond the window and never from a count, and the case below is what honours that.</p>
+     *
+     * <p>Trade-offs: the cases that write are annotated one by one so that each rolls back, and what that
+     * gives up is commit-visibility realism -- no case here observes a row as a separate connection would
+     * see it after a commit, so a defect that only appears once a change is durable would not be caught at
+     * this level. What it buys is that the figures asserted above are exact rather than approximate, in
+     * any order, on a re-run and under the parallel execution the module's runners allow. An approximate
+     * count would be worth little: the property under audit is that the seed transcribed its source
+     * COMPLETELY, and a tolerance wide enough to absorb another case's leftovers is also wide enough to
+     * absorb a missing row.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the seed loads 862 rows across the six tables, table by table")
+    void theSeedIsAuditableAcrossAllSixTables() {
+        long typeRows = this.types.count();
+        long categoryRows = this.categories.count();
+        long disclosureRows = this.disclosureGroups.count();
+        long areaCodeRows = this.phoneAreaCodes.count();
+        long stateRows = this.states.count();
+        long zipPrefixRows = this.stateZipPrefixes.count();
+
+        assertThat(typeRows).as("app/data/ASCII/trantype.txt").isEqualTo(SEEDED_TYPES);
+        assertThat(categoryRows).as("app/data/ASCII/trancatg.txt").isEqualTo(SEEDED_CATEGORIES);
+        assertThat(disclosureRows).as("app/data/ASCII/discgrp.txt")
+                .isEqualTo(SEEDED_DISCLOSURE_GROUPS);
+        assertThat(areaCodeRows).as("app/cpy/CSLKPCDY.cpy L30")
+                .isEqualTo(SEEDED_PHONE_AREA_CODES);
+        assertThat(stateRows).as("app/cpy/CSLKPCDY.cpy L1013").isEqualTo(SEEDED_STATES);
+        assertThat(zipPrefixRows).as("app/cpy/CSLKPCDY.cpy L1073")
+                .isEqualTo(SEEDED_STATE_ZIP_PREFIXES);
+
+        assertThat(typeRows + categoryRows + disclosureRows + areaCodeRows + stateRows + zipPrefixRows)
+                .as("the grand total V2__seed_reference.sql declares in its header at L18")
+                .isEqualTo(SEEDED_GRAND_TOTAL);
+    }
+
+    /**
+     * Confirms the further-page answer comes from reading one row beyond the window.
+     *
+     * <p>Purpose: the window is seven rows, declared as a program constant at
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} physical line 60, and the baseline decides
+     * whether a further page exists by FETCHING once more rather than by counting. Its forward reader has
+     * two fetch sites: one inside the row loop, and a second at physical lines 1661 to 1665 that fires
+     * only when physical line 1657 finds the row number equal to that constant. Physical line 1670 tests
+     * the outcome and 1671 records that a further page exists, while 1674 and 1675 take the exhausted
+     * branch instead. The migrated form asks the engine for one row more than the window and reads the
+     * surplus the same way, which is what {@code TransactionTypeService} does at its L342 with a bound of
+     * the window plus one and what {@code ReferencePaging.page} then interprets.</p>
+     *
+     * <p>Assumptions: an eighth row has to be INSERTED for the affirmative half of this case to be
+     * assertable at all. The seed loads exactly seven types and the window is exactly seven, so on seeded
+     * data the whole table is one page and the honest answer is that no further page exists;
+     * {@code package-info.java} records the same trap at its L465 to L469. The
+     * {@code reference_list/happy_path} fixture is the populated state of this browse and carries those
+     * same seven rows, so it does not supply an eighth either.</p>
+     *
+     * <p>Trade-offs: the inserted row is rolled back with the ambient transaction rather than deleted
+     * afterwards. A delete in a teardown would leave the table permanently changed if this case failed
+     * partway, and the seed figures asserted above would then fail for a reason belonging to this
+     * method.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("the further-page answer comes from one row beyond the window, never from a count")
+    void theFurtherPageAnswerComesFromOneRowBeyondTheWindow() {
+        List<TransactionType> onSeededData =
+                this.types.findAllByOrderByTypeCdAsc(Limit.of(PAGE_SIZE + 1));
+        assertThat(onSeededData)
+                .as("the probe asks for eight and the seed holds seven, so no surplus can appear")
+                .hasSize(SEEDED_TYPES);
+        assertThat(onSeededData.size() > PAGE_SIZE)
+                .as("one page holds the whole seeded table, so no further page exists")
+                .isFalse();
+
+        this.types.saveAndFlush(new TransactionType("08", "Eighth type, present for this case only"));
+
+        List<TransactionType> withASurplus =
+                this.types.findAllByOrderByTypeCdAsc(Limit.of(PAGE_SIZE + 1));
+        assertThat(withASurplus).hasSize(PAGE_SIZE + 1);
+        assertThat(withASurplus.size() > PAGE_SIZE)
+                .as("the surplus row is the whole evidence that a further page follows")
+                .isTrue();
+        assertThat(withASurplus.subList(0, PAGE_SIZE)).extracting(TransactionType::getTypeCd)
+                .as("the published window is the first seven, and the surplus is not published")
+                .containsExactly("01", "02", "03", "04", "05", "06", "07");
+        assertThat(withASurplus.get(PAGE_SIZE).getTypeCd())
+                .as("the surplus row is the one the window would have published next")
+                .isEqualTo("08");
+    }
+
+    /**
+     * Confirms two consecutive pages share no row and skip none between them.
+     *
+     * <p>Purpose: this is the observable property a caller actually depends on, and it is asserted rather
+     * than a bare position value because the position alone is design-dependent. Two designs are both
+     * correct and they pair differently. The baseline pairs a LOOKAHEAD position with an INCLUSIVE
+     * predicate: {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} physical line 1659 sets the
+     * trailing position to the seventh DISPLAYED row and physical line 1673 then OVERWRITES it with the
+     * eighth, not-displayed row on the branch its 1670 selects, which is exactly what stops the seventh
+     * row reappearing when the inclusive comparison at physical line 343 resumes from it. The migrated
+     * form pairs a LAST-RETURNED position with an EXCLUSIVE predicate instead.</p>
+     *
+     * <p>Assumptions: the pairing the authored source implements is the second one, and it was read from
+     * the source rather than assumed. {@code ReferencePaging.page} drops the surplus row and then seals
+     * the key of the LAST ROW IT PUBLISHES as the trailing position, and the walk that resumes from that
+     * position is {@code findByTypeCdGreaterThanOrderByTypeCdAsc}, whose comparison is strictly greater
+     * than. So the two halves agree, and the case below walks them exactly as the service does.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("consecutive pages share no row and skip none")
+    void consecutivePagesShareNoRowAndSkipNone() {
+        this.types.saveAndFlush(new TransactionType("08", "Eighth type, present for this case only"));
+
+        List<TransactionType> probe = this.types.findAllByOrderByTypeCdAsc(Limit.of(PAGE_SIZE + 1));
+        assertThat(probe.size() > PAGE_SIZE).as("a second page must exist for this case to mean anything")
+                .isTrue();
+        List<TransactionType> pageOne = probe.subList(0, PAGE_SIZE);
+
+        // WHY : Assumptions: the position handed to the second walk is the key of the LAST ROW PAGE ONE
+        //       PUBLISHED, not the key of the surplus row the probe also returned. That is the half of
+        //       the pairing this service implements, and it is only safe BECAUSE the resuming comparison
+        //       is strictly greater than. Handing the last published key to an INCLUSIVE comparison
+        //       instead would return that row again as the first row of page two -- exactly one
+        //       duplicate per page boundary, which is a defect no membership-only assertion would
+        //       notice, since every row would still be present somewhere.
+        String position = pageOne.get(pageOne.size() - 1).getTypeCd();
+        List<TransactionType> pageTwo =
+                this.types.findByTypeCdGreaterThanOrderByTypeCdAsc(position, Limit.of(PAGE_SIZE + 1));
+
+        List<String> walked = new ArrayList<>(pageOne.stream().map(TransactionType::getTypeCd).toList());
+        walked.addAll(pageTwo.stream().map(TransactionType::getTypeCd).toList());
+
+        assertThat(walked)
+                .as("no row may be published twice across the boundary between the two pages")
+                .doesNotHaveDuplicates();
+        assertThat(walked)
+                .as("no row may be passed over: the two pages together are the whole table, in order")
+                .containsExactly("01", "02", "03", "04", "05", "06", "07", "08");
+    }
+
+    /**
+     * Confirms a row inserted inside page one is afterwards neither skipped nor published twice.
+     *
+     * <p>Purpose: this demonstrates the property that positions the walk by key rather than by ordinal,
+     * instead of only asserting that no ordinal appears in a query. A row is inserted BETWEEN the two
+     * reads, at a key that sorts inside the range page one already published, and the second page is then
+     * read through the key position page one ended at.</p>
+     *
+     * <p>Alternatives Considered: positioning a page by ordinal offset was rejected, and the ground is
+     * behavioural rather than a preference. An ordinal counts rows in the ordering AS IT STANDS WHEN THE
+     * SECOND QUERY RUNS, so a row inserted before that ordinal shifts every later row one place along:
+     * the second page then re-publishes the last row of the first page and, symmetrically, a delete makes
+     * it pass one over entirely. Positioning by key cannot do either, because the key names a row rather
+     * than a place in a sequence, and rows arriving elsewhere in the ordering do not move it. On the
+     * arrangement below an ordinal-positioned second page would have re-published the row named by the
+     * position, and that reasoning stays in this comment on purpose: no ordinal-positioned query is
+     * written here, since asserting that a query text contains no ordinal is not the same claim as
+     * proving that positions do not shift.</p>
+     *
+     * <p>Assumptions: the interleaved insert is issued on this same connection rather than from a second
+     * one. What the property needs is that the second query runs against a table that has CHANGED since
+     * the first, and a flushed insert inside the ambient transaction supplies exactly that while keeping
+     * the change inside the rollback this case depends on. The insert's visibility is asserted rather
+     * than assumed, so that the case cannot pass by the change having silently not arrived.</p>
+     *
+     * <p>Assumptions: the keys used sit above the seeded range so that a gap exists to insert into at
+     * all. The seven seeded codes are consecutive, so no key sorts strictly between two of them, and a
+     * case built on the seeded rows alone could not place a row inside a published page.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("a row inserted inside page one is neither skipped nor published twice")
+    void aRowInsertedInsidePageOneIsNeitherSkippedNorPublishedTwice() {
+        this.types.saveAndFlush(new TransactionType("11", "Interleave fixture, first"));
+        this.types.saveAndFlush(new TransactionType("13", "Interleave fixture, second"));
+        this.types.saveAndFlush(new TransactionType("15", "Interleave fixture, third"));
+        this.types.saveAndFlush(new TransactionType("17", "Interleave fixture, fourth"));
+
+        int window = 3;
+        List<TransactionType> pageOne =
+                this.types.findByTypeCdGreaterThanOrderByTypeCdAsc("07", Limit.of(window));
+        assertThat(pageOne).extracting(TransactionType::getTypeCd)
+                .as("the first page of the range this case owns")
+                .containsExactly("11", "13", "15");
+        String position = pageOne.get(pageOne.size() - 1).getTypeCd();
+
+        this.types.saveAndFlush(new TransactionType("12", "Inserted between the two reads"));
+        assertThat(this.types.findByTypeCd("12"))
+                .as("the interleaved row must be visible, or this case proves nothing")
+                .isPresent();
+
+        List<TransactionType> pageTwo =
+                this.types.findByTypeCdGreaterThanOrderByTypeCdAsc(position, Limit.of(window));
+
+        assertThat(pageTwo).extracting(TransactionType::getTypeCd)
+                .as("no row page one published may return, and the row after the position may not be"
+                        + " passed over")
+                .containsExactly("17");
+        List<String> walked = new ArrayList<>(pageOne.stream().map(TransactionType::getTypeCd).toList());
+        walked.addAll(pageTwo.stream().map(TransactionType::getTypeCd).toList());
+        assertThat(walked).doesNotHaveDuplicates();
+    }
+
+    /**
+     * Confirms the backward walk reads descending and reverses into the order a caller is shown.
+     *
+     * <p>Purpose: the two directions are not mirror images and the difference must survive the migration
+     * rather than being smoothed away. The backward cursor tests the key at
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} physical line 359 with an EXCLUSIVE
+     * comparison and orders DESCENDING at its physical line 367, where the forward cursor tests
+     * inclusively at physical line 343 and orders ascending at 351. A backward page is therefore read
+     * descending and reversed before it is published, so rows reach a caller ascending whichever
+     * direction was asked for.</p>
+     *
+     * <p>Assumptions: the EMITTED order is asserted and not only the membership of the page. Membership
+     * is identical under both orders, so a walk that returned its rows ascending would satisfy a
+     * membership assertion while breaking the one thing the descending order is for: it puts the surplus
+     * row at the START of a backward page, and a publisher that drops the surplus from the wrong end
+     * silently removes a row the caller should have seen.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the backward walk reads descending and reverses into ascending display order")
+    void theBackwardWalkReversesIntoAscendingDisplayOrder() {
+        List<TransactionType> asRead =
+                this.types.findByTypeCdLessThanOrderByTypeCdDesc("06", Limit.of(PAGE_SIZE));
+
+        assertThat(asRead).extracting(TransactionType::getTypeCd)
+                .as("the engine emits descending, and the position itself is excluded")
+                .containsExactly("05", "04", "03", "02", "01");
+        assertThat(asRead.reversed()).extracting(TransactionType::getTypeCd)
+                .as("reversing is what a caller is shown, and it must be contiguous and ascending")
+                .containsExactly("01", "02", "03", "04", "05");
+    }
+
+    /**
+     * Confirms both filter arms active narrow by their conjunction rather than either one alone.
+     *
+     * <p>Purpose: the baseline carries each optional filter as a guarded pair of arms --
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} physical lines 344 to 346 for the code and
+     * 347 to 350 for the description -- and the two pairs are joined by AND, so an active code arm and an
+     * active description arm must both hold of the same row. The four combinations of the two guards are
+     * covered across this class: neither arm active, the code arm alone, the description arm alone, and
+     * both together here.</p>
+     *
+     * <p>Assumptions: the guard's ACTIVE sentinel in the baseline is the literal one character
+     * {@code '1'} and every other value means the arm is off, because a one-byte field cannot represent
+     * its own absence. The migrated form expresses the same thing as an absent argument, which is why the
+     * cases in this class pass {@code null} where the baseline sets the guard off.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("both filter arms active narrow by their conjunction")
+    void bothFilterArmsActiveNarrowByTheirConjunction() {
+        String pattern = TransactionTypeRepository.descriptionFilterPattern("Reversal");
+
+        assertThat(this.types.findFilteredPageAfter(REFERENCED_TYPE_CD, pattern, null, Limit.of(100)))
+                .extracting(TransactionType::getTypeCd)
+                .as("both arms hold of this row, so it is the only one that survives them")
+                .containsExactly(REFERENCED_TYPE_CD);
+        assertThat(this.types.findFilteredPageAfter("01", pattern, null, Limit.of(100)))
+                .as("a code that exists with a description that does not match must yield nothing,"
+                        + " which is a conjunction and not a disjunction")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms the code arm is an equality, so a partial code is not a prefix or substring search.
+     *
+     * <p>Purpose: the code arm is transcribed from {@code TR_TYPE = :WS-TYPE-CD-FILTER} at
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} physical line 345 and is an equality there.
+     * A partial code that matched the rows it is a prefix of would widen every filtered browse silently:
+     * a caller narrowing to one type would receive several and have no way to tell that it had.</p>
+     *
+     * <p>Alternatives Considered: the description arm is the one place the migrated form deliberately
+     * does NOT match its source character for character, and the difference is worth stating beside the
+     * arm that does. Physical lines 348 and 349 apply the pattern with no ESCAPE clause and add no
+     * wildcard of their own, so a plain value there matches only a description equal to it, whereas
+     * {@code TransactionTypeRepository.descriptionFilterPattern} wraps the caller's text in its own
+     * wildcards and escapes the caller's, making the description arm a containment search over literal
+     * text. That divergence is registered in the traceability document; what it does not change is this
+     * arm, which stays an equality, and which is the property both shapes agree on.</p>
+     *
+     * <p>Assumptions: a single character is compared against a two-character column. A declared-width
+     * character comparison ignores trailing padding, so the shorter value compares as itself and matches
+     * no two-character code rather than raising -- which is why the assertion is an empty page and not an
+     * expected failure.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the code arm is an equality, not a prefix or substring search")
+    void theCodeArmIsAnEqualityAndNotAPrefixSearch() {
+        assertThat(this.types.findFilteredPageAfter("0", null, null, Limit.of(100)))
+                .as("a partial code is not the prefix of the codes it opens, it is simply absent")
+                .isEmpty();
+        assertThat(this.types.findFilteredPageAfter(REFERENCED_TYPE_CD, null, null, Limit.of(100)))
+                .extracting(TransactionType::getTypeCd)
+                .as("a whole code narrows to exactly the one row it names")
+                .containsExactly(REFERENCED_TYPE_CD);
     }
 
     /**

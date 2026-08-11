@@ -18,16 +18,16 @@ import org.springframework.stereotype.Component;
  * <p>Assumptions: every class in this package is written by hand and no code generator is introduced
  * anywhere in it. The package-scope rulings this class applies are settled once in this package's own
  * {@code package-info.java} -- the hand-written charter, the rejection of MapStruct and, on a separate
- * ground, of Lombok, the trim boundary that follows the column type at its L272 to L287, and the
- * items-only boundary at its L418 to L423 -- and they are cited here rather than argued again. What
+ * ground, of Lombok, the trim boundary that follows the column type at its L303 to L318, and the
+ * items-only boundary at its L457 to L462 -- and they are cited here rather than argued again. What
  * this file adds is the evidence specific to this one record.</p>
  *
  * <p>Alternatives Considered: this class is a Spring {@code @Component} with instance members and is
  * deliberately not declared {@code final}, rather than the {@code final} class with a private
  * constructor and static members that the charter fixes for the four entity conversions at its own
- * L170 to L192. The static shape was the alternative and was not taken here. The charter already
- * admits this second shape for {@code DateInquiryReplyMapper} at its L150 to L153, and records at its
- * L191 to L192 that the component is left non-final precisely so that it remains proxyable; both of
+ * L197 to L223. The static shape was the alternative and was not taken here. The charter already
+ * admits this second shape for {@code DateInquiryReplyMapper} at its L161 to L164, and records at its
+ * L222 to L223 that the component is left non-final precisely so that it remains proxyable; both of
  * those properties are wanted here. This conversion is reached by constructor injection, which is the
  * dependency-injection pattern the Agent Action Plan fixes for this migration in place of the
  * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
@@ -40,12 +40,12 @@ import org.springframework.stereotype.Component;
  *
  * <p>Assumptions: one naming asymmetry is called out because it reads as a mistake and is not. This
  * class is named for the entity {@code UsPhoneAreaCode}, while the type it produces is
- * {@code PhoneAreaCodeResponse} with no geographic prefix, and the charter settles at its L497 to
- * L503 that the DTO package owns that name and this package follows it rather than renaming either
+ * {@code PhoneAreaCodeResponse} with no geographic prefix, and the charter settles at its L536 to
+ * L542 that the DTO package owns that name and this package follows it rather than renaming either
  * side to make the pair look uniform.</p>
  *
  * <p>Assumptions: there is no inbound member here, and the absence is a decision rather than
- * something outstanding. The charter records at its L458 to L461 that the three seeded lookup tables
+ * something outstanding. The charter records at its L497 to L500 that the three seeded lookup tables
  * carry none: these rows are seeded reference data, loaded by
  * {@code services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql}, so the
  * DTO package publishes no create and no update shape for them and there would be nothing for an
@@ -99,7 +99,7 @@ public class UsPhoneAreaCodeMapper {
         //       which is the same picture as a three-character alphanumeric item -- and every literal
         //       on the lists carried over that field is quoted and compared as characters. The stored
         //       column is CHAR(3), so a code fills its whole declared width and there is no padding
-        //       to remove; the charter's trim boundary at its L278 to L282 holds that a code of
+        //       to remove; the charter's trim boundary at its L309 to L314 holds that a code of
         //       declared width is never trimmed in a way that could change its value, in either
         //       direction.
         // WHY : Alternatives Considered: a numeric type for the code, rejected outright. The value is
@@ -157,8 +157,8 @@ public class UsPhoneAreaCodeMapper {
         //       declares at its L90 to L92 rather than to its canonical one, because both arguments
         //       are character data, and that selection is the point of the paragraph above rather than
         //       an accident of overload resolution. Both constructors take the code first and the
-        //       classification second, which is the component order the charter records at its L489 to
-        //       L490 as being invoked positionally throughout this package; reversing the two
+        //       classification second, which is the component order the charter records at its L528 to
+        //       L529 as being invoked positionally throughout this package; reversing the two
         //       arguments here would still compile and would be wrong.
         return new PhoneAreaCodeResponse(publishedCode, storedClassification);
     }
@@ -168,7 +168,7 @@ public class UsPhoneAreaCodeMapper {
      *
      * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
      * indicator of {@code com.carddemo.common.web.PageResponse} are assembled by
-     * {@code com.carddemo.reference.service}, which the charter fixes at its L418 to L423 as the only
+     * {@code com.carddemo.reference.service}, which the charter fixes at its L457 to L462 as the only
      * layer holding the keyset cursor and therefore the only one able to say whether a further page
      * exists; a mapper is handed rows and knows nothing about the query that produced them. That
      * envelope is also narrower than a caller may reach for -- it carries no previous-page flag and no

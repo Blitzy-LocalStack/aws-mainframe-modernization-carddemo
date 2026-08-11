@@ -788,11 +788,11 @@ public class PendingAuthSummary {
     /**
      * Records an approved authorization against this summary.
      *
-     * <p>Assumptions: the three statements this performs are the approved branch of
+     * <p>Assumptions: the four statements this performs are the approved branch of
      * {@code 8400-UPDATE-SUMMARY} at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines
      * 813 to 818, in the reference program's own order: add one to the approved count at line 814, add
-     * the approved amount to the approved total at line 815, and add the same amount to the credit
-     * balance at line 817.</p>
+     * the approved amount to the approved total at line 815, add the same amount to the credit balance
+     * at line 817, and assign zero to the cash balance at line 818.</p>
      *
      * <p>Assumptions: the count, the approved total and the credit balance move TOGETHER, in one
      * method, because they are one accounting fact. Exposing three setters instead would let a caller
@@ -800,15 +800,24 @@ public class PendingAuthSummary {
      * with nothing to detect it -- the same class of defect the baseline avoids by updating the segment
      * in one rewrite.</p>
      *
-     * <p>Assumptions: the fourth statement of that branch, {@code MOVE 0 TO PA-CASH-BALANCE} at line
-     * 818, is deliberately NOT reproduced, and the reason is a whole-tree reading rather than a local
-     * judgement: {@code PA-CASH-BALANCE} is written at that one line and nowhere else in the reference
-     * tree, and is read only for display at {@code cbl/COPAUS0C.cbl} line 794. Nothing ever adds to it,
-     * so the value the reference program leaves is zero and the value this type carries is the zero its
-     * constructor set. Re-assigning zero to a member already at zero would add a statement whose only
-     * effect is to invite the question of what else writes it. This is recorded because a reader
-     * comparing the two side by side will count four statements in the reference branch and three
-     * here, and the difference has to read as a finding rather than as an omission.</p>
+     * <p>Refactoring Rationale: the fourth statement, {@code MOVE 0 TO PA-CASH-BALANCE} at line 818, is
+     * now reproduced, where an earlier revision omitted it. The omission rested on a whole-tree reading
+     * that is true as far as it goes -- {@code PA-CASH-BALANCE} is WRITTEN at that one line and nowhere
+     * else in the reference tree, and is READ only for display at {@code cbl/COPAUS0C.cbl} line 794 --
+     * and concluded from it that the statement assigns zero to a member already at zero, so reproducing
+     * it would add a statement with no effect. That conclusion holds for a summary this type CREATED,
+     * whose constructor sets the member to zero. It does not hold for a summary the extract load
+     * rehydrated: {@link #fromExtract} and {@link #rehydrated} both accept and store the cash balance the
+     * segment carried, because a stored segment carries arbitrary values in all sixteen components and
+     * the load path could not otherwise represent one. So an account seeded with a non-zero cash balance
+     * would keep it here across every subsequent approval while the reference program zeroed it on the
+     * first, which is an observable difference on the path this deployment is actually seeded through.
+     * Assigning zero costs one statement and removes the difference rather than registering it.</p>
+     *
+     * <p>Assumptions: the assignment is unconditional on this branch and belongs to the APPROVED arm
+     * only. The reference program's declined arm at lines 819 to 821 carries no balance statement of any
+     * kind, so a decline leaves whatever the cash balance held -- which is why
+     * {@link #recordDeclined(BigDecimal)} does not zero it and the two methods stay separate.</p>
      *
      * @param amount the approved amount at scale two, added to both the approved total and the credit
      *     balance; must not be {@code null}
@@ -821,6 +830,11 @@ public class PendingAuthSummary {
         this.approvedAuthCount = incremented(this.approvedAuthCount, "approvedAuthCount");
         this.approvedAuthAmount = this.approvedAuthAmount.add(amount);
         this.creditBalance = this.creditBalance.add(amount);
+        // WHY : Assumptions: the scale is set rather than left to the constant, because every other
+        //       amount this type holds is at scale two and a mixed-scale member would compare equal to
+        //       its siblings under compareTo while rendering differently through toString -- the one
+        //       asymmetry a reader of a stored row would not think to check for.
+        this.cashBalance = BigDecimal.ZERO.setScale(MONEY_SCALE);
     }
 
     /**

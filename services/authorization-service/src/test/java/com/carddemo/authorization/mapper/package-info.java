@@ -32,13 +32,13 @@
  *
  * <h2>What executes here</h2>
  *
- * <p>Eight test classes occupy this package, and together they cover the four
+ * <p>Ten test classes occupy this package, and together they cover the four
  * responsibilities the parent charter assigns to it -- segment conversion, the wire fixtures, the date
  * pivot, and what a mapper is permitted to expose. The census is measured against the directory on every
  * build:
  *
  * <pre>
- * this directory: 9 java files = 8 tests + 1 charter
+ * this directory: 11 java files = 10 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section said seven and enumerated seven, omitting
@@ -48,8 +48,16 @@
  * boundary for uncovered members was being handed a list that hid the very class that answers the
  * question. The marker line above is measured by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * which also holds every class named below to a file in this directory, so a ninth class or a renamed one
- * fails the build rather than making this list wrong again.
+ * which also holds every class named below to a file in this directory, so a further class or a renamed
+ * one fails the build rather than making this list wrong again.
+ *
+ * <p>Refactoring Rationale: the census read eight tests and nine files until
+ * {@code PendingAuthSummaryMapperTest} and {@code AuthFraudMapperTest} landed, and it is corrected here rather than left for the
+ * measurement to report. Correcting it IS the required act and not a formality: the marker line is
+ * re-measured against this directory on every build, so a new class beside a stale census fails the
+ * inventory check with a message about a count while the real change is a new subject. Bumping the two
+ * figures and adding the roster entry below is what keeps the failure available for the next class
+ * instead of spending it on this one.
  *
  * <ul>
  *   <li>{@code SegmentConversionContractTest} -- every public conversion of the two segment mappers,
@@ -79,15 +87,39 @@
  *       distinguishes it from {@code SegmentConversionContractTest} is that the latter asserts the
  *       conversion as a whole against a committed image while this one asserts the parts the whole does
  *       not exercise, which is why organising per contract did not already cover them.</li>
+ *   <li>{@code PendingAuthSummaryMapperTest} -- the TYPED consequences of the 100-byte root conversion,
+ *       asserted through the carrier, the aggregate and the screen projection and never at a byte offset.
+ *       It carries the positional split of the five-slot status array named below as this package's own,
+ *       the dispatch of three coexisting numeric regimes onto one column set, the trailing padding's
+ *       absence from everything downstream, the one integer digit by which this segment's money is
+ *       narrower than the child's, and the projection's component count with the irregular position of
+ *       its fifth selection marker. Assumptions: it belongs to segment conversion for the same reason the
+ *       detail class above does, and it does not overlap the two fixture classes in the sibling
+ *       {@code .fixtures} and {@code .dto} packages, which assert the same seven images at the field-map
+ *       and raw-offset layers rather than through this mapper's public API.</li>
+ *   <li>{@code AuthFraudMapperTest} -- the crossing from the detail segment to the relational fraud row:
+ *       the merchant name that keeps its trailing blanks where the column is the table's one
+ *       variable-length one, the two numeric REGIME CHANGES that send a display field to a character
+ *       column and another to a binary one, the single field name this context corrects, the report date
+ *       whose two writes have two independent sources, the twenty-six-column shape and its order, and the
+ *       value ordering the recent-first index depends on. Assumptions: it belongs to the
+ *       segment-conversion responsibility for the same reason the detail class does -- every member it
+ *       reaches is part of projecting one 200-byte conversion onto a row -- and it exists as its own class
+ *       because eleven members of {@code AuthFraudMapper} had no caller anywhere in this tree, which is
+ *       the same gap and the same argument.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the planned inventory for this package was five files naming four test
- * classes, two of which do not exist -- a per-mapper test for the summary segment and one for the fraud
- * mapper. What is on disk is organised by CONTRACT rather than by mapper,
- * which is why one class covers every segment conversion and two cover the wire images; the one planned
- * name that does have a counterpart is the detail-segment test, and even that one is narrower than the
- * plan intended, covering the members the contract-shaped classes leave unreached rather than the mapper
- * as a whole. The planned
+ * classes, and BOTH of the names that paragraph once reported missing have since landed -- a per-mapper
+ * test for the summary segment as {@code PendingAuthSummaryMapperTest}, and one for the fraud mapper as
+ * {@code AuthFraudMapperTest} -- and both are enumerated above. The sentence is corrected rather than
+ * deleted because the point it existed to make does not depend on anything still being absent: what is
+ * on disk is organised by CONTRACT rather than by mapper, which is why one class covers every segment
+ * conversion and two cover the wire images. Every planned name now has a counterpart, and each of the
+ * three per-mapper classes -- detail, summary and fraud -- is NARROWER than the plan intended, covering
+ * the members the contract-shaped classes leave unreached rather than the mapper as a whole. That is the
+ * durable observation, and it is why arriving at the planned names did not make the contract-shaped
+ * classes redundant. The planned
  * inventory also assumed four production mappers when there are five, the fifth being the view mapper
  * whose test is named above. Publishing the planned list would have told a reader that named
  * classes were missing and that an existing one was surplus, and the likely response -- creating them
@@ -109,7 +141,8 @@
  * and it dropped the number rather than correcting it, because the point that sentence existed to make
  * did not depend on it. The same holds here. What is durable is the set of responsibilities and which
  * class carries each, because that is what a new test has to be placed against; the total is not. A
- * genuinely new contract at this boundary may be added as a ninth class, and a helper serving a single
+ * genuinely new contract at this boundary may be added as a further class -- the ninth and tenth were, and the census
+ * above moved with it rather than the class being refused -- and a helper serving a single
  * class stays private INSIDE that class rather than becoming a shared type, so that a reader of one test
  * can see everything it depends on without opening a second file.
  *
@@ -267,7 +300,9 @@
  * construct able to carry Javadoc for one. What makes the requirement MECHANICAL is a pair of Checkstyle
  * modules that divide the work, and the two halves are not interchangeable. The checker-level module
  * audits the file system and requires this file to be PRESENT in any directory contributing a Java source
- * the gate processes, so the seven classes beside it are what make its presence compulsory. The module
+ * the gate processes, so the test classes beside it are what make its presence compulsory. Their number is
+ * deliberately not restated here, because the requirement turns on there being at least one and the census
+ * above is the one place that counts them. The module
  * inside the tree walker requires the file, once present, to CARRY Javadoc, which is why a bare package
  * statement would not satisfy the gate. Neither can be waived: the rule set configures no in-source
  * suppression filter of any kind, so no annotation or magic comment can bypass a violation from within a

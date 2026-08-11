@@ -154,9 +154,12 @@
  *       name. Note what this class does NOT own: the coordinate itself, the two relative
  *       generation forms and the prefix rendering belong to a sibling type named in the
  *       boundary section below.
- *       <p>Assumptions: this class is the one member of this package with a WRITING surface, and the
- *       exception is deliberate. Every other rule here is a function of its arguments and touches
- *       nothing; this one holds the dataset bucket, so it writes the two reservation markers that make
+ *       <p>Assumptions: this class holds a WRITING surface, and so -- since the accrual's own
+ *       paragraphs landed -- does {@code InterestCalculationService}, which persists the generated
+ *       interest transaction of {@code 1300-B-WRITE-TX} and the account update of
+ *       {@code 1050-UPDATE-ACCOUNT}. Both are deliberate and neither is the general case: the
+ *       remaining rules here are functions of their arguments and touch nothing. This one holds the
+ *       dataset bucket, so it writes the two reservation markers that make
  *       a generation allocation durable across containers and retries, it stages a generation's dataset
  *       file, and it deletes the objects of a generation the retention rule has aged out. Placing those
  *       three in a job instead was the alternative and was declined: three jobs stage generations, so

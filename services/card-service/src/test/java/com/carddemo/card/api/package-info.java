@@ -1,54 +1,240 @@
 /**
  * Tests that hold this context's HTTP surface and its published contract to each other.
  *
- * <p>Assumptions: two test classes execute here and they ask different questions, so a failure in one
- * localises differently from a failure in the other. {@code CardControllerContractCensusTest} tests
- * EXISTENCE and ADDRESSING: it reads the operation identifiers out of the packaged contract at
- * {@code src/main/resources/openapi/card-api.yaml} and requires a mapped handler for each, then pins the
- * four addresses those handlers are mapped to. Nothing in a compiler or a linter performs that
- * comparison -- an operation identifier is a string in a YAML document and a handler is a method, and
- * the two are unrelated artifacts as far as the build is concerned. {@code CardDispatcherTest} tests
- * REQUEST BEHAVIOUR on the browse route: argument resolution, optional-body binding, bean validation,
- * the shared advice's rendering and the status a caller receives.</p>
+ * <p>Three classes sit beside this charter and each asks a different question about the card
+ * context's REST boundary, so a failure in one localises differently from a failure in another. One
+ * asks whether every operation the contract publishes is mounted, and at which address. The other
+ * two send real requests through a dispatcher and assert what a caller receives back: how an
+ * argument is resolved, how a faulted attribute is reported, and which status is returned. No class
+ * in this package asserts a business rule or a stored row.</p>
  *
- * <p>Refactoring Rationale: the second class is here because the first proved insufficient, and the
- * insufficiency was measured rather than argued. A review found that a census of this kind "missed the
- * literal POST/GET break and does not exercise binding, validation, advice, headers, or status
- * rendering" -- a comparison between a published address and a mapped address cannot see what a request
- * to that address does. The census is retained rather than replaced, because the two failures it detects
- * -- a published operation with no handler, and a handler at the wrong address -- are ones a dispatcher
- * test cannot report as such: a request to an unmounted address is simply refused, without saying that
- * the contract promised it.</p>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Refactoring Rationale: this package exists because of a measured defect rather than as a matter of
- * form. A review found that the contract declared five operations while the production tree held ZERO
- * controllers, so every published operation answered 404 while the document said otherwise, and the
- * build reported nothing. The census here is the smallest artifact that makes that class of gap
- * impossible to reintroduce, and it derives its expectation from the contract rather than from a list
- * written into the test, so it strengthens automatically as the contract grows.</p>
+ * <p>Assumptions: the enumeration below is both the closed set of this package's members and a
+ * listing of the directory, and it is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which reads the marker line, counts the {@code .java} files beside this charter, requires every
+ * name enumerated under it to be a file in this same directory, and re-counts each declared case
+ * figure against the class it names. That check carries 4 cases of its own and declares a floor of
+ * four marked charters at its line 90, so removing the marker below to silence a disagreement is
+ * itself a visible act rather than a quiet one:</p>
  *
- * <p>Refactoring Rationale: this paragraph previously ruled the dispatcher form OUT of this package
- * entirely, on the ground that standing up the web context would also exercise the security chain and so
- * a failure would not localise to the missing-handler question. That reasoning held for a FULL web
- * context and was then applied to a form that does not need one: {@code CardDispatcherTest} is assembled
- * with {@code standaloneSetup} and NO security chain, so an absent handler and a refused authority cannot
- * be confused -- there is no authority to refuse. The distinction the paragraph was protecting is
- * therefore kept by construction rather than by omitting the test. Which authority each route demands
- * remains asserted by {@code com.carddemo.card.config} against the chain's own installed authorization
- * managers, and is deliberately not restated here.</p>
+ * <pre>
+ * this directory: 4 java files = 3 tests + 1 charter
+ * </pre>
  *
- * <p>Alternatives Considered: a full {@code @SpringBootTest} web environment for the behavioural class,
- * which would additionally exercise the real filter chain and the auto-configured converters. Rejected
- * for this package: it would start a context, need a datasource and a token issuer, and turn a failure in
- * argument resolution into a failure that could equally be either of those. The one property a full
- * context would add that {@code standaloneSetup} cannot -- that the configured chain admits the route at
- * all -- is the property {@code com.carddemo.card.config} already asserts.</p>
+ * <ul>
+ *   <li>{@code CardControllerContractCensusTest} asks EXISTENCE and ADDRESSING across 4 cases, and
+ *       it builds no application context and sends no request. It reads every operation identifier
+ *       out of the packaged contract at {@code src/main/resources/openapi/card-api.yaml}, requires a
+ *       mapped handler named after each, pins the four addresses those handlers answer on, and
+ *       confines the one response shape carrying a full primary account number to the single
+ *       administrative handler. Neither the compiler nor a linter performs that comparison: an
+ *       operation identifier is a string in a document and a handler is a method, and the build
+ *       treats the two as unrelated artifacts.</li>
+ *   <li>{@code CardDispatcherTest} asks REQUEST BEHAVIOUR on the browse route across 5 cases:
+ *       whether a request carrying no body at all is accepted as the opening screen, whether a
+ *       cursor issued to one caller is refused when a different caller presents it, whether a
+ *       forward cursor presented as a backward step is refused, whether an account narrowing of the
+ *       wrong width is refused naming the member at fault, and whether an unreadable cursor is
+ *       refused rather than answered.</li>
+ *   <li>{@code CardUpdateHttpValidationTest} asks REQUEST BEHAVIOUR on the update route across 8
+ *       cases: that a conforming submission reaches the write path, that each faulted attribute is
+ *       answered with its reference sentence and its field state, that several attributes faulting
+ *       together are reported in one response, that attributes disagreeing on a state report the
+ *       first with its own, that a blank attribute stays distinguishable from an unacceptable one,
+ *       that an over-width attribute is refused at the boundary, and that a stale revision is
+ *       refused even when the submission changes nothing.</li>
+ * </ul>
  *
- * <p>Trade-offs: the contract is scanned line by line for operation identifiers rather than parsed
- * through an OpenAPI object model. A model would validate the document's structure on the way in; it
- * would also mean this package could only see what that model chose to expose, and this context's
- * contract leans on an extension field for its authority model and on a composition keyword for its
- * disclosure boundary -- exactly the kind of thing a model may normalise away. Reading the document as
- * written is the property being kept.</p>
+ * <p>Refactoring Rationale: this charter stated that "two test classes execute here" and named two
+ * of them, while {@code CardUpdateHttpValidationTest}, 445 lines declaring 8 cases, stood beside it
+ * as a third that no sentence here accounted for. The claim was
+ * replaced with the marker line above rather than merely incremented, because a count written in
+ * prose alone is invisible to everything except a reader comparing the paragraph against a directory
+ * listing, and this package is not the first place in the tree where such a count drifted. A fourth
+ * class arriving here without an entry now fails the build rather than quietly making this section
+ * wrong.</p>
+ *
+ * <h2>The boundary this package holds, and the four it does not</h2>
+ *
+ * <p>Only the transport boundary is asserted here: how a request binds, which handler answers it,
+ * how a refusal is rendered, and which status a caller receives. Four neighbouring questions are
+ * deliberately absent, each owned by a package that can answer it without assembling a
+ * dispatcher.</p>
+ *
+ * <ul>
+ *   <li>business rules, which are asserted against the COBOL paragraphs they were transcribed from
+ *       in the sibling test package {@code com.carddemo.card.service}</li>
+ *   <li>persistence, and therefore whether the generated SQL is right, which is asserted against a
+ *       real database in the sibling test package {@code com.carddemo.card.repository}</li>
+ *   <li>authority, which is asserted against the installed authorization managers of the chain
+ *       itself in the sibling test package {@code com.carddemo.card.config}</li>
+ *   <li>layering, which has exactly one owner in the whole build,
+ *       {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
+ *       a path {@code .github/workflows/services-ci.yml} cites character for character at its lines
+ *       15 and 434; no rule of that kind is restated in this package</li>
+ * </ul>
+ *
+ * <p>Trade-offs: the two behavioural classes are assembled from constructors rather than from an
+ * application context, which buys precise localisation at the cost of covering the wiring itself.
+ * What is bought is that a refusal observed here can only mean argument resolution, binding,
+ * validation or the advice, because no chain, no data source and no token issuer is present to have
+ * failed instead. What is given up is any evidence that the configured chain admits these routes at
+ * all, across the five operations this contract publishes on four addresses; that property is
+ * asserted against the chain declared at line 531 of
+ * {@code services/card-service/src/main/java/com/carddemo/card/config/SecurityConfig.java} by the 12
+ * cases of {@code com.carddemo.card.config.SecurityConfigTest}, rather than abandoned.</p>
+ *
+ * <h2>What the routes under test were transcribed from</h2>
+ *
+ * <p>The reference programs below are the specification for the operations this package exercises.
+ * They are read, never modified, and cited by path and line only.</p>
+ *
+ * <ul>
+ *   <li>the card list, {@code app/cbl/COCRDLIC.cbl} at 1459 lines, reached in the baseline through
+ *       CICS transaction {@code CCLI}, whose resource stanza opens at
+ *       {@code app/csd/CARDDEMO.CSD:357} and names {@code PROGRAM(COCRDLIC) TWASIZE(0)} at line
+ *       358</li>
+ *   <li>the card detail read, {@code app/cbl/COCRDSLC.cbl} at 887 lines, reached through CICS
+ *       transaction {@code CCDL}, whose stanza opens at line 347 and names
+ *       {@code PROGRAM(COCRDSLC) TWASIZE(0)} at line 348</li>
+ *   <li>the card update, {@code app/cbl/COCRDUPC.cbl} at 1560 lines, reached through CICS
+ *       transaction {@code CCUP}, whose stanza opens at line 367, carries
+ *       {@code DESCRIPTION(CREDIT CARD UPDATE TRANSACTION)} at line 368 and names
+ *       {@code PROGRAM(COCRDUPC) TWASIZE(0)} at line 369</li>
+ * </ul>
+ *
+ * <p>Two copybooks carry the contracts those programs work to. The 150-byte {@code CARD-RECORD} is
+ * declared at {@code app/cpy/CVACT02Y.cpy} line 4, in a file of 14 lines whose header states that
+ * record length. The message contract is declared at {@code app/cpy/CVCRD01Y.cpy}, 46 lines, whose
+ * lines 28 and 29 each declare a {@code PIC X(75)} message line and whose line 30 gives the second
+ * of them a {@code LOW-VALUES} sentinel for the unset state. Those widths are why a refusal asserted
+ * in this package is compared against a sentence rather than against a code alone.</p>
+ *
+ * <p>Two capabilities the target platform supplies are asserted outside this package, and both are
+ * recorded here so the split is legible rather than surprising. The baseline region declares
+ * {@code RESSEC(NO) CMDSEC(NO)} for each of the three transactions, on single lines at
+ * {@code app/csd/CARDDEMO.CSD:354} for {@code CCDL}, line 364 for {@code CCLI} and line 375 for
+ * {@code CCUP}, so authority travelled with the terminal session rather than being verified per
+ * request; the migrated service verifies it on every request from a signed claim, and that
+ * verification is asserted in the configuration test package. The same three stanzas declare
+ * {@code CONFDATA(NO)}, at lines 353, 363 and 374, so the region applied no narrowing of its own to
+ * what it sent to the screen; the migrated service narrows the primary account number in every
+ * response shape but one, and the census class beside this charter is what confines that exception
+ * to the single administrative handler.</p>
+ *
+ * <h2>Two ways a class here can pass while testing nothing</h2>
+ *
+ * <p>Assumptions: the advice that renders a refusal is not part of this context, so a dispatcher
+ * assembled here has none unless the class supplies one.
+ * {@code com.carddemo.common.error.GlobalExceptionHandler} is declared
+ * {@code @RestControllerAdvice} at line 160 of
+ * {@code services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java},
+ * it sits in {@code com.carddemo.common.error} and therefore outside {@code com.carddemo.card}, and
+ * it reaches a running service only through {@code com.carddemo.common.CardDemoCommonAutoConfiguration},
+ * the single class named in the shared kernel's
+ * {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}. A
+ * dispatcher assembled from constructors applies no auto-configuration at all, so the advice arrives
+ * only because each behavioural class registers it as controller advice, passing a clock pinned to
+ * one instant so a rendered timestamp stays comparable between runs. The consequence of dropping
+ * that registration is the reason it is written down here: the dispatcher would answer with the
+ * container's own default error representation, every assertion about the problem body's shape and
+ * about a 404 or a 409 would still pass, and the class would report success having verified
+ * none of them.</p>
+ *
+ * <p>Assumptions: no authorization chain is installed by anything in this package, which is a
+ * property of how these dispatchers are assembled rather than an omission in them.
+ * {@code com.carddemo.card.config.SecurityConfig} owns the whole authority matrix, including the
+ * administrator gate on the one route that answers with a full primary account number,
+ * {@code /api/v1/admin/cards/{cardKey}}, and it builds the token decoder that chain needs at its
+ * line 682. {@code CardController} itself carries no authority expression of any kind, so reading
+ * the controller reveals nothing about who may call it. A dispatcher assembled from constructors
+ * installs neither the chain nor the decoder, so an assertion written here that an administrator is
+ * admitted and an ordinary caller refused would pass with nothing present to refuse anybody. That
+ * is why the authority split is asserted in {@code com.carddemo.card.config} and is deliberately not
+ * restated here.</p>
+ *
+ * <p>Assumptions: none of the three classes reads
+ * {@code services/card-service/src/test/resources/application-test.yml}. That overlay takes effect
+ * only for a class activating the {@code test} profile, and no class in this package does, because
+ * none of them builds a Spring application context: the census reads a resource and reflects over a
+ * type, and the two dispatchers are assembled from constructors. This is recorded because that
+ * overlay names a reader in this package at its lines 28, 479 and 491, under a class name no file
+ * here carries, so a maintainer could reasonably expect a
+ * property set there, an issuer location or a transport setting, to influence what these tests do. It
+ * does not, and a value changed there to steer a result here would have no effect at all.</p>
+ *
+ * <h2>What parity here does and does not rest on</h2>
+ *
+ * <p>Assumptions: no executable golden master exists for any path this package covers, so parity
+ * rests on validation logic transcribed from the COBOL paragraphs together with the copybook
+ * contracts, and never on a recorded output stream. The repository's own suite states the reason at
+ * {@code tests/README.md:83-85}: the online {@code CO*} CICS programs cannot run end to end without
+ * a CICS runtime, which is absent on the runner, so only their extractable field-validation logic is
+ * unit-tested there. Its golden masters cover the batch chain, and none of {@code COCRDLIC},
+ * {@code COCRDSLC} or {@code COCRDUPC} is a batch program. Shipping inputs without a recorded output
+ * is established house practice rather than a shortfall: {@code tests/README.md:139-146} describes
+ * the export domain shipping fixtures and no golden directory, and calls that arrangement internally
+ * consistent.</p>
+ *
+ * <p>Assumptions: the graded return codes of that COBOL suite do not reach this package. The rubric
+ * is quarantined to {@code tests/}, where {@code tests/README.md:412-423} defines the values 0, 2,
+ * 4, 8 and 16 and has each runner aggregate the worst code seen, and where
+ * {@code tests/README.md:63} records a soft warn of 4 as that suite's own passing state. The gates a
+ * class in this directory answers to are binary instead: Checkstyle, the compiler, Surefire,
+ * Failsafe and JUnit each pass or fail outright. No warning tier exists here to land in, so a
+ * partial result in this package is a failure.</p>
+ *
+ * <h2>Why this file exists, and why it is not empty</h2>
+ *
+ * <p>Alternatives Considered: leaving this directory without a charter, and leaving a charter holding
+ * nothing but its package statement. Both were weighed against the gate that actually runs, and each
+ * fails it in a different place, which is why this file is neither absent nor bare. Two checks act
+ * here and they act on different things. {@code JavadocPackage} is declared at Checker level in
+ * {@code config/checkstyle/checkstyle.xml} at line 276, so it is a file-set check that fires for any
+ * directory holding an audited {@code .java} file and demands that a {@code package-info.java} exist
+ * in it. {@code MissingJavadocPackage} is declared inside {@code TreeWalker} at line 409 of that
+ * same ruleset, and it demands that the file carry a documentation comment. A charter reduced to its
+ * package statement therefore satisfies the first and fails the second. The gate is also not a
+ * review-time courtesy: {@code services/pom.xml} binds it as the
+ * {@code checkstyle-documentation-gate} execution on the Maven {@code validate} phase with
+ * {@code failOnViolation} true, {@code violationSeverity} at warning and
+ * {@code includeTestSourceDirectory} true, so it audits this test tree on every local build and does
+ * so before a single class is compiled. Nor is there an exemption to fall back on:
+ * {@code config/checkstyle/suppressions.xml} carries exactly two entries, one for generated sources
+ * and one for test fixture material, and its own charter refuses to widen the second to
+ * {@code src/test/java} on the stated ground that doing so would exempt every controller, service
+ * and repository test in every module. That ruleset configures no suppression filter of any kind
+ * either, so an exemption cannot be written into a Java source at all and this file cannot be
+ * excused in place.</p>
+ *
+ * <p>Assumptions: no charter belongs at {@code src/test/java/com/}, at
+ * {@code src/test/java/com/carddemo/} or at {@code src/test/java/com/carddemo/card/}, and none is
+ * present at any of the three. {@code JavadocPackage} fires only for a directory that holds an
+ * audited {@code .java} file, and each of those three holds subdirectories and nothing else, the
+ * last of them holding the 8 that carry this module's tests, so a
+ * charter placed there would document a package with no compilation unit in it. This is recorded so
+ * that the absence reads as a measurement rather than as three files somebody forgot.</p>
+ *
+ * <p>Assumptions: no parameter, return-value or exception at-clause appears in this charter, and
+ * their absence is deliberate rather than an omission. The project's single user-specified rule asks
+ * a docstring to give a purpose, each parameter, the return value and the exceptions raised where
+ * applicable; a package declaration has no parameter, returns nothing and raises nothing, so the
+ * purpose clause is the whole of what applies to this file. A placeholder written to look complete
+ * would fail mechanically as well, because {@code NonEmptyAtclauseDescription} is configured at line
+ * 501 of the ruleset and an at-clause with an empty description is a violation.</p>
+ *
+ * <p>Alternatives Considered: every rationale above is tagged with one of four labels written in the
+ * plural, unparenthesised, colon-terminated form, taken from lines 31 to 34 of that same rule and
+ * set out for this tree in {@code docs/CODE_DOCUMENTATION_STANDARD.md} at its lines 236 to 239. The
+ * alternative was to match the idiom that predominates in the repository's existing suite, which
+ * tags the same categories in the parenthesised singular, as {@code tests/README.md:66} does. It was
+ * rejected on two concrete grounds. The rule's validation gate at its line 43 is the sentence this
+ * tree is audited against, and that gate is written with the plural wording. And those labels are
+ * not safe to lift byte for byte from that file: it carries the non-breaking hyphen 106 times across
+ * 77 lines, and its lines 542 and 548 contain no ASCII hyphen at all, so a label copied from line
+ * 548, which is precisely where it spells the compromises category, would read correctly to a person
+ * and match no search a reviewer ran.</p>
  */
 package com.carddemo.card.api;
