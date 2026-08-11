@@ -329,19 +329,41 @@ management:
         #       the status word, so they must not be answered with contributor
         #       detail, while an operator asking the named path is a distinct,
         #       authorizable audience and is distinguishable in an access log.
-        #       (2) Assumptions: the contributor names are the ones this module
-        #       actually registers -- `db` from the datasource, `flyway` from the
-        #       migration endpoint the exposure list above admits, `diskSpace`
-        #       and `ping` from the framework defaults -- so the group resolves
-        #       rather than silently matching nothing.
-        #       (3) Trade-offs: the two questions a failed deployment raises --
+        #       (2) Assumptions: every name below is a health CONTRIBUTOR this
+        #       module actually registers -- `db` from the datasource,
+        #       `diskSpace` and `ping` from the framework defaults. A health
+        #       group admits contributor names only, and it is validated: with
+        #       `management.endpoint.health.validate-group-membership` at its
+        #       default of true, a name that resolves to no contributor aborts
+        #       startup rather than matching nothing.
+        #       (3) Refactoring Rationale: `flyway` was listed here and is
+        #       removed. It is an actuator ENDPOINT and not a health
+        #       contributor: spring-boot-flyway 4.1.0 ships
+        #       org.springframework.boot.flyway.actuate.endpoint.FlywayEndpoint
+        #       and no health class at all, so this group could never resolve it.
+        #       The measured consequence was not a missing panel but a service
+        #       that refused to start under this profile, reporting "Health
+        #       contributor 'flyway' defined in
+        #       'management.endpoint.health.group.diagnostics.include' does not
+        #       exist" -- found by starting the built archive, because no test in
+        #       this module assembles the whole context under this profile. The
+        #       migration question the entry was meant to answer is answered by
+        #       the `flyway` ENDPOINT the exposure list above already admits, so
+        #       nothing is lost by removing it from the group.
+        #       (4) Alternatives Considered: setting
+        #       `validate-group-membership` to false, which is what the failure
+        #       message offers. Rejected: it would keep the unresolvable name and
+        #       switch off the check that reported it, so the next mistyped
+        #       contributor would go unreported and this group would silently
+        #       answer for less than it names.
+        #       (5) Trade-offs: the two questions a failed deployment raises --
         #       did the pool connect, and did the migration run -- are answered
-        #       on this path for a caller entitled to ask, and the `flyway`
-        #       endpoint above answers the second one for the same audience. What
-        #       is given up is reading either answer out of an unauthenticated
-        #       probe reply, which is exactly the disclosure being closed.
+        #       for a caller entitled to ask, the first by `db` on this path and
+        #       the second by the `flyway` endpoint above. What is given up is
+        #       reading either answer out of an unauthenticated probe reply,
+        #       which is exactly the disclosure being closed.
         diagnostics:
-          include: db,flyway,diskSpace,ping
+          include: db,diskSpace,ping
           show-details: when-authorized
           show-components: when-authorized
 

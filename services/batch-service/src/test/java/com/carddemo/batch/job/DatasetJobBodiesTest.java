@@ -305,6 +305,14 @@ class DatasetJobBodiesTest {
     /**
      * A dataset whose length is not a whole multiple of the record length reports the remainder as
      * an error rather than ignoring it.
+     *
+     * <p>Refactoring Rationale: this case previously asserted that the error output held the raw
+     * remainder, so its expected length was the remainder's own length. That expectation belonged to an
+     * earlier import body that copied unparsed images through to its outputs, and it is wrong against
+     * the record layout: {@code app/cbl/CBIMPORT.cbl:106-109} declares the error record
+     * {@code PIC X(132)} and {@code app/jcl/CBIMPORT.jcl:56-60} allocates {@code LRECL=132}, so writing
+     * a 250-byte image into that artefact would produce a stream no positional consumer could parse.
+     * The assertion now reads one 132-byte diagnostic record, which is what the layout admits.</p>
      */
     @Test
     @DisplayName("a truncated dataset routes its short remainder to the error output")
@@ -331,7 +339,8 @@ class DatasetJobBodiesTest {
                 .indexOf("import/2022071800/error.dat");
         assertThat(errorIndex).isNotNegative();
         assertThat(bodies.getAllValues().get(errorIndex).optionalContentLength())
-                .contains((long) truncated.length);
+                .as("one diagnostic record at the 132-byte length the error artefact is declared with")
+                .contains(132L);
     }
 
     /**

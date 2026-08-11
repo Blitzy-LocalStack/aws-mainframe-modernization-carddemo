@@ -4,10 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.account.domain.Customer;
+import io.awspring.cloud.autoconfigure.sqs.SqsAutoConfiguration;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -15,6 +21,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
@@ -182,6 +189,51 @@ class CustomerMasterRepositoryIT {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.flyway.user", POSTGRES::getUsername);
         registry.add("spring.flyway.password", POSTGRES::getPassword);
+    }
+
+    /**
+     * Creates the owning role and the schema that the migration expects to find already present.
+     *
+     * <p>Assumptions: {@code data-migration/sql/V0__schemas_and_roles.sql} is the exclusive authority for
+     * schemas, roles and grants, and this container has never run it. That bootstrap is a precondition of
+     * the service starting rather than part of its migration, so {@code V1__account.sql} contains no
+     * {@code CREATE SCHEMA} and the base profile forbids Flyway from creating one. Supplying the
+     * precondition here is what lets the migration run against the ownership a deployment gives it: the
+     * base profile's own {@code spring.flyway.init-sqls} statement assumes this role, so every object
+     * {@code V1__account.sql} creates belongs to it, which is the arrangement
+     * {@link #flywayAppliedTheProductionAccountMigration()} then asserts by name.</p>
+     *
+     * <p>Trade-offs: the three statements below name the same role the bootstrap document names, so the two
+     * do have to agree. The alternative was to let the test profile create the role and grant it rights,
+     * which was rejected because a profile that issues those statements becomes a second definition of the
+     * cluster's role graph that no migration history records. Confining the prerequisite to test setup keeps
+     * one authority for the deployed graph and one visible harness step for the container.</p>
+     *
+     * <p>Assumptions: this runs before the Spring context is created, because JUnit invokes an
+     * {@code @BeforeAll} method after the Testcontainers extension has started the static container and
+     * before the Spring extension creates the context for the first test instance. Plain JDBC is used
+     * rather than an injected {@code DataSource} for that reason -- no bean exists yet.</p>
+     *
+     * <p>This setup step takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the container refuses the connection or any statement, which is a broken
+     *     harness rather than a failed assertion and is reported as such
+     */
+    @BeforeAll
+    static void createSchemaAndOwnerBeforeFlywayRuns() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(
+                        POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE carddemo_account_owner NOLOGIN");
+            // WHY : Assumptions: CREATE on the database is required and is not implied by role creation --
+            //       a fresh role holds only the PUBLIC grants, which are CONNECT and TEMPORARY, so the
+            //       schema creation below would fail once the role is assumed. The database name is
+            //       interpolated because Testcontainers generates it, and it is quoted as an identifier
+            //       because no generated name is guaranteed to be a bare lower-case word.
+            statement.execute("GRANT CREATE ON DATABASE \"" + POSTGRES.getDatabaseName()
+                    + "\" TO carddemo_account_owner");
+            statement.execute("CREATE SCHEMA account AUTHORIZATION carddemo_account_owner");
+        }
     }
 
     /**
@@ -616,8 +668,25 @@ class CustomerMasterRepositoryIT {
      * <p>A configuration class accepts no parameter, yields no value and raises nothing, so this block
      * carries no parameter, return or exception at-clause.</p>
      */
+    // WHY : Assumptions: the two auto-configurations excluded here read deployment values that the test
+    //       profile deliberately does not carry -- the resource-server one evaluates its decoder condition
+    //       against spring.security.oauth2.resourceserver.jwt.issuer-uri, and the queue one builds a client
+    //       that needs a region. Both are bound in application.yml to placeholders with no fallback, so
+    //       leaving either auto-configuration in this context ends context load while the condition is
+    //       being evaluated, reporting a failure that belongs to configuration rather than to any of the
+    //       ten SQL assertions in this class. AccountScreenProjectionIT excludes the same pair for the same
+    //       reason, so the two persistence tests in this package now load the same shape.
+    //       Alternatives Considered: committing a stand-in issuer address and a region into the test
+    //       profile so that a bare @EnableAutoConfiguration would start. Rejected because it puts a network
+    //       location in a committed file for a context that never calls it, and because a stand-in that
+    //       resolves is an invitation for a later context to reach it; excluding what is not under test
+    //       keeps the failure surface of this class on the persistence layer.
+    //       Trade-offs: neither the resource-server chain nor the queue client is covered here. That is
+    //       correct rather than a gap -- each is covered where it is configured, and a test about ten SQL
+    //       statements is not where a filter chain or a transport should first be exercised.
     @SpringBootConfiguration
-    @EnableAutoConfiguration
+    @EnableAutoConfiguration(
+            exclude = {OAuth2ResourceServerAutoConfiguration.class, SqsAutoConfiguration.class})
     @EntityScan("com.carddemo.account.domain")
     @EnableJpaRepositories("com.carddemo.account.repository")
     static class CustomerPersistenceTestApplication {

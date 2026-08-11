@@ -335,9 +335,12 @@ public class DataSourceConfig {
         // Trade-offs: neither property carries a default, so removing one from configuration stops
         //   startup with a message naming it. The alternative of defaulting to the pool's own numbers
         //   was rejected because it would put a sizing number in this file, and the sizing must vary by
-        //   environment: application.yml declares the base pair at L585 and L594, application-dev.yml
-        //   narrows the ceiling at L135 for a cluster that scales toward zero, and
-        //   application-prod.yml widens it at L139. The invariant those numbers must satisfy cannot be
+        //   environment: application.yml declares the base pair under spring.datasource.hikari,
+        //   application-dev.yml narrows the ceiling and takes the idle floor to zero for a cluster that
+        //   scales toward zero, and application-prod.yml widens the ceiling and holds the floor above
+        //   zero. Those three files are cited by key rather than by line deliberately -- a line number
+        //   into another author's file goes stale on any edit above it, and a stale citation is worse
+        //   than none because a reader trusts it. The invariant those numbers must satisfy cannot be
         //   checked here because half of it lives outside this deployable: running task count
         //   multiplied by this ceiling must stay within the database cluster's connection budget. What
         //   is checked here is the half that is local and self-contained, and the ceiling is logged so

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import pytest
 
-from carddemo_migration.copybook.layouts import LayoutError
+from carddemo_migration.copybook.layouts import LayoutError, layout
 from carddemo_migration.readers.card import (
     LOADED_FIELDS,
     PROTECTED_FIELD_NAMES,
@@ -230,7 +230,26 @@ def test_the_masked_renderings_still_withhold_the_verification_value() -> None:
     rendered = render_masked_card_record(_CARD_RECORD)
 
     assert len(rendered) == 150
-    assert _VERIFICATION_VALUE not in rendered
+    # WHY : Refactoring Rationale: the verification value is looked for in the SPAN THAT HELD IT
+    #   rather than anywhere in the whole record, and the offset is resolved from the layout rather
+    #   than typed here. The whole-record probe was intermittently wrong, not merely imprecise:
+    #   every masked span carries a keyed-HMAC hex tag whose alphabet includes all ten decimal
+    #   digits, so this three-digit value can appear inside ANOTHER field's tag by coincidence --
+    #   measured at roughly one run in four hundred against the per-process mask key, which made
+    #   the whole suite flaky. A coincidence inside the embossed name's tag is not a disclosure of
+    #   the verification value, while the value reappearing in its own span is exactly one, so the
+    #   span probe fails on the disclosure this case exists to catch and on nothing else.
+    verification_field = next(
+        field for field in layout("CARD").fields if field.name == "CARD-CVV-CD"
+    )
+    verification_span = rendered[
+        verification_field.start : verification_field.start + verification_field.length
+    ]
+    assert len(verification_span) == len(_VERIFICATION_VALUE)
+    assert _VERIFICATION_VALUE not in verification_span
+    # WHY : Assumptions: the sixteen-digit account number keeps its whole-record probe. A run of
+    #   sixteen specific digits appearing inside a hex tag by chance is not a rate this suite has
+    #   to design around, so nothing is given up by leaving that assertion at its widest.
     assert _PRIMARY_ACCOUNT_NUMBER not in rendered
 
     with pytest.raises(LayoutError):

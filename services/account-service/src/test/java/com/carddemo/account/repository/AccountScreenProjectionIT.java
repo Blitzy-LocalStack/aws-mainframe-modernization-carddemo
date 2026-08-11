@@ -8,12 +8,14 @@ import com.carddemo.account.domain.Customer;
 import io.awspring.cloud.autoconfigure.sqs.SqsAutoConfiguration;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -230,6 +232,50 @@ class AccountScreenProjectionIT {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.flyway.user", POSTGRES::getUsername);
         registry.add("spring.flyway.password", POSTGRES::getPassword);
+    }
+
+    /**
+     * Creates the owning role and the schema that the migration expects to find already present.
+     *
+     * <p>Assumptions: {@code data-migration/sql/V0__schemas_and_roles.sql} is the exclusive authority for
+     * schemas, roles and grants, and this container has never run it. That bootstrap is a precondition of
+     * the service starting rather than part of its migration, so {@code V1__account.sql} contains no
+     * {@code CREATE SCHEMA} and the base profile forbids Flyway from creating one. Supplying the
+     * precondition here lets the migration run under the ownership a deployment gives it, because the base
+     * profile's own {@code spring.flyway.init-sqls} statement assumes this role and every object
+     * {@code V1__account.sql} creates therefore belongs to it.</p>
+     *
+     * <p>Trade-offs: the three statements below name the same role the bootstrap document names, so the two
+     * do have to agree. Letting the test profile create the role and grant it rights was rejected: a profile
+     * issuing those statements becomes a second definition of the cluster's role graph that no migration
+     * history records. Keeping the prerequisite in test setup leaves one authority for the deployed graph
+     * and one visible harness step for the container.</p>
+     *
+     * <p>Assumptions: this runs before the Spring context is created, because JUnit invokes an
+     * {@code @BeforeAll} method after the Testcontainers extension has started the static container and
+     * before the Spring extension creates the context for the first test instance. Plain JDBC is used
+     * rather than the injected {@code DataSource} for that reason -- no bean exists yet.</p>
+     *
+     * <p>This setup step takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the container refuses the connection or any statement, which is a broken
+     *     harness rather than a failed assertion and is reported as such
+     */
+    @BeforeAll
+    static void createSchemaAndOwnerBeforeFlywayRuns() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(
+                        POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE carddemo_account_owner NOLOGIN");
+            // WHY : Assumptions: CREATE on the database is required and is not implied by role creation --
+            //       a fresh role holds only the PUBLIC grants, which are CONNECT and TEMPORARY, so the
+            //       schema creation below would fail once the role is assumed. The database name is
+            //       interpolated because Testcontainers generates it, and it is quoted as an identifier
+            //       because no generated name is guaranteed to be a bare lower-case word.
+            statement.execute("GRANT CREATE ON DATABASE \"" + POSTGRES.getDatabaseName()
+                    + "\" TO carddemo_account_owner");
+            statement.execute("CREATE SCHEMA account AUTHORIZATION carddemo_account_owner");
+        }
     }
 
     /**

@@ -2,129 +2,157 @@
 # services/account-service/src/main/resources/application-prod.yml
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The production profile overlay for the CardDemo account bounded context, the
+#   The `prod` profile overlay for the CardDemo account bounded context - the
 #   migration target of COBOL programs COACTVWC, COACTUPC, CBACT01C, CBACT03C,
-#   CBCUS01C and COACCT01. It overrides VALUES ONLY, on keys that
-#   application.yml beside it already declares, and it introduces no key that is
-#   absent there. Eleven leaf values are set. Ten of them sit on the four axes the
-#   base document's closing block permits a profile to vary - log verbosity,
-#   connection-pool sizing including the acquisition timeout, actuator health
-#   detail breadth, and the statement echo flag. The eleventh is
-#   spring.config.import, which is not an axis at all: a profile's import list
-#   REPLACES the base document's, so every overlay must re-declare the shared
-#   defaults document, and the reason is recorded at that key.
+#   CBCUS01C and app/app-vsam-mq/cbl/COACCT01.cbl, owning the PostgreSQL schema
+#   `account` and its three tables accounts, customers and card_xref.
 #
-#   This file differs from application-dev.yml in SIZING, RETENTION and
-#   DIAGNOSTIC VERBOSITY only, never in topology, protocol or security posture.
-#   The listener still serves TLS on the same port, the datasource is still the
-#   Aurora writer endpoint resolved from the platform, the same three tables are
-#   reached through the same pinned search path under the same carddemo_account
-#   role, Flyway still owns the DDL and still may not create the schema, and
-#   identity still arrives as a signed token whose token_use, client and scope
-#   claims config/SecurityConfig.java checks before common-lib's JwtRoleConverter
-#   maps its groups to authorities. A profile that turned off TLS or opened an
-#   actuator endpoint "just for prod triage" would make dev stop being a
-#   rehearsal for prod, which is the only reason to have a dev environment at
-#   all.
+#   It is layered over application.yml beside it when SPRING_PROFILES_ACTIVE=prod
+#   is set on the ECS task definition. It is never selected from inside the
+#   image: services/account-service/Dockerfile deliberately leaves that variable
+#   unpinned so one built image serves both environments, and the task definition
+#   chooses. Nothing below sets spring.profiles.active, and there is no
+#   spring.config.activate.on-profile guard, because the filename already scopes
+#   this document to the profile.
 #
-#   Seven of the eleven values below RESTATE the base value rather than changing
-#   it, and that is deliberate in each case: restating a value is what makes a
-#   later broader edit - to the base document, or to a dev value read as if it
-#   applied everywhere - unable to move production without a visible diff in this
-#   file. The seven are the acquisition timeout, the maximum connection lifetime,
-#   the statement echo flag, the project package level, the SQS listener level,
-#   the bind-parameter level and the health detail breadth. Each records that
-#   reason at its own key. The four that genuinely change are the pool ceiling,
-#   the idle floor, the root log level and the Parameter Store prefix default.
+#   THE NARROW-DELTA CONTRACT. `dev` and `prod` differ ONLY in sizing,
+#   connection-pool sizes, log level and retention. They NEVER differ in
+#   topology. This file therefore carries the SAME TEN KEYS as
+#   application-dev.yml and differs from it in values alone - three Hikari pool
+#   numbers, two SQS listener sizing numbers, and five log levels. The two files
+#   are meant to be read side by side, and a key present in one but absent from
+#   the other would be a topology difference in disguise, so the key sets are
+#   held identical deliberately. Retention is the fourth axis and is discharged
+#   by a note rather than a key, for the reason recorded beside the log levels.
 #
-#   No endpoint, credential, identifier, queue name, region or bucket appears
-#   below, and no stand-in for one. Every such value stays an unresolved
-#   placeholder in application.yml and is injected by the platform at deployment.
+#   Everything else is INHERITED and deliberately not restated: no datasource
+#   URL, username or password; no spring.config.import; no queue name or URL; no
+#   issuer or JSON web key set URI; no key identifier; no region; no Flyway key;
+#   no ddl-auto; no server.port; no actuator exposure list; no springdoc or
+#   Jackson key. The listener still serves TLS on the same port, the datasource
+#   is still the Aurora writer endpoint resolved from the platform, the same three
+#   tables are reached through the same pinned search path under the same
+#   carddemo_account role, Flyway still owns the DDL and still may not create the
+#   schema, and identity still arrives as a signed token whose token_use, client
+#   and scope claims config/SecurityConfig.java checks before common-lib's
+#   JwtRoleConverter maps its groups to authorities. A profile that turned off TLS
+#   or opened an actuator endpoint "just for prod triage" would make dev stop
+#   being a rehearsal for prod, which is the only reason to have a dev
+#   environment at all.
+#
+#   Four of the ten values below RESTATE the base value rather than changing it,
+#   and that is deliberate in each case: restating a value is what makes a later
+#   broader edit - to the base document, or to a dev value read as if it applied
+#   everywhere - unable to move production without a visible diff in this file.
+#   The four are the acquisition timeout, the two SQS listener numbers and the
+#   bind-parameter level. Each records that reason at its own key. The six that
+#   genuinely change are the pool ceiling, the idle floor, the root level, the
+#   project package level, the SQS listener level and the statement level.
+#
+#   No endpoint, credential, identifier, queue name, region, account number or
+#   bucket appears below, and no stand-in for one. Every such value stays an
+#   unresolved placeholder in application.yml and is injected by the platform at
+#   deployment.
 #
 # Parameters:
-#   Each property key is the YAML analogue of a parameter. This overlay consumes
-#   exactly one environment variable of its own:
+#   Each property key below is the YAML analogue of a parameter, and each one
+#   overrides a key that application.yml already declares. This overlay
+#   introduces no key of its own and consumes no environment variable of its own;
+#   the variables this module reads are listed in the base document.
 #
-#   CARDDEMO_ENVIRONMENT
-#     String. The environment label that completes the Parameter Store prefix
-#     below. Defaults to `prod` here rather than `dev`, so a task started with
-#     this profile and no label still reads the right subtree. The same variable
-#     is read by the shared defaults document as the environment metric tag, and
-#     there is exactly one spelling of it in this repository.
+#     spring.datasource.hikari.maximum-pool-size    - integer, base 10
+#     spring.datasource.hikari.minimum-idle         - integer, base 2
+#     spring.datasource.hikari.connection-timeout   - milliseconds, base 10000
+#     spring.cloud.aws.sqs.listener.max-concurrent-messages - integer, base 10
+#     spring.cloud.aws.sqs.listener.max-messages-per-poll   - integer, base 10
+#     logging.level.root                            - level, base INFO
+#     logging.level.com.carddemo                    - level, base INFO
+#     logging.level.io.awspring.cloud.sqs           - level, base WARN
+#     logging.level.org.hibernate.SQL               - level, base WARN
+#     logging.level.org.hibernate.orm.jdbc.bind     - level, base WARN
 #
 # Return values:
-#   The effective configuration handed to the Spring application context after
-#   this overlay is merged over src/main/resources/application.yml and the
-#   imported carddemo-common-defaults.yml.
+#   The effective Spring Environment handed to the application context after this
+#   overlay is merged over application.yml and over the shared defaults document
+#   that the base imports. This file returns nothing to application code
+#   directly; it is read by two sibling classes and by the logging subsystem:
+#
+#     config/DataSourceConfig.java consumes the three Hikari numbers. It reads
+#       maximum-pool-size and minimum-idle as declared values rather than from the
+#       started pool, validates them, and logs the accepted ceiling and idle floor
+#       so the half of the sizing invariant that lives outside this deployable can
+#       be audited.
+#     config/SqsConfig.java consumes the listener sizing indirectly: it owns the
+#       acknowledgement posture and the bounded drain on the listener-container
+#       factory, while the two numbers below are read by the starter's own
+#       listener configuration. The five-second long poll is NOT here; it is owned
+#       by the base document, for the reason recorded beside the listener.
+#     the logging subsystem consumes the five levels, rendered through the console
+#       pattern the base's imported shared defaults supply.
 #
 # Exceptions or errors:
-#   A misspelled Spring property is silently ignored rather than reported, so a
-#   typo here does not fail startup - it leaves the base value in force and the
-#   intended change simply never happens. In production that silence is the whole
-#   risk this file carries, because the values it sets are the ones that keep
-#   cardholder material out of log storage: a mis-typed logger name would leave a
-#   diagnostic raised somewhere else in force rather than pinning it down. That
-#   is why the two loggers that must stay narrow are restated here explicitly
-#   rather than inherited, and why each names what it prevents.
+#   1. Refused sizing at startup. DataSourceConfig validates the declared pair
+#      before the web server starts and raises IllegalStateException naming the
+#      offending property: a ceiling below 1 admits no connection, and an idle
+#      floor that is negative or exceeds the ceiling is refused rather than
+#      quietly substituted.
+#   2. Pool exhaustion from mis-sizing, surfacing as a Hikari connection-timeout
+#      exception on the request or message handler that lost the race for a
+#      connection, after the acquisition timeout below elapses - not as a startup
+#      failure. Raising the listener concurrency above the pool ceiling is the
+#      specific way to cause it, which is why the two numbers are chosen together.
+#   3. Silent no-op from a misspelling. Spring ignores an unknown property rather
+#      than reporting it, so a typo here does not fail startup - it leaves the
+#      base value in force and the intended change never happens. In production
+#      that silence is the whole risk this file carries, because two of the values
+#      it sets are what keep cardholder material out of log storage: a mis-typed
+#      logger name would leave a diagnostic raised elsewhere in force rather than
+#      pinning it down. That is why both of those loggers are restated here
+#      explicitly rather than inherited, and why each names what it prevents.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
 #     values and Exceptions on a module entry point. YAML has no docstring
-#     construct, so the mapping is: this header states Purpose; property keys are
-#     Parameters; the merged Spring Environment is the Return value; and each
-#     adjacent rationale states what a wrong value silently admits.
-#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
-#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
-#     same limit for YAML. No linter in this project inspects this file, so the
-#     obligation rests on that written standard and on review.
+#     construct, so this header block is the module-entry-point equivalent, and
+#     the convention it follows is docs/CODE_DOCUMENTATION_STANDARD.md. That
+#     standard also fixes the comment form used below: a statement-level WHAT
+#     comment is forbidden in a configuration file because it restates the key it
+#     sits on, so every key below carries a labelled WHY rationale and nothing
+#     else - one category name, the reason, and what differs under the
+#     alternative. A file-header WHAT is the documented exception, because this
+#     header is the docstring analogue for a format that has none.
+#   - Assumptions: no linter in this project reads this file.
+#     config/checkstyle/checkstyle.xml narrows itself to fileExtensions="java",
+#     and the standard records the same absence of a mechanical gate for YAML, so
+#     the obligation rests on that written standard and on review.
 #   - Assumptions: production capacity has a NON-ZERO minimum, so the cluster
 #     never pauses. That single difference from dev is what justifies both the
-#     larger pool and the shorter acquisition timeout below; neither number would
-#     be right against a cluster that sleeps.
+#     larger pool and the shorter acquisition timeout below, and it is why the
+#     idle floor is held above zero here while dev takes it to zero; neither
+#     number would be right against a cluster that sleeps.
 #   - Trade-offs: nothing here re-enables a diagnostic the base document
-#     suppresses. The two values that would be tempting to raise during an
-#     incident - the statement echo and the bind-parameter logger - are exactly
+#     suppresses. The two that would be tempting to raise during an incident -
+#     the Hibernate statement logger and the bind-parameter logger - are exactly
 #     the two that would write account identifiers and the plaintext side of the
 #     encrypted identifier columns into log storage, which is the one destination
 #     the masking applied at the API edge does not reach.
-#   - Alternatives Considered: widening the actuator health detail here so that an
-#     on-call reader can see which contributor is failing. Rejected, and the
-#     rejection is recorded at the key rather than only here: the probe path is
-#     unauthenticated by deployment necessity, so a detail payload would describe
-#     the data tier to anything able to reach the port. The same information is
-#     available from the metrics scrape path and from the task's own logs, neither
-#     of which is reachable without a credential.
+#   - Alternatives Considered: widening the actuator health detail here so an
+#     on-call reader can see which contributor is failing. Rejected, and the key
+#     is not restated at all: the probe path is unauthenticated by deployment
+#     necessity - the load balancer target group and the container health check
+#     can neither of them present a token - so a detail payload would describe the
+#     data tier to anything able to reach the port. The base document already
+#     closes that detail, and neither profile reopens or restates it, which keeps
+#     the actuator surface identical in both environments by construction rather
+#     than by two matching values. The same information is available from the
+#     metrics scrape path and the task's own logs, neither reachable without a
+#     credential.
 # =============================================================================
 
 spring:
-  config:
-    # WHY : (1) Assumptions: the prefix is /carddemo/<environment>/account/ - the
-    #       same three-part shape every context uses, so one Terraform module
-    #       writes them all and one IAM policy can grant read on exactly one
-    #       context's subtree. The default is `prod` here rather than `dev` so that
-    #       a task started with this profile and no label still reads the right
-    #       subtree; a task that silently read the dev subtree would come up
-    #       healthy against dev capacity settings, which is precisely the failure a
-    #       matching default prevents.
-    #       (2) Assumptions: the import stays `optional:` in production too, and
-    #       that is not laxity. The values that genuinely must be present are the
-    #       no-default placeholders in application.yml, which abort startup by name
-    #       when unset; making this import mandatory would add a second, less
-    #       specific failure for the same missing configuration and would make the
-    #       service unable to start during a Parameter Store outage even when the
-    #       task definition had already supplied every required value directly.
-    #       (3) Trade-offs: this list REPLACES the base document's single-string
-    #       import rather than adding to it, so the shared defaults document is
-    #       named again here. Omitting it would drop the shared log pattern in
-    #       production only, which is the worst place to discover it missing -
-    #       every correlated trace across the eight services would lose its
-    #       identifier in the one environment where correlation matters most.
-    import:
-      - "classpath:/carddemo-common-defaults.yml"
-      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:prod}/account/"
-
   datasource:
     hikari:
+
       # WHY : Trade-offs: twenty connections per task rather than the base
       #       document's ten. This context serves the interactive account and
       #       customer reads for every signed-on user and additionally holds a row
@@ -136,14 +164,21 @@ spring:
       #       budget is this number multiplied by the task count and summed across
       #       all eight services, which is why it is raised here rather than in the
       #       base document where every environment would inherit it.
+      # WHY : Assumptions: DataSourceConfig reads this number from configuration
+      #       rather than hard-coding it, so this file is the prod source for it,
+      #       and it logs the accepted ceiling and idle floor at startup precisely
+      #       because the task-count factor of that invariant lives outside this
+      #       deployable and can only be audited from there.
       maximum-pool-size: 20
 
-      # WHY : Trade-offs: a floor of five rather than the base document's two.
-      #       Production capacity has a non-zero minimum so the cluster never
-      #       pauses, which removes the reason the base keeps the floor low; what
-      #       remains is the cost of a cold connection inside a request, and five
-      #       covers the steady-state concurrency of the interactive read path so
-      #       that only a genuine burst pays a handshake.
+      # WHY : Trade-offs: a floor of five rather than the base document's two, and
+      #       decisively rather than the zero application-dev.yml uses. Production
+      #       capacity has a non-zero minimum so the cluster never pauses, which
+      #       removes the reason dev empties its pool entirely; what remains is the
+      #       cost of a cold connection inside a request, and five covers the
+      #       steady-state concurrency of the interactive read path so that only a
+      #       genuine burst pays a handshake. No production caller pays a resume,
+      #       which is the whole reason dev is allowed to accept one.
       minimum-idle: 5
 
       # WHY : Assumptions: ten seconds, restating the base document's value rather
@@ -151,93 +186,140 @@ spring:
       #       the cluster never pauses and the base value is right here; it is
       #       restated so that the thirty-second value application-dev.yml sets for
       #       a pausing cluster cannot be mistaken for a change that applies
-      #       everywhere. The base note records what the longer wait would cost
-      #       under real load: each waiting request occupies its servlet thread,
-      #       the thread pool saturates, the health endpoint stops answering, and a
-      #       database slowdown becomes a task replacement loop.
+      #       everywhere. What the longer wait would cost under real load is the
+      #       reason this one is short: each waiting request occupies its servlet
+      #       thread, the thread pool saturates, the health endpoint stops
+      #       answering, and a database slowdown becomes a task replacement loop.
       connection-timeout: 10000
 
-      # WHY : Trade-offs: fifteen minutes, restating the base document's maximum
-      #       lifetime rather than inheriting it. It is deliberately shorter than
-      #       the cluster's own idle timeout: recycling before the server closes a
-      #       connection means the pool retires it on its own terms rather than
-      #       discovering it closed midway through a transaction that had already
-      #       taken a row lock on the account master. Restating it here keeps that
-      #       relationship visible next to the larger pool it applies to, because a
-      #       twenty-connection pool discovers a stale socket twice as often as a
-      #       ten-connection one.
-      max-lifetime: 900000
+  cloud:
+    aws:
+      sqs:
+        listener:
 
-  jpa:
-    # WHY : (1) Assumptions: statements are NOT echoed, restating the base value
-    #       so that the dev overlay's `true` cannot be read as applying anywhere
-    #       else. The text alone is a per-request cost at production rates and
-    #       offers nothing the database's own statement statistics do not, since
-    #       the questions worth asking in production are about plans and waits
-    #       rather than syntax.
-    #       (2) Assumptions: this switch writes to standard output rather than
-    #       through a logger, so no logging level can narrow it once enabled. That
-    #       is why it is pinned false here instead of being left to the log levels
-    #       below to contain.
-    show-sql: false
+          # WHY : Assumptions: ten concurrent messages, restating the base
+          #       document's value rather than inheriting it, because
+          #       application-dev.yml reduces this to two and the reduction must
+          #       not be readable as a system-wide setting. The invariant that
+          #       makes ten correct here is the pool ceiling above: each in-flight
+          #       inquiry holds one connection while it reads the account, the
+          #       customer and the cross-reference, so a concurrency ceiling must
+          #       stay at or below the pool ceiling, and ten against twenty leaves
+          #       half the pool for the REST endpoints. Ordering and delivery
+          #       semantics are untouched by this number - they are queue-side
+          #       properties provisioned by infra/modules/sqs.
+          max-concurrent-messages: 10
+
+          # WHY : Assumptions: the batch is held equal to the concurrency ceiling
+          #       above and no larger, restating the base value for the same
+          #       reason. Ten is also the largest batch a single receive can
+          #       return, so this asks for the widest poll the service permits and
+          #       spends one API call where ten would otherwise be billed. A batch
+          #       wider than the concurrency it feeds would buy nothing anyway,
+          #       because the surplus messages would wait in memory with their
+          #       visibility clock already running rather than staying on the queue
+          #       where another task could take them.
+          max-messages-per-poll: 10
+
+          # WHY : Assumptions: the five-second long poll is NOT set here, in
+          #       either profile, and its absence is the deliberate part. The base
+          #       document owns spring.cloud.aws.sqs.listener.poll-timeout because
+          #       that value is transcribed from the baseline rather than tuned:
+          #       app/app-vsam-mq/cbl/COACCT01.cbl physical line 337 reads "MOVE
+          #       5000 TO MQGMO-WAITINTERVAL", and the comment directly above it at
+          #       physical line 336 reads "ADDED 5000 MS (5 SECS) AS THE WAIT
+          #       INTERVAL FOR GET". It is a preserved behavioural contract and not
+          #       a sizing knob, so it stays identical in both environments.
+          # WHY : Assumptions: there is deliberately no transactional-outbox key
+          #       here. In COACCT01.cbl the get options are computed with
+          #       MQGMO-SYNCPOINT at physical lines 347 to 350, the EXEC CICS READ
+          #       of the account sits inside that same window at physical lines 396
+          #       to 401, and the reply put options are computed with
+          #       MQPMO-SYNCPOINT at physical lines 475 to 477 - receive, business
+          #       work and reply are one atomic unit of work, so no reply can be
+          #       lost between a commit and a publish and there is no window for an
+          #       outbox to close. This is the opposite of the authorization
+          #       context, whose COPAUA0C.cbl computes its options with the
+          #       NO-syncpoint variant at physical lines 389 and 753 and therefore
+          #       does need one.
 
 logging:
   level:
-    # WHY : Trade-offs: INFO on the project package root, restating the base value
-    #       so that the dev overlay's DEBUG cannot be read as applying anywhere
-    #       else. The account-view and account-update outcomes are the audit trail
-    #       this context produces and they are emitted at INFO; DEBUG would add the
-    #       128-field validation chain transcribed from app/cbl/COACTUPC.cbl on
-    #       every update, which costs log storage billed by the gigabyte and buries
-    #       the lines that matter. This is the key the base document declares, so it
-    #       governs common-lib's shared kernel together with this module.
-    com.carddemo: INFO
 
-    # WHY : Assumptions: the root logger returns to WARN, narrower than the base
-    #       document's INFO and narrower than dev. The one thing the base INFO
-    #       buys - the framework line recording what each configuration import
-    #       resolved - is a startup diagnostic that a deployment pipeline reads
-    #       once, whereas at production request rates root INFO is framework
-    #       narration on every call. Flyway's own migration line stays at INFO by
-    #       omission, because the base document pins org.flywaydb separately and
-    #       this file does not restate it, so the durable record that
-    #       V1__account.sql ran is preserved.
+    # WHY : Trade-offs: the root logger returns to WARN, narrower than the base
+    #       document's INFO and narrower than dev's INFO. At production request
+    #       rates root INFO is framework narration on every call, and the startup
+    #       diagnostics it buys are read once by a deployment pipeline rather than
+    #       continuously. Flyway's own migration line stays at INFO by omission,
+    #       because the base document pins org.flywaydb separately and this file
+    #       does not restate it, so the durable record that V1__account.sql ran is
+    #       preserved. The accepted cost is that a framework warning is the
+    #       earliest signal available here, which is why the project package below
+    #       is held a level wider.
     root: WARN
 
-    # WHY : Assumptions: the SQS listener container's own package stays at WARN, so
-    #       a genuine visibility or acknowledgement fault is reported and routine
-    #       polling is not. Dev raises this to DEBUG; restating it here is what
-    #       stops that from being read as a system-wide setting.
+    # WHY : Trade-offs: INFO on the project package, against dev's DEBUG. The
+    #       account-view and account-update outcomes are the audit trail this
+    #       context produces and they are emitted at INFO; DEBUG would add the
+    #       128-field validation chain transcribed from app/cbl/COACTUPC.cbl on
+    #       every update, which costs log storage billed by the gigabyte and
+    #       buries the lines that matter. This is the key the base document
+    #       declares, so it governs common-lib's shared kernel together with this
+    #       module.
+    com.carddemo: INFO
+
+    # WHY : Trade-offs: the SQS listener container's package stays at WARN, so a
+    #       genuine visibility or acknowledgement fault is reported and routine
+    #       polling is not - and routine polling here is one receive every five
+    #       seconds for the lifetime of every task, which at DEBUG would drown the
+    #       faults worth seeing. Dev raises this to DEBUG; stating WARN here is
+    #       what stops that from being read as a system-wide setting.
     io.awspring.cloud.sqs: WARN
 
-    # WHY : Assumptions: pinned at WARN rather than inherited, so no broader level
-    #       change can raise it. At TRACE this logger writes every bound value, and
-    #       the bound values on this context's statements are account identifiers,
-    #       customer identifiers and the plaintext side of the columns that are
-    #       stored encrypted precisely so they are not readable at rest. Log
-    #       storage is the one destination the masking applied at the API edge by
-    #       common-lib's GlobalExceptionHandler and by this module's mapper does not
-    #       reach, so this line is a data-protection control rather than a
-    #       log-volume one.
+    # WHY : Assumptions: the Hibernate statement logger is pinned at WARN rather
+    #       than inherited, so no broader level change can raise it in production.
+    #       At DEBUG it writes the generated SQL, whose predicates carry account
+    #       and customer identifiers, and the questions worth asking in production
+    #       are about plans and waits rather than syntax - the database's own
+    #       statement statistics answer those without copying identifiers into log
+    #       storage. application-dev.yml raises this one to DEBUG, which the base
+    #       document permits for dev and for dev alone; pinning it here is what
+    #       keeps that permission from spreading.
+    # WHY : Assumptions: this pin is also why spring.jpa.show-sql is not restated
+    #       in either profile. That switch writes to standard output OUTSIDE the
+    #       logging subsystem, so no level can narrow it once enabled and it would
+    #       escape the shared console pattern as well; the base document pins it
+    #       false and both profiles leave it there, using this logger instead as
+    #       the one supported control over statement text.
+    org.hibernate.SQL: WARN
+
+    # WHY : Assumptions: THIS LOGGER IS PINNED OFF AND MUST NEVER BE RAISED - not
+    #       in this file, not in application-dev.yml, and not at run time.
+    #       org.hibernate.orm.jdbc.bind is the Hibernate bind-parameter logger,
+    #       and at DEBUG or TRACE it prints the parameter VALUES bound into every
+    #       statement. This service's parameters include the two most sensitive
+    #       columns in the migration: customers.ssn_encrypted and
+    #       customers.govt_issued_id_encrypted. The baseline holds both in clear -
+    #       app/cpy/CVCUS01Y.cpy declares CUST-SSN PIC 9(09) at physical line 17
+    #       and CUST-GOVT-ISSUED-ID PIC X(20) at physical line 18 - and the target
+    #       instead stores them as BYTEA and returns them masked, a divergence from
+    #       the baseline that is deliberate and documented. Raising this logger
+    #       would print the plaintext side of exactly those two columns into
+    #       CloudWatch Logs, which defeats that divergence entirely, and it would
+    #       also print the primary account number that the mapper masks to its last
+    #       four digits at the API edge. The masking applied at that edge does not
+    #       reach log storage, so this line is a data-protection control rather
+    #       than a log-volume one.
     org.hibernate.orm.jdbc.bind: WARN
 
-management:
-  # WHY : Assumptions: only the health endpoint's detail breadth is touched. The
-  #       exposure list, which decides WHICH endpoints answer at all, is not
-  #       restated and so stays exactly as the base closes it at health, info and
-  #       prometheus.
-  endpoint:
-    health:
-      # WHY : (1) Assumptions: never, restating the base value against the dev
-      #       overlay's `always`. Both pollers of this endpoint are unauthenticated
-      #       by necessity - the load balancer target group and the container
-      #       health check, neither of which can present a token - so anything able
-      #       to reach the port reads whatever this endpoint returns. A detail
-      #       payload names the datasource and the schema the connection reaches,
-      #       which is a description of the data tier.
-      #       (2) Trade-offs: the accepted cost is that an on-call reader cannot
-      #       tell from the probe which contributor is failing. That information is
-      #       available from the metrics scrape path and from the task's own logs,
-      #       neither of which is reachable without a credential, so nothing is
-      #       lost except the shortest route to it.
-      show-details: never
+    # WHY : Assumptions: log RETENTION is the fourth permitted dev/prod axis and
+    #       it is deliberately absent from this file, because it is not an
+    #       application property at all. Retention is a property of the CloudWatch
+    #       log group, owned by infra/modules/observability and set per environment
+    #       there - longer here than in dev - and the service writes to the group
+    #       with no say in how long the group keeps what it wrote. This note is the
+    #       entire discharge of the retention axis on the application side, and it
+    #       is recorded rather than left implicit so that a later reader does not
+    #       invent an application-level retention key - such a key would be
+    #       accepted by the property binder, would appear to have been set, and
+    #       would do nothing whatsoever.

@@ -1575,7 +1575,7 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-All **33** modules are delivered — **32** test modules plus the shared `conftest.py`:
+All **34** modules are delivered — **33** test modules plus the shared `conftest.py`:
 
 <!-- carddemo:test-module-roster:begin -->
 [`conftest.py`](tests/conftest.py),
@@ -1591,6 +1591,7 @@ All **33** modules are delivered — **32** test modules plus the shared `confte
 [`test_doubles.py`](tests/test_doubles.py),
 [`test_ebcdic_code_page_allow_list.py`](tests/test_ebcdic_code_page_allow_list.py),
 [`test_ebcdic_codec.py`](tests/test_ebcdic_codec.py),
+[`test_loaders.py`](tests/test_loaders.py),
 [`test_mask_key_material.py`](tests/test_mask_key_material.py),
 [`test_master_disclosure.py`](tests/test_master_disclosure.py),
 [`test_online_write_lease.py`](tests/test_online_write_lease.py),

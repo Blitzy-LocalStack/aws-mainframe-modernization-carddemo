@@ -2,84 +2,227 @@
 # services/reporting-service/Dockerfile
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Builds the non-root container image for the CardDemo reporting and statement
-#   context: the migrated form of app/cbl/CORPT00C.cbl online and of the batch report
-#   and statement programs app/cbl/CBTRN03C.cbl, CBSTM03A.CBL and CBSTM03B.CBL.
+#   Builds the non-root container image for the CardDemo REPORTING AND STATEMENT
+#   bounded context. Four reference programs are its behavioural oracle; they are
+#   read and never modified, and the uppercase .CBL spellings below are the
+#   on-disk spellings, so a lowercase citation is a dead reference:
+#     app/cbl/CORPT00C.cbl  the online report request, CICS transaction CR00.
+#     app/cbl/CBTRN03C.cbl  the transaction detail report writer, whose record is
+#                           133 columns wide (FD-REPTFILE-REC at L85).
+#     app/cbl/CBSTM03A.CBL  the statement generator, emitting TWO widths --
+#                           80-byte plain text (FD-STMTFILE-REC at L45) and
+#                           100-byte markup (FD-HTMLFILE-REC at L47).
+#     app/cbl/CBSTM03B.CBL  its dynamically called data-access subprogram.
+#
+# What this image replaces:
+#   app/csd/CARDDEMO.CSD L489 defines LIBRARY(CARDDLIB) and L491 gives it
+#   DSNAME01(AWS.M2.CARDDEMO.LOADLIB) -- the load library the CICS region loaded
+#   these programs from. This image is that deployment unit's replacement: the
+#   deployment workflow pushes it to Amazon ECR under a short-lived federated
+#   role, and ECS Fargate runs it behind an internal load balancer. Nothing here
+#   loads a module from a library at run time, so the mechanism is replaced
+#   rather than emulated. The ad-hoc submission path in the same resource --
+#   TDQUEUE(JOBS) at L499, DDNAME(INREADER) at L501 and RECORDSIZE(80) at L502 --
+#   is likewise replaced, by a state-machine execution rather than by job text
+#   written to an internal reader.
+#
+# Stages:
+#   build    resolves the reactor's dependency graph, then compiles the
+#            unpublished common-lib sibling and this module from source in one
+#            invocation, producing the repackaged bootable jar under
+#            reporting-service/target.
+#   runtime  carries that one jar plus the shared listener-material entry point,
+#            and nothing else from the build stage: no Maven, no compiler, no
+#            resolved dependency cache and no sources.
+#
+# Artifact:
+#   One bootable Spring Boot jar at /app/app.jar, owned and executed by the fixed
+#   non-root identity 10001:10001, listening on 8080 over TLS, and probed by the
+#   single HEALTHCHECK below against the Actuator health endpoint.
+#
+# Gates:
+#   The Checkstyle documentation gate runs INSIDE this build, not merely in the
+#   pipeline. services/pom.xml binds its checkstyle-documentation-gate execution
+#   to Maven's validate phase with failOnViolation true and violationSeverity
+#   warning, and validate precedes package, so an absent or incomplete Javadoc in
+#   either module compiled here fails `docker build` rather than surfacing later.
 #
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
-#   Runtime configuration arrives entirely through environment variables that the
-#   ECS task definition supplies. The values this service cannot start without,
-#   because their placeholders declare no fallback, are:
-#     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
-#     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
-#     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
-#     - CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN
-#     - CARDDEMO_REPORTING_S3_OUTPUT_BUCKET
+#   This image declares no build argument. The entry point takes no argument of
+#   its own and forwards "$@", which is load-bearing here because ONE image
+#   serves TWO invocation modes:
+#     (no arguments)  ReportingApplication starts the HTTPS listener and stays
+#                     up. This is the ECS service mode.
+#     --job=<name>    ReportingTaskRunner takes the run instead, builds a context
+#                     with no web application at all, and exits with a status.
+#                     The accepted names are generate-statements, generate-reports
+#                     and generate-report, each with its own required date or
+#                     report-type options. This is the mode the batch statement
+#                     and report states invoke through container overrides.
+#   Everything else arrives as environment variables that the ECS task definition
+#   supplies from AWS Systems Manager Parameter Store and AWS Secrets Manager.
+#   The placeholders in application.yml that declare NO fallback, so the listener
+#   cannot start without them, are the datasource triple, the resource-server
+#   issuer URI, the expected client id, the state-machine identifier, the
+#   artifact-store bucket, the artifact signing key, and the listener keystore
+#   credential -- the last of which the entry point mints for this one task
+#   rather than reading from the deployment.
 #
 # Return values:
-#   0 (integer): the JVM exited after a requested shutdown.
-#   non-zero (integer): the context failed to start or the JVM terminated
-#     abnormally. ECS reads that status to decide whether to replace the task.
+#   0 (integer)         the JVM exited after a requested shutdown, or the
+#                       selected --job= task completed.
+#   non-zero (integer)  the context failed to start, the task failed or its
+#                       command line was malformed, or the JVM terminated
+#                       abnormally. ECS reads that status to decide whether to
+#                       replace the task, and the batch state machine reads it to
+#                       decide whether its state failed.
 #
 # Exceptions or errors:
-#   An unset variable from the list above, an unreachable datasource, an
-#   unreachable JWT issuer, or a Flyway checksum mismatch aborts the start before
-#   the listener binds, so the task never reports healthy.
+#   An unset no-fallback variable, an unreachable datasource, an unreachable token
+#   issuer or an absent reporting view stops the start-up or the first query, so
+#   the task never reports healthy. This module owns NO schema and runs NO
+#   migration, so it cannot create what it reads: an absent view or grant is a
+#   defect against data-migration/sql/V0__schemas_and_roles.sql and
+#   data-migration/sql/V1__reporting_views.sql, never something for this image to
+#   repair.
+#
+# What this file must never contain, and does not:
+#   no credential, no connection string, no endpoint host, no ARN, no bucket
+#   name, no signing key, no user-pool identifier, no registry account and no
+#   environment name. Every one of those is a deployment value, and the two
+#   verifications that keep this true are the absence of any ARG or ENV carrying
+#   one, and the fact that every COPY below names one narrow path -- three module
+#   POMs, the Checkstyle ruleset directory, two source trees and one start-up
+#   program -- so no file outside those seven can reach a layer.
 #
 # Governing convention:
-#   docs/CODE_DOCUMENTATION_STANDARD.md
+#   docs/CODE_DOCUMENTATION_STANDARD.md. Its Dockerfile section (L828-L842)
+#   requires a header PLUS a justification on the base-image pin and on layer
+#   ordering, and its "four labels, and their one permitted written form" section
+#   (L230-L253) fixes every label as an unmarked token followed by a colon, so no
+#   label below carries emphasis markup.
 #
-# WHAT: From the repository root, build this image with:
-#       docker build --file services/reporting-service/Dockerfile \
-#         --tag carddemo-reporting-service:validation .
-# WHY : Assumptions: the repository root is the build context, not services/,
-#       because the image compiles the unpublished common-lib sibling from source
-#       and the inherited Checkstyle documentation gate reads config/checkstyle,
-#       which sits OUTSIDE the services reactor. Every COPY below is therefore
-#       repository-root-relative and all of them fail if the context is narrowed.
+# Build:
+#   Run from the REPOSITORY ROOT, so that the trailing dot is the repository root
+#   and not this module's directory:
+#     docker build -f services/reporting-service/Dockerfile -t carddemo/reporting-service:local .
+#   The gating workflow spells the same two flags long-form and tags per commit:
+#     docker build --file services/reporting-service/Dockerfile \
+#       --tag carddemo-reporting-service:validation .
+#
+# WHY (non-obvious design decisions, each expanded at the instruction it governs):
+#   - Assumptions: the build context is the repository root, not services/ and
+#     not this directory. The image compiles the unpublished common-lib sibling
+#     from source, and the inherited documentation gate reads config/checkstyle --
+#     both of which sit OUTSIDE this module's tree.
+#   - Trade-offs: two stages rather than one, so Maven, the JDK compiler and the
+#     whole resolved dependency cache stay out of the shipped image.
+#   - Assumptions: nothing here publishes. The only registry hostname in this file
+#     belongs to the public base image, and the example tags above name no account
+#     and no region, so no line can be mistaken for a publishable reference.
 # =============================================================================
 
-# WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
-#       Corretto vendor and Java 21 major version, so a class-file level or
-#       vendor-specific behavior cannot first appear after the jar is shipped.
-# WHY : Assumptions: the digest is the MULTI-PLATFORM INDEX digest read with
+# WHAT: pins the compiler that produces the bytecode this image ships to the same
+#       vendor and Java major version as the runtime stage below.
+# WHY : Assumptions: services/pom.xml sets maven.compiler.release to 21 and its
+#       enforcer rule requires that Java, so the build JDK must satisfy 21 and
+#       the runtime must be able to load what it emits. Matching the VENDOR as
+#       well is the part that is not forced by the POM and is chosen anyway: a
+#       vendor difference between the JDK that compiles and the JVM that runs
+#       shows up as a garbage-collector default or a security-provider ordering,
+#       which is the class of difference that appears under load rather than at
+#       build time.
+# WHAT: rejects the generic Maven image that would otherwise be the obvious pick.
+# WHY : Alternatives Considered: maven:3-eclipse-temurin-21 was evaluated and
+#       rejected. It would compile with one vendor's JDK what the other vendor's
+#       runtime executes, and matching the two costs nothing here because both
+#       vendors publish a Maven image; the generic tag would additionally float
+#       its Maven minor version.
+# WHAT: makes the reference immutable while keeping the version human-readable.
+# WHY : Assumptions: the digest is the MULTI-PLATFORM INDEX digest, read with
 #       `docker buildx imagetools inspect`, not the platform manifest digest that
-#       `docker images` reports, so linux/amd64 and linux/arm64 builders both
-#       resolve it. The tag is retained beside it so a reader can see the version
-#       without a registry round trip.
+#       `docker images` reports, so an amd64 and an arm64 builder both resolve it.
+#       The tag is retained beside it so a reader sees the version without a
+#       registry round trip.
 FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e282adf79d02fbd1ad3091ad0bb2feff1d7 AS build
 
-# WHY : Assumptions: mirroring the repository's services depth under /build keeps
-#       the parent POM's basedir-activated Checkstyle path valid in both the
-#       aggregator and the two modules selected from it.
+# WHAT: reproduces the repository's own services/ depth inside the stage, rather
+#       than flattening the reactor to the stage root.
+# WHY : Assumptions: services/pom.xml locates the Checkstyle ruleset through two
+#       mutually exclusive profiles -- checkstyle-config-beside-reactor-root tests
+#       ${basedir}/../config/checkstyle from the aggregator, and
+#       checkstyle-config-one-level-above-reactor-root tests
+#       ${basedir}/../../config/checkstyle from each module. Only a layout that
+#       keeps config/ a SIBLING of services/ satisfies both, and flattening would
+#       satisfy neither, so the gate would fail while looking for a file that had
+#       in fact been copied in.
 WORKDIR /build/services
 
-# WHY : Trade-offs: POMs and the documentation-gate configuration are copied
-#       before any source file so that a source-only change reuses the resolved
-#       dependency layer. The extra COPY instructions make this file longer, but
-#       they avoid repeating Maven's dependency download, which dominates the
-#       otherwise immutable cost of this build.
+# WHAT: brings in the dependency-declaring files alone, ahead of every source
+#       file, so that the resolution step below occupies its own layer.
+# WHY : Trade-offs: this ordering is the mandatory layer-ordering justification
+#       for this file. Copying the POMs first and the sources later puts the
+#       dependency warm-up BETWEEN the two groups, so editing one line of Java
+#       invalidates the source layer and everything after it while leaving the
+#       resolved dependency layer cached. The accepted cost is the four COPY
+#       instructions that precede the warm-up, and one more layer than a single
+#       copy of the whole reactor would have produced -- and that single copy is
+#       exactly the rejected alternative, because it re-resolves the entire Spring
+#       Boot 4.1.0, AWS SDK 2.49.3 and Testcontainers 2.0.5 graph on every source
+#       edit.
+# WHAT: keeps each copied path narrow and named, instead of taking the context
+#       wholesale.
+# WHY : Trade-offs: a blanket copy of the context is refused outright. This
+#       module ships no .dockerignore of its own and must not, so the only
+#       exclusions in force are the repository-root ones, which drop build output
+#       and local state but deliberately do NOT drop app/**, tests/** or
+#       samples/** -- the COBOL baseline, the parity suite and the mainframe build
+#       samples. Naming each path explicitly is what keeps those trees out of every
+#       layer; the cost is that adding a sibling dependency means editing this
+#       file, which is the visible edit it should be.
 COPY services/pom.xml ./pom.xml
 COPY services/common-lib/pom.xml ./common-lib/pom.xml
 COPY services/reporting-service/pom.xml ./reporting-service/pom.xml
+
+# WHAT: places the ruleset at an absolute destination while the three POMs above
+#       use relative ones.
+# WHY : Assumptions: the asymmetry is required rather than untidy. config/ is a
+#       SIBLING of services/ in the repository, and the two profiles named at
+#       WORKDIR above resolve the ruleset relative to the aggregator and to each
+#       module. Mirroring that sibling relationship under /build satisfies both
+#       readings; copying the ruleset into the reactor directory would satisfy
+#       neither. Both files in the directory are needed, not just the ruleset:
+#       checkstyle.xml wires suppressions.xml through a SuppressionFilter whose
+#       optional attribute is false, so an absent companion fails the gate.
 COPY config/checkstyle /build/config/checkstyle
 
+# WHAT: narrows the copied aggregator's module list to the two modules whose
+#       directories exist in this stage, then warms the local repository for them.
 # WHY : Assumptions: Maven validates every module directory an aggregator declares
-#       before -pl can select from it, so the copied parent must list only the two
-#       modules whose directories exist in this stage. The source parent POM is
-#       never modified; only the copy inside this layer is trimmed.
-# WHY : Assumptions: exactly two module entries must survive (common-lib and
-#       reporting-service) and at least one must be dropped. The transformation ASSERTS
-#       both counts, so a renamed or already-trimmed module list fails here with
-#       the count that was wrong instead of emitting a plausible-looking POM whose
+#       before -pl can select from it, so a copied parent still listing all nine
+#       modules fails on the seven directories this stage never copies. Only the
+#       COPY inside this layer is rewritten; services/pom.xml itself is never
+#       modified, here or anywhere.
+# WHAT: turns a silent mis-edit of that list into a named failure.
+# WHY : Assumptions: exactly two module entries must survive -- common-lib and
+#       reporting-service -- and at least one must be dropped. Both counts are
+#       ASSERTED, so a renamed or already-trimmed module list fails here with the
+#       count that was wrong, instead of emitting a plausible-looking POM whose
 #       breakage surfaces later as an obscure -pl resolution error.
-# WHY : Trade-offs: tracking XML comment state costs several lines over a
-#       single-line filter. It is paid because a comment mentioning a module - the
-#       very comment a maintainer would add to explain an absence - would
-#       otherwise be deleted as though it were a module entry, silently.
+# WHAT: tracks XML comment state across the filter rather than matching line by
+#       line.
+# WHY : Trade-offs: several extra lines over a one-line filter, paid because a
+#       comment that MENTIONS a module -- the very comment a maintainer would add
+#       to explain an absence -- would otherwise be deleted as though it were a
+#       module entry, and deleted silently.
+# WHAT: prefers rewriting the list over carrying the seven module POMs this stage
+#       has no other use for.
+# WHY : Alternatives Considered: copying all nine module POMs so the copied parent
+#       could stay verbatim. Rejected on two grounds: it would carry seven POMs for
+#       modules this stage never builds, and a module added to the reactor later
+#       would still break this build -- at Maven's own "child module does not
+#       exist" complaint rather than at the trim's named assertion, which is the
+#       less legible of the two failures.
 RUN awk ' \
     in_comment { print; if ($0 ~ /-->/) { in_comment = 0 } next } \
     /<!--/ && $0 !~ /-->/ { print; in_comment = 1; next } \
@@ -107,138 +250,380 @@ RUN awk ' \
     && mvn -B -ntp -f pom.xml -pl common-lib,reporting-service -am \
        dependency:go-offline
 
+# WHAT: opens the part of the stage that a source edit is meant to invalidate,
+#       and copies both modules' sources because the reactor compiles both.
+# WHY : Trade-offs: this is the second half of the split declared above the POM
+#       copies, and its POSITION is the whole mechanism. Everything from here down
+#       is invalidated by any source edit, which is why the warm-up sits above it
+#       rather than below: appending a line to one Java file leaves the warm-up
+#       layer cached and re-runs only the packaging step. The residue accepted is
+#       that dependency:go-offline is a best effort rather than a proof -- in a
+#       multi-module reactor it can miss a plugin dependency a later phase asks
+#       for -- and the flag on the next instruction is what exposes that instead
+#       of hiding it.
 COPY services/common-lib/src ./common-lib/src
 COPY services/reporting-service/src ./reporting-service/src
 
-# WHY : Trade-offs: tests are skipped while packaging because the suite gate is
-#       the repository-root reactor build `mvn -f services/pom.xml clean verify`,
-#       whose Surefire and Failsafe executions cover all ten modules. This stage
-#       sees only common-lib and reporting-service, so running tests here would report a
-#       narrower result under a name that reads like the full one.
-# WHY : Assumptions: Checkstyle stays bound to `validate` and therefore still runs
-#       inside this stage, before `package`, even under -DskipTests. It is the one
-#       gate this image build keeps, because a missing Javadoc is a defect in the
-#       sources being compiled here rather than a statement about behavior.
+# WHAT: builds the sibling library from source in the same reactor rather than
+#       resolving it as a published artifact.
+# WHY : Assumptions: -am is a requirement here, not an optimisation. common-lib is
+#       published to no registry, so no artifact exists for Maven to resolve, and
+#       naming both modules with -pl still needs -am to bring in the parent POM
+#       they inherit their plugin and dependency management from.
+# WHAT: suppresses test EXECUTION while still compiling test sources.
+# WHY : Trade-offs: -DskipTests, and deliberately NOT -Dmaven.test.skip=true. The
+#       suite gate is the repository-root reactor build
+#       `mvn -f services/pom.xml clean verify`, whose Surefire and Failsafe
+#       executions cover all nine modules; this stage sees two of them, so tests
+#       run here would report a narrower result under a name that reads like the
+#       full one. This stage also could not run them all: the module's repository
+#       integration tests pin the persistence contract against a real PostgreSQL
+#       engine through Testcontainers, which needs a Docker daemon an image build
+#       does not have. The flag chosen still COMPILES test sources, so a test that
+#       no longer compiles still fails this build; -Dmaven.test.skip=true was
+#       rejected precisely because it would skip that compilation and hide the
+#       break.
+# WHAT: keeps the documentation gate inside this build even though tests are not
+#       run.
+# WHY : Assumptions: -DskipTests suppresses test execution only -- it does not
+#       skip Checkstyle. The gate stays bound to validate, which runs before
+#       package, so it fires in this stage. It is the one gate this image build
+#       keeps, because a missing Javadoc is a defect in the very sources being
+#       compiled here rather than a statement about behaviour. Nothing in this
+#       file may be added to get past it: not -Dcheckstyle.skip, not a
+#       severity downgrade, not a return-code tolerance, and not a second
+#       configLocation.
+# WHAT: makes the warm-up layer above a checked claim instead of a hopeful one.
+# WHY : Trade-offs: --offline is what turns that layer from an optimisation into a
+#       verified one. Without it, anything the warm-up missed would be fetched
+#       here quietly and the dependency layer would look effective while every
+#       rebuild still reached the network; with it, a miss fails this step by
+#       name. Measured on this reactor, the packaging step resolves entirely from
+#       the local repository and downloads nothing. What is given up is tolerance:
+#       a dependency added to either module's POM must be reachable by the warm-up
+#       -- the intended loss, because the alternative hides the very thing being
+#       cached.
+# WHAT: renders the build log as a transcript a reviewer can read after the fact.
+# WHY : Trade-offs: -B and -ntp give up the interactive, redrawn progress display
+#       a developer sees locally, in exchange for a log whose lines are stable
+#       enough to grep for the gate's own verdict in a CI artifact.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,reporting-service -am \
     clean package -DskipTests
 
-# WHY : Assumptions: the publisher provides no Alpine variant of this Corretto
-#       image; `21-alpine` does not resolve and would fail the build. 21.0.12 is
-#       the highest published 21.x tag and headless is selected because an HTTP
-#       service needs no AWT or graphics stack.
+# WHAT: names the smallest runtime this context can actually use, and records why
+#       the tag cannot be shortened or swapped for a smaller-sounding one.
+# WHY : Assumptions: the publisher provides NO Alpine variant of this Corretto
+#       image. The repository publishes -al2 and -al2023 only, each with the
+#       headful, headless, generic and jdk suffixes, and 21.0.12 is the highest
+#       published 21.x. So the reflex reach for a smaller base, `21-alpine`, is
+#       not a different or larger image -- it is a tag that does not resolve, and
+#       substituting it fails this build outright at the pull. An earlier draft of
+#       the migration plan named exactly that tag, which is why the fact is
+#       recorded here beside the line it would be edited on.
+# WHAT: selects one of the four published suffixes over the other three.
+# WHY : Trade-offs: headless omits the AWT and graphics stack that a report and
+#       statement writer never loads; generic keeps it, and jdk would additionally
+#       ship javac and the whole compiler toolchain into a production runtime,
+#       which is the very thing the build stage exists to keep out. What is given
+#       up is the ability to render an image or open a font inside the container.
+#       This context writes 133-column report text, 80-byte statement text and
+#       100-byte markup -- all character data -- so it needs neither.
+# WHAT: holds the reference immutable rather than trusting a patch-level tag.
 # WHY : Refactoring Rationale: the reference is digest-pinned rather than left on
-#       the bare tag because this tag has already moved at least once - the
+#       the bare tag because this tag has already moved at least once -- the
 #       registry index for `21.0.12-al2023-headless` and a copy cached earlier on
 #       a build host are two different manifest lists that both still resolve. A
 #       patch-level tag reading like an exact version is the easiest kind of
 #       mutable reference to mistake for an immutable one, so two builds of one
 #       commit could otherwise ship two different runtimes with nothing in the
-#       build log to say so.
+#       build log to say so. A floating `21`, `latest` or `stable` is refused for
+#       the same reason, only more so.
 FROM public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless@sha256:75f1cdabc3d8758f5499bf67046991bc7797e37156c7445f0048eb6d17c90dcf AS runtime
 
+# WHAT: establishes one fixed unprivileged identity, and an application directory
+#       that identity owns, before anything is copied in.
+# WHY : Alternatives Considered: running as root was rejected outright. Nothing
+#       this image does at run time needs a privileged operation -- the JVM reads
+#       one jar, writes a keystore under /tmp and binds an unprivileged port -- so
+#       root would buy no capability while leaving a compromised process holding
+#       every privilege the container has.
+# WHAT: writes the account records directly instead of calling the usual account
+#       tools.
 # WHY : Alternatives Considered: installing shadow-utils solely for useradd and
-#       groupadd was rejected because this minimal image omits those tools and
-#       their package payload adds no runtime capability. Plain passwd and group
-#       records give the same fixed identity with no extra package or repository.
+#       groupadd was rejected. Inspecting this exact pinned digest shows that none
+#       of useradd, groupadd or adduser exists in it, so the tooling path would
+#       mean adding a package whose payload adds no runtime capability to a process
+#       that needs one fixed identity. Appending plain group and account records is
+#       the accepted fallback: it yields the same fixed 10001:10001 identity with
+#       no package and no repository access during the build.
+# WHAT: puts the guarantee of non-root execution in the image rather than in the
+#       deployment that runs it.
 # WHY : Assumptions: the ECS task definition does not drop privileges, so the
-#       image must guarantee UID/GID 10001 itself. The process writes only below
-#       its owned working directory and the platform-provided /tmp.
+#       image must guarantee the identity itself. The process writes only below
+#       this owned directory and the platform-provided /tmp, which is why no other
+#       path is chowned.
 RUN printf '%s\n' 'carddemo:x:10001:' >> /etc/group \
     && printf '%s\n' \
        'carddemo:!:10001:10001:CardDemo reporting:/app:/bin/false' >> /etc/passwd \
     && mkdir -p /app \
     && chown 10001:10001 /app
 
-# WHY : Assumptions: the owned application directory is the working directory so
-#       any relative temporary output stays inside the only application path the
-#       fixed identity may modify.
+# WHAT: makes the owned directory the process's working directory, not merely its
+#       home.
+# WHY : Assumptions: any relative output a library opens then lands inside the
+#       only application path the fixed identity may modify, so a write that was
+#       not anticipated fails on permissions rather than succeeding somewhere
+#       unowned. Report and statement artifacts do not land here at all: they are
+#       streamed to object storage by the module's own sink types.
 WORKDIR /app
 
-# WHY : Assumptions: reporting-service-1.0.0-SNAPSHOT.jar is the artifact this module's POM
-#       produces and the Boot repackage goal makes it self-contained, so copying
-#       that one file excludes sources, build caches, reports and every reactor
-#       target directory from the shipped image.
+# WHAT: carries exactly one build product across the stage boundary, selected by a
+#       glob whose match is provably unique.
+# WHY : Assumptions: the glob resolves to exactly one file, and the module POM is
+#       what guarantees it. The Boot repackage goal writes the bootable jar under
+#       the inherited default name and renames the plain one beside it with a
+#       .jar.original suffix, which `*.jar` does not match; measured in this
+#       stage, `ls -1` over the same target directory returns a single path. The
+#       file services/reporting-service/pom.xml deliberately leaves finalName
+#       uncustomised and records that the image build selects the artifact by a
+#       plain jar glob, so the two files are one contract read from both ends.
+# WHAT: refuses the more explicit-looking form of the same instruction.
+# WHY : Alternatives Considered: naming reporting-service-<version>.jar literally.
+#       It reads as the safer, more explicit choice and is the opposite: the
+#       version lives in the parent POM, so a version bump would break this image
+#       at the COPY, and break it by writing a path that no longer exists rather
+#       than by saying a version changed.
+# WHAT: corrects the form this file previously used.
+# WHY : Refactoring Rationale: an earlier revision of this Dockerfile did name the
+#       versioned jar literally, which contradicted the decision its own module POM
+#       records at the finalName element -- two files stating opposite contracts,
+#       with only one of them enforced by a build. The glob restores the single
+#       contract the POM documents.
+# WHAT: settles the destination path that the entry point later execs.
+# WHY : Assumptions: /app/app.jar is depended on by the shared entry point, which
+#       execs `java -jar /app/app.jar`; renaming here without renaming there
+#       yields an image that builds and cannot start. The ownership is set during
+#       the copy so no later chown layer duplicates the file.
 COPY --from=build --chown=10001:10001 \
-    /build/services/reporting-service/target/reporting-service-1.0.0-SNAPSHOT.jar \
+    /build/services/reporting-service/target/*.jar \
     /app/app.jar
 
-# WHY : Assumptions: 8080 carries BOTH the business REST surface and the actuator
-#       health group, over TLS, because the base profile enables server.ssl and
-#       declares one connector. A second port was considered and is not available
-#       without a management port, which would need its own certificate.
+# WHAT: declares the single port that the business API, the health probe and the
+#       metrics scrape all share.
+# WHY : Assumptions: 8080 is a contract with the infrastructure rather than a local
+#       preference. infra/modules/ecs-service defaults container_port to 8080 and
+#       the security-group design permits only load-balancer-to-application on it,
+#       so application.yml's server.port, the target group and this declaration
+#       must agree; a different port here produces a task that starts and never
+#       receives traffic, which is harder to diagnose than one that fails to start.
+# WHAT: keeps the management surface on the same connector instead of splitting it
+#       off.
+# WHY : Trade-offs: one port carries BOTH the report and statement endpoints and
+#       the Actuator health, info and Prometheus endpoints, over TLS, because the
+#       base profile enables server.ssl and declares one connector. A separate
+#       management port was considered and would need its own certificate and its
+#       own security-group rule, and it would let the probe succeed on a connector
+#       the traffic never uses -- the exact disagreement the single port prevents.
 EXPOSE 8080
 
-# WHY : Refactoring Rationale: the listener key pair and certificate are minted
-#       by THIS TASK at startup rather than injected from Secrets Manager. They
-#       used to be one shared pair, generated by a managed `tls_private_key` in
-#       each environment root, persisted in Terraform state and handed to every
-#       online task -- so a state reader held the server private key of all eight
-#       services. The script below draws a fresh 2048-bit RSA key and a
-#       self-signed leaf into a PKCS#12 keystore on the task's own encrypted
-#       ephemeral volume, which is destroyed with the task, and its own header
-#       records the three alternatives measured and rejected before this one.
-# WHY : Assumptions: the script needs no package. /usr/bin/keytool, /usr/bin/tr,
-#       /usr/bin/head and a readable /dev/urandom were each verified inside this
-#       exact runtime digest, which is why the hardening below adds no layer of
-#       dependencies to carry a certificate generator.
-# WHY : Trade-offs: the mode is set by a separate RUN rather than by `COPY
-#       --chmod`. `--chmod` needs BuildKit, and the gating workflow invokes plain
-#       `docker build` over each Dockerfile, so relying on it would make image
-#       builds depend on which builder the runner happens to select. The cost is
-#       one extra layer holding one mode change.
+# WHAT: states the heap ceiling as a share of whatever memory the task is given,
+#       instead of leaving it on a default nobody chose.
+# WHY : Assumptions: the container memory limit comes from the Fargate task
+#       definition, so a ratio tracks that definition while an absolute size would
+#       have to be edited in lockstep with it. Java 21 is container-aware and reads
+#       the cgroup limit, but its default share of that limit is tuned for a host
+#       running many processes, not for a task whose entire allocation belongs to
+#       one JVM. Measured inside this exact runtime digest, MaxRAMPercentage
+#       defaults to 25.0, so a 1 GiB limit yields a 256 MiB ceiling and three
+#       quarters of the task's memory is unavailable to the heap; at 75.0 the same
+#       limit yields 768 MiB. The remaining quarter is
+#       deliberate headroom for metaspace, thread stacks and the direct buffers the
+#       AWS SDK clients use to stream report and statement bytes.
+# WHAT: separates the absolute form of this flag from the relative one.
+# WHY : Refactoring Rationale: an earlier revision of this file rejected "-Xmx or
+#       -XX container flags" as a single category, on the ground that a hard-coded
+#       ceiling would silently override the task definition's memory. That
+#       reasoning is sound for -Xmx and does not transfer to MaxRAMPercentage,
+#       which states a ratio rather than a size and therefore tracks the task
+#       definition instead of contradicting it. Treating the two as one category is
+#       what left the heap on an unchosen default, so they are separated here:
+#       -Xmx stays rejected for the original reason, and the percentage is set.
+# WHAT: chooses the variable the entry point reads over the one every JVM reads.
+# WHY : Alternatives Considered: JAVA_TOOL_OPTIONS, which the JVM picks up with no
+#       cooperation from the entry point at all. Rejected because EVERY JVM started
+#       in this image would inherit it, including the keytool invocation the entry
+#       point makes and any `java -version` a diagnostic runs, each of which would
+#       then print a "Picked up JAVA_TOOL_OPTIONS" line onto its own output.
+#       JAVA_OPTS is read by exactly the one process this is meant to configure.
+# WHAT: marks this value as replaceable rather than as a floor.
+# WHY : Trade-offs: the entry point expands ${JAVA_OPTS} unquoted and word-splits
+#       it (config/docker/generate-listener-material.sh:189), so a task definition
+#       setting JAVA_OPTS replaces this value wholesale rather than adding to it,
+#       and a deployment that needs another flag must restate the percentage
+#       alongside it. That is accepted because merging a container-set value with
+#       an image-set one needs a wrapper that parses JVM arguments, and a wrapper
+#       that silently reorders or drops a flag is a worse failure than a variable a
+#       reader can see being replaced.
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+
+# WHAT: records, at the point where one would be added, that no deployment value
+#       is baked into any layer of this image.
+# WHY : Assumptions: the datasource URL and its two credentials, the token issuer
+#       URI, the expected client id, the state-machine identifier, the
+#       artifact-store bucket, the artifact signing key and the region all arrive
+#       at RUN TIME from AWS Systems Manager Parameter Store and AWS Secrets
+#       Manager, resolved by the Spring Cloud AWS parameter-store and
+#       secrets-manager starters this module's POM declares and by the config
+#       imports application.yml lists. No service hard-codes an endpoint, so none
+#       of those values may appear here as an ARG default, an ENV or a copied file.
+#       Publication authenticates by short-lived federated role assumption, so
+#       there is no long-lived credential in existence to bake in even by mistake.
+# WHAT: leaves the profile selector unset, and treats that absence as the
+#       decision rather than an omission.
+# WHY : Trade-offs: SPRING_PROFILES_ACTIVE is deliberately not set. One built image
+#       is meant to run unchanged in every environment and the task definition
+#       selects the profile at launch; baking one in would require an image per
+#       environment and would make behaviour depend on which environment happened
+#       to build it, so the artifact could no longer be promoted. Accepted cost:
+#       the image cannot be run correctly by `docker run` with no environment
+#       supplied -- the right bias, because that failure is immediate and legible
+#       whereas a wrong baked-in profile is silent.
+
+# WHAT: installs the shared start-up program that mints this task's own listener
+#       key pair and certificate before the JVM binds.
+# WHY : Refactoring Rationale: the listener material is minted by THIS TASK at
+#       startup rather than injected from a managed credential store. It used to
+#       be one shared pair, generated in each environment root, persisted in
+#       Terraform state and handed to every online task -- so a state reader held
+#       the server private key of all eight services. The program below draws a
+#       fresh 2048-bit RSA key and a self-signed leaf into a PKCS#12 keystore on
+#       the task's own encrypted ephemeral volume, which is destroyed with the
+#       task, and its own header records the alternatives measured before this one.
+# WHAT: keeps that program dependency-free rather than adding a package to carry a
+#       certificate generator.
+# WHY : Assumptions: /usr/bin/keytool, /usr/bin/tr, /usr/bin/head and a readable
+#       /dev/urandom were each verified inside this exact runtime digest, so the
+#       program needs no package and this stage installs none.
+# WHAT: sets the mode in its own instruction rather than on the copy.
+# WHY : Trade-offs: `COPY --chmod` needs BuildKit, and the gating workflow invokes
+#       plain `docker build` over each Dockerfile, so relying on it would make
+#       image builds depend on which builder the runner happens to select. The cost
+#       is one extra layer holding one mode change.
 COPY config/docker/generate-listener-material.sh /usr/local/bin/carddemo-entrypoint.sh
 RUN chmod 0555 /usr/local/bin/carddemo-entrypoint.sh
 
-# WHY : Assumptions: the named account resolves to the 10001:10001 identity
-#       created above; naming it keeps the non-root intent visible in image
-#       metadata while the numeric records keep behavior deterministic.
-USER carddemo:carddemo
+# WHAT: switches off root for every later instruction and for the running
+#       container, using the numeric identity rather than the account name.
+# WHY : Assumptions: the NUMERIC form is chosen so the image behaves the same
+#       wherever the name cannot be resolved -- under a read-only root filesystem,
+#       and under admission policies that require a non-root user by inspecting the
+#       numeric id rather than reading /etc/passwd. The named record written above
+#       still exists, so `id` inside the container resolves it and the non-root
+#       intent stays legible; nothing depends on that resolution succeeding.
+# WHAT: replaces the name-only form this file previously used.
+# WHY : Refactoring Rationale: an earlier revision declared the account by name.
+#       That reads more clearly and is strictly weaker: a policy or runtime that
+#       evaluates the numeric id sees an unresolved name as "not proven non-root",
+#       so the clearer spelling is the one that can fail admission.
+USER 10001:10001
 
-# WHY : Assumptions: this context owns NO schema, so its image runs no Flyway
-#       migration and its database role holds select and nothing else. The
-#       consequence for this file is that a start against a database whose views
-#       are absent fails at first query rather than at start, so the probe's
-#       retry budget below is what distinguishes a slow dependency from a
-#       missing one - the image itself cannot create what it reads.
-# WHY : Assumptions: the pinned headless runtime contains /usr/bin/curl - verified
-#       inside this exact digest, which also confirms wget is absent - so the probe
-#       needs no package installation and fails explicitly on a non-success status.
-# WHY : Assumptions: the probe speaks HTTPS, not HTTP. server.ssl.enabled is true
-#       in the base profile, so the connector is TLS and a plaintext request would
-#       fail the check on every healthy task - a probe that always fails is worse
-#       than none, because it makes a working deployment look broken.
-# WHY : Trade-offs: --insecure is accepted for this one request. The certificate is
-#       supplied by the deployment and its subject names the service, never
-#       127.0.0.1, so verification could not succeed from inside the container
-#       regardless of how correct the certificate is. What is given up is identity
-#       checking on a loopback call inside the container's own network namespace,
-#       where there is no other party to impersonate; what is kept is that the
-#       encrypted listener is the one actually proven to answer.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+# WHAT: probes the running context on precisely the path and protocol the load
+#       balancer will use, so the two readers cannot disagree.
+# WHY : Assumptions: /actuator/health has TWO independent readers, and that is an
+#       infrastructure contract rather than a convenience. The module
+#       infra/modules/ecs-service defaults health_check_path to /actuator/health
+#       and probes it with target_protocol, whose only accepted value is HTTPS, and
+#       its task definition deliberately declares NO container health check so that
+#       this one is the container-level definition of healthy. Securing that
+#       endpoint shut, moving its path or changing its port would break both readers
+#       at once, one of them silently draining the task from the load balancer. It
+#       also requires spring-boot-starter-actuator, which this module's POM
+#       declares for these consumers specifically: removing that dependency breaks
+#       both checks together.
+# WHAT: relies on a client already present in the pinned base rather than adding
+#       one.
+# WHY : Assumptions: /usr/bin/curl is present in this exact runtime digest --
+#       verified by running it there, which also confirms that wget is absent -- so
+#       the probe installs no package and adds no layer. It is named by absolute
+#       path because the exec form below resolves no PATH.
+# WHAT: makes an unsuccessful HTTP status fail the probe rather than pass it, and
+#       does so without a shell.
+# WHY : Alternatives Considered: the shell form `CMD curl -f <url> || exit 1`. The
+#       exec form is used instead, and `--fail` carries the same guarantee: curl
+#       exits non-zero on a 4xx or 5xx, and Docker reads any non-zero exit as
+#       unhealthy, so the `|| exit 1` that form needs to make its intent explicit
+#       has nothing left to add here. What the exec form buys is that no shell is
+#       spawned inside the container on every probe interval -- one less process,
+#       and one less place for an environment-dependent expansion to change what is
+#       actually requested.
+# WHAT: speaks the encrypted protocol the connector actually offers.
+# WHY : Assumptions: server.ssl.enabled is true in the base profile, so the
+#       connector is TLS and a plaintext request would fail this check on every
+#       healthy task -- a probe that always fails is worse than none, because it
+#       makes a working deployment look broken.
+# WHAT: waives certificate verification for this one loopback request.
+# WHY : Trade-offs: the certificate is minted for this task and its subject names
+#       the service, never 127.0.0.1, so verification could not succeed from inside
+#       the container however correct the certificate is. What is given up is
+#       identity checking on a call that never leaves the container's own network
+#       namespace, where there is no other party to impersonate; what is kept is
+#       that the encrypted listener is the one actually proven to answer.
+# WHAT: sizes the four durations around this context's start-up rather than
+#       copying a default.
+# WHY : Trade-offs: --start-period is the one that has to be reasoned about, and it
+#       is set higher here than in the sibling images. It has to cover a cold JVM
+#       start, the keystore mint the entry point performs, the Parameter Store and
+#       Secrets Manager config imports application.yml declares, and a first
+#       datasource connection made with full certificate verification. Set below
+#       that, the container is killed while it is legitimately still starting and
+#       the deployment loops on a service that would have become healthy; set far
+#       above it, a task that will never bind is left running longer before
+#       replacement. --retries then tolerates a transient miss at three
+#       consecutive failures, and --timeout stays under --interval so probes cannot
+#       overlap.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure", \
          "--max-time", "4", "--output", "/dev/null", \
          "https://127.0.0.1:8080/actuator/health"]
 
-# WHY : Assumptions: the entry point is the generator script, and `exec java`
-#       is its last line -- so the JVM still becomes PID 1 and still receives
-#       SIGTERM directly from ECS, letting Spring run its shutdown hooks and the
-#       task drain. That property is why the previous instruction used the exec
-#       form, and `exec` inside the script is what preserves it: a script that
-#       merely CALLED java would leave the shell as PID 1, and a shell does not
-#       forward the signal, so the task would be killed on timeout instead.
-# WHY : Assumptions: the script takes no argument of its own and forwards "$@",
-#       so `docker run <image> --spring.profiles.active=prod` and an ECS
-#       container `command` override both still reach the JVM unchanged.
-# WHY : Alternatives Considered: keeping the exec-form java entry point and
-#       generating the keystore in a separate ECS container that shares a volume.
-#       Rejected: a sidecar or init container adds a task-definition dependency
-#       and a shared writable volume between two containers for material that
-#       only one of them ever reads, and it puts the key on a volume a second
-#       process can open. Generating it in the same process tree keeps the key
-#       reachable only by the JVM's own user.
-# WHY : Alternatives Considered: adding -Xmx or -XX container flags was rejected.
-#       Java 21 reads the cgroup memory limit and sizes the heap from it, so a
-#       hard-coded ceiling would silently override the task definition's memory
-#       and have to be edited in two places whenever that changes. JAVA_OPTS is
-#       honoured by the script for a deployment that must override something.
+# WHAT: hands PID 1 to the start-up program, which replaces itself with the JVM.
+# WHY : Assumptions: the program's last line is `exec java ${JAVA_OPTS:-} -jar
+#       /app/app.jar "$@"` (config/docker/generate-listener-material.sh:189), so
+#       the JVM still becomes PID 1 and still receives SIGTERM directly from ECS,
+#       letting Spring run its shutdown hooks within the graceful-shutdown budget
+#       application.yml sets. `exec` is what preserves that: a program that merely
+#       CALLED java would leave a shell as PID 1, and a shell does not forward the
+#       signal, so the task would be killed on timeout instead.
+# WHAT: explains why the plain java entry point was not used here, given that the
+#       exec form is otherwise the right shape.
+# WHY : Alternatives Considered: ENTRYPOINT ["java", "-jar", "/app/app.jar"] with
+#       no start-up program. Rejected because the listener keystore credential
+#       placeholder in application.yml declares no fallback, so a context started
+#       that way stops during start-up, and because the target group's protocol is
+#       fixed at HTTPS -- a task with no certificate never turns healthy. The
+#       property that form exists to protect, a JVM at PID 1 receiving SIGTERM, is
+#       kept by the `exec` above, so nothing is traded away.
+# WHAT: keeps the certificate generation inside this container's own process tree.
+# WHY : Alternatives Considered: minting the keystore in a separate ECS container
+#       that shares a volume. Rejected: a sidecar or init container adds a
+#       task-definition dependency and a shared writable volume between two
+#       containers for material only one of them reads, and it puts the private key
+#       somewhere a second process can open it.
+# WHAT: preserves argument pass-through, which is what makes one image serve both
+#       the service and the batch invocation.
+# WHY : Assumptions: the program takes no argument of its own and forwards "$@",
+#       so a container override of `--job=generate-statements --business-date=...`
+#       reaches ReportingTaskRunner and selects the non-web task context, while the
+#       same image with no argument starts the listener. Dropping the forwarding
+#       would silently reduce this image to one of its two modes.
+# WHAT: records the boundary of what this file's own validation proves.
+# WHY : Trade-offs: this image is proven to BUILD, and its identity, health probe
+#       and artifact are proven by inspecting the built image. No push to a live
+#       registry, no `terraform apply` and no deployment to a live AWS account
+#       happens here; each is an operator action outside this scope. The accepted
+#       consequence is that a failure reachable only against real managed services
+#       -- an absent parameter, a denied grant -- surfaces at deployment rather
+#       than here, which is why every such value is a no-fallback placeholder that
+#       stops start-up loudly instead of defaulting.
 ENTRYPOINT ["/usr/local/bin/carddemo-entrypoint.sh"]
+

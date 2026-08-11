@@ -1602,8 +1602,38 @@ carddemo:
 #
 #   Four axes of variation are permitted, and only four: log levels; Hikari
 #   connection-pool sizing, including the acquisition timeout a pausing dev
-#   cluster needs; the breadth of the actuator health detail; and the statement
-#   echo flag spring.jpa.show-sql. Nothing else may differ between the two.
+#   cluster needs; SQS listener sizing, meaning the concurrency ceiling and the
+#   poll batch width; and log retention. Nothing else may differ between the two.
+#
+#   Refactoring Rationale: this list previously named the breadth of the actuator
+#   health detail and the statement echo flag spring.jpa.show-sql as the third and
+#   fourth axes, and named no messaging axis at all. Both are corrected here
+#   because both were actively harmful rather than merely inexact. Permitting the
+#   health detail to vary invited the dev profile to widen it, and it had -- which
+#   published a description of the data tier on the ONE route SecurityConfig
+#   leaves unauthenticated, since neither the load-balancer target group nor the
+#   container health check can present a token. Permitting spring.jpa.show-sql to
+#   vary pointed both profiles at a switch that writes to standard output OUTSIDE
+#   the logging subsystem, so no level below can narrow it and the shared console
+#   pattern never reaches it; org.hibernate.SQL below is the supported control and
+#   is the one the profiles now use. Neither key is restated by either profile any
+#   longer, so the actuator surface and the echo flag are now identical in both
+#   environments by construction rather than by two values that could drift.
+#
+#   Assumptions: the listener axis is named because the concurrency ceiling and
+#   the pool ceiling are one decision, not two. Each in-flight inquiry holds a
+#   connection for the length of its three reads, so a concurrency ceiling above
+#   the pool ceiling converts queue depth into connection-acquisition waits -- the
+#   condition that existed while the dev profile narrowed the pool to four and
+#   left this ceiling at the base ten. Both profiles now state both numbers, which
+#   is what keeps the pair auditable side by side.
+#
+#   Retention is the fourth axis and is the one axis with NO key in any of these
+#   three files: it is a property of the CloudWatch log group, owned by
+#   infra/modules/observability. Both profiles record that where their log levels
+#   are set, so that a reader does not invent an application-level retention key
+#   -- the binder would accept it, it would appear to have been set, and it would
+#   do nothing.
 #
 #   Six axes are forbidden outright: service topology, route structure, schema
 #   ownership, identity mechanism, use of a message transport, and datastore type.

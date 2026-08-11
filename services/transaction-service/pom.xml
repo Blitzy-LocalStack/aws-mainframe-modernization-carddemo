@@ -186,6 +186,45 @@
     </dependency>
 
     <!--
+      Assumptions: Boot 4 SPLIT the HTTP clients out of the web starter, and this
+      module needs the half that was removed. `RestClient` is an API in spring-web,
+      so src/main/java/com/carddemo/transaction/service/RestAccountContextClient.java
+      COMPILES without this entry; what spring-web does not carry is the
+      autoconfiguration that publishes the `RestClient.Builder` bean that adapter's
+      constructor injects. That autoconfiguration lives in
+      org.springframework.boot:spring-boot-restclient, which this starter brings
+      along with its own AutoConfiguration.imports registration. No version is
+      declared, because the Spring Boot parent manages it in lockstep with the
+      framework version exactly as it does for the four starters above.
+
+      Refactoring Rationale: the omission was found by STARTING the built jar and
+      not by any test, and it did not surface as a warning. The context failed
+      outright with "Parameter 0 of constructor in
+      com.carddemo.transaction.service.RestAccountContextClient required a bean of
+      type 'org.springframework.web.client.RestClient$Builder' that could not be
+      found", so the task could never have turned healthy and GET /actuator/health
+      could never have answered. Nothing in the suite caught it: the unit tests for
+      that adapter build it through its package-private seam and hand a builder in,
+      and no test in this module loads the whole context, so a missing bean stayed
+      invisible behind a fully green build. That is the same build-versus-runtime
+      asymmetry the note above records for the four starters, one level over.
+
+      Alternatives Considered: declaring the plain spring-boot-restclient artifact,
+      and hand-constructing a RestClient inside the adapter. The plain artifact is
+      rejected because every other Boot dependency in this file is a starter and
+      this one adds only the Jackson pairing this module already carries.
+      Hand-construction is rejected because it would move transport configuration
+      out of the framework's autoconfiguration and restate it in every adapter, and
+      because services/account-service/pom.xml already answered this identical
+      question with this starter, so a different shape here would leave two modules
+      answering one question two ways.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-restclient</artifactId>
+    </dependency>
+
+    <!--
       Assumptions: the four `ledger` entities map the fixed-width VSAM records
       one field at a time, and the three keyset access paths replace the CICS
       browse verbs of app/cbl/COTRN00C.cbl (STARTBR at L281, READNEXT at L286,

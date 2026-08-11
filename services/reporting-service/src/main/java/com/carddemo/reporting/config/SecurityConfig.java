@@ -206,9 +206,9 @@ public class SecurityConfig {
      *
      * <p>Assumptions: both probes read this path on the SAME port as the business surface, and not on a
      * separate management port. The container image declares one port, 8080, at
-     * {@code services/reporting-service/Dockerfile} line 169, states at its line 165 that the port
+     * {@code services/reporting-service/Dockerfile} line 427, states at its line 421 that the port
      * carries the business surface and the actuator together, and points its own health check at this
-     * path on that port at lines 217 to 220; this module's {@code application.yml} binds the application
+     * path on that port at lines 584 to 587; this module's {@code application.yml} binds the application
      * to the same port at its line 226 and restricts the exposed management set at its line 1028.
      * Splitting the two onto different ports would let the target group and the container health check
      * disagree about whether one task is alive, which produces both halves of the wrong outcome -- a

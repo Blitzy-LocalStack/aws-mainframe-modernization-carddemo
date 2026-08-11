@@ -241,14 +241,78 @@ The service reads every endpoint, credential and key identifier from its
 environment. Nothing is compiled in, and the two profiles change values only —
 never topology.
 
-| Profile | Pool max / min idle | `show-sql` | `com.carddemo` log level | Health detail |
-|---|---|---|---|---|
-| `dev` | 4 / 1 | `true` | `DEBUG` | `always` |
-| `prod` | 20 / 5 | `false` | `INFO` | `never` |
+Both profiles carry the **same ten keys** and differ only in their values, so the
+two files can be diffed side by side; a key present in one and absent from the
+other would be a topology difference in disguise. The four permitted axes are
+pool sizing, SQS listener sizing, log level and retention.
 
-Both profiles import the shared defaults from `common-lib` and both layer an
-**optional** AWS Parameter Store prefix over them, so the same jar runs with or
-without Parameter Store reachable.
+| Key | `dev` | `prod` |
+|---|---|---|
+| `spring.datasource.hikari.maximum-pool-size` | `4` | `20` |
+| `spring.datasource.hikari.minimum-idle` | `0` | `5` |
+| `spring.datasource.hikari.connection-timeout` | `30000` | `10000` |
+| `spring.cloud.aws.sqs.listener.max-concurrent-messages` | `2` | `10` |
+| `spring.cloud.aws.sqs.listener.max-messages-per-poll` | `2` | `10` |
+| `logging.level.root` | `INFO` | `WARN` |
+| `logging.level.com.carddemo` | `DEBUG` | `INFO` |
+| `logging.level.io.awspring.cloud.sqs` | `DEBUG` | `WARN` |
+| `logging.level.org.hibernate.SQL` | `DEBUG` | `WARN` |
+| `logging.level.org.hibernate.orm.jdbc.bind` | `WARN` | `WARN` |
+
+Three of those rows are worth reading together rather than as separate numbers.
+
+Trade-offs: the `dev` idle floor is `0` because the dev cluster is provisioned to
+scale to zero and pauses only while no connection from user activity exists, so a
+floor above zero would pin one open and forfeit the saving entirely. What is
+traded for it is first-request latency after a pause, accepted in development
+only — `prod` holds its floor at `5` so no production caller ever pays a resume.
+The longer `dev` acquisition timeout is the direct consequence of that floor: the
+first caller after a pause waits for the cluster to resume, and at the `prod`
+value of `10000` that caller would instead fail with an acquisition timeout every
+time the cluster had paused.
+
+Assumptions: the listener concurrency and the pool ceiling are one decision, not
+two. Each in-flight inquiry holds a connection for the length of its three reads —
+the account, the customer and the cross-reference — so concurrency is held at or
+below the pool ceiling in both profiles. A ceiling above the pool converts queue
+depth into connection-acquisition waits and times out handlers that would
+otherwise have succeeded.
+
+`logging.level.org.hibernate.orm.jdbc.bind` is pinned to `WARN` in **both**
+profiles and must never be raised in either. It is the bind-parameter logger, and
+at `DEBUG` or `TRACE` it prints bound parameter **values** — which here include
+the plaintext side of `customers.ssn_encrypted` and
+`customers.govt_issued_id_encrypted`, columns stored encrypted and returned
+masked precisely so they are never readable. The masking applied at the API edge
+does not reach log storage.
+
+Alternatives Considered: two keys are deliberately **absent** from both profiles
+rather than pinned in both. `spring.jpa.show-sql` was rejected as the statement
+control because it writes to standard output outside the logging subsystem, so no
+level can narrow it once enabled and it escapes the shared console pattern as
+well; `org.hibernate.SQL` above is the supported control and is what the profiles
+vary instead. `management.endpoint.health.show-details` was rejected because
+`GET /actuator/health` is the one route left unauthenticated — neither the load
+balancer target group nor the container health check can present a token — so a
+detail payload would describe the data tier to any caller able to reach the port.
+Both stay as `application.yml` closes them, which keeps the actuator surface and
+the echo flag identical in both environments by construction rather than by two
+values that could drift apart.
+
+Assumptions: retention is the fourth axis and has no key in either profile,
+because it is not an application property at all — it is a CloudWatch log-group
+property owned by `infra/modules/observability`. An application-level retention
+key would be accepted by the property binder, would appear to have been set, and
+would do nothing.
+
+Refactoring Rationale: the shared defaults from `common-lib` and the **optional**
+AWS Parameter Store and Secrets Manager prefixes are imported once, by
+`application.yml`, and neither profile restates the import list. Both profiles
+previously did. That was removed because a config-data import is resolved per
+document and is therefore inherited, so the restatement bought nothing and cost
+a second source of truth — and the `dev` copy had already drifted to omit the
+Secrets Manager location the base declares. The same jar runs with or without
+Parameter Store reachable, because every remote location is `optional:`.
 
 ```bash
 # WHAT: build the bootable jar, then start it against a local database.

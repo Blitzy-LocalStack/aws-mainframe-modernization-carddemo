@@ -925,7 +925,15 @@ def s3_client() -> S3StagingClient:
     #   same call, which is the hardest kind of stale-state defect to attribute because only
     #   half the state moved. Routing through config keeps one authority for construction and
     #   one for invalidation.
-    return config._aws_client("s3")
+    # WHY : Assumptions: the factory is reached by its PUBLIC name. It was private when this call
+    #   was written, and ``config`` promoted it precisely because a public function here depending
+    #   on a private name there is a contract no import check can protect -- that module was free to
+    #   rename it, and did. The private spelling is now absent and is asserted absent by
+    #   ``tests/test_config_name_contract.py``, so the old call raised ``AttributeError`` on the
+    #   first real staging run while every test still passed, because nothing exercised this
+    #   function. ``tests/test_loaders.py`` now reads this module's call graph and fails if the
+    #   client is obtained anywhere other than the published factory.
+    return config.aws_client("s3")
 
 
 def _require_retention_count(retention_count: int) -> int:
